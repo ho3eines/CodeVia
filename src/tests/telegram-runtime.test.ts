@@ -386,6 +386,51 @@ describe("Telegram HTTP surface", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("hands out a pairing code when a user connects a bot in Settings", async () => {
+    delete process.env.TELEGRAM_BOT_TOKEN; // no operator bot: users bring their own
+    getEnvFresh();
+    mockTelegramApi();
+    const srv = await boot();
+    const created = await srv.inject({
+      method: "POST",
+      url: "/integrations/telegram/accounts",
+      payload: { token: "999999:personal-bot-token", name: "My bot" },
+    });
+    expect(created.statusCode).toBe(201);
+    const body = created.json();
+    // A token alone is enough: the bot is live (polling) but answers nobody's chat
+    // until the owner pairs it.
+    expect(body.account.connected).toBe(true);
+    expect(body.account.paired).toBe(false);
+    expect(body.account.pairCode).toMatch(/^[0-9A-F]{6}$/);
+    expect(body.pairing?.howto).toMatch(/\/pair [0-9A-F]{6}/);
+
+    // Re-pairing (new chat, or a leaked code) issues a fresh one.
+    const repatched = await srv.inject({
+      method: "PATCH",
+      url: `/integrations/telegram/accounts/${body.account.id}`,
+      payload: { pair: true },
+    });
+    expect(repatched.json().pairCode).toMatch(/^[0-9A-F]{6}$/);
+    expect(repatched.json().chatId ?? "").toBe("");
+
+    // The webhook route for that account refuses an unlinked chat instead of
+    // answering it with the owner's data.
+    const intruder = await srv.inject({
+      method: "POST",
+      url: `/integrations/telegram/webhook/${body.account.id}`,
+      payload: { update_id: 5, message: { chat: { id: 424242, type: "private" }, from: { id: 424242 }, text: "/projects" } },
+    });
+    expect(intruder.statusCode).toBe(200);
+    const sent = fetchBodies.filter((b) => String(b.text ?? "").includes("not linked to a chat yet"));
+    expect(sent.length).toBe(1);
+    // …with the *fresh* code, since re-pairing rotated it.
+    expect(String(sent[0].text)).toContain(repatched.json().pairCode);
+    expect(String(sent[0].text)).not.toContain(body.account.pairCode);
+    // …and it never read the owner's projects.
+    expect(String(sent[0].text)).not.toMatch(/Select a project/);
+  });
+
   it("reports ready only when a receive path is actually running", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
     getEnvFresh();

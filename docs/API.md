@@ -141,7 +141,7 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 | POST | `/integrations/telegram/updates/skip` | Drain Telegram's queued backlog without replaying it |
 | POST | `/integrations/telegram/webhook` | Telegram update webhook (public; honours `TELEGRAM_WEBHOOK_SECRET`) |
 | POST | `/integrations/telegram/webhook/:accountId` | Per-user bot webhook (public) |
-| GET/POST/PATCH/DELETE | `/integrations/telegram/accounts[/:id]` | Per-user bots (token encrypted, never returned) |
+| GET/POST/PATCH/DELETE | `/integrations/telegram/accounts[/:id]` | Per-user bots: token from Settings (encrypted, never returned). POST with no `chatId` returns `pairing.code`; the bot answers no chat until its owner sends `/pair CODE`. `PATCH {pair:true}` un-links and issues a fresh code |
 | POST | `/integrations/telegram/accounts/:id/connect` | Verify token + choose receive path (webhook, else polling) |
 | POST | `/integrations/telegram/accounts/:id/transport` | Force one account onto polling/webhook |
 | POST | `/integrations/telegram/command` | Drive a telegram-style command (UI preview; `deliver:true` to actually send) |

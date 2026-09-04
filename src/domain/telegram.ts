@@ -2,7 +2,12 @@ import { DocumentRepository } from "../db/repository.js";
 import { getDb } from "../db/client.js";
 import type { Db } from "../db/client.js";
 import type { ID } from "../types.js";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+
+/** 6-char code shown in Settings and typed to the bot as `/pair CODE`. */
+export function newTelegramPairCode(): string {
+  return randomBytes(3).toString("hex").toUpperCase();
+}
 
 /* ------------------------------------------------------------------ *
  * Per-user Telegram bot account.
@@ -35,6 +40,12 @@ export interface TelegramAccount {
   pollingActive?: boolean;
   lastCheckedAt?: string;
   lastError?: string;
+  /**
+   * One-time pairing code. A bot registered through Settings answers only the chat
+   * that presents it (`/pair CODE`), so a token that leaks into a group does not
+   * turn into a public bot reading that user's projects.
+   */
+  pairCode?: string;
   createdAt: string;
   updatedAt: string;
 }

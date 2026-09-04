@@ -19,6 +19,32 @@ The Telegram bot is a first-class interface: project-aware, bidirectional, with 
 
 Without a token, the platform uses **MockTelegramService** (messages are logged, not sent), so local development needs no bot.
 
+### One bot per user — entered in Settings, never in an env var
+
+`TELEGRAM_BOT_TOKEN` is the **operator's** bot (one per deployment, shared by everyone). For
+"each user has their own bot", nothing is set in the environment: each person opens
+**Settings → Your Telegram bot**, pastes the token from BotFather, and saves. The platform then:
+
+1. verifies the token with `getMe` and stores it **encrypted at rest** (AES-256-GCM); the UI only
+   ever shows a mask — and a `422` is returned instead of saving a token Telegram rejects;
+2. brings up a receive path for *that* token: webhook when this deployment has a public HTTPS URL,
+   otherwise **long polling** (no URL, no tunnel);
+3. shows a **6-character pairing code**. The bot answers no chat until its owner sends
+   `/pair CODE` to it on Telegram — after that it answers *only* that chat. Anyone else gets
+   "this is a private CodeVia bot". Without this, a token pasted into a group would turn into a
+   bot that reads and drives the owner's projects for whoever finds it;
+4. scopes what the bot can see: it lists only projects owned by that user (projects created
+   through the web UI while signed in are stamped with `ownerId`; pre-existing/unowned projects
+   stay visible to everyone, so single-user installs are unaffected);
+5. routes that bot's incoming messages to that user's data — both the per-account webhook path
+   (`POST /integrations/telegram/webhook/:accountId`) and the account's poller build a bot bound
+   to the account row, and re-read it live, so linking a chat takes effect without a restart.
+
+Re-pairing (new phone, new chat, leaked code) = **🔗 Link another chat** in Settings, which
+invalidates the old chat and issues a fresh code. Two users must not paste the *same* token: the
+platform warns when an account's token equals the operator's, because both receivers then answer
+every message twice.
+
 ---
 
 ## 2. How updates reach the bot
@@ -60,6 +86,7 @@ list of actionable `fixes`.
 |---------|--------|
 | `/start` `/menu` | Main menu with inline keyboards |
 | `/help` | Command list |
+| `/pair CODE` | **Per-user bots only**: binds this chat as the bot's owner. The code is shown in Settings when the token is entered |
 | `/projects` | List / switch projects (with one project it is auto-selected) |
 | `/agents` | Agents of the active project |
 | `/models` | Registered models |

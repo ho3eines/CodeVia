@@ -42,6 +42,8 @@ function defaultPermissions(): Record<Permission, boolean> {
 }
 
 export interface CreateProjectInput {
+  /** Platform user who owns the new project (undefined = shared). */
+  ownerId?: string;
   name: string;
   slug?: string;
   description: string;
@@ -129,6 +131,9 @@ export class AgentManager {
     }
     const project: Project = {
       id: `proj-${randomUUID().slice(0, 8)}`,
+      // Who owns it: per-user Telegram bots filter on this so one user's bot
+      // cannot list (or drive) another user's repositories.
+      ownerId: input.ownerId,
       slug,
       name: input.name,
       description: input.description,

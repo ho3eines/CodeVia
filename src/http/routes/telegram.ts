@@ -12,7 +12,7 @@ import {
   testTelegramToken,
   verifyTelegramWebhookSecret,
 } from "../../integrations/telegram.js";
-import type { TelegramAccount } from "../../domain/telegram.js";
+import { newTelegramPairCode, type TelegramAccount } from "../../domain/telegram.js";
 import type { TelegramMode } from "../../integrations/telegram-runtime.js";
 import { resolveRequestUser } from "../auth.js";
 import { getEnv } from "../../config/env.js";
@@ -31,7 +31,7 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
   const telegram = container.telegram;
   const runtime = container.telegramRuntime;
   const bot = container.telegramBotFor(telegram);
-  const botFor = (svc = telegram) => container.telegramBotFor(svc);
+  const botFor = (svc = telegram, account?: TelegramAccount) => container.telegramBotFor(svc, account);
 
   /** Resolve the public HTTPS base URL this deployment is reachable at, using the
    *  real forwarded host/proto so the webhook points at a URL Telegram can reach
@@ -61,6 +61,9 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     pollingActive: !!a.pollingActive,
     lastCheckedAt: a.lastCheckedAt,
     lastError: a.lastError,
+    /** Linked to a chat yet? Until then the bot answers nothing but /pair. */
+    paired: Boolean(a.chatId),
+    pairCode: a.pairCode,
     tokenMasked: maskTelegramToken(accountTelegramToken(a)),
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
@@ -263,6 +266,9 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
       connected: true,
       webhookSet: false,
       lastError: undefined,
+      // No chat typed in (the normal case: you only have a token) → the bot hands
+      // out a code here, you send it to the bot, and that chat becomes the owner.
+      pairCode: chatId ? undefined : newTelegramPairCode(),
     });
     const connected = await connectAccount(account, publicBaseFrom(req));
     reply.code(201);
@@ -274,6 +280,12 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
       receiving: connected.transport === "polling" ? "long polling (getUpdates)" : connected.webhookSet ? "webhook" : "nothing — see lastError",
       chatIdHint: !accountId
         ? "Tip: message your bot, send /id to it, and put that number in AccountId so updates route to your account."
+        : undefined,
+      pairing: connected.pairCode
+        ? {
+            code: connected.pairCode,
+            howto: `Message your bot on Telegram and send: /pair ${connected.pairCode} — that chat becomes the only one it answers.`,
+          }
         : undefined,
       // Two receivers on one token = every message answered twice.
       warning: sameTokenAsPlatformBot(token)
@@ -295,6 +307,12 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
       chatId: typeof b.chatId === "string" ? b.chatId.trim() || undefined : (typeof b.accountId === "string" ? (b.accountId.trim() || undefined) : account.chatId),
       updatedAt: new Date().toISOString(),
     };
+    // Clearing the chat id un-pairs the bot and issues a fresh code, which is how
+    // you move your bot to a different chat (or recover after a leaked code).
+    if (b.pair === true || b.chatId === "") {
+      next.chatId = undefined;
+      next.pairCode = newTelegramPairCode();
+    }
     if (typeof b.token === "string" && b.token.trim()) {
       next.tokenEnc = encryptTelegramToken(b.token.trim());
       const connected = await connectAccount(next, publicBaseFrom(req));
@@ -365,13 +383,16 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
       const telegramId = update.message?.chat?.id ?? update.message?.from?.id ?? update.callback_query?.from?.id;
       account = container.telegramAccountRepo.byTelegramId(telegramId != null ? String(telegramId) : undefined)[0];
     }
-    const activeBot = account ? botFor(accountTelegramService(account)) : bot;
+    const activeBot = account ? botFor(accountTelegramService(account), account) : bot;
     const update = await activeBot.handle(body);
     // A successful delivery proves the webhook path works — record it so the UI
     // can say "receiving via webhook" without another API round-trip.
     if (account && !account.webhookSet && req) {
+      // Re-read: handling this update may have just *paired* the chat (or refreshed
+      // the token), and writing the snapshot from before would undo it.
+      const live = container.telegramAccountRepo.findById(account.id)?.data ?? account;
       container.telegramAccountRepo.upsert({
-        ...account,
+        ...live,
         webhookSet: true,
         transport: "webhook",
         lastCheckedAt: new Date().toISOString(),
@@ -419,17 +440,23 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
 
   // Manually drive a telegram-style message (for the web UI "Telegram" preview).
   app.post("/integrations/telegram/command", { schema: { tags: ["telegram"] } }, async (req) => {
-    const b = req.body as { chatId?: string; text?: string; callbackData?: string; deliver?: boolean };
+    const b = req.body as { chatId?: string; text?: string; callbackData?: string; deliver?: boolean; accountId?: string };
+    // Previewing through a user's own bot (their token, their projects) instead of
+    // the operator's global one — that is what "what will MY bot answer" means.
+    const account = b.accountId
+      ? container.telegramAccountRepo.findByIdAndUser(b.accountId, currentUserId(req))
+      : undefined;
+    const previewBot = account ? botFor(accountTelegramService(account), account) : botFor();
     const payload: Record<string, unknown> = b.callbackData
       ? { update_id: Date.now(), callback_query: { id: `web-${Date.now()}`, data: b.callbackData, from: { id: b.chatId ?? "web" }, message: { chat: { id: b.chatId ?? "web", type: "private" }, message_id: 1 } } }
       : { update_id: Date.now(), message: { chat: { id: b.chatId ?? "web", type: "private" }, from: { id: b.chatId ?? "web" }, text: b.text } };
     // "Deliver" actually sends through the configured service (a real bot gets
     // the message); otherwise this is a dry-run preview of what the bot replies.
     if (b.deliver) {
-      const update = await botFor().handle(payload);
+      const update = await previewBot.handle(payload);
       return { ok: true, update, delivered: true };
     }
-    const { update, reply, error } = await botFor().preview(payload);
+    const { update, reply, error } = await previewBot.preview(payload);
     return { ok: !error, update, reply, error };
   });
 

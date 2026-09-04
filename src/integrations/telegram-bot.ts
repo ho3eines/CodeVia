@@ -29,6 +29,21 @@ export interface TelegramBotDeps {
   logger: Logger;
   /** Live "how am I receiving messages" report, surfaced by /ping and /start. */
   runtimeStatus?: () => TelegramRuntimeStatus | undefined;
+  /** Platform user this bot belongs to (per-user bot). Undefined = the operator's global bot. */
+  userId?: string;
+  /**
+   * Access control for a user's own bot. Without it a bot answers whoever finds
+   * it — with a leaked token that means strangers browsing (and commanding) the
+   * owner's projects. The state is read through `current()` because pairing can
+   * happen at any moment, including from this very handler.
+   */
+  access?: TelegramBotAccess;
+}
+
+export interface TelegramBotAccess {
+  current(): { ownerChatId?: string; pairCode?: string };
+  /** Bind the chat that presented the right code to this bot's owner. */
+  link(chatId: string): void | Promise<void>;
 }
 
 type InlineButton = { text: string; callback_data?: string; url?: string };
@@ -67,6 +82,13 @@ export class TelegramBot {
     }
 
     if (!t.chatId) return t;
+
+    // Per-user bots answer their paired chat only.
+    const denied = await this.gateAccess(t);
+    if (denied !== undefined) {
+      await this.deps.telegram.sendMessage({ chatId: t.chatId, text: denied });
+      return t;
+    }
 
     // A thrown handler must never look like "the bot ignored me": answer with
     // the reason instead of going silent.
@@ -120,6 +142,53 @@ export class TelegramBot {
     } catch (err) {
       return { update: t, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  /**
+   * Returns the text to send when this chat must not be served, or undefined when
+   * the update may proceed. `/pair CODE` is the only thing a stranger is allowed
+   * to do, and only with the code the owner sees in Settings.
+   */
+  private async gateAccess(t: TelegramUpdate): Promise<string | undefined> {
+    const access = this.deps.access;
+    if (!access) return undefined;
+    const chatId = t.chatId!;
+    const { ownerChatId, pairCode } = access.current();
+    if (ownerChatId && ownerChatId === chatId) return undefined;
+    const raw = (t.text ?? "").trim();
+    const m = /^\/pair(?:@\w+)?\s+(\S+)$/i.exec(raw);
+    if (m && pairCode && m[1]!.trim().toUpperCase() === pairCode.toUpperCase()) {
+      await access.link(chatId);
+      return `✅ Linked — this bot now answers this chat and nobody else.
+
+Send /start for the menu.`;
+    }
+    if (ownerChatId) {
+      return "🔒 This is a private CodeVia bot: it answers its owner's chat only.";
+    }
+    return `🔒 This bot is not linked to a chat yet.
+Open CodeVia → Settings → Telegram, copy the pairing code, and send it here as:
+<code>/pair ${pairCode ?? "CODE"}</code>`;
+  }
+
+  /**
+   * Projects this bot may touch. A per-user bot sees its owner's projects (plus
+   * unowned/legacy ones, so an existing single-user install keeps working); the
+   * operator's global bot sees everything.
+   */
+  private ownedProjects(): Project[] {
+    const all = this.deps.projectRepo.findMany().map((r) => r.data);
+    const userId = this.deps.userId;
+    if (!userId) return all;
+    return all.filter((p) => !p.ownerId || p.ownerId === userId);
+  }
+
+  private ownedProject(id: string | undefined): Project | undefined {
+    if (!id) return undefined;
+    const found = this.deps.projectRepo.findById(id)?.data;
+    if (!found) return undefined;
+    if (this.deps.userId && found.ownerId && found.ownerId !== this.deps.userId) return undefined;
+    return found;
   }
 
   private async resolveView(t: TelegramUpdate): Promise<View> {
@@ -195,7 +264,7 @@ export class TelegramBot {
    * ------------------------------------------------------------------ */
 
   private menuHome(chatId?: string): View {
-    const projects = this.deps.projectRepo.findMany().map((r) => r.data);
+    const projects = this.ownedProjects();
     const active = chatId ? this.activeProject(chatId) : undefined;
     const status = this.deps.runtimeStatus?.();
     const lines = [
@@ -294,6 +363,7 @@ export class TelegramBot {
         "• *GitHub* — linked repos, branches, opened issues & PRs.",
         "• *Self-check* (`/ping`) — how the bot receives messages + what to fix.",
         "• *Id* (`/id`) — your Telegram user/chat id, i.e. the “AccountId” the web UI asks for.",
+        ...(this.deps.access ? ["• *Link* (`/pair CODE`) — binds this chat to a bot created in Settings."] : []),
         "",
         "Send any natural-language message (فارسی هم می‌شود) and I'll run it on the active project.",
         "`/task <شرح>` creates a task, `/run <متن>` runs it now, `/stop` cancels queued work.",
@@ -305,7 +375,7 @@ export class TelegramBot {
   }
 
   private projectsView(): View {
-    const projects = this.deps.projectRepo.findMany().map((r) => r.data);
+    const projects = this.ownedProjects();
     if (projects.length === 0) {
       return {
         text: "ℹ️ No projects yet.\n\nCreate one from the web UI, or POST /projects with a GitHub repo.",
@@ -324,7 +394,7 @@ export class TelegramBot {
   }
 
   private selectProject(chatId: string, id: string): View {
-    const project = this.deps.projectRepo.findById(id)?.data;
+    const project = this.ownedProject(id);
     if (!project) return this.projectsView();
     this.projectByChat.set(chatId, id);
     return {
@@ -433,13 +503,13 @@ export class TelegramBot {
 
   private activeProject(chatId: string): Project | undefined {
     const id = this.projectByChat.get(chatId);
-    const bound = id ? this.deps.projectRepo.findById(id)?.data : undefined;
+    const bound = this.ownedProject(id);
     if (bound) return bound;
     if (id) this.projectByChat.delete(chatId); // stale id (project deleted)
     // With exactly one project there is nothing to choose — auto-binding it is
     // the difference between "the bot works" and "the bot ignores every message"
     // for the common single-project setup.
-    const all = this.deps.projectRepo.findMany().map((r) => r.data);
+    const all = this.ownedProjects();
     if (all.length === 1) {
       this.projectByChat.set(chatId, all[0].id);
       return all[0];
@@ -448,7 +518,7 @@ export class TelegramBot {
   }
 
   private projectsKeyboardOnly(): InlineKeyboard {
-    const projects = this.deps.projectRepo.findMany().map((r) => r.data);
+    const projects = this.ownedProjects();
     if (projects.length === 0) return [[{ text: "ℹ️ No projects yet", callback_data: "menu:home" }]];
     return projects
       .slice(0, 12)
@@ -467,7 +537,7 @@ export class TelegramBot {
   private dashboardView(): View {
     const runs = this.deps.runRepo.findMany().map((r) => r.data);
     const tasks = this.deps.taskRepo.findMany().map((r) => r.data);
-    const projects = this.deps.projectRepo.findMany().map((r) => r.data);
+    const projects = this.ownedProjects();
     const agents = this.deps.agentRepo.findMany().map((r) => r.data);
     const running = runs.filter((r) => r.status === "running").length;
     const succeeded = runs.filter((r) => r.status === "succeeded").length;
@@ -492,7 +562,7 @@ export class TelegramBot {
     const idx = arg.indexOf(":");
     const kind = idx >= 0 ? arg.slice(0, idx) : arg;
     const id = idx >= 0 ? arg.slice(idx + 1) : undefined;
-    const project = id ? this.deps.projectRepo.findById(id)?.data : this.activeProject(chatId);
+    const project = this.ownedProject(id) ?? this.activeProject(chatId);
     if (!project) return this.projectsView();
     if (id) this.projectByChat.set(chatId, project.id);
 
@@ -615,7 +685,7 @@ export class TelegramBot {
   private agentView(id: string): View {
     const a = this.deps.agentRepo.findById(id)?.data;
     if (!a) return this.menuHome();
-    const p = a.projectId ? this.deps.projectRepo.findById(a.projectId)?.data : undefined;
+    const p = this.ownedProject(a.projectId);
     const text = [
       `🤖 *${a.name}*`,
       "",

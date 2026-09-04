@@ -2,7 +2,7 @@ import { getDb } from "../db/client.js";
 import { getQueue } from "../db/queue.js";
 import { getKv } from "../db/kv.js";
 import { getProjectRepo, getTaskRepo, getWorkflowRepo, getConversationRepo, getMemoryRepo } from "../domain/repos.js";
-import { getTelegramAccountRepo } from "../domain/telegram.js";
+import { getTelegramAccountRepo, type TelegramAccount } from "../domain/telegram.js";
 import { getUserRepo } from "../auth/users.js";
 import type { ModelProvider } from "../domain/entities.js";
 import { getAgentRepo } from "../agents/agent-repo.js";
@@ -158,10 +158,37 @@ export class Container {
    * boolean.
    * ------------------------------------------------------------------ */
 
-  /** Build a bot bound to a specific Telegram service (global token or a user's). */
-  telegramBotFor(service = this.telegram): TelegramBot {
+  /**
+   * Build a bot bound to a specific Telegram service (the operator's global token
+   * or a user's own bot). Passing the account makes the bot *scoped*: it answers
+   * only its owner's paired chat and only sees that owner's projects.
+   */
+  telegramBotFor(service = this.telegram, account?: TelegramAccount): TelegramBot {
+    const access = account
+      ? {
+          current: () => {
+            // Read live: pairing happens while this bot is already running.
+            const live = this.telegramAccountRepo.findById(account.id)?.data ?? account;
+            return { ownerChatId: live.chatId, pairCode: live.pairCode };
+          },
+          link: (chatId: string) => {
+            const live = this.telegramAccountRepo.findById(account.id)?.data;
+            if (!live) return;
+            this.telegramAccountRepo.upsert({
+              ...live,
+              chatId,
+              accountId: live.accountId ?? chatId,
+              pairCode: undefined,
+              lastError: undefined,
+              updatedAt: new Date().toISOString(),
+            });
+          },
+        }
+      : undefined;
     return new TelegramBot({
       telegram: service,
+      userId: account?.userId,
+      access,
       projectRepo: this.projectRepo,
       taskRepo: this.taskRepo,
       workflowRepo: this.workflowRepo,
@@ -181,7 +208,7 @@ export class Container {
 
   readonly telegramRuntime: TelegramRuntime = new TelegramRuntime({
     telegram: this.telegram,
-    createBot: (service) => this.telegramBotFor(service),
+    createBot: (service, account) => this.telegramBotFor(service, account),
     telegramAccountRepo: {
       findMany: () => this.telegramAccountRepo.findMany(),
       upsert: (account) => this.telegramAccountRepo.upsert(account),

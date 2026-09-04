@@ -57,7 +57,7 @@ The stored `Provider` config stores only `secretRef` (e.g. `OPENAI_API_KEY`) —
 
 | Variable | Description |
 |----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather — the only variable a working bot needs |
+| `TELEGRAM_BOT_TOKEN` | The **operator's** bot token. Optional: each user can instead paste their own token in Settings → Telegram (encrypted at rest, chat-paired), which is the multi-user path |
 | `TELEGRAM_MODE` | `auto` (default) · `polling` · `webhook` · `off` — how updates are received |
 | `TELEGRAM_POLL_TIMEOUT` | Long-poll hold seconds (default 25) |
 | `TELEGRAM_WEBHOOK_SECRET` | Optional webhook secret (`X-Telegram-Bot-Api-Secret-Token`, enforced on the webhook route when set) |

@@ -78,7 +78,7 @@ export interface TelegramConnectionTest {
 export interface TelegramRuntimeDeps {
   telegram: ITelegramService;
   /** Builds a bot bound to a specific service (global token or a user's token). */
-  createBot: (service: ITelegramService) => TelegramBot;
+  createBot: (service: ITelegramService, account?: TelegramAccount) => TelegramBot;
   telegramAccountRepo: {
     findMany(): Array<{ data: TelegramAccount }>;
     upsert(account: TelegramAccount): unknown;
@@ -365,7 +365,7 @@ export class TelegramRuntime {
     if (existing) {
       await existing.stop();
     }
-    const bot = this.deps.createBot(service);
+    const bot = this.deps.createBot(service, account);
     const poller = new TelegramPoller({
       name: `account:${account.id}`,
       service,

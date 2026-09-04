@@ -170,6 +170,12 @@ export interface ProjectCapabilities {
 
 export interface Project {
   id: ID;
+  /**
+   * Platform user who owns this project. Empty/undefined means "shared" — legacy
+   * rows and single-user installs stay visible to every bot. Per-user bots filter
+   * on it, so one user's Telegram bot cannot list or drive another's repos.
+   */
+  ownerId?: ID;
   slug: string;
   name: string;
   description: string;
