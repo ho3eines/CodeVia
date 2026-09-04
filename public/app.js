@@ -139,23 +139,29 @@
     if (!caps) return "";
     return Object.keys(CAP_NAMES).filter((k) => caps[k]).map((k) => `<span class="badge badge-muted">${CAP_NAMES[k]}</span>`).join(" ");
   }
-  // Render a provider/model test result with the requested URL + discovered models.
+  // Render a provider/model test result: destination URL(s), discovered models,
+  // and — for chat tests — the text the model actually replied with.
   function renderTestResult(r) {
     if (!r) return "";
-    // Surface EVERY URL the platform will hit (catalog + chat). Each on its own
-    // line so the user can verify the platform follows the provider's docs.
+    // The model's actual reply (model chat test) — the most important part, first.
+    const responseSection = typeof r.responseText === "string" && r.responseText.trim()
+      ? `<div class="test-response">
+          <div class="test-response-label">💬 Model replied${typeof r.latencyMs === "number" ? ` · ${r.latencyMs}ms` : ""}${typeof r.status === "number" ? ` · HTTP ${r.status}` : ""}</div>
+          <pre class="test-response-text">${esc(r.responseText)}</pre>
+        </div>`
+      : (typeof r.responseText === "string" ? `<div class="test-response"><div class="test-response-label">💬 Model replied with an empty response</div></div>` : "");
+    // Surface EVERY URL the platform hits (catalog + chat + the live request).
+    // Each on its own line so the user can verify exactly where requests go.
     const allUrls = Array.from(new Set([r.catalogUrl, r.chatUrl, ...(r.urls || []), r.url].filter(Boolean)));
-    const urlLabels = {
-      catalog: "📚 catalog (model list)",
-      chat: "💬 chat (completion)",
-    };
     const classify = (u) => {
-      if (u === r.catalogUrl) return urlLabels.catalog;
-      if (u === r.chatUrl) return urlLabels.chat;
+      if (u === r.url && r.method) return `${r.method} request`;
+      if (u === r.catalogUrl) return "📚 catalog (model list)";
+      if (u === r.chatUrl) return "💬 chat (completion)";
       return "→ request";
     };
     const urlsSection = allUrls.length
       ? `<div class="test-urls" style="margin-top:6px;display:flex;flex-direction:column;gap:3px">
+          <div style="font-size:10px;color:var(--text-muted)">Where requests are sent:</div>
           ${allUrls.map((u) => `<div class="mono" style="font-size:10px;word-break:break-all"><span class="badge badge-muted">${esc(classify(u))}</span> ${esc(u)}</div>`).join("")}
         </div>`
       : "";
@@ -165,7 +171,7 @@
     const caps = r.detectedCapabilities || r.capabilities;
     const capsSection = caps && typeof caps === "object" ? `<div style="margin-top:6px">Capabilities: ${capsBadges(caps)}</div>` : "";
     const found = typeof r.found === "boolean" ? ` <span class="badge badge-${r.found ? "ok" : "err"}">${r.found ? "found in catalog" : "not in catalog"}</span>` : "";
-    return `<div class="test-result ${r.ok ? "ok" : "err"}">${r.ok ? "✓" : "✗"} ${esc(r.message)}${found}${r.hint ? "<br>" + esc(r.hint) : ""}${modelsSection}${capsSection}${urlsSection}</div>`;
+    return `<div class="test-result ${r.ok ? "ok" : "err"}">${r.ok ? "✓" : "✗"} ${esc(r.message)}${found}${r.hint ? "<br>" + esc(r.hint) : ""}${responseSection}${modelsSection}${capsSection}${urlsSection}</div>`;
   }
 
   /* ---------- modal ---------- */
@@ -1058,15 +1064,17 @@
         .catch(() => renderCapsPreview());
     };
     $("#m-id").addEventListener("change", onPick);
+    // Sends ONE real message to the provider + model (before saving) and shows
+    // the exact chat URL plus the model's reply.
     $("#m-test").onclick = async () => {
       const el = $("#m-test-result");
       const modelId = $("#m-id").value.trim();
       const providerId = $("#m-prov").value;
       if (!modelId) { toast("Model required", "", "err"); return; }
       if (!providerId) { toast("Provider required", "", "err"); return; }
-      el.innerHTML = `<div class="test-result">Testing…</div>`;
+      el.innerHTML = `<div class="test-result">Sending test message to ${esc(modelId)}…</div>`;
       try {
-        const r = await api("/models/test", { method: "POST", body: { providerId, modelId } });
+        const r = await api("/models/test", { method: "POST", body: { providerId, modelId, message: MODEL_TEST_MSG } });
         el.innerHTML = renderTestResult(r);
         // Surface detected capabilities on the form.
         const caps = r.detectedCapabilities || r.capabilities;
@@ -1076,7 +1084,7 @@
           auto.innerHTML = `Detected capabilities: ${capsBadges(caps)}`;
           el.appendChild(auto);
         }
-        toast(r.ok ? "Model reachable" : "Cannot test yet", r.message, r.ok ? "ok" : "warn");
+        toast(r.ok ? "Model replied" : "Cannot test yet", r.message, r.ok ? "ok" : "warn");
       } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
     };
     $("#m-go").onclick = async () => {
@@ -1101,14 +1109,35 @@
     try { await api(`/models/${id}`, { method: "DELETE" }); toast("Model deleted", "", "ok"); refreshCurrent(); }
     catch (e) { toast("Error", e.message, "err"); }
   };
+  // Default test message (mirrors the server default) — short, cheap, verifiable.
+  const MODEL_TEST_MSG = "This is a connectivity test from CodeVia. Reply with exactly: OK";
+  // A follow-up box so users can send ANY message to the model and read the reply.
+  function modelChatBox(id, preset = "") {
+    return `<div class="model-chat-box">
+      <textarea class="textarea" id="model-chat-msg-${id}" rows="2" placeholder="Type any message to send to this model…">${esc(preset)}</textarea>
+      <div class="flex" style="justify-content:flex-end"><button class="btn" onclick="modelSend('${id}')">✉ Send message</button></div>
+    </div>`;
+  }
   window.modelTest = async (id) => {
     const el = document.getElementById("model-test-" + id);
-    if (el) el.innerHTML = `<div class="test-result">Testing…</div>`;
+    if (el) el.innerHTML = `<div class="test-result">Sending test message…</div>`;
     try {
-      const r = await api(`/models/${id}/test`, { method: "POST" });
-      if (el) el.innerHTML = renderTestResult(r);
-      toast(r.ok ? "Model provider OK" : "Model test failed", r.message, r.ok ? "ok" : "err");
+      const r = await api(`/models/${id}/test`, { method: "POST", body: {} });
+      if (el) el.innerHTML = renderTestResult(r) + modelChatBox(id);
+      toast(r.ok ? "Model replied" : "Model test failed", r.message, r.ok ? "ok" : "err");
     } catch (e) { if (el) el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
+  };
+  window.modelSend = async (id) => {
+    const ta = document.getElementById("model-chat-msg-" + id);
+    const message = ta ? ta.value.trim() : "";
+    if (!message) { toast("Empty message", "Type a message to send to the model first.", "err"); return; }
+    const el = document.getElementById("model-test-" + id);
+    if (el) el.innerHTML = `<div class="test-result">Sending your message…</div>`;
+    try {
+      const r = await api(`/models/${id}/test`, { method: "POST", body: { message } });
+      if (el) el.innerHTML = renderTestResult(r) + modelChatBox(id, message);
+      toast(r.ok ? "Model replied" : "Model test failed", r.message, r.ok ? "ok" : "err");
+    } catch (e) { if (el) el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>` + modelChatBox(id, message); toast("Error", e.message, "err"); }
   };
 
   /* PROVIDERS */

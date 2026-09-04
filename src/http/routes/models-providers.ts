@@ -5,6 +5,8 @@ import {
   providerReadiness,
   providerHasSecret,
   testProviderConnection,
+  testModelChat,
+  DEFAULT_MODEL_TEST_MESSAGE,
   type ProviderTestResult,
 } from "../../ai/provider-test.js";
 import { detectModelCapabilities, detectModelInfo } from "../../ai/provider-urls.js";
@@ -192,9 +194,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     return m;
   });
 
-  // Pre-registration model test: verifies a provider + model (before the model
-  // is saved), surfaces the exact endpoint, confirms the model is in the catalog,
-  // and reports the auto-detected capabilities.
+  // Pre-registration model test (before the model is saved). Two modes:
+  //  - with `message` in the body → sends ONE real chat message to the model and
+  //    returns the exact chat URL + the model's reply (what the Test button uses);
+  //  - without `message` → cheap detection only: auto-detected capabilities +
+  //    catalog lookup (used by the Add-Model dropdown; never costs a completion).
+  // Never persists anything.
   app.post("/models/test", { schema: { tags: ["models"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const providerId = String(b.providerId ?? "").trim();
@@ -203,40 +208,50 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (!prow) return fail(reply, 400, `Unknown provider "${providerId}"`);
     const modelId = String(b.modelId ?? "").trim();
     if (!modelId) return fail(reply, 400, "modelId is required");
-    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
     const info = detectModelInfo(modelId);
-    // `found` is only meaningful when the catalog was actually enumerated.
+    const message = typeof b.message === "string" ? b.message.trim() : "";
+    if (message) {
+      const chat = await testModelChat(prow.data, info.id, { message, timeoutMs: 15000 });
+      return {
+        providerId,
+        capabilities: info.capabilities,
+        detectedCapabilities: info.capabilities,
+        ...chat,
+      };
+    }
+    // Detection-only mode: verify reachability + catalog membership, no completion call.
+    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
     const catalogChecked = Array.isArray(test.models);
     const found = catalogChecked ? test.models!.includes(info.id) : undefined;
     return {
       providerId,
       modelId: info.id,
       found,
+      contextWindow: info.contextWindow,
       capabilities: info.capabilities,
       detectedCapabilities: info.capabilities,
       ...test,
     };
   });
 
-  // Live check for a specific model: verifies the provider, surfaces the URL,
-  // confirms the model is in the catalog, and reports its detected capabilities.
+  // Live chat test for a saved model: sends ONE real message to the model and
+  // returns the exact chat URL + the model's reply. Accepts an optional custom
+  // message in the body so users can ask the model anything from the UI.
   app.post("/models/:id/test", { schema: { tags: ["models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const b = (req.body ?? {}) as Record<string, unknown>;
     const r = container.modelRepo.findById(id);
     if (!r) return fail(reply, 404, "model not found");
     const prow = container.providerRepo.findById(r.data.providerId);
     if (!prow) return fail(reply, 404, `Provider not found for model "${r.data.modelId}"`);
-    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
     const modelId = r.data.modelId;
-    const catalogChecked = Array.isArray(test.models);
-    const found = catalogChecked ? test.models!.includes(modelId) : undefined;
+    const message = typeof b.message === "string" && b.message.trim() ? b.message : DEFAULT_MODEL_TEST_MESSAGE;
+    const chat = await testModelChat(prow.data, modelId, { message, timeoutMs: 15000 });
     return {
-      modelId,
       providerId: prow.data.id,
-      found,
       capabilities: r.data.capabilities,
       detectedCapabilities: detectModelInfo(modelId).capabilities,
-      ...test,
+      ...chat,
     };
   });
 

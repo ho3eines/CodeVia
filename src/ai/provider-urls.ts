@@ -81,6 +81,39 @@ export function buildGeminiChatEndpoint(config: ModelProvider, modelId: string, 
   return `${base}/models/${encodeURIComponent(model)}:generateContent${apiKey ? `?key=${encodeURIComponent(apiKey)}` : ""}`;
 }
 
+/** Build the Ollama native chat URL (`/api/chat` — Ollama does NOT use /v1). */
+export function buildOllamaChatEndpoint(config: ModelProvider): string {
+  const base = stripVersionPath(config.baseUrl ?? "http://localhost:11434", "/v1");
+  return `${base}/api/chat`;
+}
+
+/**
+ * Mask secrets embedded in a URL (e.g. Gemini's `?key=...`) so endpoints can be
+ * displayed/logged safely. Only the value is hidden; the shape stays visible.
+ */
+export function maskUrlSecrets(url: string): string {
+  return url.replace(/([?&](?:key|api_key|apikey|token)=)[^&]+/gi, "$1***");
+}
+
+/**
+ * The exact chat URL a real completion call will hit for a provider + model.
+ * Displayed in tests so the user always knows where the request is sent.
+ */
+export function buildChatUrlForModel(config: ModelProvider, modelId: string, apiKey?: string): string {
+  switch (config.apiFormat) {
+    case "anthropic":
+      return buildAnthropicChatEndpoint(config);
+    case "gemini":
+      return buildGeminiChatEndpoint(config, modelId, apiKey);
+    case "ollama":
+      return buildOllamaChatEndpoint(config);
+    case "openai":
+    case "custom":
+    default:
+      return buildChatEndpoint(config);
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * Capability / metadata inference for a model id.
  * Most model-catalog endpoints return little more than an id, so we infer

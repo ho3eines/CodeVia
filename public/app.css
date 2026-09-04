@@ -306,5 +306,11 @@ code, pre { font-family: var(--mono); }
 .test-result { margin-top: 8px; font-size: 11px; padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); white-space: pre-wrap; }
 .test-result.ok { border-color: rgba(22,163,74,0.4); }
 .test-result.err { border-color: rgba(220,38,38,0.4); }
+/* Model chat-test reply */
+.test-response { margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface, rgba(255,255,255,0.03)); overflow: hidden; }
+.test-response-label { padding: 5px 8px; font-size: 10px; color: var(--text-muted); border-bottom: 1px solid var(--border); white-space: normal; }
+.test-response-text { margin: 0; padding: 8px; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
+.model-chat-box { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; white-space: normal; }
+.model-chat-box .textarea { width: 100%; font-size: 11px; }
 [dir="rtl"] .repo-row .repo-meta { margin-left: 0; margin-right: auto; }
 @media (max-width: 760px) { .repo-sel-row { grid-template-columns: 1fr 1fr; } }

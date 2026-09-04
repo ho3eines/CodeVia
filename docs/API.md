@@ -60,17 +60,17 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 |--------|------|-------------|
 | GET/POST | `/models` | Model Registry (`POST` validates `providerId` exists and `modelId` is set → `400`). Capabilities are **auto-detected** from the model id when omitted; the response includes `detectedCapabilities` |
 | GET/PATCH/DELETE | `/models/:id` | Model detail / update / delete |
-| POST | `/models/test` | Pre-registration model test (before saving): `{providerId, modelId}` → `{found, url, capabilities, detectedCapabilities, ...test}` — never persists |
+| POST | `/models/test` | Pre-registration model test (before saving) — never persists. With `{providerId, modelId, message}` it **sends ONE real chat message** and returns the exact chat `url`, the HTTP `status`/`latencyMs`, and the model's `responseText`. Without `message` it is cheap detection-only (auto capabilities + catalog lookup, no completion call) |
 | POST | `/models/:id/activate` / `deactivate` | Toggle a model for routing |
-| POST | `/models/:id/test` | Live check for a saved model → verifies the provider, surfaces the endpoint, reports `found` + detected capabilities |
+| POST | `/models/:id/test` | Live chat test for a saved model — **sends ONE real message** (optional `{message}`, else a short default prompt) and returns `{ok, url, method, status?, latencyMs?, responseText, transport, ...}`. `transport` is `http` or `mock`; `url` is the exact chat endpoint (secrets masked) |
 | GET | `/providers/presets` | Provider types + per-type defaults (`baseUrl`, `secretRef`, `authType`, `apiFormat`) used by the Add Provider form. Anthropic default omits `/v1` (the platform appends it) |
 | GET | `/providers` | Providers, each with `readiness {ready, reason?, hint?}` and `keyPresent` (is the env var behind `secretRef` set?) |
 | POST | `/providers` | Create (secret **references** only — a literal key in `secretRef` is rejected with `400`; duplicate name → `409`). Auto-activates only when immediately usable; auto-discovers models via the live catalog |
-| POST | `/providers/test` | Pre-registration connectivity test (before saving): verifies the draft config, returns `{url, models, modelInfos, ...}` — never persists |
+| POST | `/providers/test` | Pre-registration connectivity test (before saving): verifies the draft config, returns `{url, catalogUrl, chatUrl, urls, models, modelInfos, ...}` — the `message` always states the destination (`GET <url> → ...` or where it *would* go). Never persists |
 | GET/PATCH | `/providers/:id` | Detail / update (drops the cached adapter so new config is used) |
 | POST | `/providers/:id/activate` | Approve/enable. `422` + `hint` when the key is missing; `?force=true` overrides |
 | POST | `/providers/:id/deactivate` | Disable (the runner skips inactive providers even if their models are active) |
-| POST | `/providers/:id/test` | Live connectivity test → `{ok, keyPresent, checked, status?, latencyMs?, message, hint?, url, models?, modelInfos?}` |
+| POST | `/providers/:id/test` | Live connectivity test → `{ok, keyPresent, checked, status?, latencyMs?, message, hint?, url, catalogUrl, chatUrl, urls, models?, modelInfos?}`. The `message` always names the requested endpoint; the mock provider reports no URLs (it makes no external request) |
 | DELETE | `/providers/:id` | Delete; `409` if models reference it unless `?cascade=true` (mock provider cannot be deleted) |
 
 ## Skills
