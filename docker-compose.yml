@@ -1,0 +1,42 @@
+# Local full-stack dev / production bundle. For Railway, individual services are
+# split (see railway.json). This compose file runs the platform + worker together
+# for convenience and single-service deployments.
+services:
+  codevia-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: codevia-platform:latest
+    container_name: codevia-web
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATABASE_PATH: /app/data/codevia.db
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Model providers (Secret References — never commit real keys)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # GitHub
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_ENABLED: ${GITHUB_ENABLED:-false}
+      # Telegram
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      # Platform
+      ENABLE_SIMULATION_MODE: ${ENABLE_SIMULATION_MODE:-true}
+    ports:
+      - "8080:8080"
+    volumes:
+      - codevia-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  codevia-data:
