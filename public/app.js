@@ -30,6 +30,33 @@
     }
     return res.status === 204 ? null : res.json();
   }
+  /* ---------- auth/session state ---------- */
+  // Cached session introspection. /auth/me is a PUBLIC endpoint that always
+  // answers 200 (it never 401s): { authenticated, loginConfigured, requireAuth }.
+  // The SPA fetches it once at boot and refreshes it after login/logout, then
+  // uses it to (a) show the login screen *before* firing protected calls that
+  // would guaranteed-401 in strict mode, and (b) gate the user slot + repo
+  // listing without per-request console noise.
+  const authState = { authenticated: false, requireAuth: false, loginConfigured: false, user: null };
+  async function refreshAuthState() {
+    try {
+      const me = await api("/auth/me");
+      authState.authenticated = !!me.authenticated;
+      authState.user = me.user || null;
+      authState.requireAuth = !!me.requireAuth;
+      authState.loginConfigured = !!me.loginConfigured;
+    } catch (_) {
+      // Network/server unreachable: leave last-known state; route handler
+      // errors surface normally.
+    }
+    return authState;
+  }
+  // True when a logged-in session is required right now (strict mode is on and
+  // GitHub login is configured). Mirrors the server guard exactly.
+  function loginIsRequired() {
+    return !authState.authenticated && authState.requireAuth;
+  }
+
   // Raw fetch that returns json body even on error (for diagnostics)
   async function apiRaw(path, opts = {}) {
     const res = await fetch(path, {
@@ -213,22 +240,37 @@
     const params = matched.params || {};
     const title = $("#topbar-title");
     handleLoginResultParams();
-    try {
-      await handler(rest, params);
-    } catch (err) {
-      if (err && err.status === 401) {
-        await renderLoginRequired();
-      } else {
-        renderError(err);
-        toast("Error", err.message, "err");
+    // Refresh session introspection up front. /auth/me is public (never 401),
+    // so when strict mode is on and we are logged out we can show the login
+    // screen *instead of* dispatching protected calls that would guaranteed
+    // 401 (which logs unavoidable console errors in the browser).
+    await refreshAuthState();
+    if (loginIsRequired()) {
+      await renderLoginRequired();
+    } else {
+      try {
+        await handler(rest, params);
+      } catch (err) {
+        if (err && err.status === 401) {
+          // Session expired between refreshes (or revoked server-side):
+          // re-sync state and show the login screen.
+          await refreshAuthState();
+          await renderLoginRequired();
+        } else {
+          renderError(err);
+          toast("Error", err.message, "err");
+        }
       }
-    } finally {
+    }
+    {
       const shown = titleMap[matched.pattern] || titleMap[full] || titleMap[key] || "Dashboard";
       title.textContent = document.title = shown;
       $("nav").setAttribute("aria-current", "true");
       $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.href === key));
       setLangDir();
     }
+    // Keep the top-bar login/user slot in sync with the refreshed state.
+    renderUserSlot();
   }
   const titleMap = {
     "/dashboard": "Dashboard", "/projects": "Projects", "/agents": "Agents", "/models": "Models",
@@ -616,40 +658,44 @@
   window.addMemory = () => openModal("Add Memory Entry", `<div class="field"><label>Type</label><select class="select" id="mm-type">${["architecture","business","technical","decision","bug","knowledge","lesson","conversation"].map(t=>`<option>${t}</option>`).join("")}</select></div><div class="field"><label>Key</label><input class="input" id="mm-key"/></div><div class="field"><label>Content</label><textarea class="textarea" id="mm-content"></textarea></div><button class="btn btn-primary" id="mm-go">Save</button>`);
 
   /* GITHUB */
+  // Renders the top-bar user/login slot from the cached authState. Uses the
+  // OAuth config status from /auth/me (loginConfigured) — no extra request,
+  // no 401 (these endpoints are public).
   async function renderUserSlot() {
     const slot = $("#user-slot");
     if (!slot) return;
     try {
-      // /auth/me is public and answers { authenticated: false } when logged
-      // out — the catch below is only for network/server-unreachable errors.
-      const me = await api("/auth/me").catch((e) => {
-        if (e && e.status === 401) return { authenticated: false, user: null };
-        throw e;
-      });
-      if (me.authenticated && me.user && me.user.externalId !== "demo") {
-        const avatar = me.user.avatarUrl ? `<img src="${esc(me.user.avatarUrl)}" alt="" style="width:22px;height:22px;border-radius:50%;vertical-align:-6px;margin-right:6px"/>` : "👤 ";
-        slot.innerHTML = `<span class="pill" title="${esc(me.user.email || "")} (${esc(me.user.role)})">${avatar}${esc(me.user.name)}</span> <button class="btn btn-ghost" id="logout-btn" style="padding:4px 10px">Logout</button>`;
+      if (authState.authenticated && authState.user && authState.user.externalId !== "demo") {
+        const u = authState.user;
+        const avatar = u.avatarUrl ? `<img src="${esc(u.avatarUrl)}" alt="" style="width:22px;height:22px;border-radius:50%;vertical-align:-6px;margin-right:6px"/>` : "👤 ";
+        slot.innerHTML = `<span class="pill" title="${esc(u.email || "")} (${esc(u.role)})">${avatar}${esc(u.name)}</span> <button class="btn btn-ghost" id="logout-btn" style="padding:4px 10px">Logout</button>`;
         $("#logout-btn").onclick = async () => {
           await api("/auth/logout", { method: "POST" }).catch(() => {});
           try { localStorage.removeItem("cv_token"); } catch (_) {}
           toast("Logged out", "Signed out of GitHub.", "ok");
+          await refreshAuthState();
           renderUserSlot(); refreshCurrent();
         };
       } else {
-        const st = await api("/auth/github/status").catch(() => ({ configured: false }));
-        slot.innerHTML = st.configured
+        slot.innerHTML = authState.loginConfigured
           ? `<a class="btn btn-primary" href="/auth/github/login" style="padding:6px 12px;text-decoration:none">🐙 Login with GitHub</a>`
           : `<a class="btn btn-ghost" href="#/github" title="GitHub OAuth not configured" style="padding:6px 12px;text-decoration:none">👤 Demo mode</a>`;
       }
     } catch (_) { /* leave slot empty when API unreachable */ }
   }
-  /* Login result toasts — the OAuth callback can land on any hash route (?login=success|error). */
+  /* Login result toasts — the OAuth callback can land on any hash route
+     (?login=success|error). route() refreshes session state right after this,
+     so on success we use the now-valid cookie via the refreshed authState. */
   function handleLoginResultParams() {
     const q = new URLSearchParams((location.hash.split("?")[1] || ""));
     if (q.get("login") === "success" && !sessionStorage.getItem("cv-welcomed")) {
       sessionStorage.setItem("cv-welcomed", "1");
-      api("/auth/me").then((me) => toast("GitHub login successful", me && me.user ? me.user.name : "", "ok")).catch(() => toast("GitHub login successful", "", "ok"));
-      renderUserSlot();
+      // Name comes from the authState refresh that route() performs next;
+      // renderUserSlot() is called again there. Fire the toast immediately
+      // and let route() re-render the slot with the authenticated user.
+      api("/auth/me")
+        .then((me) => toast("GitHub login successful", me && me.user ? me.user.name : "", "ok"))
+        .catch(() => toast("GitHub login successful", "", "ok"));
     }
     if (q.get("login") === "error") {
       toast("GitHub login failed", q.get("reason") || "Please try again.", "err");
@@ -657,11 +703,11 @@
   }
   on("/github", async () => {
     const status = await api("/integrations/github/status");
-    // /auth/me is public session introspection (always 200): use it to decide
-    // whether the protected repositories call would succeed. Skipping the
-    // request while logged out avoids a guaranteed 401 (+ console noise) in
-    // strict mode; the login card below is shown instead.
-    const me = await api("/auth/me").catch(() => ({ authenticated: false, user: null }));
+    // Use the cached session introspection (refreshed by route() before every
+    // view). It tells us whether the protected repositories call would
+    // succeed; skipping it while logged out avoids a guaranteed 401 (+ console
+    // noise) in strict mode — the login card below is shown instead.
+    const me = { authenticated: authState.authenticated, user: authState.user };
     const oauthStatus = await api("/auth/github/status").catch(() => ({ configured: false, diagnostics: {} }));
     const repos = me.authenticated
       ? await api("/github/repositories").catch(() => [])
@@ -927,6 +973,10 @@
   window.addEventListener("hashchange", route);
   renderNav();
   connectSocket();
-  renderUserSlot();
-  route();
+  // Prime session state before the first render so the user slot + route gate
+  // have correct login status (no flash of "Demo mode", no early 401).
+  refreshAuthState().then(() => {
+    renderUserSlot();
+    route();
+  });
 })();
