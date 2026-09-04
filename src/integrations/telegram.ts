@@ -607,7 +607,13 @@ export async function testTelegramToken(token: string): Promise<TelegramGetMe> {
     };
   }
   if (res.errorCode === 401) return { ok: false, error: "Telegram rejected the token (invalid bot token?)" };
-  return { ok: false, error: res.error ? `Telegram API error: ${res.error}` : "Telegram rejected the token (invalid bot token?)" };
+  return {
+    ok: false,
+    // Keep Telegram's own description when there is one; for network failures the
+    // client already says what went wrong ("telegram getMe network error: …"), so
+    // don't wrap it in a second "Telegram API error:" layer.
+    error: res.error ?? "Telegram rejected the token (invalid bot token?)",
+  };
 }
 
 /** Register the platform webhook for a user bot (real connection). */
