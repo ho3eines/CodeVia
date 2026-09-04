@@ -187,23 +187,48 @@ export function createMockTelegram(): MockTelegramService {
 }
 
 /* ------------------------------------------------------------------ *
- * Per-user Telegram accounts
+ * Webhook URL resolution
+ *
+ * Telegram only accepts a public HTTPS webhook URL. The platform may run in
+ * several places (local dev, a Railway/container deployment, or the Arena
+ * preview at https://{port}-{sandboxId}.e2b.app). Rather than requiring the
+ * operator to hard-code PUBLIC_WEB_BASE_URL, we resolve the webhook URL from,
+ * in order of precedence:
+ *
+ *   1. TELEGRAM_WEBHOOK_URL       (explicit override)
+ *   2. PUBLIC_WEB_BASE_URL        (public production URL)
+ *   3. a URL learned from a real incoming request (host + forwarded proto)
+ *   4. WEB_BASE_URL               (dev default)
  * ------------------------------------------------------------------ */
 
-export interface TelegramGetMe {
-  ok: boolean;
-  username?: string;
-  id?: number;
-  botId?: string;
-  error?: string;
+let learnedPublicBaseUrl: string | undefined;
+
+/** Remember a public base URL we observed from an actual request (e.g. the
+ *  Arena preview host) so later registrations reuse it. */
+export function learnPublicBaseUrl(url: string | undefined): void {
+  if (!url) return;
+  const clean = url.replace(/\/$/, "");
+  if (/^https:\/\//i.test(clean) && !/@/.test(clean)) learnedPublicBaseUrl = clean;
 }
 
-export function getTelegramWebhookUrl(): string {
+export function getPublicBaseUrl(host?: string, proto?: string): string {
+  const env = getEnv();
+  if (env.PUBLIC_WEB_BASE_URL?.trim()) return env.PUBLIC_WEB_BASE_URL.trim();
+  if (learnedPublicBaseUrl) return learnedPublicBaseUrl;
+  // Derive from the caller's request: the proxy forwards the real scheme/host.
+  if (host && !/localhost|127\.0\.0\.1/i.test(host)) {
+    const scheme = proto === "https" ? "https" : proto === "http" ? "http" : "https";
+    return `${scheme}://${host}`;
+  }
+  return env.WEB_BASE_URL;
+}
+
+export function getTelegramWebhookUrl(host?: string, proto?: string): string {
   const env = getEnv();
   if (env.TELEGRAM_WEBHOOK_URL?.trim()) {
     return env.TELEGRAM_WEBHOOK_URL.trim();
   }
-  const base = env.PUBLIC_WEB_BASE_URL ?? env.WEB_BASE_URL;
+  const base = getPublicBaseUrl(host, proto);
   return `${String(base).replace(/\/$/, "")}/integrations/telegram/webhook`;
 }
 
@@ -226,6 +251,14 @@ export function validateTelegramWebhookUrl(url: string): { ok: boolean; error?: 
     return { ok: false, error: `invalid webhook URL "${url}"` };
   }
   return { ok: true };
+}
+
+export interface TelegramGetMe {
+  ok: boolean;
+  username?: string;
+  id?: number;
+  botId?: string;
+  error?: string;
 }
 
 export function accountTelegramToken(account: TelegramAccount): string | undefined {

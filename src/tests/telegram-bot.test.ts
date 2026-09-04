@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Container } from "../app/container.js";
 import { TelegramBot } from "../integrations/telegram-bot.js";
-import { MockTelegramService, validateTelegramWebhookUrl, setTelegramWebhook } from "../integrations/telegram.js";
+import { MockTelegramService, validateTelegramWebhookUrl, setTelegramWebhook, getPublicBaseUrl, getTelegramWebhookUrl } from "../integrations/telegram.js";
 import { logger } from "../logger.js";
 import { freshDb } from "./test-helpers.js";
 
@@ -145,5 +145,14 @@ describe("Telegram bot (project-aware, keyboard-driven)", () => {
     const res = await setTelegramWebhook("token:abc", "http://localhost:8080/integrations/telegram/webhook");
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/HTTPS/i);
+  });
+
+  it("derives an HTTPS webhook URL from the real forwarded host/proto", () => {
+    // Behind a proxy / the Arena preview host, the request carries the public
+    // host + proto — we must use it instead of the http://localhost default.
+    expect(getPublicBaseUrl("8080-codevia.e2b.app", "https")).toBe("https://8080-codevia.e2b.app");
+    expect(getTelegramWebhookUrl("8080-codevia.e2b.app", "https")).toBe("https://8080-codevia.e2b.app/integrations/telegram/webhook");
+    // A real deployment with PUBLIC_WEB_BASE_URL set wins over the request host.
+    expect(validateTelegramWebhookUrl(getTelegramWebhookUrl("8080-codevia.e2b.app", "https")).ok).toBe(true);
   });
 });

@@ -145,29 +145,49 @@ export class Container {
     logger.info("container seeded");
   }
 
+  /** The public base URL we last successfully pointed the global webhook at,
+   *  so we don't re-register the same URL on every status poll. */
+  private globalWebhookRegisteredBase?: string;
+
   /**
    * Register the global bot's webhook with Telegram when the platform is
    * configured for Telegram (ENABLE_TELEGRAM=true + a token). Without this the
    * bot has no way to receive updates, which is the #1 reason a real bot stays
    * silent. In local dev (no public URL / no token) this is a no-op and just logs.
    */
-  async setupTelegramWebhook(): Promise<{ ok: boolean; url?: string; error?: string }> {
+  async setupTelegramWebhook(baseOverride?: string): Promise<{ ok: boolean; url?: string; error?: string }> {
     const env = getEnv();
     if (!env.ENABLE_TELEGRAM) return { ok: false, error: "Telegram disabled (set ENABLE_TELEGRAM=true)" };
     if (!env.TELEGRAM_BOT_TOKEN) return { ok: false, error: "TELEGRAM_BOT_TOKEN is not set" };
-    const url = getTelegramWebhookUrl();
+    const url = baseOverride
+      ? `${baseOverride.replace(/\/$/, "")}/integrations/telegram/webhook`
+      : getTelegramWebhookUrl();
     const valid = validateTelegramWebhookUrl(url);
     if (!valid.ok) {
       logger.warn("Telegram webhook not set — no public HTTPS URL", { error: valid.error, url });
       return { ok: false, url, error: valid.error };
     }
+    // Don't spam setWebhook with the same URL we already registered.
+    if (this.globalWebhookRegisteredBase === url) {
+      return { ok: true, url };
+    }
     const res = await setTelegramWebhook(env.TELEGRAM_BOT_TOKEN, url);
     if (res.ok) {
+      this.globalWebhookRegisteredBase = url;
       logger.info("Telegram webhook registered", { url });
     } else {
       logger.warn("Telegram webhook registration failed", { error: res.error ?? "unknown", url });
     }
     return { ok: res.ok, url, error: res.error };
+  }
+
+  /**
+   * Heal the global bot webhook once a public HTTPS base URL has been observed
+   * from a real request (e.g. the Arena preview host). Safe to call on request
+   * handlers; it no-ops when Telegram is disabled, no token, or already done.
+   */
+  async healTelegramWebhook(baseOverride?: string): Promise<void> {
+    await this.setupTelegramWebhook(baseOverride);
   }
 
   private seedDefaultProviders(): void {
