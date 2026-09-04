@@ -1,6 +1,11 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
 import { getEnv } from "../../config/env.js";
+import {
+  getGitHubAdminSettings,
+  saveGitHubAdminSettings,
+  type SaveGitHubAdminSettingsInput,
+} from "../../auth/admin-settings.js";
 
 export function registerSettingsRoutes(app: FastifyInstance, container: Container): void {
   app.get("/settings", { schema: { tags: ["settings"] } }, async () => {
@@ -42,8 +47,39 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
       agents: container.agentRepo.findMany().map((r) => r.data),
       skills: container.skillRepo.findMany().map((r) => ({ id: r.data.id, slug: r.data.slug, name: r.data.name })),
       projects: container.projectRepo.findMany().map((r) => ({ id: r.data.id, slug: r.data.slug, name: r.data.name })),
+      // Admin-managed (non-secret) GitHub login settings — included so a fresh
+      // instance (e.g. after a Railway deploy wiped the ephemeral DB) can be
+      // restored with POST /settings/restore.
+      adminSettings: getGitHubAdminSettings(container.kv),
       secretsIncluded: false,
     };
+  });
+
+  // Restore admin-managed settings from a backup blob (POST /settings/backup
+  // output). Only the validated, non-secret GitHub login settings are written
+  // back — secrets stay environment-only by design.
+  app.post("/settings/restore", { schema: { tags: ["settings"] } }, async (req: FastifyRequest, reply: FastifyReply) => {
+    const b = (req.body ?? {}) as { adminSettings?: Partial<SaveGitHubAdminSettingsInput> };
+    if (!b.adminSettings || typeof b.adminSettings !== "object") {
+      reply.code(400);
+      return { error: "Restore payload missing adminSettings" };
+    }
+    try {
+      const stored = saveGitHubAdminSettings(container.kv, b.adminSettings, req.user.id);
+      await container.auditRepo.record({
+        userId: req.user.id,
+        action: "admin.settings.restore",
+        result: "success",
+        source: "web",
+        correlationId: `restore-${Date.now()}`,
+        metadata: { keys: Object.keys(b.adminSettings) },
+      });
+      return { ok: true, stored };
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode ?? 400;
+      reply.code(status);
+      return { error: err instanceof Error ? err.message : "Restore failed" };
+    }
   });
 
   // Project export (config + agents + prompts + skills + workflows + rules; no secrets).

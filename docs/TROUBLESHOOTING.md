@@ -67,9 +67,38 @@ check itself went through the auth guard, so every logged-out page load logged
 401s. Current builds keep session introspection public — `GET /auth/me`,
 `POST /auth/logout` and `GET /auth/github/status` always answer `200` with
 `{ authenticated: false }` when logged out, and the UI skips protected calls
-until you sign in. If you still see these 401s, redeploy to the latest build
-and then **Login with GitHub** (`#/github`); protected data endpoints
-(`/dashboard`, `/github/repositories`, …) correctly return `401` until then.
+until you sign in.
+
+**Quick check that the deployed build is current:** in a browser (logged out)
+open `https://<app>/auth/me` — a current build answers `200`
+(`{"authenticated":false,…}`). If it answers `401`, the deployed build is
+**stale** — deploy the latest `main` (Railway: *Deploy* → deploy the latest
+commit) and reload. Then **Login with GitHub** (`#/github` or the top bar);
+protected data endpoints (`/dashboard`, `/github/repositories`, …) correctly
+return `401` only until you sign in. Sessions last 7 days; changing
+`AUTH_SECRET` or wiping the DB (ephemeral storage — see below) invalidates
+them and requires one re-login.
+
+## I have to re-enter the GitHub settings (and re-login) after every deploy
+
+The admin-panel GitHub login settings and the user table live in the runtime
+SQLite DB at `/app/data`. On Railway the container filesystem is **ephemeral**
+— every deploy wipes it, so the settings disappear and everyone must re-login.
+Fixes (pick one):
+
+1. **Railway volume (recommended, one time):** Service → Settings → Storage →
+   **Add Volume**, mount path `/app/data`, then Redeploy. `#/admin` shows an
+   amber "ephemeral storage" warning card while this is unconfigured — it goes
+   away once the volume is attached. See [DEPLOYMENT.md](DEPLOYMENT.md) →
+   *Option C — persistent storage*.
+2. **Railway Variables (login config only):** set `GITHUB_CLIENT_ID`,
+   `GITHUB_CLIENT_SECRET`, `GITHUB_OAUTH_CALLBACK_URL`, `AUTH_SECRET`
+   (and `REQUIRE_AUTH` if you use strict mode). Env values persist across
+   deploys and take precedence over the admin panel — the Client ID field in
+   `#/admin` then shows an `env` badge and is read-only.
+3. **Manual fallback:** `#/settings` → **⬇ System Backup** before the deploy,
+   then **⬆ Restore Backup** after it (restores the non-secret login
+   settings; secrets are always env-only).
 
 ## `WebSocket connection to 'wss://…/socket.io/…' failed: ERR_CONNECTION_RESET`
 
