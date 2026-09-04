@@ -156,3 +156,84 @@ describe("Telegram bot (project-aware, keyboard-driven)", () => {
     expect(validateTelegramWebhookUrl(getTelegramWebhookUrl("8080-codevia.e2b.app", "https")).ok).toBe(true);
   });
 });
+
+describe("Telegram bot — real-world command handling", () => {
+  it("answers /start@BotName in groups (Telegram appends the bot username)", async () => {
+    await bot.handle({
+      update_id: 20,
+      message: { chat: { id: -100, type: "supergroup" }, from: { id: 123, username: "dev" }, text: "/start@CodeViaBot" },
+    });
+    const sent = lastSent();
+    expect(sent.chatId).toBe("-100");
+    expect(sent.text).toContain("CodeVia");
+  });
+
+  it("auto-selects the only project, so a plain message runs without menu taps", async () => {
+    await container.agentManager.createProject({ name: "Storefront", configRepo: "acme/storefront", description: "Demo storefront" });
+    const before = container.taskRepo.findMany().length;
+    await bot.handle({
+      update_id: 21,
+      message: { chat: { id: 888 }, from: { id: 123 }, text: "چرا لاگین بعد از آخرین کامیت خراب شده؟" },
+    });
+    expect(container.taskRepo.findMany().length).toBe(before + 1);
+    const sent = lastSent();
+    expect(sent.text).toContain("Task created & queued");
+  });
+
+  it("tells the user their ids (/id) — the AccountId the web UI asks for", async () => {
+    await bot.handle({
+      update_id: 22,
+      message: { chat: { id: 555010, type: "private" }, from: { id: 555010, username: "hooman" }, text: "/id" },
+    });
+    const sent = lastSent();
+    expect(sent.text).toContain("555010");
+    expect(sent.text).toContain("@hooman");
+  });
+
+  it("reports how it receives messages on /ping", async () => {
+    const withStatus = new TelegramBot({
+      ...botDeps(),
+      runtimeStatus: () =>
+        ({ transport: "polling", mode: "auto", enabled: true, fixes: [], webhookUrl: "https://x/integrations/telegram/webhook" }) as never,
+    });
+    await withStatus.handle({ update_id: 23, message: { chat: { id: 777 }, from: { id: 1 }, text: "/ping" } });
+    const sent = lastSent();
+    expect(sent.text).toContain("polling");
+    expect(sent.text).toMatch(/self-check/i);
+  });
+
+  it("answers with the error instead of going silent when a handler throws", async () => {
+    const broken = new TelegramBot({ ...botDeps(), projectRepo: { findMany() { throw new Error("db is locked"); }, findById() { throw new Error("db is locked"); } } as never });
+    await broken.handle({ update_id: 24, message: { chat: { id: 777 }, from: { id: 1 }, text: "/projects" } });
+    const sent = lastSent();
+    expect(sent.text).toContain("db is locked");
+    expect(sent.text).toContain("Something went wrong");
+  });
+
+  it("cancels queued tasks on /stop", async () => {
+    const project = await container.agentManager.createProject({ name: "Storefront", configRepo: "acme/storefront", description: "Demo storefront" });
+    const task = container.agentManager.createTask({ projectId: project.id, title: "queued thing" });
+    container.taskRepo.upsert({ ...task, status: "queued" }, { projectId: project.id });
+    await bot.handle({ update_id: 25, message: { chat: { id: 777 }, from: { id: 1 }, text: "/stop" } });
+    expect(container.taskRepo.findById(task.id)?.data.status).toBe("cancelled");
+  });
+
+  function botDeps() {
+    return {
+      telegram,
+      projectRepo: container.projectRepo,
+      taskRepo: container.taskRepo,
+      workflowRepo: container.workflowRepo,
+      conversationRepo: container.conversationRepo,
+      agentRepo: container.agentRepo,
+      runRepo: container.runRepo,
+      agentManager: container.agentManager,
+      github: container.github,
+      modelRepo: container.modelRepo,
+      skillRepo: container.skillRepo,
+      memoryRepo: container.memoryRepo,
+      queue: container.queue,
+      logger,
+    };
+  }
+});

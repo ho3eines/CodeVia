@@ -1,19 +1,21 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
-import { TelegramBot } from "../../integrations/telegram-bot.js";
 import {
   accountTelegramService,
   accountTelegramToken,
   encryptTelegramToken,
   getPublicBaseUrl,
-  getTelegramWebhookUrl,
+  getTelegramWebhookPath,
+  isTelegramConnection,
   learnPublicBaseUrl,
   maskTelegramToken,
-  setTelegramWebhook,
   testTelegramToken,
+  verifyTelegramWebhookSecret,
 } from "../../integrations/telegram.js";
 import type { TelegramAccount } from "../../domain/telegram.js";
+import type { TelegramMode } from "../../integrations/telegram-runtime.js";
 import { resolveRequestUser } from "../auth.js";
+import { getEnv } from "../../config/env.js";
 import { logger } from "../../logger.js";
 
 function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
@@ -21,39 +23,29 @@ function fail(reply: FastifyReply, status: number, message: string, extra: Recor
   return { error: message, ...extra };
 }
 
+const MODES: TelegramMode[] = ["auto", "webhook", "polling", "off"];
+
 export function registerTelegramRoutes(app: FastifyInstance, container: Container): void {
   // Reuse the container's singleton Telegram service (same token connection the
   // rest of the platform and the worker use), rather than creating a fresh one.
   const telegram = container.telegram;
-  const botDeps = {
-    projectRepo: container.projectRepo,
-    taskRepo: container.taskRepo,
-    workflowRepo: container.workflowRepo,
-    conversationRepo: container.conversationRepo,
-    agentRepo: container.agentRepo,
-    runRepo: container.runRepo,
-    agentManager: container.agentManager,
-    github: container.github,
-    modelRepo: container.modelRepo,
-    skillRepo: container.skillRepo,
-    memoryRepo: container.memoryRepo,
-    queue: container.queue,
-    logger: logger.child({ component: "telegram-bot" }),
-  };
-  const bot = new TelegramBot({ telegram, ...botDeps });
-  const botFor = (svc = telegram) => new TelegramBot({ telegram: svc, ...botDeps });
+  const runtime = container.telegramRuntime;
+  const bot = container.telegramBotFor(telegram);
+  const botFor = (svc = telegram) => container.telegramBotFor(svc);
 
   /** Resolve the public HTTPS base URL this deployment is reachable at, using the
    *  real forwarded host/proto so the webhook points at a URL Telegram can reach
    *  (works out of the box behind a proxy / the Arena preview host). */
-  const publicBaseFrom = (req: Parameters<typeof resolveRequestUser>[0]) => {
+  const publicBaseFrom = (req: FastifyRequest) => {
     const h = req.headers as Record<string, unknown>;
-    const proto = String(h["x-forwarded-proto"] ?? (req as { protocol?: string }).protocol ?? "https");
-    const host = String(h["x-forwarded-host"] ?? h.host ?? (req as { host?: string }).host ?? "");
+    const proto = String(h["x-forwarded-proto"] ?? req.protocol ?? "https");
+    const host = String(h["x-forwarded-host"] ?? h.host ?? "");
     const base = getPublicBaseUrl(host, proto);
     learnPublicBaseUrl(base);
     return base;
   };
+
+  const webhookUrlFor = (base: string) => `${base.replace(/\/$/, "")}${getTelegramWebhookPath()}`;
 
   const serialize = (a: TelegramAccount) => ({
     id: a.id,
@@ -65,41 +57,82 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     botUsername: a.botUsername,
     connected: a.connected,
     webhookSet: !!a.webhookSet,
+    transport: a.transport ?? (a.webhookSet ? "webhook" : "off"),
+    pollingActive: !!a.pollingActive,
+    lastCheckedAt: a.lastCheckedAt,
     lastError: a.lastError,
     tokenMasked: maskTelegramToken(accountTelegramToken(a)),
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
   });
 
+  /**
+   * Verify a user's bot token and choose how it receives updates:
+   * webhook when this deployment is publicly reachable, otherwise **long
+   * polling** with the account's own token. The polling fallback is what makes a
+   * bot work for people who have no HTTPS host to point Telegram at (local dev,
+   * a preview URL, a NAT'ed VPS) — previously such an account was "connected"
+   * in the UI yet could never hear a message.
+   */
   async function connectAccount(account: TelegramAccount, publicBase?: string): Promise<TelegramAccount> {
     const token = accountTelegramToken(account);
+    const now = () => new Date().toISOString();
     if (!token) {
-      return { ...account, connected: false, lastError: "Token cannot be decrypted" };
+      return { ...account, connected: false, lastError: "Token cannot be decrypted", updatedAt: now() };
     }
     const me = await testTelegramToken(token);
     if (!me.ok) {
-      return { ...account, connected: false, lastError: me.error, botId: account.botId, botUsername: account.botUsername, updatedAt: new Date().toISOString() };
+      return {
+        ...account,
+        connected: false,
+        lastError: me.error,
+        lastCheckedAt: now(),
+        botId: account.botId,
+        botUsername: account.botUsername,
+        updatedAt: now(),
+      };
     }
-    // A webhook is required for the bot to receive updates. Telegram demands a
-    // public HTTPS URL. We prefer a base derived from the actual incoming request
-    // (the proxy/preview host), falling back to PUBLIC_WEB_BASE_URL / config.
     const base = publicBase ?? getPublicBaseUrl();
-    const webhookUrl = `${base.replace(/\/$/, "")}/integrations/telegram/webhook`;
-    const webhookResult = await setTelegramWebhook(token, webhookUrl);
+    const webhookUrl = webhookUrlFor(base);
+    const service = accountTelegramService(account);
+    const webhookResult = isTelegramConnection(service)
+      ? await service.setWebhook(webhookUrl, { secretToken: getEnv().TELEGRAM_WEBHOOK_SECRET })
+      : { ok: false as const, error: "mock telegram service" };
+
+    let transport: TelegramAccount["transport"] = webhookResult.ok ? "webhook" : "polling";
+    let pollingActive = false;
+    let lastError: string | undefined;
+
+    if (webhookResult.ok) {
+      await runtime.stopAccountPolling(account.id);
+    } else {
+      // No webhook → keep polling as the receive path. If polling cannot start
+      // either, that is the error the user needs to see.
+      const status = await runtime.startAccountPolling(account);
+      pollingActive = !!status?.running;
+      transport = pollingActive ? "polling" : "off";
+      lastError = pollingActive
+        ? `Bot is live. Webhook was not usable (${webhookResult.error ?? "no public HTTPS URL"}) — receiving messages via long polling instead.`
+        : `Bot token is valid, but no update transport could be started: ${webhookResult.error ?? "unknown"}`;
+    }
+
     const updated: TelegramAccount = {
       ...account,
       botId: me.botId ?? account.botId,
       botUsername: me.username ?? account.botUsername,
       connected: true,
       webhookSet: webhookResult.ok,
-      lastError: webhookResult.ok ? undefined : `Bot is live, but it can't receive messages yet: ${webhookResult.error}`,
-      updatedAt: new Date().toISOString(),
+      transport,
+      pollingActive,
+      lastCheckedAt: now(),
+      lastError,
+      updatedAt: now(),
     };
     container.telegramAccountRepo.upsert(updated);
     return updated;
   }
 
-  const currentUserId = (req: Parameters<typeof resolveRequestUser>[0]) => {
+  const currentUserId = (req: FastifyRequest) => {
     const { user } = resolveRequestUser(req, container);
     return user.id;
   };
@@ -107,21 +140,69 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
   app.get("/integrations/telegram/status", { schema: { tags: ["telegram"] } }, async (req) => {
     const userId = currentUserId(req);
     const accounts = container.telegramAccountRepo.byUser(userId).map(serialize);
-    const globalConnected = await telegram.health();
+    // "connected" must mean a real bot token is in play — the mock service
+    // answers health() with true, which used to make the UI claim a global bot
+    // existed when there was none.
+    const globalConfigured = runtime.status().enabled && runtime.status().hasToken;
     const publicBase = publicBaseFrom(req);
-    // If a global bot token is configured and we now know a public HTTPS base,
-    // register its webhook so the bot actually receives updates.
-    await container.healTelegramWebhook(publicBase);
+    // Reconcile the receive path (webhook registration and/or the poller) and
+    // any account that asked for polling. Both are idempotent no-ops when
+    // nothing changed, so this is safe to run on every UI poll.
+    await runtime.start(publicBase);
+    await runtime.syncAccountPollers().catch(() => undefined);
+    const status = runtime.status();
+    const receiving = status.transport !== "off" || accounts.some((a) => a.transport === "polling" || a.webhookSet);
     return {
-      connected: globalConnected || accounts.some((a) => a.connected),
-      globalConnected,
+      connected: (globalConfigured || accounts.some((a) => a.connected)) && receiving,
+      configured: globalConfigured || accounts.some((a) => a.connected),
+      receiving,
+      globalConnected: globalConfigured,
       kind: telegram.constructor.name,
-      // Show the actual public HTTPS URL the webhook will use (from the request
-      // host or PUBLIC_WEB_BASE_URL), not the http://localhost default.
+      // Show the actual public HTTPS URL the webhook uses (from the request host
+      // or PUBLIC_WEB_BASE_URL), not the http://localhost default.
       baseUrl: publicBase,
-      webhookUrl: `${publicBase.replace(/\/$/, "")}/integrations/telegram/webhook`,
+      webhookUrl: webhookUrlFor(publicBase),
+      transport: status.transport,
+      mode: status.mode,
+      botUsername: status.botUsername,
+      webhookSet: status.webhookSet,
+      webhookError: status.webhookError,
+      webhookInfo: status.webhookInfo,
+      polling: status.polling,
+      fixes: status.fixes,
+      note: status.note,
       accounts,
     };
+  });
+
+  // Round-trip diagnostics straight from Telegram's own view of this bot.
+  app.get("/integrations/telegram/diagnostics", { schema: { tags: ["telegram"] } }, async (req) => {
+    const status = await runtime.diagnostics(true);
+    return { ...status, checkedFrom: publicBaseFrom(req) };
+  });
+
+  /** Switch the receive transport without redeploying (UI toggle / curl). */
+  app.post("/integrations/telegram/transport", { schema: { tags: ["telegram"] } }, async (req, reply) => {
+    const b = (req.body ?? {}) as { mode?: string; baseUrl?: string };
+    const mode = String(b.mode ?? "").trim() as TelegramMode;
+    if (!MODES.includes(mode)) return fail(reply, 400, `mode must be one of ${MODES.join(" | ")}`);
+    const status = await runtime.setMode(mode, b.baseUrl ? String(b.baseUrl).replace(/\/$/, "") : publicBaseFrom(req));
+    return { ok: true, mode, status };
+  });
+
+  /** Re-register the webhook now (e.g. right after setting PUBLIC_WEB_BASE_URL). */
+  app.post("/integrations/telegram/webhook/refresh", { schema: { tags: ["telegram"] } }, async (req) => {
+    const base = publicBaseFrom(req);
+    const res = await runtime.registerWebhook(webhookUrlFor(base));
+    const status = await runtime.diagnostics(true);
+    return { ok: res.ok, url: webhookUrlFor(base), error: res.error, status };
+  });
+
+  /** Drop Telegram's queued backlog so a restarted bot doesn't replay old messages. */
+  app.post("/integrations/telegram/updates/skip", { schema: { tags: ["telegram"] } }, async (_req, reply) => {
+    const skipped = await runtime.skipPendingUpdates().catch(() => undefined);
+    if (skipped === undefined) return fail(reply, 409, "long polling is not active for this deployment");
+    return { ok: true, skipped };
   });
 
   // Per-user bot accounts: list / create / update / connect / remove.
@@ -155,7 +236,16 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     });
     const connected = await connectAccount(account, publicBaseFrom(req));
     reply.code(201);
-    return { account: serialize(connected), webhookUrl: getTelegramWebhookUrl() };
+    return {
+      account: serialize(connected),
+      webhookUrl: runtime.status().webhookUrl ?? webhookUrlFor(getPublicBaseUrl()),
+      // Tell the user exactly where their bot is now listening, and what to do
+      // if they'd rather have a webhook (serverless/multi-replica setups).
+      receiving: connected.transport === "polling" ? "long polling (getUpdates)" : connected.webhookSet ? "webhook" : "nothing — see lastError",
+      chatIdHint: !accountId
+        ? "Tip: message your bot, send /id to it, and put that number in AccountId so updates route to your account."
+        : undefined,
+    };
   });
 
   app.patch("/integrations/telegram/accounts/:id", { schema: { tags: ["telegram"] } }, async (req, reply) => {
@@ -190,11 +280,39 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     return serialize(connected);
   });
 
+  /** Force an account onto polling (or back onto the webhook). */
+  app.post("/integrations/telegram/accounts/:id/transport", { schema: { tags: ["telegram"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const userId = currentUserId(req);
+    const account = container.telegramAccountRepo.findByIdAndUser(id, userId);
+    if (!account) return fail(reply, 404, "Telegram account not found");
+    const b = (req.body ?? {}) as { transport?: string };
+    const want = String(b.transport ?? "polling");
+    if (want === "polling") {
+      const status = await runtime.startAccountPolling(account);
+      const updated: TelegramAccount = {
+        ...account,
+        transport: "polling",
+        pollingActive: !!status?.running,
+        webhookSet: false,
+        lastCheckedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastError: status?.running ? undefined : status?.note ?? "poller not running",
+      };
+      container.telegramAccountRepo.upsert(updated);
+      return { ok: !!status?.running, account: serialize(updated), status };
+    }
+    await runtime.stopAccountPolling(id);
+    const connected = await connectAccount({ ...account, transport: "webhook" }, publicBaseFrom(req));
+    return { ok: true, account: serialize(connected) };
+  });
+
   app.delete("/integrations/telegram/accounts/:id", { schema: { tags: ["telegram"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const userId = currentUserId(req);
     const account = container.telegramAccountRepo.findByIdAndUser(id, userId);
     if (!account) return fail(reply, 404, "Telegram account not found");
+    await runtime.stopAccountPolling(id);
     container.telegramAccountRepo.deleteById(id);
     return { ok: true };
   });
@@ -202,7 +320,7 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
   // Global + per-account webhook. A user bot's webhook points at the same
   // public URL; the router picks the right account by :accountId or the
   // incoming chat/user id.
-  const handleWebhook = async (body: unknown, accountId?: string) => {
+  const handleWebhook = async (body: unknown, accountId?: string, req?: FastifyRequest) => {
     let account: TelegramAccount | undefined;
     if (accountId) {
       account = container.telegramAccountRepo.findMany().map((r) => r.data).find((a) => a.id === accountId);
@@ -215,42 +333,77 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     }
     const activeBot = account ? botFor(accountTelegramService(account)) : bot;
     const update = await activeBot.handle(body);
+    // A successful delivery proves the webhook path works — record it so the UI
+    // can say "receiving via webhook" without another API round-trip.
+    if (account && !account.webhookSet && req) {
+      container.telegramAccountRepo.upsert({
+        ...account,
+        webhookSet: true,
+        transport: "webhook",
+        lastCheckedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    if (req) learnPublicBaseUrl(publicBaseFrom(req).replace(/\/$/, ""));
     return { ok: true, account: account ? account.id : undefined, update };
+  };
+
+  /**
+   * Telegram posts updates here. Two rules matter:
+   *  • always answer 200 — a 4xx/5xx makes Telegram retry and, after repeated
+   *    failures, *disable the webhook*, which looks like "the bot died";
+   *  • when a secret token is configured, require it, because this route is
+   *    public and anyone could otherwise forge "approved" callbacks.
+   */
+  const webhookHandler = async (req: FastifyRequest, reply: FastifyReply, accountId?: string) => {
+    const expected = getEnv().TELEGRAM_WEBHOOK_SECRET;
+    const provided = req.headers["x-telegram-bot-api-secret-token"];
+    if (!verifyTelegramWebhookSecret(provided == null ? undefined : String(provided), expected)) {
+      logger.warn("telegram webhook rejected: secret token mismatch");
+      reply.code(401);
+      return { error: "invalid telegram webhook secret token" };
+    }
+    try {
+      reply.code(200);
+      return await handleWebhook(req.body, accountId, req);
+    } catch (err) {
+      logger.error("telegram webhook error", { err: String(err) });
+      // 200 anyway: the failure is reported to the chat (below) and logged.
+      reply.code(200);
+      return { ok: false, error: String(err) };
+    }
   };
 
   app.post("/integrations/telegram/webhook/:accountId", { schema: { tags: ["telegram"] } }, async (req, reply) => {
     const { accountId } = req.params as { accountId: string };
-    try {
-      reply.code(200);
-      return await handleWebhook(req.body, accountId);
-    } catch (err) {
-      logger.error("telegram webhook error", { err: String(err) });
-      reply.code(200);
-      return { ok: false, error: String(err) };
-    }
+    return webhookHandler(req, reply, accountId);
   });
 
   app.post("/integrations/telegram/webhook", { schema: { tags: ["telegram"] } }, async (req, reply) => {
-    try {
-      reply.code(200);
-      return await handleWebhook(req.body);
-    } catch (err) {
-      logger.error("telegram webhook error", { err: String(err) });
-      reply.code(200);
-      return { ok: false, error: String(err) };
-    }
+    return webhookHandler(req, reply);
   });
 
   // Manually drive a telegram-style message (for the web UI "Telegram" preview).
   app.post("/integrations/telegram/command", { schema: { tags: ["telegram"] } }, async (req) => {
-    const b = req.body as { chatId?: string; text?: string };
-    const update = await botFor().handle({ update_id: Date.now(), message: { chat: { id: b.chatId ?? "web" }, from: { id: "web" }, text: b.text } });
-    return { ok: true, update };
+    const b = req.body as { chatId?: string; text?: string; callbackData?: string; deliver?: boolean };
+    const payload: Record<string, unknown> = b.callbackData
+      ? { update_id: Date.now(), callback_query: { id: `web-${Date.now()}`, data: b.callbackData, from: { id: b.chatId ?? "web" }, message: { chat: { id: b.chatId ?? "web", type: "private" }, message_id: 1 } } }
+      : { update_id: Date.now(), message: { chat: { id: b.chatId ?? "web", type: "private" }, from: { id: b.chatId ?? "web" }, text: b.text } };
+    // "Deliver" actually sends through the configured service (a real bot gets
+    // the message); otherwise this is a dry-run preview of what the bot replies.
+    if (b.deliver) {
+      const update = await botFor().handle(payload);
+      return { ok: true, update, delivered: true };
+    }
+    const { update, reply, error } = await botFor().preview(payload);
+    return { ok: !error, update, reply, error };
   });
 
   app.post("/integrations/telegram/send", { schema: { tags: ["telegram"] } }, async (req) => {
     const b = req.body as { chatId?: string; text?: string };
-    const ok = await telegram.sendMessage({ chatId: b.chatId ?? "web", text: b.text ?? "" });
-    return { ok };
+    const chatId = b.chatId ?? "";
+    if (!chatId) return { ok: false, error: "chatId is required — message your bot and send /id to get it" };
+    const ok = await telegram.sendMessage({ chatId, text: b.text ?? "" });
+    return { ok, transport: runtime.status().transport };
   });
 }

@@ -21,9 +21,12 @@ async function main() {
   const container = getContainer();
   await container.ensureSeed();
 
-  // Register the Telegram webhook so the bot actually receives updates
-  // (no-op + a log line when TELEGRAM is disabled / no token / local dev).
-  await container.setupTelegramWebhook();
+  // Bring up the Telegram receive path: register the webhook when a public
+  // HTTPS URL exists, otherwise long-poll `getUpdates` so a token-only setup
+  // still works (no tunnel, no ngrok). Mock/off modes no-op with a log line.
+  await container.startTelegram().catch((err) => {
+    logger.warn("telegram receive path could not start", { err: String(err) });
+  });
 
   // Startup guard: a local-address OAuth callback in production means the login
   // flow can never complete (the browser cannot be redirected back to localhost).
@@ -48,6 +51,7 @@ async function main() {
 
   const shutdown = async (signal: string) => {
     logger.warn(`received ${signal}, shutting down`);
+    await container.stopTelegram().catch(() => undefined);
     stopWorker();
     io.close();
     await app.close();

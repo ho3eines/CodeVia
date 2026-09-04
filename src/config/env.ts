@@ -38,6 +38,26 @@ const envBoolean = (defaultValue: boolean) =>
       .default(defaultValue),
   );
 
+/** Blank or whitespace-only env values mean "unset", not "" or 0. */
+const blankToUndefined = (v: unknown): unknown =>
+  typeof v === "string" && v.trim() === "" ? undefined : v;
+
+const envEnum = <T extends readonly [string, ...string[]]>(values: T, defaultValue: T[number]) =>
+  z.preprocess(blankToUndefined, z.enum(values).default(defaultValue));
+
+const envNumber = (defaultValue: number, min?: number) =>
+  z.preprocess(
+    (v) => {
+      const u = blankToUndefined(v);
+      if (u === undefined) return undefined;
+      const n = Number(u);
+      if (!Number.isFinite(n)) return u; // let zod report the error
+      if (min !== undefined && n < min) return min;
+      return n;
+    },
+    z.coerce.number().default(defaultValue),
+  );
+
 /**
  * Environment variable contract. All secrets come from environment variables /
  * secret management (Railway Variables, Railway Secrets, Secret Manager). They are
@@ -90,6 +110,18 @@ const EnvSchema = z.object({
   // Set this explicitly when deploying (e.g. https://<app>.up.railway.app).
   // If unset, it is derived from PUBLIC_WEB_BASE_URL (falling back to WEB_BASE_URL).
   TELEGRAM_WEBHOOK_URL: z.string().optional(),
+  // How the bot RECEIVES updates:
+  //   auto    — webhook when a public HTTPS URL is reachable, long polling otherwise
+  //             (this is what makes a token-only setup work with zero extra config)
+  //   polling — always long-poll getUpdates (no public URL / no tunnel needed)
+  //   webhook — always setWebhook (fails loudly when there is no public HTTPS URL)
+  //   off     — never receive updates (send-only, e.g. notifications from CI)
+  TELEGRAM_MODE: envEnum(["auto", "polling", "webhook", "off"] as const, "auto"),
+  // Long-poll hold time in seconds (Telegram allows 0-60; 25 is a good default).
+  TELEGRAM_POLL_TIMEOUT: envNumber(25, 0),
+  // Telegram Bot API base. Only change it when a proxy/mirror is required — or
+  // to point at scripts/mock-telegram-api.mjs to exercise the bot offline.
+  TELEGRAM_API_BASE: z.string().default("https://api.telegram.org"),
 
   // Platform control
   ENABLE_TELEGRAM: envBoolean(false),

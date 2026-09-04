@@ -1407,41 +1407,102 @@
   on("/telegram", async () => {
     const status = await api("/integrations/telegram/status");
     const accounts = status.accounts || [];
-    $("#content").innerHTML = `<div class="overview"><div><h1>Telegram Integration</h1><p>Per-user Telegram bots — each user connects their own token & AccountId and gets a real bot.</p></div>
+    const receiving = status.transport || "off";
+    const recvBadge = receiving === "off"
+      ? `<span class="badge badge-err">not receiving</span>`
+      : receiving === "polling"
+        ? `<span class="badge badge-ok">long polling</span>`
+        : `<span class="badge badge-ok">webhook</span>`;
+    const fixes = (status.fixes || []).length
+      ? `<div class="field-hint err" style="margin-top:8px">${status.fixes.map((f) => `• ${esc(f)}`).join("<br/>")}</div>`
+      : "";
+    const poll = status.polling || {};
+    $("#content").innerHTML = `<div class="overview"><div><h1>Telegram Integration</h1><p>Per-user Telegram bots — connect a token and the platform receives your messages, with or without a public URL.</p></div>
         <button class="btn btn-primary" onclick="openTelegramAccount()">＋ Connect a bot</button></div>
       <div class="grid-2">
-        <div class="card card-body"><div class="card-title">Platform connection</div>
-          <div class="status-grid"><div class="status-item"><span class="status-dot ${status.globalConnected?'healthy':'warn'}"></span>${status.globalConnected?'Global bot (TELEGRAM_BOT_TOKEN)':'No global bot token — connect your own bot below'}</div></div>
-          <div class="meter-row"><span class="lbl">Webhook URL</span><span class="val mono" style="font-size:10px;word-break:break-all">${esc(status.webhookUrl || "—")}</span></div>
-          <p style="color:var(--text-muted);font-size:11px">After connecting a bot, set its webhook to the URL above (or use “Connect” which attempts it automatically). Commands: /start /projects /agents /task /run /status /tests /issues /pr /memory /skills</p>
+        <div class="card card-body"><div class="card-title">Platform connection ${recvBadge}</div>
+          <div class="status-grid"><div class="status-item"><span class="status-dot ${status.receiving ? "healthy" : "warn"}"></span>${status.globalConnected ? `Global bot (TELEGRAM_BOT_TOKEN)${status.botUsername ? " · @" + esc(status.botUsername) : ""}` : "No global bot token — connect your own bot below"}</div></div>
+          <div class="meter-row"><span class="lbl">Receiving mode</span><span class="val mono">${esc(status.mode || "auto")} → ${esc(receiving)}</span></div>
+          ${receiving === "polling"
+            ? `<div class="meter-row"><span class="lbl">Poller</span><span class="val">${poll.running ? `✅ running · ${poll.updatesReceived || 0} update(s)` : "⏹ stopped"}</span></div>
+               <div class="field-hint">No public URL needed — the bot asks Telegram for updates. Works on a laptop, a NAT'ed VPS, or a preview host.</div>`
+            : `<div class="meter-row"><span class="lbl">Webhook URL</span><span class="val mono" style="font-size:10px;word-break:break-all">${esc(status.webhookUrl || "—")}</span></div>
+               <div class="meter-row"><span class="lbl">Telegram sees</span><span class="val mono">${esc((status.webhookInfo && status.webhookInfo.url) || "no webhook yet")}</span></div>`}
+          ${poll.lastError ? `<div class="field-hint err">${esc(poll.lastError)}</div>` : ""}
+          ${fixes}
+          <div class="provider-actions" style="margin-top:10px">
+            <button class="btn" onclick="telegramTransport('polling')">📡 Use long polling</button>
+            <button class="btn" onclick="telegramTransport('webhook')">🔗 Use webhook</button>
+            <button class="btn btn-ghost" onclick="telegramDiagnostics()">🩺 Diagnostics</button>
+            <button class="btn btn-ghost" onclick="telegramTransport('off')">⏹ Stop receiving</button>
+          </div>
+          <p style="color:var(--text-muted);font-size:11px;margin-top:8px">Commands: /start /projects /agents /task /run /status /tests /issues /pr /memory /skills /id /ping — or just write your request in Persian. Docs: <span class="mono">docs/TELEGRAM_SETUP.md</span></p>
         </div>
-        <div class="card card-body"><div class="card-title">Preview</div>
-          <div class="field"><label>Message</label><input class="input" id="tg-msg" placeholder="/start"/></div>
-          <button class="btn btn-primary" id="tg-send">Send</button>
-          <div class="card mt"><div class="card-body" id="tg-out" style="background:var(--bg);min-height:80px"></div></div>
+        <div class="card card-body"><div class="card-title">Preview (no bot needed)</div>
+          <div class="field"><label>Message</label><input class="input" id="tg-msg" placeholder="/start" value="/start"/></div>
+          <button class="btn btn-primary" id="tg-send">Show reply</button>
+          <div class="card mt" id="tg-out" style="background:var(--bg);min-height:80px"></div>
         </div>
       </div>
       <div class="card card-body mt"><div class="card-title">Your bots (${accounts.length})</div>
         ${accounts.length ? `<div class="grid-2">${accounts.map((a) => `<div class="card card-body">
-          <div class="card-title">${esc(a.name || a.botUsername || a.botId || a.accountId || "Bot account")} ${a.connected ? '<span class="badge badge-ok">connected</span>' : '<span class="badge badge-err">disconnected</span>'}</div>
+          <div class="card-title">${esc(a.name || a.botUsername || a.botId || a.accountId || "Bot account")} ${a.connected ? '<span class="badge badge-ok">connected</span>' : '<span class="badge badge-err">disconnected</span>'} ${a.transport === "polling" ? '<span class="badge badge-info">polling</span>' : a.webhookSet ? '<span class="badge badge-ok">webhook</span>' : '<span class="badge badge-muted">not receiving</span>'}</div>
           <div class="meter-row"><span class="lbl">Bot</span><span class="val mono">${esc(a.botUsername || a.botId || "—")}</span></div>
           <div class="meter-row"><span class="lbl">AccountId</span><span class="val mono">${esc(a.accountId || "—")}</span></div>
           <div class="meter-row"><span class="lbl">Chat</span><span class="val mono">${esc(a.chatId || "—")}</span></div>
           <div class="meter-row"><span class="lbl">Token</span><span class="val mono">${esc(a.tokenMasked || "—")}</span></div>
-          <div class="meter-row"><span class="lbl">Webhook</span><span class="val">${a.webhookSet ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
-          ${a.lastError ? `<div class="field-hint err">${esc(a.lastError)}</div>` : ""}
+          <div class="meter-row"><span class="lbl">Last check</span><span class="val mono">${esc(a.lastCheckedAt || "—")}</span></div>
+          ${a.lastError ? `<div class="field-hint ${a.webhookSet || a.pollingActive ? "" : "err"}">${esc(a.lastError)}</div>` : ""}
           <div class="provider-actions">
-            <button class="btn" onclick="telegramConnect('${esc(a.id)}')">↻ Connect</button>
+            <button class="btn" onclick="telegramConnect('${esc(a.id)}')">↻ Reconnect</button>
+            <button class="btn" onclick="telegramAccountPoll('${esc(a.id)}', ${a.pollingActive ? "false" : "true"})">${a.pollingActive ? "⏹ Stop polling" : "📡 Poll for me"}</button>
             <button class="btn btn-ghost" onclick="openTelegramAccount('${esc(a.id)}')">Edit</button>
             <button class="btn btn-danger" onclick="telegramDelete('${esc(a.id)}')">Delete</button>
           </div>
-        </div>`).join("")}</div>` : emptyState("📱", "No bot connected", "Enter your Telegram bot token + AccountId to connect a real account for this user.")}
+        </div>`).join("")}</div>` : emptyState("📱", "No bot connected", "Enter your Telegram bot token (from @BotFather) to connect a real account for this user.")}
       </div>`;
-    $("#tg-send").onclick = async () => {
-      const r = await api("/integrations/telegram/command", { method: "POST", body: { text: $("#tg-msg").value } });
-      $("#tg-out").innerHTML = `<pre style="white-space:pre-wrap">${esc(JSON.stringify(r, null, 2))}</pre>`;
+    const renderPreview = (r) => {
+      const reply = r && r.reply;
+      const kb = (reply && reply.keyboard) || [];
+      $("#tg-out").innerHTML = r && r.error
+        ? `<div class="error-state"><h4>Bot error</h4><p style="font-size:12px">${esc(r.error)}</p></div>`
+        : reply
+          ? `<div style="padding:8px 10px"><div style="white-space:pre-wrap;font-size:12px">${esc(String(reply.text || "").replace(/[*`]/g, ""))}</div>
+             ${kb.length ? `<div class="flex" style="flex-wrap:wrap;gap:6px;margin-top:10px">${kb.map((row) => row.map((btn) => `<button class="btn btn-ghost" style="font-size:11px" onclick="telegramPreviewButton('${esc(btn.callback_data || "")}')">${esc(btn.text)}</button>`).join("")).join("")}</div>` : ""}</div>`
+          : `<div class="field-hint">${esc(r && r.delivered ? "Sent to your Telegram chat." : "That update has no reply — send /start or type a request.")}</div>`;
     };
+    window.telegramPreviewButton = async (data) => {
+      if (!data) return;
+      try { renderPreview(await api("/integrations/telegram/command", { method: "POST", body: { callbackData: data } })); }
+      catch (e) { toast("Preview failed", e.message, "err"); }
+    };
+    $("#tg-send").onclick = async () => {
+      try { renderPreview(await api("/integrations/telegram/command", { method: "POST", body: { text: $("#tg-msg").value } })); }
+      catch (e) { toast("Preview failed", e.message, "err"); }
+    };
+    renderPreview(await api("/integrations/telegram/command", { method: "POST", body: { text: "/start" } }));
   });
+  window.telegramTransport = async (mode) => {
+    try {
+      const r = await api("/integrations/telegram/transport", { method: "POST", body: { mode } });
+      toast("Telegram transport updated", `now ${r.status.transport}`, r.status.transport === "off" ? "warn" : "ok");
+      refreshCurrent();
+    } catch (e) { toast("Could not change transport", e.message, "err"); }
+  };
+  window.telegramDiagnostics = async () => {
+    try {
+      const d = await api("/integrations/telegram/diagnostics");
+      openModal("Telegram diagnostics", `<pre style="white-space:pre-wrap;font-size:11px;max-height:60vh;overflow:auto">${esc(JSON.stringify(d, null, 2))}</pre>
+        <div class="field-hint">Live from Telegram: getMe + getWebhookInfo + the local poller state.</div>`);
+    } catch (e) { toast("Diagnostics failed", e.message, "err"); }
+  };
+  window.telegramAccountPoll = async (id, active) => {
+    try {
+      await api(`/integrations/telegram/accounts/${id}/transport`, { method: "POST", body: { transport: active ? "polling" : "webhook" } });
+      toast(active ? "Long polling started" : "Switched back to webhook", "", "ok");
+      refreshCurrent();
+    } catch (e) { toast("Could not change the account transport", e.message, "err"); }
+  };
   window.openTelegramAccount = async (editId) => {
     const existing = editId ? (await api("/integrations/telegram/accounts")).find((a) => a.id === editId) : null;
     openModal(editId ? "Edit Telegram bot" : "Connect Telegram bot", `

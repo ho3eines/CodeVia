@@ -57,9 +57,13 @@ The stored `Provider` config stores only `secretRef` (e.g. `OPENAI_API_KEY`) —
 
 | Variable | Description |
 |----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
-| `TELEGRAM_WEBHOOK_SECRET` | Optional webhook secret |
-| `ENABLE_TELEGRAM` | `true` to enable the bot interactions |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather — the only variable a working bot needs |
+| `TELEGRAM_MODE` | `auto` (default) · `polling` · `webhook` · `off` — how updates are received |
+| `TELEGRAM_POLL_TIMEOUT` | Long-poll hold seconds (default 25) |
+| `TELEGRAM_WEBHOOK_SECRET` | Optional webhook secret (`X-Telegram-Bot-Api-Secret-Token`, enforced on the webhook route when set) |
+| `TELEGRAM_WEBHOOK_URL` | Explicit public webhook URL override |
+| `TELEGRAM_API_BASE` | Bot API base; only change for a proxy/mirror or offline testing |
+| `ENABLE_TELEGRAM` | Legacy "I want Telegram" flag — a token is enough; `TELEGRAM_MODE=off` is the opt-out |
 
 Without a token, a **MockTelegramService** is used (messages are recorded/logged), so local development needs no credentials.
 

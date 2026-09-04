@@ -14,7 +14,9 @@ import { modelRouter, ModelRouter } from "../ai/model-router.js";
 import { contextEngine, ContextEngine } from "../ai/context-engine.js";
 import { toolRegistry, ToolRegistry } from "../tools/registry.js";
 import { resolveGitHubService } from "../github/registry.js";
-import { resolveTelegramService, getTelegramWebhookUrl, setTelegramWebhook, validateTelegramWebhookUrl } from "../integrations/telegram.js";
+import { resolveTelegramService } from "../integrations/telegram.js";
+import { TelegramBot } from "../integrations/telegram-bot.js";
+import { TelegramRuntime, type TelegramMode, type TelegramRuntimeStatus } from "../integrations/telegram-runtime.js";
 import { getEnv } from "../config/env.js";
 import { memoryResolver, MemoryResolver } from "../memory/index.js";
 import { AgentRouter } from "../agents/router.js";
@@ -145,49 +147,106 @@ export class Container {
     logger.info("container seeded");
   }
 
-  /** The public base URL we last successfully pointed the global webhook at,
-   *  so we don't re-register the same URL on every status poll. */
-  private globalWebhookRegisteredBase?: string;
+  /* ------------------------------------------------------------------ *
+   * Telegram bot wiring
+   *
+   * The platform can receive Telegram updates two ways: a webhook (needs a
+   * public HTTPS URL Telegram can reach) or long polling (`getUpdates`, needs
+   * only a token). `TelegramRuntime` picks between them, keeps the
+   * registration in sync, owns the poller(s), and answers the
+   * "why is my bot silent" question with real diagnostics instead of a
+   * boolean.
+   * ------------------------------------------------------------------ */
 
-  /**
-   * Register the global bot's webhook with Telegram when the platform is
-   * configured for Telegram (ENABLE_TELEGRAM=true + a token). Without this the
-   * bot has no way to receive updates, which is the #1 reason a real bot stays
-   * silent. In local dev (no public URL / no token) this is a no-op and just logs.
-   */
-  async setupTelegramWebhook(baseOverride?: string): Promise<{ ok: boolean; url?: string; error?: string }> {
-    const env = getEnv();
-    if (!env.ENABLE_TELEGRAM) return { ok: false, error: "Telegram disabled (set ENABLE_TELEGRAM=true)" };
-    if (!env.TELEGRAM_BOT_TOKEN) return { ok: false, error: "TELEGRAM_BOT_TOKEN is not set" };
-    const url = baseOverride
-      ? `${baseOverride.replace(/\/$/, "")}/integrations/telegram/webhook`
-      : getTelegramWebhookUrl();
-    const valid = validateTelegramWebhookUrl(url);
-    if (!valid.ok) {
-      logger.warn("Telegram webhook not set — no public HTTPS URL", { error: valid.error, url });
-      return { ok: false, url, error: valid.error };
+  /** Build a bot bound to a specific Telegram service (global token or a user's). */
+  telegramBotFor(service = this.telegram): TelegramBot {
+    return new TelegramBot({
+      telegram: service,
+      projectRepo: this.projectRepo,
+      taskRepo: this.taskRepo,
+      workflowRepo: this.workflowRepo,
+      conversationRepo: this.conversationRepo,
+      agentRepo: this.agentRepo,
+      runRepo: this.runRepo,
+      agentManager: this.agentManager,
+      github: this.github,
+      modelRepo: this.modelRepo,
+      skillRepo: this.skillRepo,
+      memoryRepo: this.memoryRepo,
+      queue: this.queue,
+      logger: logger.child({ component: "telegram-bot" }),
+      runtimeStatus: () => this.telegramRuntime?.status(),
+    });
+  }
+
+  readonly telegramRuntime: TelegramRuntime = new TelegramRuntime({
+    telegram: this.telegram,
+    createBot: (service) => this.telegramBotFor(service),
+    telegramAccountRepo: {
+      findMany: () => this.telegramAccountRepo.findMany(),
+      upsert: (account) => this.telegramAccountRepo.upsert(account),
+    },
+    state: this.kv,
+    logger,
+    // TELEGRAM_MODE=auto (default): webhook when a public HTTPS URL is usable,
+    // long polling otherwise. A token alone is enough to bring the bot up —
+    // `ENABLE_TELEGRAM` used to gate *receiving*, which silently disabled every
+    // bot whose owner only pasted a token. `off` is the explicit opt-out.
+    mode: getEnv().TELEGRAM_MODE,
+    pollTimeoutSec: getEnv().TELEGRAM_POLL_TIMEOUT,
+    webhookSecret: getEnv().TELEGRAM_WEBHOOK_SECRET,
+  });
+
+  /** Bring the receive path up (webhook registration and/or long polling). */
+  async startTelegram(baseOverride?: string): Promise<TelegramRuntimeStatus> {
+    const status = await this.telegramRuntime.start(baseOverride);
+    await this.telegramRuntime.syncAccountPollers().catch(() => undefined);
+    if (status.transport === "polling") {
+      logger.info("Telegram bot is receiving updates via long polling", { bot: status.botUsername });
+    } else if (status.transport === "webhook") {
+      logger.info("Telegram bot is receiving updates via webhook", { url: status.webhookUrl });
+    } else if (status.note) {
+      logger.warn(`Telegram receive path inactive: ${status.note}`, { fixes: status.fixes });
     }
-    // Don't spam setWebhook with the same URL we already registered.
-    if (this.globalWebhookRegisteredBase === url) {
-      return { ok: true, url };
-    }
-    const res = await setTelegramWebhook(env.TELEGRAM_BOT_TOKEN, url);
-    if (res.ok) {
-      this.globalWebhookRegisteredBase = url;
-      logger.info("Telegram webhook registered", { url });
-    } else {
-      logger.warn("Telegram webhook registration failed", { error: res.error ?? "unknown", url });
-    }
-    return { ok: res.ok, url, error: res.error };
+    return status;
+  }
+
+  async stopTelegram(): Promise<void> {
+    await this.telegramRuntime.stop();
+  }
+
+  telegramStatus(): TelegramRuntimeStatus {
+    return this.telegramRuntime.status();
   }
 
   /**
-   * Heal the global bot webhook once a public HTTPS base URL has been observed
-   * from a real request (e.g. the Arena preview host). Safe to call on request
-   * handlers; it no-ops when Telegram is disabled, no token, or already done.
+   * Register the global bot's webhook with Telegram when a public HTTPS URL is
+   * usable. Kept for back-compat (startup + status polling call it); it now
+   * delegates to the runtime, which also starts long polling when a webhook
+   * is not an option. Previously this returned early whenever
+   * `ENABLE_TELEGRAM` was unset — which left a configured, valid bot token
+   * with no receive path at all: the classic "bot never replies".
+   */
+  async setupTelegramWebhook(baseOverride?: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+    const status = await this.telegramRuntime.start(baseOverride);
+    if (status.transport === "webhook") return { ok: true, url: status.webhookUrl };
+    if (status.transport === "polling") return { ok: false, url: status.webhookUrl, error: `webhook unavailable (${status.webhookError ?? "no public HTTPS URL"}); long polling is active instead` };
+    return { ok: false, url: status.webhookUrl, error: status.webhookError ?? status.note ?? "Telegram is not receiving updates" };
+  }
+
+  /**
+   * Heal the receive path once a public HTTPS base URL has been observed from a
+   * real request (e.g. the Arena preview host). Safe to call from request
+   * handlers: it no-ops when nothing changed.
    */
   async healTelegramWebhook(baseOverride?: string): Promise<void> {
-    await this.setupTelegramWebhook(baseOverride);
+    await this.telegramRuntime.start(baseOverride);
+    await this.telegramRuntime.syncAccountPollers().catch(() => undefined);
+  }
+
+  /** Live diagnostics: token, webhook registration, polling state, fixes. */
+  async telegramDiagnostics(force = true): Promise<TelegramRuntimeStatus> {
+    return this.telegramRuntime.diagnostics(force);
   }
 
   private seedDefaultProviders(): void {

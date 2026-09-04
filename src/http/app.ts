@@ -191,7 +191,9 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     "/integrations/github/status",
   ]);
   // Socket.io and Swagger expose subpaths below these public roots.
-  const PUBLIC_PATH_PREFIXES = ["/docs/", "/socket.io/"];
+  // `/integrations/telegram/webhook/<accountId>` is a per-user bot webhook:
+  // Telegram posts to it with no session cookie, so it must be public too.
+  const PUBLIC_PATH_PREFIXES = ["/docs/", "/socket.io/", "/integrations/telegram/webhook/"];
   const requestPath = (url: string): string => {
     const raw = url.split("?")[0];
     if (/^https?:\/\//i.test(raw)) {

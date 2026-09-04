@@ -29,6 +29,11 @@ export interface TelegramAccount {
   botId?: string;
   connected: boolean;
   webhookSet?: boolean;
+  /** How this bot receives updates: pushed webhook, long polling (no URL needed), or off. */
+  transport?: "webhook" | "polling" | "off";
+  /** Long polling is active for this account right now. */
+  pollingActive?: boolean;
+  lastCheckedAt?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;

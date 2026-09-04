@@ -1,0 +1,464 @@
+import type { ITelegramService, TelegramWebhookInfo } from "./telegram.js";
+import {
+  getTelegramWebhookPath,
+  getPublicBaseUrl,
+  isTelegramConnection,
+  learnPublicBaseUrl,
+  telegramWebhookFixHints,
+  validateTelegramWebhookUrl,
+} from "./telegram.js";
+import { TelegramPoller, type TelegramPollerStatus, type TelegramPollStateStore } from "./telegram-poller.js";
+import type { TelegramBot } from "./telegram-bot.js";
+import type { TelegramAccount } from "../domain/telegram.js";
+import { accountTelegramService } from "./telegram.js";
+import type { Logger } from "../logger.js";
+
+export type TelegramMode = "auto" | "webhook" | "polling" | "off";
+export type TelegramTransport = "webhook" | "polling" | "off";
+
+export interface TelegramRuntimeStatus {
+  enabled: boolean;
+  mode: TelegramMode;
+  transport: TelegramTransport;
+  mock: boolean;
+  hasToken: boolean;
+  tokenProblem?: string;
+  botUsername?: string;
+  botId?: string;
+  baseUrl?: string;
+  webhookUrl?: string;
+  webhookSet: boolean;
+  webhookError?: string;
+  webhookInfo?: TelegramWebhookInfo;
+  polling?: TelegramPollerStatus;
+  accountPolling?: Record<string, TelegramPollerStatus>;
+  lastCheckedAt?: string;
+  fixes: string[];
+  note?: string;
+}
+
+export interface TelegramRuntimeDeps {
+  telegram: ITelegramService;
+  /** Builds a bot bound to a specific service (global token or a user's token). */
+  createBot: (service: ITelegramService) => TelegramBot;
+  telegramAccountRepo: {
+    findMany(): Array<{ data: TelegramAccount }>;
+    upsert(account: TelegramAccount): unknown;
+  };
+  state?: TelegramPollStateStore;
+  logger: Logger;
+  mode?: TelegramMode;
+  pollTimeoutSec?: number;
+  webhookSecret?: string;
+}
+
+/**
+ * Owns *how* the platform receives Telegram updates — the part that decides
+ * whether a bot is alive or silent:
+ *
+ *   • webhook  — register `setWebhook` and let Telegram push updates to us;
+ *   • polling  — long-poll `getUpdates` (needs only a token: no public HTTPS
+ *                host, no tunnel, nothing for Telegram to reach);
+ *   • auto     — webhook when a public HTTPS URL is actually usable, polling
+ *                otherwise. This is the default, so a fresh bot token is enough.
+ *
+ * Per-user bot accounts get their own poller when their webhook cannot be
+ * registered, so a user who connects a bot from the UI is never stuck on the
+ * "I have no server to point Telegram at" problem.
+ */
+export class TelegramRuntime {
+  private poller?: TelegramPoller;
+  private readonly accountPollers = new Map<string, TelegramPoller>();
+  private currentMode: TelegramMode;
+  private transport: TelegramTransport = "off";
+  private webhookUrl?: string;
+  private webhookError?: string;
+  private webhookInfo?: TelegramWebhookInfo;
+  private registeredWebhookUrl?: string;
+  private botUsername?: string;
+  private botId?: string;
+  private lastCheckedAt?: string;
+  private note?: string;
+  /** Why we ended up on polling instead of the webhook (kept until it changes). */
+  private fallbackReason?: string;
+  private started = false;
+  private signature = "";
+
+  constructor(private readonly deps: TelegramRuntimeDeps) {
+    this.currentMode = deps.mode ?? "auto";
+  }
+
+  get mode(): TelegramMode {
+    return this.currentMode;
+  }
+
+  get service(): ITelegramService {
+    return this.deps.telegram;
+  }
+
+  private get connection() {
+    return isTelegramConnection(this.deps.telegram) ? this.deps.telegram : undefined;
+  }
+
+  /** Base URL Telegram would reach us on (explicit config > learned from requests). */
+  resolveBaseUrl(host?: string, proto?: string): string {
+    const base = getPublicBaseUrl(host, proto).replace(/\/$/, "");
+    learnPublicBaseUrl(base);
+    return base;
+  }
+
+  webhookUrlFor(base: string): string {
+    return `${base}${getTelegramWebhookPath()}`;
+  }
+
+  /**
+   * Decide the transport and bring it up. Safe to call repeatedly: the webhook
+   * is only re-registered when the URL actually changed, and the poller is
+   * idempotent, so a request-time "heal" call costs nothing when all is well.
+   */
+  async start(baseOverride?: string): Promise<TelegramRuntimeStatus> {
+    const conn = this.connection;
+    // The UI polls /integrations/telegram/status; re-running getMe + webhook
+    // registration on every poll wastes Telegram API calls (and 429s are a real
+    // risk), so an unchanged, healthy configuration short-circuits here.
+    const probeBase = baseOverride ?? (conn ? this.resolveBaseUrl() : undefined);
+    const probeUrl = probeBase ? this.webhookUrlFor(probeBase) : undefined;
+    const signature = [this.currentMode, probeUrl ?? "", conn?.tokenProblem ?? ""].join("|");
+    if (conn && this.started && signature === this.signature) {
+      const healthy =
+        this.transport === "polling" ? !!this.poller?.status().running
+        : this.transport === "webhook" ? this.registeredWebhookUrl === probeUrl
+        : false;
+      if (healthy) return this.status();
+    }
+    if (!conn) {
+      this.transport = "off";
+      this.note = this.deps.telegram.constructor.name === "MockTelegramService"
+        ? "mock Telegram mode — messages are logged, not sent. Set TELEGRAM_BOT_TOKEN for a real bot."
+        : "no Telegram service configured";
+      this.started = true;
+      return this.status();
+    }
+    this.started = true;
+    this.note = undefined;
+
+    // Verify the token once so the status UI can tell "bad token" from "no route".
+    const me = await conn.getMe();
+    if (me.ok && me.result) {
+      this.botUsername = me.result.username;
+      this.botId = me.result.id != null ? String(me.result.id) : undefined;
+      this.webhookError = undefined;
+    } else {
+      this.webhookError = me.error;
+      this.note = "Telegram rejected the bot token — check TELEGRAM_BOT_TOKEN (or reconnect the account).";
+      this.transport = "off";
+      this.signature = "";
+      this.lastCheckedAt = new Date().toISOString();
+      return this.status();
+    }
+    this.lastCheckedAt = new Date().toISOString();
+
+    const base = baseOverride ?? this.resolveBaseUrl();
+    const url = this.webhookUrlFor(base);
+    const urlValid = validateTelegramWebhookUrl(url).ok;
+    const mode = this.currentMode;
+
+    if (mode === "off") {
+      await this.stopPolling();
+      this.signature = signature;
+      this.transport = "off";
+      this.note = "Telegram receiving is disabled (TELEGRAM_MODE=off). Sending notifications still works.";
+      return this.status();
+    }
+
+    if (mode === "polling") {
+      await this.usePolling(true);
+      this.signature = signature;
+      return this.status();
+    }
+
+    if (mode === "webhook") {
+      if (!urlValid) {
+        this.transport = "webhook";
+        this.webhookError = validateTelegramWebhookUrl(url).error;
+        this.webhookSet(false);
+        this.signature = "";
+        this.note = "TELEGRAM_MODE=webhook requires a public HTTPS URL — set PUBLIC_WEB_BASE_URL / TELEGRAM_WEBHOOK_URL, or switch TELEGRAM_MODE to auto/polling.";
+        return this.status();
+      }
+      await this.registerWebhook(url);
+      return this.status();
+    }
+
+    // auto: webhook when we have a URL Telegram can actually reach, else polling.
+    if (!urlValid) {
+      this.note = "No public HTTPS URL is configured — the bot falls back to long polling, so it works without a tunnel.";
+      await this.usePolling(true);
+      this.signature = signature;
+      return this.status();
+    }
+    const res = await this.registerWebhook(url);
+    if (!res.ok) {
+      this.note = `setWebhook failed (${res.error}) — falling back to long polling so the bot still receives messages.`;
+      await this.usePolling(true);
+    }
+    this.signature = signature;
+    return this.status();
+  }
+
+  /** Change the transport at runtime (UI toggle / API) and bring it back up. */
+  async setMode(mode: TelegramMode, baseOverride?: string): Promise<TelegramRuntimeStatus> {
+    this.currentMode = mode;
+    if (mode === "off" || mode === "webhook") await this.stopPolling();
+    return this.start(baseOverride);
+  }
+
+  /** Register/refresh the global webhook (idempotent per URL). */
+  async registerWebhook(url: string): Promise<{ ok: boolean; error?: string }> {
+    const conn = this.connection;
+    if (!conn) return { ok: false, error: "mock Telegram service cannot register a webhook" };
+    const valid = validateTelegramWebhookUrl(url);
+    this.webhookUrl = url;
+    if (!valid.ok) {
+      this.webhookError = valid.error;
+      this.webhookSet(false);
+      return { ok: false, error: valid.error };
+    }
+    if (this.registeredWebhookUrl === url && this.transport === "webhook") {
+      return { ok: true };
+    }
+    const res = await conn.setWebhook(url, { secretToken: this.deps.webhookSecret });
+    if (!res.ok) this.fallbackReason = res.error;
+    if (res.ok) {
+      this.registeredWebhookUrl = url;
+      this.webhookError = undefined;
+      this.fallbackReason = undefined;
+      this.note = undefined;
+      this.transport = "webhook";
+      await this.stopPolling();
+      this.deps.logger.info("Telegram webhook registered", { url });
+      return { ok: true };
+    }
+    this.webhookError = res.error;
+    this.webhookSet(false);
+    this.deps.logger.warn("Telegram webhook registration failed", { url, error: res.error });
+    return { ok: false, error: res.error };
+  }
+
+  /**
+   * Switch the global bot to long polling. `dropWebhook` removes an existing
+   * registration — Telegram refuses `getUpdates` while a webhook is set, so a
+   * stale/broken webhook is itself a common cause of a silent bot.
+   */
+  /**
+   * Switch the global bot to long polling. If Telegram still has a webhook
+   * registered it must go first — `getUpdates` returns 409 while one exists,
+   * which is itself a common cause of a bot that "ignores" everyone.
+   */
+  async usePolling(dropWebhook = true): Promise<TelegramRuntimeStatus> {
+    // Explicit polling is a choice, not a fallback — nothing to explain.
+    if (this.currentMode === "polling") this.fallbackReason = undefined;
+    const conn = this.connection;
+    this.transport = "polling";
+    if (conn && dropWebhook) {
+      const info = await conn.getWebhookInfo();
+      if (info.url) {
+        const del = await conn.deleteWebhook(false);
+        if (del.ok) {
+          this.registeredWebhookUrl = undefined;
+          this.webhookInfo = { url: undefined, empty: true };
+          this.webhookError = undefined;
+          this.deps.logger.info("removed the registered Telegram webhook so long polling could take over");
+        } else if (del.error && del.error !== "aborted") {
+          this.webhookError = del.error;
+        }
+      } else {
+        this.webhookInfo = { ...info, empty: true };
+      }
+    }
+    this.ensurePoller();
+    return this.status();
+  }
+
+  private ensurePoller(): TelegramPoller | undefined {
+    const conn = this.connection;
+    if (!conn) return undefined;
+    if (!this.poller) {
+      const bot = this.deps.createBot(this.deps.telegram);
+      this.poller = new TelegramPoller({
+        name: "global",
+        service: this.deps.telegram,
+        onUpdate: async (update) => {
+          await bot.handle(update);
+        },
+        logger: this.deps.logger.child({ component: "telegram-poller" }),
+        state: this.deps.state,
+        timeoutSec: this.deps.pollTimeoutSec,
+        deleteWebhookOnStart: true,
+      });
+    }
+    this.poller.start();
+    return this.poller;
+  }
+
+  private async stopPolling(): Promise<void> {
+    await this.poller?.stop();
+    for (const p of this.accountPollers.values()) await p.stop();
+    this.accountPollers.clear();
+  }
+
+  /* ---------------- per-user bot accounts ---------------- */
+
+  /**
+   * Start long polling for a user-connected bot. Used when the account's
+   * webhook cannot be registered (no public HTTPS URL, dev laptop, preview
+   * host) so the user's own bot still receives messages.
+   */
+  async startAccountPolling(account: TelegramAccount): Promise<TelegramPollerStatus | undefined> {
+    const service = accountTelegramService(account);
+    if (!isTelegramConnection(service)) return undefined;
+    const existing = this.accountPollers.get(account.id);
+    if (existing) {
+      await existing.stop();
+    }
+    const bot = this.deps.createBot(service);
+    const poller = new TelegramPoller({
+      name: `account:${account.id}`,
+      service,
+      onUpdate: async (update) => {
+        await bot.handle(update);
+      },
+      logger: this.deps.logger.child({ component: "telegram-poller", telegramAccount: account.id }),
+      state: this.deps.state,
+      timeoutSec: this.deps.pollTimeoutSec,
+      deleteWebhookOnStart: true,
+    });
+    poller.start();
+    this.accountPollers.set(account.id, poller);
+    return poller.status();
+  }
+
+  async stopAccountPolling(accountId: string): Promise<void> {
+    const p = this.accountPollers.get(accountId);
+    if (!p) return;
+    await p.stop();
+    this.accountPollers.delete(accountId);
+  }
+
+  /** Keep pollers in sync with the accounts that currently want polling. */
+  async syncAccountPollers(): Promise<void> {
+    const accounts = this.deps.telegramAccountRepo.findMany().map((r) => r.data);
+    const wanted = new Set(accounts.filter((a) => a.transport === "polling" && a.connected).map((a) => a.id));
+    for (const [id, poller] of [...this.accountPollers.entries()]) {
+      if (!wanted.has(id)) {
+        await poller.stop();
+        this.accountPollers.delete(id);
+      }
+    }
+    for (const account of accounts) {
+      if (!wanted.has(account.id)) continue;
+      const poller = this.accountPollers.get(account.id);
+      if (poller && !poller.status().running) this.accountPollers.delete(account.id);
+      if (!this.accountPollers.has(account.id)) await this.startAccountPolling(account);
+    }
+  }
+
+  /* ---------------- diagnostics ---------------- */
+
+  /** Live round-trip with Telegram: token, webhook registration, polling state. */
+  async diagnostics(force = false): Promise<TelegramRuntimeStatus> {
+    const conn = this.connection;
+    if (!conn) return this.status();
+    const me = await conn.getMe();
+    if (me.ok && me.result) {
+      this.botUsername = me.result.username;
+      this.botId = me.result.id != null ? String(me.result.id) : undefined;
+      this.webhookError = undefined;
+    } else {
+      this.webhookError = me.error;
+    }
+    if (this.transport !== "polling" || force) {
+      this.webhookInfo = await conn.getWebhookInfo();
+    } else {
+      this.webhookInfo = { ...(this.webhookInfo ?? {}), empty: true, url: undefined };
+    }
+    this.lastCheckedAt = new Date().toISOString();
+    return this.status();
+  }
+
+  private webhookSet(ok: boolean): void {
+    this.transport = ok ? "webhook" : this.transport;
+    if (ok) this.registeredWebhookUrl = this.webhookUrl;
+  }
+
+  /**
+   * Drain the backlog Telegram has queued for us, without answering it. Useful
+   * after downtime, when replaying hours of old messages would be noise.
+   */
+  async skipPendingUpdates(): Promise<number | undefined> {
+    if (!this.poller) return undefined;
+    let total = 0;
+    for (let i = 0; i < 20; i += 1) {
+      const n = await this.poller.skipPending();
+      total += n;
+      if (n === 0) break;
+    }
+    return total;
+  }
+
+  async stop(): Promise<void> {
+    await this.stopPolling();
+    this.started = false;
+  }
+
+  status(): TelegramRuntimeStatus {
+    const conn = this.connection;
+    const tokenProblem = conn?.tokenProblem;
+    const base = conn ? this.resolveBaseUrl() : undefined;
+    const webhookUrl = this.webhookUrl ?? (base ? this.webhookUrlFor(base) : undefined);
+    const accountPolling: Record<string, TelegramPollerStatus> = {};
+    for (const [id, p] of this.accountPollers) accountPolling[id] = p.status();
+    const fixes: string[] = [];
+    if (tokenProblem) fixes.push(`Bot token: ${tokenProblem}.`);
+    // `ENABLE_TELEGRAM=false` used to be the kill switch for *receiving*, which
+    // meant a perfectly good token produced a deaf bot. A token now means "the
+    // user wants a bot"; say so instead of silently honouring the old flag.
+    const rawEnableFlag = String(process.env.ENABLE_TELEGRAM ?? "").trim().toLowerCase();
+    if (["false", "0", "no", "off"].includes(rawEnableFlag) && conn) {
+      fixes.push('ENABLE_TELEGRAM is false but a token is set, so the bot still runs (that flag no longer gates receiving). Use TELEGRAM_MODE=off to silence it.');
+    }
+    if (this.webhookError) fixes.push(`Telegram: ${this.webhookError}`);
+    if (this.transport === "polling" && this.fallbackReason) {
+      fixes.push(`Webhook not usable (${this.fallbackReason}) — the bot receives updates by long polling instead, which needs no public URL.`);
+    }
+    const polling = this.poller?.status();
+    if (polling?.lastError) fixes.push(`Polling error: ${polling.lastError}`);
+    fixes.push(...telegramWebhookFixHints(this.webhookInfo, this.transport));
+    // Only nag when a real bot is configured and *still* nothing is arriving —
+    // in mock/off mode the note already explains the situation.
+    const optedOut = this.currentMode === "off";
+    if (this.transport === "off" && this.started && conn && !tokenProblem && fixes.length === 0 && !optedOut) {
+      fixes.push('Nothing is receiving updates — run POST /integrations/telegram/transport {"mode":"auto"} or press “Use polling”.');
+    }
+    return {
+      enabled: !!conn && !tokenProblem,
+      mode: this.currentMode,
+      transport: this.transport,
+      mock: !conn,
+      hasToken: !!conn?.token,
+      tokenProblem,
+      botUsername: this.botUsername,
+      botId: this.botId,
+      baseUrl: base,
+      webhookUrl,
+      webhookSet: this.transport === "webhook" && !!this.registeredWebhookUrl,
+      webhookError: this.webhookError,
+      webhookInfo: this.webhookInfo,
+      polling,
+      accountPolling: Object.keys(accountPolling).length ? accountPolling : undefined,
+      lastCheckedAt: this.lastCheckedAt,
+      fixes,
+      note: this.note ?? (this.started ? undefined : "telegram runtime not started yet"),
+    };
+  }
+}

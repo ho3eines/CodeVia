@@ -133,9 +133,17 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/integrations/telegram/status` | Bot status |
-| POST | `/integrations/telegram/webhook` | Telegram update webhook |
-| POST | `/integrations/telegram/command` | Drive a telegram-style command (UI preview) |
+| GET | `/integrations/telegram/status` | Bot status: `transport` (polling/webhook/off), `receiving`, `fixes[]` |
+| GET | `/integrations/telegram/diagnostics` | Live `getMe` + `getWebhookInfo` + poller state |
+| POST | `/integrations/telegram/transport` | Switch receive mode `{mode:"auto"\|"polling"\|"webhook"\|"off"}` |
+| POST | `/integrations/telegram/webhook/refresh` | Re-register the webhook now |
+| POST | `/integrations/telegram/updates/skip` | Drain Telegram's queued backlog without replaying it |
+| POST | `/integrations/telegram/webhook` | Telegram update webhook (public; honours `TELEGRAM_WEBHOOK_SECRET`) |
+| POST | `/integrations/telegram/webhook/:accountId` | Per-user bot webhook (public) |
+| GET/POST/PATCH/DELETE | `/integrations/telegram/accounts[/:id]` | Per-user bots (token encrypted, never returned) |
+| POST | `/integrations/telegram/accounts/:id/connect` | Verify token + choose receive path (webhook, else polling) |
+| POST | `/integrations/telegram/accounts/:id/transport` | Force one account onto polling/webhook |
+| POST | `/integrations/telegram/command` | Drive a telegram-style command (UI preview; `deliver:true` to actually send) |
 | POST | `/integrations/telegram/send` | Send a message |
 
 ## Conversations

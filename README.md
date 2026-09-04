@@ -15,7 +15,7 @@ A **production-ready, multi-project, GitHub-centric, multi-agent, multi-model, T
 - 🗂️ **GitHub-backed Memory** — architecture, decisions, bugs, knowledge, lessons and conversation summaries versioned via commits.
 - 🔀 **Workflow Engine** — visual DAG of agent / tool / condition / approval / parallel / trigger nodes.
 - 🏃 **Background Worker + Queue** — agent executions never block the UI/API thread; retries, exponential backoff, dead-letter, idempotency.
-- 📱 **Telegram bot** — project-aware inline keyboards + natural-language requests, plus human approval via Telegram.
+- 📱 **Telegram bot** — project-aware inline keyboards, natural-language requests (فارسی included) and human approval via Telegram. It receives updates over a **webhook when one is reachable, long polling otherwise**, so a bot token alone is enough — no ngrok, no public URL, and `/ping` tells you exactly which path is live.
 - 📊 **Observability** — AI Run Console (observable steps, never chain-of-thought), cost tracking, agent dashboards, audit log, notifications, system health.
 - 🔐 **Security-first** — secrets are **references** (env vars / secret manager) only; RBAC, webhook signature validation, request-gated dangerous operations, audit trail.
 - 🐳 **Dockerized + Railway-ready** — multi-stage Dockerfile, health/readiness/liveness endpoints, `railway.json`, `docker-compose.yml`, `.env.example`.
