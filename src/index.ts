@@ -21,6 +21,10 @@ async function main() {
   const container = getContainer();
   await container.ensureSeed();
 
+  // Register the Telegram webhook so the bot actually receives updates
+  // (no-op + a log line when TELEGRAM is disabled / no token / local dev).
+  await container.setupTelegramWebhook();
+
   // Startup guard: a local-address OAuth callback in production means the login
   // flow can never complete (the browser cannot be redirected back to localhost).
   // Log loudly instead of failing silently with 401s after "successful" login.

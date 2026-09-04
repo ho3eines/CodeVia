@@ -5,7 +5,7 @@ import { Container } from "../app/container.js";
 import { buildServer } from "../http/app.js";
 import { freshDb } from "./test-helpers.js";
 
-const ENV_KEYS = ["REQUIRE_AUTH"] as const;
+const ENV_KEYS = ["REQUIRE_AUTH", "PUBLIC_WEB_BASE_URL"] as const;
 let savedEnv: Record<string, string | undefined>;
 let cleanup: (() => void) | undefined;
 let app: FastifyInstance | undefined;
@@ -23,6 +23,9 @@ beforeEach(() => {
   savedEnv = {};
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
   for (const k of ENV_KEYS) delete process.env[k];
+  // Telegram only accepts public HTTPS webhooks; give the bot a real public URL
+  // so the mocked setWebhook flow is exercised (and webhookSet reports true).
+  process.env.PUBLIC_WEB_BASE_URL = "https://codevia-tests.example.com";
   getEnvFresh();
   cleanup = freshDb().cleanup;
 });

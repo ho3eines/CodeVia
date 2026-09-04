@@ -86,6 +86,10 @@ const EnvSchema = z.object({
   // Telegram Bot
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_WEBHOOK_SECRET: z.string().optional(),
+  // Public webhook URL the bot receives updates on. Telegram requires HTTPS.
+  // Set this explicitly when deploying (e.g. https://<app>.up.railway.app).
+  // If unset, it is derived from PUBLIC_WEB_BASE_URL (falling back to WEB_BASE_URL).
+  TELEGRAM_WEBHOOK_URL: z.string().optional(),
 
   // Platform control
   ENABLE_TELEGRAM: envBoolean(false),

@@ -15,12 +15,20 @@ export interface TelegramUpdate {
   userId?: string;
   text?: string;
   callbackData?: string;
+  /** `callback_query.id` — used to answer the callback so Telegram stops the button spinner. */
+  callbackId?: string;
+  /** Telegram message id of the message the user interacted with (for callback/edits). */
+  messageId?: number;
 }
 
 export interface ITelegramService {
   sendMessage(msg: TelegramMessage): Promise<boolean>;
   sendButtons(msg: TelegramMessage): Promise<boolean>;
   sendDocument(chatId: string, filename: string, content: string): Promise<boolean>;
+  /** Acknowledge an inline-button callback so the button doesn't spin/fail. */
+  answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>;
+  /** Edit an existing bot message (used for inline-keyboard navigation). */
+  editMessage(msg: TelegramMessage & { messageId: number }): Promise<boolean>;
   handleUpdate(update: unknown): Promise<TelegramUpdate | undefined>;
   health(): Promise<boolean>;
 }
@@ -76,14 +84,42 @@ export class TelegramBotApiService implements ITelegramService {
     return this.sendMessage({ chatId, text: `📄 ${filename}\n\n${content.slice(0, 3500)}` });
   }
 
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean> {
+    return this.post("answerCallbackQuery", { callback_query_id: callbackQueryId, text });
+  }
+
+  async editMessage(msg: TelegramMessage & { messageId: number }): Promise<boolean> {
+    return this.post("editMessageText", {
+      chat_id: msg.chatId,
+      message_id: msg.messageId,
+      text: msg.text ?? "",
+      reply_markup: msg.inlineKeyboard?.length
+        ? { inline_keyboard: msg.inlineKeyboard }
+        : undefined,
+    });
+  }
+
   async handleUpdate(update: TelegramUpdate | unknown): Promise<TelegramUpdate | undefined> {
-    const u = update as { update_id?: number; message?: { chat?: { id?: number }; from?: { id?: number }; text?: string }; callback_query?: { data?: string } };
+    // Updates may be a plain text `message` (commands / natural language) or a
+    // `callback_query` (inline-button press). A callback carries its own
+    // `message.chat`, so we must read chat/user/text from BOTH shapes — otherwise
+    // the bot never knows where to reply and inline buttons go dead.
+    const u = update as {
+      update_id?: number;
+      message?: { chat?: { id?: number }; from?: { id?: number }; text?: string; message_id?: number };
+      callback_query?: { id?: string; data?: string; from?: { id?: number }; message?: { chat?: { id?: number }; message_id?: number } };
+    };
+    const chat = u.message ?? u.callback_query?.message ?? undefined;
+    const chatId = chat?.chat?.id ?? u.callback_query?.from?.id ?? u.message?.from?.id;
+    const userId = u.message?.from?.id ?? u.callback_query?.from?.id;
     return {
       updateId: u.update_id ?? 0,
-      chatId: u.message?.chat?.id != null ? String(u.message.chat.id) : undefined,
-      userId: u.message?.from?.id != null ? String(u.message.from.id) : undefined,
+      chatId: chatId != null ? String(chatId) : undefined,
+      userId: userId != null ? String(userId) : undefined,
       text: u.message?.text,
       callbackData: u.callback_query?.data,
+      callbackId: u.callback_query?.id,
+      messageId: chat?.message_id,
     };
   }
 
@@ -109,13 +145,29 @@ export class MockTelegramService implements ITelegramService {
     this.sent.push({ chatId, text: `📄 ${filename}\n\n${content.slice(0, 300)}` });
     return true;
   }
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean> {
+    this.sent.push({ chatId: callbackQueryId, text: text ?? "" });
+    return true;
+  }
+  async editMessage(msg: TelegramMessage & { messageId: number }): Promise<boolean> {
+    this.sent.push(msg);
+    return true;
+  }
   async handleUpdate(update: unknown): Promise<TelegramUpdate> {
-    const u = update as { update_id?: number; message?: { chat?: { id?: number }; text?: string }; callback_query?: { data?: string } };
+    const u = update as {
+      update_id?: number;
+      message?: { chat?: { id?: number }; text?: string; message_id?: number };
+      callback_query?: { id?: string; data?: string; message?: { chat?: { id?: number }; message_id?: number } };
+    };
+    const chat = u.message ?? u.callback_query?.message ?? undefined;
+    const chatId = chat?.chat?.id ?? u.callback_query?.message?.chat?.id;
     return {
       updateId: u.update_id ?? 0,
-      chatId: u.message?.chat?.id != null ? String(u.message.chat.id) : undefined,
+      chatId: chatId != null ? String(chatId) : undefined,
       text: u.message?.text,
       callbackData: u.callback_query?.data,
+      callbackId: u.callback_query?.id,
+      messageId: chat?.message_id,
     };
   }
   async health(): Promise<boolean> {
@@ -135,8 +187,71 @@ export function createMockTelegram(): MockTelegramService {
 }
 
 /* ------------------------------------------------------------------ *
- * Per-user Telegram accounts
+ * Webhook URL resolution
+ *
+ * Telegram only accepts a public HTTPS webhook URL. The platform may run in
+ * several places (local dev, a Railway/container deployment, or the Arena
+ * preview at https://{port}-{sandboxId}.e2b.app). Rather than requiring the
+ * operator to hard-code PUBLIC_WEB_BASE_URL, we resolve the webhook URL from,
+ * in order of precedence:
+ *
+ *   1. TELEGRAM_WEBHOOK_URL       (explicit override)
+ *   2. PUBLIC_WEB_BASE_URL        (public production URL)
+ *   3. a URL learned from a real incoming request (host + forwarded proto)
+ *   4. WEB_BASE_URL               (dev default)
  * ------------------------------------------------------------------ */
+
+let learnedPublicBaseUrl: string | undefined;
+
+/** Remember a public base URL we observed from an actual request (e.g. the
+ *  Arena preview host) so later registrations reuse it. */
+export function learnPublicBaseUrl(url: string | undefined): void {
+  if (!url) return;
+  const clean = url.replace(/\/$/, "");
+  if (/^https:\/\//i.test(clean) && !/@/.test(clean)) learnedPublicBaseUrl = clean;
+}
+
+export function getPublicBaseUrl(host?: string, proto?: string): string {
+  const env = getEnv();
+  if (env.PUBLIC_WEB_BASE_URL?.trim()) return env.PUBLIC_WEB_BASE_URL.trim();
+  if (learnedPublicBaseUrl) return learnedPublicBaseUrl;
+  // Derive from the caller's request: the proxy forwards the real scheme/host.
+  if (host && !/localhost|127\.0\.0\.1/i.test(host)) {
+    const scheme = proto === "https" ? "https" : proto === "http" ? "http" : "https";
+    return `${scheme}://${host}`;
+  }
+  return env.WEB_BASE_URL;
+}
+
+export function getTelegramWebhookUrl(host?: string, proto?: string): string {
+  const env = getEnv();
+  if (env.TELEGRAM_WEBHOOK_URL?.trim()) {
+    return env.TELEGRAM_WEBHOOK_URL.trim();
+  }
+  const base = getPublicBaseUrl(host, proto);
+  return `${String(base).replace(/\/$/, "")}/integrations/telegram/webhook`;
+}
+
+/** Telegram only accepts HTTPS webhooks. Returns a friendly reason if not. */
+export function validateTelegramWebhookUrl(url: string): { ok: boolean; error?: string } {
+  if (!url) return { ok: false, error: "no public webhook URL is configured" };
+  if (!/^https:\/\//i.test(url)) {
+    return {
+      ok: false,
+      error: `webhook URL must be HTTPS (got "${url}"). Set PUBLIC_WEB_BASE_URL or TELEGRAM_WEBHOOK_URL to a public HTTPS URL — e.g. https://<your-app>.up.railway.app — or use an HTTPS tunnel (ngrok/cloudflared) for local dev.`,
+    };
+  }
+  // A localhost webhook will never be reachable from Telegram.
+  try {
+    const host = new URL(url).hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host.endsWith(".local")) {
+      return { ok: false, error: `webhook URL "${url}" points at localhost, which Telegram cannot reach. Use a public HTTPS URL.` };
+    }
+  } catch {
+    return { ok: false, error: `invalid webhook URL "${url}"` };
+  }
+  return { ok: true };
+}
 
 export interface TelegramGetMe {
   ok: boolean;
@@ -144,12 +259,6 @@ export interface TelegramGetMe {
   id?: number;
   botId?: string;
   error?: string;
-}
-
-export function getTelegramWebhookUrl(): string {
-  const env = getEnv();
-  const base = env.PUBLIC_WEB_BASE_URL ?? env.WEB_BASE_URL;
-  return `${String(base).replace(/\/$/, "")}/integrations/telegram/webhook`;
 }
 
 export function accountTelegramToken(account: TelegramAccount): string | undefined {
@@ -191,6 +300,8 @@ export async function testTelegramToken(token: string): Promise<TelegramGetMe> {
 
 /** Register the platform webhook for a user bot (real connection). */
 export async function setTelegramWebhook(token: string, url: string): Promise<{ ok: boolean; error?: string }> {
+  const valid = validateTelegramWebhookUrl(url);
+  if (!valid.ok) return { ok: false, error: valid.error };
   try {
     const res = await fetch(`https://api.telegram.org/bot${encodeURIComponent(token)}/setWebhook`, {
       method: "POST",

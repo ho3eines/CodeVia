@@ -14,7 +14,8 @@ import { modelRouter, ModelRouter } from "../ai/model-router.js";
 import { contextEngine, ContextEngine } from "../ai/context-engine.js";
 import { toolRegistry, ToolRegistry } from "../tools/registry.js";
 import { resolveGitHubService } from "../github/registry.js";
-import { resolveTelegramService } from "../integrations/telegram.js";
+import { resolveTelegramService, getTelegramWebhookUrl, setTelegramWebhook, validateTelegramWebhookUrl } from "../integrations/telegram.js";
+import { getEnv } from "../config/env.js";
 import { memoryResolver, MemoryResolver } from "../memory/index.js";
 import { AgentRouter } from "../agents/router.js";
 import { AgentRunner } from "../agents/runner.js";
@@ -142,6 +143,51 @@ export class Container {
     // Load the mock provider + default models into the registry for routing.
     this.seedDefaultModels();
     logger.info("container seeded");
+  }
+
+  /** The public base URL we last successfully pointed the global webhook at,
+   *  so we don't re-register the same URL on every status poll. */
+  private globalWebhookRegisteredBase?: string;
+
+  /**
+   * Register the global bot's webhook with Telegram when the platform is
+   * configured for Telegram (ENABLE_TELEGRAM=true + a token). Without this the
+   * bot has no way to receive updates, which is the #1 reason a real bot stays
+   * silent. In local dev (no public URL / no token) this is a no-op and just logs.
+   */
+  async setupTelegramWebhook(baseOverride?: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+    const env = getEnv();
+    if (!env.ENABLE_TELEGRAM) return { ok: false, error: "Telegram disabled (set ENABLE_TELEGRAM=true)" };
+    if (!env.TELEGRAM_BOT_TOKEN) return { ok: false, error: "TELEGRAM_BOT_TOKEN is not set" };
+    const url = baseOverride
+      ? `${baseOverride.replace(/\/$/, "")}/integrations/telegram/webhook`
+      : getTelegramWebhookUrl();
+    const valid = validateTelegramWebhookUrl(url);
+    if (!valid.ok) {
+      logger.warn("Telegram webhook not set — no public HTTPS URL", { error: valid.error, url });
+      return { ok: false, url, error: valid.error };
+    }
+    // Don't spam setWebhook with the same URL we already registered.
+    if (this.globalWebhookRegisteredBase === url) {
+      return { ok: true, url };
+    }
+    const res = await setTelegramWebhook(env.TELEGRAM_BOT_TOKEN, url);
+    if (res.ok) {
+      this.globalWebhookRegisteredBase = url;
+      logger.info("Telegram webhook registered", { url });
+    } else {
+      logger.warn("Telegram webhook registration failed", { error: res.error ?? "unknown", url });
+    }
+    return { ok: res.ok, url, error: res.error };
+  }
+
+  /**
+   * Heal the global bot webhook once a public HTTPS base URL has been observed
+   * from a real request (e.g. the Arena preview host). Safe to call on request
+   * handlers; it no-ops when Telegram is disabled, no token, or already done.
+   */
+  async healTelegramWebhook(baseOverride?: string): Promise<void> {
+    await this.setupTelegramWebhook(baseOverride);
   }
 
   private seedDefaultProviders(): void {

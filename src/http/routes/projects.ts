@@ -100,11 +100,6 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
         tech: Array.isArray(body.tech) ? (body.tech as string[]) : [],
       });
 
-      // Ensure databases single-select (keep only first value)
-      if (project.capabilities.databases.length > 1) {
-        project.capabilities.databases = [project.capabilities.databases[0]];
-      }
-
       // Compute skills from the selected capabilities
       const skills = skillsForCapabilities(project.capabilities);
 

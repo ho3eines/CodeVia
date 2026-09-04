@@ -5,9 +5,10 @@ import {
   accountTelegramService,
   accountTelegramToken,
   encryptTelegramToken,
+  getPublicBaseUrl,
   getTelegramWebhookUrl,
+  learnPublicBaseUrl,
   maskTelegramToken,
-  resolveTelegramService,
   setTelegramWebhook,
   testTelegramToken,
 } from "../../integrations/telegram.js";
@@ -21,19 +22,38 @@ function fail(reply: FastifyReply, status: number, message: string, extra: Recor
 }
 
 export function registerTelegramRoutes(app: FastifyInstance, container: Container): void {
-  const globalTelegram = resolveTelegramService();
-  const telegram = globalTelegram;
+  // Reuse the container's singleton Telegram service (same token connection the
+  // rest of the platform and the worker use), rather than creating a fresh one.
+  const telegram = container.telegram;
   const botDeps = {
     projectRepo: container.projectRepo,
     taskRepo: container.taskRepo,
+    workflowRepo: container.workflowRepo,
+    conversationRepo: container.conversationRepo,
     agentRepo: container.agentRepo,
     runRepo: container.runRepo,
     agentManager: container.agentManager,
     github: container.github,
+    modelRepo: container.modelRepo,
+    skillRepo: container.skillRepo,
+    memoryRepo: container.memoryRepo,
+    queue: container.queue,
     logger: logger.child({ component: "telegram-bot" }),
   };
   const bot = new TelegramBot({ telegram, ...botDeps });
   const botFor = (svc = telegram) => new TelegramBot({ telegram: svc, ...botDeps });
+
+  /** Resolve the public HTTPS base URL this deployment is reachable at, using the
+   *  real forwarded host/proto so the webhook points at a URL Telegram can reach
+   *  (works out of the box behind a proxy / the Arena preview host). */
+  const publicBaseFrom = (req: Parameters<typeof resolveRequestUser>[0]) => {
+    const h = req.headers as Record<string, unknown>;
+    const proto = String(h["x-forwarded-proto"] ?? (req as { protocol?: string }).protocol ?? "https");
+    const host = String(h["x-forwarded-host"] ?? h.host ?? (req as { host?: string }).host ?? "");
+    const base = getPublicBaseUrl(host, proto);
+    learnPublicBaseUrl(base);
+    return base;
+  };
 
   const serialize = (a: TelegramAccount) => ({
     id: a.id,
@@ -51,7 +71,7 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     updatedAt: a.updatedAt,
   });
 
-  async function connectAccount(account: TelegramAccount): Promise<TelegramAccount> {
+  async function connectAccount(account: TelegramAccount, publicBase?: string): Promise<TelegramAccount> {
     const token = accountTelegramToken(account);
     if (!token) {
       return { ...account, connected: false, lastError: "Token cannot be decrypted" };
@@ -60,14 +80,19 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     if (!me.ok) {
       return { ...account, connected: false, lastError: me.error, botId: account.botId, botUsername: account.botUsername, updatedAt: new Date().toISOString() };
     }
-    const webhookResult = await setTelegramWebhook(token, getTelegramWebhookUrl());
+    // A webhook is required for the bot to receive updates. Telegram demands a
+    // public HTTPS URL. We prefer a base derived from the actual incoming request
+    // (the proxy/preview host), falling back to PUBLIC_WEB_BASE_URL / config.
+    const base = publicBase ?? getPublicBaseUrl();
+    const webhookUrl = `${base.replace(/\/$/, "")}/integrations/telegram/webhook`;
+    const webhookResult = await setTelegramWebhook(token, webhookUrl);
     const updated: TelegramAccount = {
       ...account,
       botId: me.botId ?? account.botId,
       botUsername: me.username ?? account.botUsername,
       connected: true,
       webhookSet: webhookResult.ok,
-      lastError: webhookResult.ok ? undefined : `API OK but webhook not set: ${webhookResult.error}`,
+      lastError: webhookResult.ok ? undefined : `Bot is live, but it can't receive messages yet: ${webhookResult.error}`,
       updatedAt: new Date().toISOString(),
     };
     container.telegramAccountRepo.upsert(updated);
@@ -83,11 +108,18 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     const userId = currentUserId(req);
     const accounts = container.telegramAccountRepo.byUser(userId).map(serialize);
     const globalConnected = await telegram.health();
+    const publicBase = publicBaseFrom(req);
+    // If a global bot token is configured and we now know a public HTTPS base,
+    // register its webhook so the bot actually receives updates.
+    await container.healTelegramWebhook(publicBase);
     return {
       connected: globalConnected || accounts.some((a) => a.connected),
       globalConnected,
       kind: telegram.constructor.name,
-      webhookUrl: getTelegramWebhookUrl(),
+      // Show the actual public HTTPS URL the webhook will use (from the request
+      // host or PUBLIC_WEB_BASE_URL), not the http://localhost default.
+      baseUrl: publicBase,
+      webhookUrl: `${publicBase.replace(/\/$/, "")}/integrations/telegram/webhook`,
       accounts,
     };
   });
@@ -121,7 +153,7 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
       webhookSet: false,
       lastError: undefined,
     });
-    const connected = await connectAccount(account);
+    const connected = await connectAccount(account, publicBaseFrom(req));
     reply.code(201);
     return { account: serialize(connected), webhookUrl: getTelegramWebhookUrl() };
   });
@@ -141,7 +173,7 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     };
     if (typeof b.token === "string" && b.token.trim()) {
       next.tokenEnc = encryptTelegramToken(b.token.trim());
-      const connected = await connectAccount(next);
+      const connected = await connectAccount(next, publicBaseFrom(req));
       container.telegramAccountRepo.upsert(connected);
       return serialize(connected);
     }
@@ -154,7 +186,7 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     const userId = currentUserId(req);
     const account = container.telegramAccountRepo.findByIdAndUser(id, userId);
     if (!account) return fail(reply, 404, "Telegram account not found");
-    const connected = await connectAccount(account);
+    const connected = await connectAccount(account, publicBaseFrom(req));
     return serialize(connected);
   });
 

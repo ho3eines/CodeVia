@@ -17,13 +17,27 @@ Without a token, the platform uses a **MockTelegramService** (messages are logge
 
 ## 2. Set the webhook
 
-Point Telegram's webhook at the platform:
+**Telegram only accepts public HTTPS webhooks.** It rejects `http://` and
+`localhost` URLs with `Bad Request: bad webhook: An HTTPS URL must be provided
+for webhook`. The bot needs a reachable HTTPS URL to receive updates — the
+#1 cause of a silent bot.
+
+Configure the public URL via **one** of:
+
+- `PUBLIC_WEB_BASE_URL=https://<your-app>.up.railway.app` (production / Railway), or
+- `TELEGRAM_WEBHOOK_URL=https://<your-tunnel>.example.com/integrations/telegram/webhook` (explicit override, e.g. an ngrok/cloudflared HTTPS tunnel for local dev).
+
+When `ENABLE_TELEGRAM=true` and a token is set, the platform registers the
+webhook automatically on boot. You can also set it manually:
 
 ```
 https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<your-app>.up.railway.app/integrations/telegram/webhook
 ```
 
-The route `POST /integrations/telegram/webhook` accepts Telegram updates and routes them to the bot handler. (An alternate `sendMessage`-based polling mode is available too.)
+The route `POST /integrations/telegram/webhook` accepts Telegram updates and
+routes them to the bot handler. If the configured URL is not a public HTTPS URL,
+the bot still connects (the token is valid) but it cannot receive messages, and
+the platform logs a clear, actionable message explaining exactly what to set.
 
 ---
 
@@ -48,6 +62,7 @@ The route `POST /integrations/telegram/webhook` accepts Telegram updates and rou
 | `/skills` | Show skills |
 | `/settings` | Bot settings |
 | `/stop` / `/cancel` | Stop / cancel work |
+| `/dashboard` | Platform dashboard |
 
 > The primary UX is **inline keyboards** (not command-only). Messages can also be **natural language**: e.g. *"در پروژه X Login را بررسی کن و تست Authentication را اجرا کن."* The bot routes to the Agent Manager, which detects the project, picks agents/models, loads memory/skills, runs, and reports.
 
