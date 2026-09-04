@@ -54,6 +54,41 @@ describe("AgentManager end-to-end (mock GitHub + mock AI)", () => {
     expect(labels).toContain("Create pull request");
   });
 
+  it("keeps agents isolated across multiple projects (no roster collision)", async () => {
+    const a = await container.agentManager.createProject({
+      name: "Project A",
+      description: "A .NET accounting system",
+      configRepo: "acme/a",
+    });
+    const b = await container.agentManager.createProject({
+      name: "Project B",
+      description: "A React storefront",
+      configRepo: "acme/b",
+    });
+    const agentsA = container.agentRepo.byProject(a.id);
+    const agentsB = container.agentRepo.byProject(b.id);
+    expect(agentsA.length).toBeGreaterThanOrEqual(10);
+    expect(agentsB.length).toBeGreaterThanOrEqual(10);
+    // No shared agent id between projects.
+    const idsA = new Set(agentsA.map((x) => x.id));
+    const idsB = new Set(agentsB.map((x) => x.id));
+    expect([...idsA].filter((id) => idsB.has(id))).toEqual([]);
+    // Each project has its own backend + qa agents.
+    expect(agentsA.some((x) => x.type === "backend-developer")).toBe(true);
+    expect(agentsB.some((x) => x.type === "backend-developer")).toBe(true);
+    // Running a task in project B must resolve a project-B agent (not A's).
+    const task = container.agentManager.createTask({
+      projectId: b.id,
+      title: "Fix login bug",
+      description: "login broken",
+      agentType: "debugging",
+    });
+    const res = await container.agentManager.runTask(task.id);
+    expect(res.status).toBe("succeeded");
+    const runsB = container.runRepo.byProject(b.id);
+    expect(runsB[0].agentId).not.toBe(agentsA.find((x) => x.type === "debugging")?.id);
+  });
+
   it("records cost usage from the model call", async () => {
     const project = await container.agentManager.createProject({
       name: "Accounting App",

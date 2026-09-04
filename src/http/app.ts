@@ -46,6 +46,23 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     bodyLimit: 5 * 1024 * 1024,
   });
 
+  // Accept empty JSON bodies (e.g. POST /tasks/:id/run, /projects/:id/activate)
+  // so body-less requests with a `Content-Type: application/json` header (as the
+  // SPA sends) don't trip Fastify's `FST_ERR_CTP_EMPTY_JSON_BODY`.
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      const text = body == null ? "" : String(body);
+      if (!text.trim()) return done(null, {});
+      try {
+        done(null, JSON.parse(text));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
+
   await app.register(cors, { origin: true });
   await app.register(swagger, {
     openapi: {

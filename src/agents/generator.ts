@@ -4,6 +4,7 @@ import type { SkillRepository } from "../skills/registry.js";
 import type { ModelRepository } from "../ai/model-repo.js";
 import type { IModelProvider } from "../ai/types.js";
 import { logger } from "../logger.js";
+import { randomUUID } from "node:crypto";
 
 /** Per-agent-type scaffolding: role, mission, skills, tools, permissions. */
 const AGENT_SCAFFOLD: Record<
@@ -184,8 +185,10 @@ export class AgentGenerator {
     for (const type of AGENT_TYPES) {
       const scaffold = AGENT_SCAFFOLD[type];
       const existing = this.agentRepo.byType(project.id, type);
+      // Agents are per-project, so ids must be project-unique (a fixed
+      // `agent-<type>` id would collide across projects and wipe other rosters).
       const agent: Agent = {
-        id: existing?.id ?? `agent-${type}`,
+        id: existing?.id ?? `agent-${type}-${project.id}-${randomUUID().slice(0, 6)}`,
         projectId: project.id,
         type,
         name: scaffold.role,
