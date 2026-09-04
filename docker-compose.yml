@@ -25,6 +25,8 @@ services:
       # Telegram
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      TELEGRAM_WEBHOOK_INSECURE: ${TELEGRAM_WEBHOOK_INSECURE:-false}
+      TELEGRAM_WEBHOOK_ALLOW_LOOPBACK: ${TELEGRAM_WEBHOOK_ALLOW_LOOPBACK:-false}
       # auto = webhook when a public HTTPS URL exists, long polling otherwise.
       # Pin to "polling" for a private/behind-NAT deployment.
       TELEGRAM_MODE: ${TELEGRAM_MODE:-auto}

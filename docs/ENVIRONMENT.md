@@ -62,6 +62,8 @@ The stored `Provider` config stores only `secretRef` (e.g. `OPENAI_API_KEY`) —
 | `TELEGRAM_POLL_TIMEOUT` | Long-poll hold seconds (default 25) |
 | `TELEGRAM_WEBHOOK_SECRET` | Optional webhook secret (`X-Telegram-Bot-Api-Secret-Token`, enforced on the webhook route when set) |
 | `TELEGRAM_WEBHOOK_URL` | Explicit public webhook URL override |
+| `TELEGRAM_WEBHOOK_INSECURE` | `true` keeps an `http://` webhook URL for a public host (behind a proxy that only forwards `x-forwarded-proto: http`). Never use it with `localhost` — Telegram cannot reach that anyway |
+| `TELEGRAM_WEBHOOK_ALLOW_LOOPBACK` | `true` skips both the https and the localhost rule so the webhook round-trip can be tested locally or through a tunnel. Off by default; never set it in production |
 | `TELEGRAM_API_BASE` | Bot API base; only change for a proxy/mirror or offline testing |
 | `ENABLE_TELEGRAM` | Legacy "I want Telegram" flag — a token is enough; `TELEGRAM_MODE=off` is the opt-out |
 

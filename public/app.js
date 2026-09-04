@@ -1410,9 +1410,11 @@
     const receiving = status.transport || "off";
     const recvBadge = receiving === "off"
       ? `<span class="badge badge-err">not receiving</span>`
-      : receiving === "polling"
+      : status.ready && receiving === "polling"
         ? `<span class="badge badge-ok">long polling</span>`
-        : `<span class="badge badge-ok">webhook</span>`;
+        : status.ready && receiving === "webhook"
+          ? `<span class="badge badge-ok">webhook</span>`
+          : `<span class="badge badge-err">${esc(receiving)} — broken</span>`;
     const fixes = (status.fixes || []).length
       ? `<div class="field-hint err" style="margin-top:8px">${status.fixes.map((f) => `• ${esc(f)}`).join("<br/>")}</div>`
       : "";
@@ -1421,7 +1423,7 @@
         <button class="btn btn-primary" onclick="openTelegramAccount()">＋ Connect a bot</button></div>
       <div class="grid-2">
         <div class="card card-body"><div class="card-title">Platform connection ${recvBadge}</div>
-          <div class="status-grid"><div class="status-item"><span class="status-dot ${status.receiving ? "healthy" : "warn"}"></span>${status.globalConnected ? `Global bot (TELEGRAM_BOT_TOKEN)${status.botUsername ? " · @" + esc(status.botUsername) : ""}` : "No global bot token — connect your own bot below"}</div></div>
+          <div class="status-grid"><div class="status-item"><span class="status-dot ${status.ready ? "healthy" : status.configured ? "warn" : "err"}"></span>${status.globalConnected ? `Global bot (TELEGRAM_BOT_TOKEN)${status.botUsername ? " · @" + esc(status.botUsername) : ""}` : status.configured ? `A token is set but Telegram rejected it${status.botUsername ? " · @" + esc(status.botUsername) : ""} — press 🧪 Run connection test` : "No global bot token — connect your own bot below"}</div></div>
           <div class="meter-row"><span class="lbl">Receiving mode</span><span class="val mono">${esc(status.mode || "auto")} → ${esc(receiving)}</span></div>
           ${receiving === "polling"
             ? `<div class="meter-row"><span class="lbl">Poller</span><span class="val">${poll.running ? `✅ running · ${poll.updatesReceived || 0} update(s)` : "⏹ stopped"}</span></div>
@@ -1509,7 +1511,8 @@
   window.telegramTransport = async (mode) => {
     try {
       const r = await api("/integrations/telegram/transport", { method: "POST", body: { mode } });
-      toast("Telegram transport updated", `now ${r.status.transport}`, r.status.transport === "off" ? "warn" : "ok");
+      // A requested mode that could not come up is a warning with the reason, not a success.
+      toast(r.ok ? "Telegram transport updated" : "Could not switch transport", r.message || `now ${r.transport}`, r.ok ? (r.transport === "off" ? "warn" : "ok") : "err");
       refreshCurrent();
     } catch (e) { toast("Could not change transport", e.message, "err"); }
   };
@@ -1542,6 +1545,7 @@
       const body = { token, accountId: $("#ta-account").value.trim(), chatId: $("#ta-chat").value.trim(), name: $("#ta-name").value.trim() };
       try {
         const r = editId ? await api(`/integrations/telegram/accounts/${editId}`, { method: "PATCH", body }) : await api("/integrations/telegram/accounts", { method: "POST", body });
+        if (r && r.warning) toast("Bot connected — but note", r.warning, "warn");
         closeModal(); toast(editId ? "Bot updated" : "Bot connected", (r.account?.botUsername || r.botUsername || "Telegram bot") + (r.account?.webhookSet ? " · webhook set" : ""), r.account?.connected || r.connected ? "ok" : "warn"); refreshCurrent();
       } catch (e) { toast("Connection failed", e.message, "err"); }
     };

@@ -384,6 +384,21 @@ describe("Telegram HTTP surface", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("does not report success when the requested transport cannot come up", async () => {
+    // No public HTTPS URL here: asking for webhook mode must answer ok:false with
+    // the reason, instead of a green toast over a bot that receives nothing.
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    getEnvFresh();
+    mockTelegramApi();
+    const srv = await boot();
+    const res = await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "webhook" } });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.message).toMatch(/HTTPS/i);
+    expect(fetchCalls).not.toContain("setWebhook");
+  });
+
   it("diagnostics returns Telegram's own view of the bot", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
     getEnvFresh();

@@ -576,22 +576,44 @@ export function getTelegramWebhookUrl(host?: string, proto?: string): string {
 /** Telegram only accepts HTTPS webhooks. Returns a friendly reason if not. */
 export function validateTelegramWebhookUrl(url: string): { ok: boolean; error?: string } {
   if (!url) return { ok: false, error: "no public webhook URL is configured" };
+  if (allowLoopbackWebhook()) {
+    // Explicit dev/testing opt-in: skip both Telegram's https-only rule and the
+    // loopback rule so a webhook round-trip can be exercised against a local Bot
+    // API double or a tunnel that only resolves on this machine.
+    try {
+      new URL(url);
+      return { ok: true };
+    } catch {
+      return { ok: false, error: `invalid webhook URL "${url}"` };
+    }
+  }
   if (!/^https:\/\//i.test(url)) {
     return {
       ok: false,
       error: `webhook URL must be HTTPS (got "${url}"). Set PUBLIC_WEB_BASE_URL or TELEGRAM_WEBHOOK_URL to a public HTTPS URL — e.g. https://<your-app>.up.railway.app — or use an HTTPS tunnel (ngrok/cloudflared) for local dev.`,
     };
   }
-  // A localhost webhook will never be reachable from Telegram.
+  // A localhost webhook will never be reachable from Telegram — unless the
+  // operator explicitly opted in (tailscale, a tunnel that resolves locally, or
+  // testing the webhook round-trip against a Bot API double).
   try {
     const host = new URL(url).hostname;
-    if (host === "localhost" || host === "127.0.0.1" || host.endsWith(".local")) {
-      return { ok: false, error: `webhook URL "${url}" points at localhost, which Telegram cannot reach. Use a public HTTPS URL.` };
+    const loopback = host === "localhost" || host === "127.0.0.1" || host.startsWith("127.") || host.endsWith(".local");
+    if (loopback && !allowLoopbackWebhook()) {
+      return { ok: false, error: `webhook URL "${url}" points at localhost, which Telegram cannot reach. Use a public HTTPS URL — or set TELEGRAM_WEBHOOK_ALLOW_LOOPBACK=true for local/tunnel testing.` };
     }
   } catch {
     return { ok: false, error: `invalid webhook URL "${url}"` };
   }
   return { ok: true };
+}
+
+export function allowLoopbackWebhook(): boolean {
+  try {
+    return getEnv().TELEGRAM_WEBHOOK_ALLOW_LOOPBACK === true;
+  } catch {
+    return false;
+  }
 }
 
 export interface TelegramGetMe {

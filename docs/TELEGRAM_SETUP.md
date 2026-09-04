@@ -146,7 +146,22 @@ HTML formatting are all exercised for real.
 
 ---
 
-## 9. What *you* have to do (checklist)
+## 9. Environment variables that change this behaviour
+
+| Variable | Effect when set |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | The only thing needed for a working bot (long polling). |
+| `TELEGRAM_MODE` | `auto` (default) · `webhook` · `polling` · `off`. |
+| `TELEGRAM_POLL_TIMEOUT` | Long-poll hold seconds (default 25). |
+| `TELEGRAM_WEBHOOK_URL` | Exact webhook URL to register, skipping URL discovery. |
+| `PUBLIC_WEB_BASE_URL` | Public base used to build the webhook URL. |
+| `TELEGRAM_WEBHOOK_SECRET` | Registered on `setWebhook` **and** required on every inbound post. |
+| `TELEGRAM_WEBHOOK_INSECURE` | Keep `http://` for a public host behind a proxy that reports `x-forwarded-proto: http`. |
+| `TELEGRAM_WEBHOOK_ALLOW_LOOPBACK` | Test-only: allows `http://127.0.0.1:…` webhooks (offline Bot API double, tunnels). Never in production. |
+| `TELEGRAM_API_BASE` | Point the client at a proxy/mirror or the mock (`npm run mock:telegram`). |
+| `ENABLE_TELEGRAM` | Enable-only switch. A token already means intent; use `TELEGRAM_MODE=off` to stop receiving. |
+
+## 10. What *you* have to do (checklist)
 
 The platform automates everything it can (webhook registration, polling fallback,
 offset, retries). These are the steps only an operator can do:

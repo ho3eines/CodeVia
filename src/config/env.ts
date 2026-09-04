@@ -117,6 +117,8 @@ const EnvSchema = z.object({
   //   webhook — always setWebhook (fails loudly when there is no public HTTPS URL)
   //   off     — never receive updates (send-only, e.g. notifications from CI)
   TELEGRAM_MODE: envEnum(["auto", "polling", "webhook", "off"] as const, "auto"),
+  // Allow a loopback webhook URL (local/tunnel testing against a Bot API double).
+  TELEGRAM_WEBHOOK_ALLOW_LOOPBACK: envBoolean(false),
   // Keep `http://` webhook URLs for public hosts (Telegram normally rejects
   // them; only set this when an HTTPS-terminating proxy is not in front).
   TELEGRAM_WEBHOOK_INSECURE: envBoolean(false),

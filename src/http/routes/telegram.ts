@@ -74,7 +74,12 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
    * a preview URL, a NAT'ed VPS) — previously such an account was "connected"
    * in the UI yet could never hear a message.
    */
-  async function connectAccount(account: TelegramAccount, publicBase?: string): Promise<TelegramAccount> {
+  function sameTokenAsPlatformBot(token: string): boolean {
+  const global = getEnv().TELEGRAM_BOT_TOKEN;
+  return Boolean(global) && global === token;
+}
+
+async function connectAccount(account: TelegramAccount, publicBase?: string): Promise<TelegramAccount> {
     const token = accountTelegramToken(account);
     const now = () => new Date().toISOString();
     if (!token) {
@@ -190,7 +195,20 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     const mode = String(b.mode ?? "").trim() as TelegramMode;
     if (!MODES.includes(mode)) return fail(reply, 400, `mode must be one of ${MODES.join(" | ")}`);
     const status = await runtime.setMode(mode, b.baseUrl ? String(b.baseUrl).replace(/\/$/, "") : publicBaseFrom(req));
-    return { ok: true, mode, status };
+    // Report the *outcome*, not the intent: a requested mode that could not be
+    // brought up (no public URL, token rejected) must not look like success.
+    const ok = mode === "off" ? true : status.transport === mode && !status.webhookError;
+    return {
+      ok,
+      mode,
+      transport: status.transport,
+      message: ok
+        ? mode === "off"
+          ? "Telegram receiving is off; sending still works."
+          : `receiving via ${status.transport}`
+        : status.webhookError ?? status.fixes[0] ?? `could not switch to ${mode}`,
+      status,
+    };
   });
 
   /** Re-register the webhook now (e.g. right after setting PUBLIC_WEB_BASE_URL). */
@@ -247,6 +265,10 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
       receiving: connected.transport === "polling" ? "long polling (getUpdates)" : connected.webhookSet ? "webhook" : "nothing — see lastError",
       chatIdHint: !accountId
         ? "Tip: message your bot, send /id to it, and put that number in AccountId so updates route to your account."
+        : undefined,
+      // Two receivers on one token = every message answered twice.
+      warning: sameTokenAsPlatformBot(token)
+        ? "This is the same bot token as the platform bot, so both receivers will answer every message. Create a separate bot in @BotFather for a personal account, or delete this account and use the platform bot."
         : undefined,
     };
   });
