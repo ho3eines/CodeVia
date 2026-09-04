@@ -3,6 +3,35 @@ export interface GithubRepoRef {
   name: string;
 }
 
+/** A repository as listed for a connected account (superset of GithubRepoRef). */
+export interface GithubRepository extends GithubRepoRef {
+  /** `owner/name` */
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  description?: string;
+  htmlUrl?: string;
+  language?: string;
+  updatedAt?: string;
+  archived?: boolean;
+  permissions?: { admin: boolean; push: boolean; pull: boolean };
+}
+
+export interface ListRepositoriesOptions {
+  /** Case-insensitive substring filter on `owner/name`. */
+  query?: string;
+  /** Maximum number of repositories to return (default 300). */
+  limit?: number;
+}
+
+/** The authenticated identity behind a GitHub connection. */
+export interface GithubViewer {
+  login: string;
+  name?: string;
+  /** OAuth scopes granted to the token (empty for installation tokens / mock). */
+  scopes: string[];
+}
+
 export interface GithubBranch {
   name: string;
   sha: string;
@@ -52,7 +81,8 @@ export interface GithubFile {
  */
 export interface IGitHubService {
   readonly kind: "real" | "mock";
-  listRepositories(): Promise<GithubRepoRef[]>;
+  listRepositories(opts?: ListRepositoriesOptions): Promise<GithubRepository[]>;
+  getViewer(): Promise<GithubViewer>;
   listBranches(repo: GithubRepoRef): Promise<GithubBranch[]>;
   listCommits(repo: GithubRepoRef, branch?: string): Promise<GithubCommit[]>;
   listPullRequests(repo: GithubRepoRef): Promise<GithubPullRequest[]>;
@@ -81,4 +111,13 @@ export interface GithubWebhookEnvelope {
   signature: string;
   headers: Record<string, string | string[] | undefined>;
   body: string;
+}
+
+/** Parse `owner/name` into a repo ref (undefined when malformed). */
+export function parseRepoFullName(fullName: string | undefined | null): GithubRepoRef | undefined {
+  if (!fullName) return undefined;
+  const trimmed = String(fullName).trim().replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "").replace(/\/+$/, "");
+  const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(trimmed);
+  if (!m) return undefined;
+  return { owner: m[1], name: m[2] };
 }

@@ -25,17 +25,22 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/projects` | List projects |
-| POST | `/projects` | Create a project (**auto-onboard**: generate agents/skills/workflows/rules) |
-| GET | `/projects/:id` | Project detail |
-| PATCH | `/projects/:id` | Update project |
+| GET | `/projects/options` | Option catalog for the project form: `platforms`, `languages`, `frameworks`, `databases`, `deploymentTargets`, `features`, `integrations`, `agentTypes`, `repositoryRoles`, `coreAgentTypes` (all **multi-select**) |
+| GET | `/projects` | List projects (documents are upgraded to the multi-repo shape on read) |
+| POST | `/projects` | Create a project (**auto-onboard**: generate agents/skills/workflows/rules). Body: `name`, `description`, `repositories[]` (`{repo:"owner/name", branch?, role?, isConfigRepo?}` — exactly one config repo holds `.ai-engineering`), `capabilities{}` (arrays per dimension; `agentTypes` empty = derive roster from the stack). Legacy `configRepo`/`branch`/`framework`/`database` strings are still accepted. Errors: `400` no/invalid repo, `409` duplicate slug |
+| GET | `/projects/:id` | Project detail (`404` when missing) |
+| PATCH | `/projects/:id` | Update project. `capabilities{}` (merged, re-runs onboarding — agents outside the roster are disabled, never deleted), `repositories[]`, `name`, `description`, `defaultModelId`, `active`, `settings{}`, `reonboard:true` |
 | POST | `/projects/:id/activate` / `deactivate` | Toggle project |
 | DELETE | `/projects/:id` | Delete |
-| GET | `/projects/:id/agents` / `skills` / `memory` / `workflows` / `tasks` / `runs` / `tests` / `issues` / `pull-requests` / `repositories` | Sub-resources |
-| POST | `/projects/:id/ask` | Natural-language AI action → task + queued job |
+| GET | `/projects/:id/agents` / `skills` / `memory` / `workflows` / `tasks` / `runs` / `tests` | Sub-resources |
+| GET | `/projects/:id/issues` / `pull-requests` | Issues / PRs across **all** linked repositories (`?repo=owner/name` to filter); each item carries `repo` |
+| POST | `/projects/:id/ask` | Natural-language AI action → task + queued job (`agentType` optional) |
 | POST | `/projects/:id/onboard` | Re-run onboarding |
 | GET | `/projects/:id/export` | Project export (config + agents + prompts + skills + workflows + rules; no secrets) |
-| POST | `/projects/:id/repositories` | Attach/change a repository |
+| GET | `/projects/:id/repositories` | Linked repositories (`repo`, `branch`, `role`, `isConfigRepo`, `private`, `htmlUrl`) |
+| POST | `/projects/:id/repositories` | Link a repository (`repo`, `branch?`, `role?`, `isConfigRepo?`) — idempotent per repo |
+| PATCH | `/projects/:id/repositories/:owner/:name` | Change `branch` / `role` / make it the config repo |
+| DELETE | `/projects/:id/repositories/:owner/:name` | Unlink (the last repository cannot be removed) |
 
 ## Agents
 
@@ -53,8 +58,17 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET/POST | `/models`, `/models/:id` | Model Registry |
-| GET/POST | `/providers`, `/providers/:id` | Providers (secret refs only) |
+| GET/POST | `/models` | Model Registry (`POST` validates `providerId` exists and `modelId` is set → `400`) |
+| GET/PATCH/DELETE | `/models/:id` | Model detail / update / delete |
+| POST | `/models/:id/activate` / `deactivate` | Toggle a model for routing |
+| GET | `/providers/presets` | Provider types + per-type defaults (`baseUrl`, `secretRef`, `authType`, `apiFormat`) used by the Add Provider form |
+| GET | `/providers` | Providers, each with `readiness {ready, reason?, hint?}` and `keyPresent` (is the env var behind `secretRef` set?) |
+| POST | `/providers` | Create (secret **references** only — a literal key in `secretRef` is rejected with `400`; duplicate name → `409`). Auto-activates only when immediately usable |
+| GET/PATCH | `/providers/:id` | Detail / update (drops the cached adapter so new config is used) |
+| POST | `/providers/:id/activate` | Approve/enable. `422` + `hint` when the key is missing; `?force=true` overrides |
+| POST | `/providers/:id/deactivate` | Disable (the runner skips inactive providers even if their models are active) |
+| POST | `/providers/:id/test` | Live connectivity test → `{ok, keyPresent, checked, status?, latencyMs?, message, hint?, models?}` |
+| DELETE | `/providers/:id` | Delete; `409` if models reference it unless `?cascade=true` (mock provider cannot be deleted) |
 
 ## Skills
 
@@ -94,8 +108,8 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | GET | `/auth/github/status` | Is OAuth configured? + current user (public) |
 | GET | `/auth/github/login` | 302 redirect to `github.com` authorize (or `?format=json` → `{url, state}`) |
 | GET | `/auth/github/callback?code&state` | Code exchange → session cookie → redirect to `#/github?login=success` |
-| GET | `/auth/me` | Current user (`{authenticated, user}` — demo user when logged out) |
-| POST | `/auth/logout` | Clear session cookie |
+| GET | `/auth/me` | Current user (`{authenticated, user, githubToken:{stored, scopes, canReadPrivateRepos, login}}` — demo user when logged out) |
+| POST | `/auth/logout` | Clear session cookie and delete the stored (encrypted) GitHub token |
 
 Sessions travel via the HttpOnly `cv_session` cookie or `Authorization: Bearer <token>`.
 The first GitHub user to log in becomes `owner`; later users become `developer`.
@@ -104,8 +118,8 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/integrations/github/status` | Connection status (now also `oauthConfigured`, `authenticated`, `user`) |
-| GET | `/github/repositories` | List repos |
+| GET | `/integrations/github/status` | Connection status: `source` (`user-oauth` \| `server-token` \| `mock`), `sourceHint`, `repoCount`, `viewer {login, scopes}`, `userToken {stored, canReadPrivateRepos}`, `oauthConfigured`, `authenticated`, `user` |
+| GET | `/github/repositories?q=&limit=` | Repositories visible to the **current session**: the logged-in user's own OAuth token first, then the server `GITHUB_TOKEN`, then demo data. Returns `{repositories[], source, scopes, hint, count}`; each repo has `fullName`, `private`, `defaultBranch`, `description`, `htmlUrl`, `language`, `updatedAt`, `archived`, `permissions`. GitHub auth failures → `401/403` with a `hint` |
 | GET | `/github/repositories/:owner/:name/branches` | Branches |
 | GET | `/github/repositories/:owner/:name/commits` | Commits |
 | POST | `/github/repositories/:owner/:name/branches` | Create branch |

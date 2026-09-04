@@ -164,6 +164,12 @@ export interface GenerateAgentOptions {
   defaultModelId?: string;
   /** Technology hints gathered from onboarding / repository analysis. */
   tech?: string[];
+  /**
+   * Agent roster to generate (derived from the project's multi-select
+   * capabilities). Defaults to all 18 types. Agents of the project that are
+   * NOT in the roster are disabled (never deleted — re-onboarding can re-enable).
+   */
+  agentTypes?: AgentType[];
 }
 
 /**
@@ -182,7 +188,14 @@ export class AgentGenerator {
   generate(project: Project, opts: GenerateAgentOptions = {}): Agent[] {
     const defaultModelId = opts.defaultModelId ?? project.defaultModelId;
     const created: Agent[] = [];
-    for (const type of AGENT_TYPES) {
+    const roster = opts.agentTypes?.length ? AGENT_TYPES.filter((t) => opts.agentTypes!.includes(t)) : AGENT_TYPES;
+    // Agents outside the selected roster are switched off (kept for history).
+    for (const a of this.agentRepo.byProject(project.id)) {
+      if (!roster.includes(a.type) && a.enabled) {
+        this.agentRepo.upsert({ ...a, enabled: false, updatedAt: new Date().toISOString() }, { projectId: project.id });
+      }
+    }
+    for (const type of roster) {
       const scaffold = AGENT_SCAFFOLD[type];
       const existing = this.agentRepo.byType(project.id, type);
       // Agents are per-project, so ids must be project-unique (a fixed
@@ -207,11 +220,11 @@ export class AgentGenerator {
         tokenBudget: 20000,
         memorySources: ["project", type],
         enabled: true,
-        version: 1,
-        createdAt: new Date().toISOString(),
+        version: existing ? existing.version + 1 : 1,
+        createdAt: existing?.createdAt ?? new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      const saved = existing ? this.agentRepo.upsert(agent, { projectId: project.id }) : this.agentRepo.upsert(agent, { projectId: project.id });
+      const saved = this.agentRepo.upsert(agent, { projectId: project.id });
       created.push(saved.data);
     }
     logger.info(`AgentGenerator created ${created.length} agents for project ${project.id}`);
@@ -226,7 +239,7 @@ export class AgentGenerator {
       ``,
       `Project: ${project.name} (${project.slug})`,
       `Repository: ${project.configRepo} @ ${project.branch}`,
-      `Tech: ${project.framework ?? "unknown"} / ${project.primaryLanguage ?? "unknown"} / ${project.database ?? "unknown"}`,
+      ...this.profileLines(project),
       ``,
       `Rules you must follow:`,
       `- Before changing code, inspect the repository and existing architecture.`,
@@ -235,6 +248,26 @@ export class AgentGenerator {
       `- Dangerous operations (merge, deploy, migration, delete) require human approval.`,
       `- Keep the definition of done: build passes, tests pass, docs updated, committed.`,
     ].join("\n");
+  }
+
+  /** Human-readable multi-select profile for the system prompt. */
+  private profileLines(project: Project): string[] {
+    const c = project.capabilities;
+    if (!c) {
+      return [`Tech: ${project.framework ?? "unknown"} / ${project.primaryLanguage ?? "unknown"} / ${project.database ?? "unknown"}`];
+    }
+    const line = (label: string, values: string[]): string | undefined => (values.length ? `${label}: ${values.join(", ")}` : undefined);
+    const repos = (project.repositories ?? []).map((r) => `${r.repo}@${r.branch} (${r.role})`);
+    return [
+      line("Platforms", c.platforms),
+      line("Languages", c.languages),
+      line("Frameworks", c.frameworks),
+      line("Databases", c.databases),
+      line("Deployment", c.deploymentTargets),
+      line("Key features", c.features),
+      line("Integrations", c.integrations),
+      repos.length > 1 ? `Repositories: ${repos.join("; ")}` : undefined,
+    ].filter((x): x is string => !!x);
   }
 
   private buildModels(defaultModelId: string | undefined, type: AgentType): Agent["models"] {

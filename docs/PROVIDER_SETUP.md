@@ -39,7 +39,28 @@ The platform is **provider-agnostic**. Agents depend on the `IModelProvider` int
      "active": true
    }
    ```
-   The stored config keeps only `secretRef`, never your key.
+   The stored config keeps only `secretRef`, never your key (a literal key in
+   `secretRef` is rejected with `400`). `GET /providers/presets` returns the
+   per-type defaults the **Add Provider** form pre-fills, so usually only a
+   name is needed.
+
+   **Approving a provider.** A provider is only usable when it is *active*.
+   New providers auto-activate when they are immediately usable (key present
+   or `authType: none` such as Ollama); otherwise they are saved **inactive**
+   with a `readiness.reason`/`hint` (e.g. `OPENAI_API_KEY is not set on the
+   server`). On the Providers page use:
+
+   - **✓ Activate** → `POST /providers/:id/activate` — refuses with `422` while
+     the key is missing (`?force=true` overrides),
+   - **Deactivate** → `POST /providers/:id/deactivate` — the runner then skips
+     the provider even if its models are still active,
+   - **Test connection** → `POST /providers/:id/test` — checks the key and calls
+     the provider's model catalog (`/models`, Anthropic `/models`, Gemini
+     `/models`, Ollama `/api/tags`) with a short timeout; returns
+     `{ok, status, latencyMs, message, hint, models}`,
+   - **Edit** → `PATCH /providers/:id` (the cached adapter is refreshed),
+   - **Delete** → `DELETE /providers/:id?cascade=true` (removes its models too;
+     the built-in mock provider cannot be deleted).
 
 3. Register Models in the **Model Registry** (`Settings → Models` or `POST /models`) with `providerId`, `modelId`, cost, context window, and **capabilities** (vision/tools/structured output/code/reasoning/streaming).
 

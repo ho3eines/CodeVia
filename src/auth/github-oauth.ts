@@ -17,6 +17,13 @@ export const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_to
 export const GITHUB_API_BASE = "https://api.github.com";
 
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+/**
+ * Default OAuth scope. `repo` is required to list/read PRIVATE repositories
+ * (and for agents to commit/open PRs on the user's behalf); `read:user` and
+ * `user:email` build the profile. Admins can narrow it in Admin → GitHub
+ * Login (e.g. `public_repo read:user user:email`).
+ */
+export const DEFAULT_GITHUB_OAUTH_SCOPE = "repo read:user user:email";
 export const OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 export interface OAuthConfig {
@@ -67,7 +74,7 @@ export function getOAuthConfig(): OAuthConfig | undefined {
     clientId: env.GITHUB_CLIENT_ID,
     clientSecret: env.GITHUB_CLIENT_SECRET,
     redirectUri: getOAuthRedirectUri(),
-    scope: env.GITHUB_OAUTH_SCOPE || "read:user user:email",
+    scope: env.GITHUB_OAUTH_SCOPE || DEFAULT_GITHUB_OAUTH_SCOPE,
   };
 }
 
