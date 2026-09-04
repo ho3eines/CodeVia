@@ -3,6 +3,7 @@ import type { User } from "../domain/entities.js";
 import type { UserRole, Permission } from "../types.js";
 import type { Container } from "../app/container.js";
 import { extractSessionToken, verifySession } from "../auth/github-oauth.js";
+import { getEnv } from "../config/env.js";
 
 export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   owner: ["project.read", "project.write", "agent.read", "agent.write", "workflow.read", "workflow.write", "model.read", "model.write", "provider.read", "provider.write", "skill.read", "skill.write", "memory.read", "memory.write", "repository.read", "repository.write", "deployment.read", "deployment.write", "secret.read", "secret.write", "telegram.read", "telegram.write", "admin.read", "admin.write"],
@@ -73,7 +74,7 @@ export function authMiddleware(opts: { container: Container; can?: Permission })
     // Optional strict mode: the Admin panel toggle overrides REQUIRE_AUTH env.
     // When on, API callers must present a valid GitHub-login session instead
     // of silently using the demo user.
-    let requireAuth = process.env.REQUIRE_AUTH === "true";
+    let requireAuth = getEnv().REQUIRE_AUTH;
     try {
       const { getEffectiveRequireAuth } = await import("../auth/admin-settings.js");
       requireAuth = getEffectiveRequireAuth(opts.container.kv);
@@ -81,8 +82,35 @@ export function authMiddleware(opts: { container: Container; can?: Permission })
       // kv unavailable (tests) — fall back to the env flag.
     }
     if (requireAuth && !authenticated && !req.headers["x-user-id"]) {
-      reply.code(401);
-      throw Object.assign(new Error("Authentication required (GitHub login)"), { statusCode: 401 });
+      // Strict mode must never lock everyone out: while GitHub login is not
+      // configured there is no way to obtain a session, so enforcing 401 here
+      // would brick the whole UI (including the Admin page needed to fix it).
+      // Log loudly and fall back to demo mode until OAuth is set up.
+      let loginConfigured = true;
+      try {
+        const { getEffectiveOAuthConfig } = await import("../auth/admin-settings.js");
+        loginConfigured = !!getEffectiveOAuthConfig(opts.container.kv);
+      } catch {
+        // kv unavailable — assume configured so the env flag still applies.
+      }
+      if (loginConfigured) {
+        reply.code(401);
+        throw Object.assign(new Error("Authentication required (GitHub login)"), { statusCode: 401 });
+      }
+      warnStrictModeWithoutLogin();
     }
   };
+}
+
+let warnedStrictModeWithoutLogin = false;
+function warnStrictModeWithoutLogin(): void {
+  if (warnedStrictModeWithoutLogin) return;
+  warnedStrictModeWithoutLogin = true;
+  // Lazy import keeps this module free of a hard logger dependency for tests.
+  void import("../logger.js").then(({ logger }) =>
+    logger.warn(
+      "REQUIRE_AUTH is on but GitHub login is not configured (missing Client ID and/or GITHUB_CLIENT_SECRET). " +
+        "Falling back to demo mode so the platform stays reachable — configure GitHub login to enforce strict auth.",
+    ),
+  );
 }

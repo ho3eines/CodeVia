@@ -16,6 +16,32 @@ The platform runs in **Mock AI** mode. Providers, models and skills are seeded; 
 - Set `GITHUB_TOKEN` (or App/OAuth credentials) and `GITHUB_ENABLED=true` to hit real repos.
 - The context/memory engine degrades gracefully when a repo is missing — a missing repo won't crash agent runs.
 
+## Blank page / `GET /app.js 401 (Unauthorized)` / "Authentication required (GitHub login)"
+
+Strict login mode (`REQUIRE_AUTH`) is on, but no GitHub session exists.
+
+- The SPA shell (`/`, `/app.js`, `/app.css`, `/socket.io/*`) and the OAuth
+  handshake (`/auth/github/login|callback|status`) are always public, so the UI
+  loads and shows a **Sign in required** screen with a **Login with GitHub** button.
+- If you did **not** intend strict mode: remove `REQUIRE_AUTH` (or set it to
+  `false`) in Railway Variables and redeploy. Older builds parsed *any* value —
+  even `REQUIRE_AUTH=false` — as `true`; this is fixed (`true/false`, `1/0`,
+  `yes/no`, `on/off` are understood).
+- If GitHub login is **not configured** (no Client ID / `GITHUB_CLIENT_SECRET`),
+  strict mode cannot be enforced (nobody could ever sign in); the platform logs a
+  warning and stays in demo mode until login is configured.
+- Strict mode can also be toggled from `#/admin` → **GitHub Login** → *Require
+  GitHub login for API* (stored in the runtime DB, overrides the env value).
+
+## GitHub login fails with `redirect_uri_mismatch`
+
+The OAuth App's **Authorization callback URL** must match the platform's
+callback **exactly**: `https://<your-app>.up.railway.app/auth/github/callback`.
+Check `GET /auth/github/status` → `redirectUri` and compare it with the value
+in GitHub → Settings → Developer settings → OAuth Apps. Set
+`PUBLIC_WEB_BASE_URL=https://<your-app>.up.railway.app` (or
+`GITHUB_OAUTH_CALLBACK_URL`) so the platform derives the same URL.
+
 ## Webhook signature invalid (`401`)
 
 - Set `GITHUB_WEBHOOK_SECRET` and use it as the GitHub App "Webhook secret".

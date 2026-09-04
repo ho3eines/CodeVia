@@ -97,25 +97,51 @@ function verifySignedPayload(token: string, secret: string): Record<string, unkn
 
 /* ---------------- OAuth state (CSRF protection) ---------------- */
 
-export function createOAuthState(secret?: string): string {
+/**
+ * Only in-app hash routes may be used as a post-login destination — this
+ * prevents open redirects (e.g. `next=https://evil.example`).
+ */
+const SAFE_NEXT_RE = /^#\/[A-Za-z0-9_\-/.%?=&]*$/;
+
+export function sanitizeNextLocation(next: unknown): string | undefined {
+  if (typeof next !== "string") return undefined;
+  const t = next.trim();
+  if (!t || t.length > 200 || !SAFE_NEXT_RE.test(t)) return undefined;
+  return t;
+}
+
+export function createOAuthState(secret?: string, opts?: { next?: string }): string {
   const s = secret ?? getAuthSecret();
+  const next = sanitizeNextLocation(opts?.next);
   const payload = JSON.stringify({
     nonce: randomBytes(16).toString("hex"),
     iat: Date.now(),
     exp: Date.now() + OAUTH_STATE_TTL_MS,
+    ...(next ? { next } : {}),
   });
   const payloadB64 = b64urlEncode(payload);
   return `${payloadB64}.${signPayload(payloadB64, s)}`;
 }
 
 export function verifyOAuthState(state: string | undefined, secret?: string, now = Date.now()): boolean {
-  if (!state) return false;
+  return readOAuthState(state, secret, now) !== undefined;
+}
+
+/** Verify the state and return its (sanitized) payload, or undefined when invalid/expired. */
+export function readOAuthState(
+  state: string | undefined,
+  secret?: string,
+  now = Date.now(),
+): { nonce: string; next?: string } | undefined {
+  if (!state) return undefined;
   const s = secret ?? getAuthSecret();
   const payload = verifySignedPayload(state, s);
-  if (!payload) return false;
+  if (!payload) return undefined;
   const exp = Number(payload.exp ?? 0);
-  if (!Number.isFinite(exp) || now > exp) return false;
-  return typeof payload.nonce === "string" && payload.nonce.length > 0;
+  if (!Number.isFinite(exp) || now > exp) return undefined;
+  if (typeof payload.nonce !== "string" || payload.nonce.length === 0) return undefined;
+  const next = sanitizeNextLocation(payload.next);
+  return { nonce: payload.nonce, ...(next ? { next } : {}) };
 }
 
 /* ---------------- authorize URL ---------------- */

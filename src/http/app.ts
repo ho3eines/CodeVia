@@ -1,7 +1,8 @@
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { join, relative, resolve, sep } from "node:path";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import swagger from "@fastify/swagger";
@@ -114,6 +115,9 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     prefix: "/",
     wildcard: false,
   });
+  // Exact URL paths of the files in /public (e.g. "/app.js", "/app.css",
+  // "/index.html"). Used by the auth guard to keep the SPA shell reachable.
+  const staticAssetPaths = await listStaticAssetPaths(publicDir);
 
   // SPA fallback: unknown non-API GET routes render index.html (hash routing).
   app.setNotFoundHandler(async (request, reply) => {
@@ -153,12 +157,43 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   });
 
   // Global auth guard for everything not whitelisted. Public/unauthenticated
-  // endpoints (health, docs, webhooks) are skipped; everything else attaches the
-  // current user context for permission checks.
-  const PUBLIC_PREFIXES = ["/health", "/ready", "/live", "/docs", "/webhooks/github", "/integrations/telegram/webhook", "/auth/github/login", "/auth/github/callback", "/auth/github/status"];
+  // endpoints (health, docs, webhooks, the OAuth handshake) are skipped;
+  // everything else attaches the current user context for permission checks.
+  const PUBLIC_PREFIXES = [
+    "/health",
+    "/ready",
+    "/live",
+    "/docs",
+    "/webhooks/github",
+    "/integrations/telegram/webhook",
+    "/auth/github/login",
+    "/auth/github/callback",
+    "/auth/github/status",
+    // Socket.io handshake/polling — realtime is observable status only.
+    "/socket.io/",
+  ];
+  // The SPA shell + its assets must always load, otherwise nobody can reach the
+  // login button (and a 401 on /app.js renders a blank page). Data still goes
+  // through the guarded API, so this exposes nothing beyond the static files.
+  const isStaticAsset = (request: { method: string; url: string }): boolean => {
+    if (request.method !== "GET" && request.method !== "HEAD") return false;
+    const pathname = request.url.split("?")[0];
+    return staticAssetPaths.has(pathname);
+  };
+  const isSpaNavigation = (request: { method: string; url: string; headers: Record<string, unknown> }): boolean => {
+    if (request.method !== "GET" && request.method !== "HEAD") return false;
+    const pathname = request.url.split("?")[0];
+    if (pathname.startsWith("/api")) return false;
+    const accept = String(request.headers.accept ?? "");
+    // Real browser navigations ask for HTML; API clients (fetch/XHR) don't.
+    return accept.includes("text/html");
+  };
   app.addHook("onRequest", async (request, reply) => {
     const url = request.url;
     if (url === "/" || PUBLIC_PREFIXES.some((p) => url.startsWith(p))) {
+      return;
+    }
+    if (isStaticAsset(request) || (request.is404 && isSpaNavigation(request))) {
       return;
     }
     await authMiddleware({ container })(request, reply);
@@ -169,4 +204,27 @@ export async function buildServer(container: Container): Promise<BuildServerResu
 
 export function getWebBaseUrl(): string {
   return getEnv().PUBLIC_WEB_BASE_URL ?? getEnv().WEB_BASE_URL;
+}
+
+/** Recursively list the files under `root` as URL paths ("/app.js", "/img/x.png"). */
+async function listStaticAssetPaths(root: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  let entries: Dirent[];
+  try {
+    entries = await readdir(root, { withFileTypes: true, recursive: true });
+  } catch (err) {
+    logger.warn("static asset directory not readable", { root, err: String(err) });
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    // `parentPath` (Node ≥ 20.12) is the directory containing the entry; fall
+    // back to the deprecated `path` alias on older runtimes.
+    const parent = (entry as Dirent & { parentPath?: string }).parentPath ?? entry.path ?? root;
+    const abs = join(parent, entry.name);
+    const rel = relative(root, abs).split(sep).join("/");
+    if (!rel || rel.startsWith("..")) continue;
+    out.add("/" + rel);
+  }
+  return out;
 }
