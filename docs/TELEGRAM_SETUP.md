@@ -167,8 +167,12 @@ offset, retries). These are the steps only an operator can do:
    token make Telegram answer `409 Conflict`.
 
 **In the UI (Telegram page)**
-8. Press **🧪 Run connection test** — it walks token → egress → webhook → endpoint → transport
-   and prints the one action that fixes each failing step.
+8. Press **🧪 Run connection test** (`GET /integrations/telegram/test`) — it walks
+   token → outbound network → webhook registration → our endpoint answering 200 →
+   a running transport, and prints the one action that fixes each failing step.
+   `verdict: "blocked"` with `This host cannot reach api.telegram.org` means the
+   environment has no outbound HTTPS (CI runners and sandboxed previews usually
+   don't) — nothing in Telegram's settings will change that.
 9. Send `/start` to your bot in Telegram. No answer? Send `/ping` to the bot: it reports the
    transport it is actually using and what to fix.
 10. Still silent? `curl -s https://<app>/integrations/telegram/diagnostics` and read `fixes[]`.

@@ -1,5 +1,6 @@
 import type { ITelegramService, TelegramWebhookInfo } from "./telegram.js";
 import {
+  isTelegramUnreachable,
   getTelegramWebhookPath,
   getPublicBaseUrl,
   isTelegramConnection,
@@ -452,7 +453,7 @@ export class TelegramRuntime {
       action: me.ok
         ? undefined
         : networkish
-          ? undefined
+          ? undefined // the egress step below carries the real instruction
           : "Copy a fresh token from @BotFather (/token) and set TELEGRAM_BOT_TOKEN — it changes when you run /revoke.",
     });
     push({
@@ -461,7 +462,7 @@ export class TelegramRuntime {
       status: me.ok ? "pass" : networkish ? "fail" : "pass",
       detail: networkish ? me.error : "outbound HTTPS to Telegram works",
       action: networkish
-        ? "Your network is blocking outbound traffic to api.telegram.org (egress policy, corporate proxy, or a sandboxed host). Allow that host, or run CodeVia somewhere with internet access — no webhook/polling setting can work around it."
+        ? "This host cannot reach api.telegram.org over HTTPS. Allow egress to that host (port 443), or run CodeVia somewhere with internet access (Railway, your laptop, a VPS). No webhook or polling setting can work around a blocked network — this is why a bot looks 'broken' in a sandbox."
         : undefined,
     });
 

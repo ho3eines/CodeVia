@@ -312,6 +312,11 @@ export class TelegramBotApiService implements ITelegramService, TelegramConnecti
       max_connections?: number;
       allowed_updates?: string[];
     }>("getWebhookInfo", undefined, { signal });
+    if (!res.ok) {
+      // Never report "no webhook is registered" when we could not ask — that
+      // misdiagnosis costs people an hour.
+      return { lastError: res.error };
+    }
     const r = res.result ?? {};
     return {
       url: r.url || undefined,
@@ -662,6 +667,17 @@ export function verifyTelegramWebhookSecret(headerValue: string | undefined, exp
   let diff = 0;
   for (let i = 0; i < expected.length; i += 1) diff |= headerValue.charCodeAt(i) ^ expected.charCodeAt(i);
   return diff === 0;
+}
+
+/**
+ * True when a call failed because *this host* could not reach Telegram, as
+ * opposed to Telegram rejecting what we sent. Without this distinction a blocked
+ * egress policy looks like "the webhook is broken", which sends people off
+ * debugging URLs and tokens instead of the network.
+ */
+export function isTelegramUnreachable(error: string | undefined): boolean {
+  if (!error) return false;
+  return /ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|SSL_ERROR|socket hang up|fetch failed|network error|could not connect/i.test(error);
 }
 
 /** Actionable guidance for the most common "bot is silent" causes. */

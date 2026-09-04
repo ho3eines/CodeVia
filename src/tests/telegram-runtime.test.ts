@@ -314,7 +314,11 @@ describe("Telegram connection test (what the operator must do)", () => {
     const by = Object.fromEntries(t.steps.map((st) => [st.name, st]));
     expect(t.verdict).toBe("blocked");
     expect(by.egress.status).toBe("fail");
-    expect(by.egress.action).toMatch(/api\.telegram\.org/);
+    expect(by.egress.action).toMatch(/cannot reach api\.telegram\.org/i);
+    // …and do not misreport the unknown webhook state as "no webhook".
+    const webhook = by.webhook;
+    expect(["fail", "skip"]).toContain(webhook.status);
+    expect(webhook.detail ?? "").toMatch(/ECONNRESET|fetch failed|network error/i);
     await c.stopTelegram();
   });
 

@@ -135,6 +135,7 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 |--------|------|-------------|
 | GET | `/integrations/telegram/status` | Bot status: `transport` (polling/webhook/off), `receiving`, `fixes[]` |
 | GET | `/integrations/telegram/diagnostics` | Live `getMe` + `getWebhookInfo` + poller state |
+| GET | `/integrations/telegram/test` | Connection test: token → egress → webhook → endpoint → transport, each with the action that fixes it |
 | POST | `/integrations/telegram/transport` | Switch receive mode `{mode:"auto"\|"polling"\|"webhook"\|"off"}` |
 | POST | `/integrations/telegram/webhook/refresh` | Re-register the webhook now |
 | POST | `/integrations/telegram/updates/skip` | Drain Telegram's queued backlog without replaying it |
