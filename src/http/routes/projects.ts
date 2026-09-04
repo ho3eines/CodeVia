@@ -76,7 +76,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       login: tokenInfo?.login,
     };
     try {
-      const project = await container.agentManager.createProject({
+      let project = await container.agentManager.createProject({
         name,
         slug: typeof body.slug === "string" && body.slug.trim() ? body.slug.trim() : undefined,
         description: String(body.description ?? ""),

@@ -1,5 +1,6 @@
 import type { ChatRequest, ChatResponse, IModelProvider, ProviderModelInfo } from "./types.js";
 import type { ModelProvider } from "../domain/entities.js";
+import { buildGeminiChatEndpoint } from "./provider-urls.js";
 import { logger } from "../logger.js";
 
 /** Google Gemini (generateContent) adapter. */
@@ -38,7 +39,7 @@ export class GeminiProvider implements IModelProvider {
     const key = this.resolveApiKey();
     const system = req.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
     const user = req.messages.filter((m) => m.role !== "system").map((m) => m.content).join("\n\n");
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${req.modelId}:generateContent?key=${key}`;
+    const url = buildGeminiChatEndpoint(this.config, req.modelId, key);
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -93,7 +93,7 @@ export class ProviderRegistry {
         id: "provider-anthropic",
         name: "Anthropic",
         type: "anthropic",
-        baseUrl: "https://api.anthropic.com/v1",
+        baseUrl: "https://api.anthropic.com",
         secretRef: "ANTHROPIC_API_KEY",
         authType: "api-key",
         apiFormat: "anthropic",

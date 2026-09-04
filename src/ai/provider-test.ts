@@ -1,5 +1,8 @@
 import type { ModelProvider } from "../domain/entities.js";
 import { decryptSecret } from "../auth/encrypted-secrets.js";
+import { buildModelsEndpoint } from "./provider-urls.js";
+import type { DetectedModelInfo } from "./provider-urls.js";
+import { detectModelInfo } from "./provider-urls.js";
 
 export interface ProviderTestResult {
   ok: boolean;
@@ -11,8 +14,16 @@ export interface ProviderTestResult {
   latencyMs?: number;
   message: string;
   hint?: string;
+  /** Exact URL the provider's model catalog was requested from (so the user can verify it). */
+  url?: string;
+  /** Any additional URLs the test touched (e.g. chat endpoint authes). */
+  urls?: string[];
   /** Model ids discovered from the provider (best effort, capped). */
   models?: string[];
+  /** Discovered models with inferred capabilities (id + metadata). */
+  modelInfos?: DetectedModelInfo[];
+  /** Whether a real chat completion was attempted (model-level tests). */
+  chatChecked?: boolean;
 }
 
 /**
@@ -63,27 +74,6 @@ export function providerReadiness(config: ModelProvider): { ready: boolean; reas
   return { ready: true };
 }
 
-function modelsEndpoint(config: ModelProvider, key: string | undefined): { url: string; headers: Record<string, string> } {
-  const base = (config.baseUrl ?? "").replace(/\/+$/, "");
-  const headers: Record<string, string> = { accept: "application/json" };
-  switch (config.apiFormat) {
-    case "anthropic":
-      if (key) headers["x-api-key"] = key;
-      headers["anthropic-version"] = "2023-06-01";
-      return { url: `${base}/models?limit=50`, headers };
-    case "gemini":
-      return { url: `${base}/models${key ? `?key=${encodeURIComponent(key)}` : ""}`, headers };
-    case "ollama":
-      return { url: `${base.replace(/\/v1$/, "")}/api/tags`, headers };
-    case "openai":
-    case "custom":
-    default:
-      if (key) headers.authorization = config.authType === "api-key" ? key : `Bearer ${key}`;
-      if (key && config.authType === "api-key") headers["api-key"] = key;
-      return { url: `${base}/models`, headers };
-  }
-}
-
 function extractModelIds(payload: unknown): string[] {
   if (!payload || typeof payload !== "object") return [];
   const obj = payload as Record<string, unknown>;
@@ -92,13 +82,33 @@ function extractModelIds(payload: unknown): string[] {
     .map((m) => String(m.id ?? m.name ?? m.model ?? ""))
     .filter(Boolean)
     .map((id) => id.replace(/^models\//, ""))
-    .slice(0, 50);
+    .slice(0, 100);
+}
+
+/** Build a best-effort `ProviderTestResult` for a request that could not be attempted. */
+export function providerTestNotReady(
+  config: ModelProvider,
+  url: string | undefined,
+): ProviderTestResult {
+  const keyPresent = !!resolveProviderKey(config);
+  const readiness = providerReadiness(config);
+  return {
+    ok: false,
+    keyPresent,
+    checked: false,
+    url,
+    urls: url ? [url] : undefined,
+    message: readiness.reason ?? "Provider not ready",
+    hint: readiness.hint,
+  };
 }
 
 /**
  * Live connectivity test for a provider: verifies the key is present, then calls
  * the provider's cheapest read-only endpoint (model catalog) with a short timeout.
- * Never throws; always returns a structured result the UI can display.
+ * Never throws; always returns a structured result the UI can display, including
+ * the exact URL that was requested and the models (with inferred capabilities)
+ * that were discovered.
  */
 export async function testProviderConnection(
   config: ModelProvider,
@@ -109,12 +119,13 @@ export async function testProviderConnection(
     return { ok: true, keyPresent: false, checked: false, message: "Mock provider is always available (no network call)." };
   }
   const readiness = providerReadiness(config);
+  const url = buildModelsEndpoint(config, resolveProviderKey(config)).url;
   if (!readiness.ready) {
-    return { ok: false, keyPresent, checked: false, message: readiness.reason ?? "Provider not ready", hint: readiness.hint };
+    return providerTestNotReady(config, url);
   }
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = Math.min(opts.timeoutMs ?? 10_000, config.timeoutMs || 10_000);
-  const { url, headers } = modelsEndpoint(config, resolveProviderKey(config));
+  const { headers } = buildModelsEndpoint(config, resolveProviderKey(config));
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const started = Date.now();
@@ -128,15 +139,19 @@ export async function testProviderConnection(
       /* non-JSON body */
     }
     if (res.ok) {
-      const models = extractModelIds(body);
+      const modelIds = extractModelIds(body);
+      const modelInfos = modelIds.map((id) => detectModelInfo(id));
       return {
         ok: true,
         keyPresent,
         checked: true,
         status: res.status,
         latencyMs,
-        message: `Connected (${res.status}) in ${latencyMs}ms${models.length ? ` — ${models.length} models visible` : ""}`,
-        models,
+        url,
+        urls: [url],
+        message: `Connected (${res.status}) in ${latencyMs}ms — ${modelIds.length} model(s) visible`,
+        models: modelIds,
+        modelInfos,
       };
     }
     const apiMessage =
@@ -147,7 +162,7 @@ export async function testProviderConnection(
         : res.status === 404
           ? "Endpoint not found — check the Base URL and API format."
           : undefined;
-    return { ok: false, keyPresent, checked: true, status: res.status, latencyMs, message: `Provider returned ${res.status}: ${apiMessage}`, hint };
+    return { ok: false, keyPresent, checked: true, status: res.status, latencyMs, url, urls: [url], message: `Provider returned ${res.status}: ${apiMessage}`, hint };
   } catch (err) {
     const aborted = err instanceof Error && err.name === "AbortError";
     return {
@@ -155,6 +170,8 @@ export async function testProviderConnection(
       keyPresent,
       checked: true,
       latencyMs: Date.now() - started,
+      url,
+      urls: [url],
       message: aborted ? `Timed out after ${timeoutMs}ms` : `Network error: ${err instanceof Error ? err.message : String(err)}`,
       hint: "The server could not reach the provider — check the Base URL, outbound network access, or proxy settings.",
     };

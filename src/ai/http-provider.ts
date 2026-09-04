@@ -6,6 +6,7 @@ import type {
   Usage,
 } from "./types.js";
 import type { ModelProvider } from "../domain/entities.js";
+import { buildChatEndpoint } from "./provider-urls.js";
 import { logger } from "../logger.js";
 
 /**
@@ -56,7 +57,6 @@ export class OpenAICompatibleProvider implements IModelProvider {
   }
 
   async chat(req: ChatRequest): Promise<ChatResponse> {
-    const baseUrl = this.config.baseUrl ?? "https://api.openai.com/v1";
     const key = this.resolveApiKey();
     const body: Record<string, unknown> = {
       model: req.modelId,
@@ -77,7 +77,7 @@ export class OpenAICompatibleProvider implements IModelProvider {
       }));
     }
 
-    const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+    const url = buildChatEndpoint(this.config);
     const started = Date.now();
     const res = await fetch(url, {
       method: "POST",
