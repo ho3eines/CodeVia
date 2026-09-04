@@ -29,6 +29,10 @@ export type TelegramTransport = "webhook" | "polling" | "off";
 
 export interface TelegramRuntimeStatus {
   enabled: boolean;
+  /** A token is configured (may still be rejected by Telegram — see `tokenProblem`). */
+  configured: boolean;
+  /** The bot is actually alive: a receive path is running and Telegram accepted us. */
+  ready: boolean;
   mode: TelegramMode;
   transport: TelegramTransport;
   mock: boolean;
@@ -184,6 +188,10 @@ export class TelegramRuntime {
         : "Telegram rejected the bot token — check TELEGRAM_BOT_TOKEN (or reconnect the account).";
       this.transport = "off";
       this.signature = "";
+      // A token Telegram rejects must not keep hammering getUpdates: the poller
+      // would spin forever on 401 and `ready` would stay true on a deaf bot.
+      // (Blocked egress is different — keep the poller so it self-heals.)
+      if (!isTelegramUnreachable(me.error)) await this.stopPolling().catch(() => undefined);
       this.lastCheckedAt = new Date().toISOString();
       return this.status();
     }
@@ -634,8 +642,19 @@ export class TelegramRuntime {
     if (this.transport === "off" && this.started && conn && !tokenProblem && fixes.length === 0 && !optedOut) {
       fixes.push('Nothing is receiving updates — run POST /integrations/telegram/transport {"mode":"auto"} or press “Use polling”.');
     }
+    // `ready` answers "is my bot alive?" — a transport is running *and* Telegram
+    // accepted our last call. `enabled` only means "not turned off", which used to
+    // let a rejected token or a half-registered webhook look healthy in the UI.
+    const pollingRunning = Boolean(this.poller?.status().running);
+    const webhookLive = this.transport === "webhook"
+      && Boolean(this.registeredWebhookUrl)
+      && !this.webhookError
+      && !tokenProblem;
+    const ready = this.currentMode !== "off" && !!conn && !tokenProblem && (pollingRunning || webhookLive);
     return {
       enabled: !!conn && !tokenProblem,
+      configured: !!conn,
+      ready,
       mode: this.currentMode,
       transport: this.transport,
       mock: !conn,

@@ -384,6 +384,31 @@ describe("Telegram HTTP surface", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("reports ready only when a receive path is actually running", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    getEnvFresh();
+    mockTelegramApi();
+    const srv = await boot();
+    await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "polling" } });
+    let res = await srv.inject({ method: "GET", url: "/integrations/telegram/status" });
+    let body = res.json();
+    expect(body.ready).toBe(true);
+    expect(body.configured).toBe(true);
+
+    // A token Telegram rejects must surface as "configured but not ready", never as
+    // healthy — and the poller must stop hammering getUpdates with a dead token.
+    mockTelegramApi({ getMe: { status: 401, body: { ok: false, description: "Unauthorized" } } });
+    await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "off" } });
+    await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "polling" } });
+    res = await srv.inject({ method: "GET", url: "/integrations/telegram/status" });
+    body = res.json();
+    expect(body.ready).toBe(false);
+    expect(body.configured).toBe(true);
+    expect(body.transport).toBe("off");
+    expect(body.polling?.running ?? false).toBe(false);
+    expect(body.note ?? body.fixes.join(" ")).toMatch(/rejected the bot token|unauthorized/i);
+  });
+
   it("does not report success when the requested transport cannot come up", async () => {
     // No public HTTPS URL here: asking for webhook mode must answer ok:false with
     // the reason, instead of a green toast over a bot that receives nothing.

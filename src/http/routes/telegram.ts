@@ -160,7 +160,14 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
     return {
       connected: (globalConfigured || accounts.some((a) => a.connected)) && receiving,
       configured: globalConfigured || accounts.some((a) => a.connected),
+      // "ready" is about the *platform* bot: a receive path is running and Telegram
+      // accepted the token. The UI colours its dot with this, never with
+      // `configured`, so a rejected or half-registered bot can't look healthy.
+      // Personal bots report for themselves in `accounts[]`.
+      ready: status.ready,
       receiving,
+      hasToken: status.hasToken,
+      tokenProblem: status.tokenProblem,
       globalConnected: globalConfigured,
       kind: telegram.constructor.name,
       // Show the actual public HTTPS URL the webhook uses (from the request host
