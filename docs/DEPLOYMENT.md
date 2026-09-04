@@ -28,7 +28,13 @@ Copy `.env.example` → `.env` and set the values you want (see [ENVIRONMENT.md]
 ### Option A — single service (simplest)
 
 1. Push the repository to GitHub and connect it to Railway.
-2. Railway detects `railway.json` (Dockerfile builder, `/health` healthcheck, `node dist/index.js`).
+2. Railway detects `railway.json` (Dockerfile builder, `/health` healthcheck).
+   The start command is
+   `"/usr/local/bin/docker-entrypoint.sh node dist/index.js"` — deliberately the
+   **entrypoint first**: `ENTRYPOINT` prepares the volume mount and drops to the
+   `codevia` user, `CMD`/`startCommand` only says *what* to run. A bare
+   `node dist/index.js` here (or in Service → Settings → Build → Start Command)
+   skips the volume fix-up and crash-loops with `unable to open database file`.
 3. Set **Railway Variables / Secrets**:
    - `NODE_ENV=production`
    - `PORT=8080`, `HOST=0.0.0.0`
@@ -38,11 +44,18 @@ Copy `.env.example` → `.env` and set the values you want (see [ENVIRONMENT.md]
    - `TELEGRAM_BOT_TOKEN=…`
    - `PUBLIC_WEB_BASE_URL=https://<your-app>.up.railway.app`
 4. Add a Volume with mount path `/app/data` to persist the runtime DB. The
-   image entrypoint detects the root-owned Railway mount, fixes its ownership,
-   and then drops privileges to the `codevia` user before starting Node.
-5. Deploy.
+   entrypoint reads `DATABASE_PATH`, creates/chowns that directory while it is
+   still root (`chown -R codevia`), then re-execs the app as `codevia`
+   (`setpriv`, with a `su` fallback) so the container never runs Node as root.
+   Ownership is repaired on *every* boot, because Railway re-mounts the volume
+   root-owned after each rebuild.
+5. Deploy. If the previous deploy crash-looped, trigger a redeploy from the
+   latest commit (an old build has no `ENTRYPOINT` and no storage pre-flight).
 
 Health: Railway polls `/health`.
+
+> `docker-compose.yml` and plain `docker run` need no `command:` override — the
+> image declares the entrypoint itself, so the volume is always prepared.
 
 ### Option B — split services (web + worker)
 

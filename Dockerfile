@@ -38,6 +38,14 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 ENV HOME=/app
 
+# Declare the entrypoint. Without this, nothing in the image ever runs
+# docker-entrypoint.sh: `docker run` would start CMD directly and a PaaS
+# start command would replace it — so the root-owned volume mount at /app/data
+# never gets prepared and SQLite dies with "unable to open database file".
+# ENTRYPOINT is inherited by the platform's "start command" (which only
+# replaces CMD), so the volume fix-up runs on every boot path.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
 EXPOSE 8080
 ENV PORT=8080
 ENV HOST=0.0.0.0

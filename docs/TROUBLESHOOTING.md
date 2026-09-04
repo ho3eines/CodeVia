@@ -3,7 +3,29 @@
 ## The platform won't start
 
 - **`Invalid environment configuration`** — a required env var is missing/invalid. Check `.env.example` against your `.env`.
-- **`EACCES`, `permission denied`, or only repeated `fatal startup error` after `Mounting volume` on Railway** — use `/app/data` as the volume mount path and set `DATABASE_PATH=/app/data/codevia.db`. The image entrypoint now initializes the root-owned Railway mount and then runs the app as `codevia`; redeploy after pulling this fix. The startup handler prints the underlying error on current builds instead of hiding it in log metadata.
+- **Repeating `Mounting volume …` / `fatal startup error` on Railway** — this is the
+  classic "root-owned volume + unprivileged app" crash loop: the platform mounts
+  `/app/data` as `root:root` *after* the image is built, so SQLite cannot create
+  `codevia.db`/`-wal`/`-shm` there and the process exits before the healthcheck
+  ever passes. The current build fixes it on three levels — redeploy the latest
+  `main` and the failure becomes self-explanatory:
+  1. `Dockerfile` declares `ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]`,
+     so the volume is prepared (mkdir + chown to `codevia`) on **every** boot path,
+     even if the platform overrides `CMD` with its own start command.
+  2. `railway.json` sets `deploy.startCommand` to
+     `/usr/local/bin/docker-entrypoint.sh node dist/index.js` — keep it. If you
+     replaced it with a bare `node dist/index.js` in the Railway dashboard
+     (Service → Settings → Build → Start Command), that override bypasses the
+     volume fix-up; clear it (or restore the entrypoint prefix).
+  3. Startup now runs a **storage pre-flight** before opening the DB, so instead
+     of a bare `fatal startup error` you get
+     `unusable storage path: … permission denied (EACCES) — /app/data is owned by
+     uid 0 (mode 755) and this process runs as uid 997 …` with the exact fix.
+  Requirements: volume mount path **exactly** `/app/data` and
+  `DATABASE_PATH=/app/data/codevia.db`. If the container is forced to run
+  non-root by a platform setting, the entrypoint prints a `FATAL: /app/data is not
+  writable by uid …` line instead of looping — let the image run as root (it drops
+  privileges itself) or chown the volume to that uid.
 - **Port already in use** — change `PORT` or stop the other process.
 - **`node:sqlite`** — requires Node ≥ 22. Ensure your runtime uses Node 22+ (`docker` image uses `node:22-slim`).
 

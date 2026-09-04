@@ -14,7 +14,7 @@ Copy `.env.example` to `.env` and set the values you need.
 | `HOST` | `0.0.0.0` | Bind address (must stay `0.0.0.0` for container deployments) |
 | `PORT` | `8080` | HTTP port |
 | `LOG_LEVEL` | `info` | `trace` \| `debug` \| `info` \| `warn` \| `error` \| `fatal` |
-| `DATABASE_PATH` | `./data/codevia.db` | Runtime SQLite path (volume in Docker) |
+| `DATABASE_PATH` | `./data/codevia.db` | Runtime SQLite path. In Docker/Railway set it inside the volume (`/app/data/codevia.db`); the entrypoint prepares that directory and the app pre-checks it is writable at boot |
 
 ---
 

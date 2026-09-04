@@ -1,12 +1,23 @@
 import { getContainer } from "./app/container.js";
 import { buildServer } from "./http/app.js";
 import { getEnv } from "./config/env.js";
+import { checkStoragePath, StoragePreflightError } from "./app/storage-preflight.js";
 import { getEffectiveGitHubLoginSettings } from "./auth/admin-settings.js";
 import { getLocalhostCallbackWarning } from "./auth/github-oauth.js";
 import { logger } from "./logger.js";
 
 async function main() {
   const env = getEnv();
+
+  // Fail fast — and loudly — when the runtime store path is unusable. Opening
+  // the DB is the first thing the container does, and node:sqlite reports a
+  // non-writable volume as a bare `unable to open database file`, which made
+  // Railway crash-loops unreadable.
+  const storage = checkStoragePath(env.DATABASE_PATH);
+  if (!storage.writable) {
+    throw new StoragePreflightError(storage);
+  }
+
   const container = getContainer();
   await container.ensureSeed();
 
@@ -45,10 +56,13 @@ async function main() {
 
 main().catch((err) => {
   const detail = err instanceof Error ? (err.stack || `${err.name}: ${err.message}`) : String(err);
-  logger.fatal("fatal startup error", { error: detail });
+  // A storage failure has an actionable hint; surface it in the message too, not
+  // just in the metadata (platform log viewers often show only the message).
+  const headline = err instanceof StoragePreflightError ? `unusable storage path: ${err.message}` : detail.split("\n")[0];
+  const errno = (err as NodeJS.ErrnoException | null)?.code;
+  logger.fatal(`fatal startup error: ${headline}`, { error: detail, code: errno });
   // Railway's log viewer may display only the structured message and hide
-  // metadata fields. Print the actual startup failure as a separate line so
-  // volume/permission, SQLite, and environment errors are actionable.
+  // metadata fields, so print the underlying startup failure verbatim as well.
   console.error(`fatal startup error: ${detail}`);
   process.exit(1);
 });
