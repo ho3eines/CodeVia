@@ -179,7 +179,9 @@ export class TelegramRuntime {
       this.webhookError = undefined;
     } else {
       this.webhookError = me.error;
-      this.note = "Telegram rejected the bot token — check TELEGRAM_BOT_TOKEN (or reconnect the account).";
+      this.note = isTelegramUnreachable(me.error)
+        ? "This server cannot reach api.telegram.org (outbound HTTPS is blocked), so neither webhook nor polling can work here."
+        : "Telegram rejected the bot token — check TELEGRAM_BOT_TOKEN (or reconnect the account).";
       this.transport = "off";
       this.signature = "";
       this.lastCheckedAt = new Date().toISOString();
@@ -469,7 +471,15 @@ export class TelegramRuntime {
     const info = await conn.getWebhookInfo();
     this.webhookInfo = info;
     const expected = this.webhookUrl ?? (this.started ? this.webhookUrlFor(this.resolveBaseUrl()) : undefined);
-    if (info.lastError) {
+    if (isTelegramUnreachable(info.lastError)) {
+      push({
+        name: "webhook",
+        label: "Telegram can deliver to the webhook",
+        status: "skip",
+        detail: `Telegram's webhook state could not be read (${info.lastError}).`,
+        action: "Blocked outbound HTTPS — resolve the egress step first; this check is inconclusive until then.",
+      });
+    } else if (info.lastError) {
       push({
         name: "webhook",
         label: "Telegram can deliver to the webhook",

@@ -684,7 +684,13 @@ export function isTelegramUnreachable(error: string | undefined): boolean {
 export function telegramWebhookFixHints(info: TelegramWebhookInfo | undefined, mode: string): string[] {
   const hints: string[] = [];
   const err = info?.lastError ?? "";
-  if (info && !info.empty && !info.url) hints.push("No webhook is registered and polling is off — the bot cannot receive messages. Set TELEGRAM_MODE=polling.");
+  // A failed *query* is not "no webhook" — say which one it is, or people debug
+  // a registration that was never the problem.
+  if (isTelegramUnreachable(err)) {
+    hints.push(`Cannot query Telegram (${err}) — this host has no outbound HTTPS to api.telegram.org. Fix egress first; webhook and polling both need it.`);
+    return hints;
+  }
+  if (info?.empty === true && mode !== "polling") hints.push("No webhook is registered and polling is off — the bot cannot receive messages. Set TELEGRAM_MODE=polling.");
   if (/HTTPS URL must be provided/i.test(err)) hints.push("Telegram rejected the webhook URL: it must be public HTTPS. Set PUBLIC_WEB_BASE_URL or TELEGRAM_WEBHOOK_URL.");
   if (/connection refused|timed out|not enough|bad webhook/i.test(err)) {
     hints.push(`Telegram cannot reach ${info?.url ?? "the webhook URL"} (${err}). Make sure the app is publicly reachable, then press "Reconnect".`);

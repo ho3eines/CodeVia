@@ -317,8 +317,9 @@ describe("Telegram connection test (what the operator must do)", () => {
     expect(by.egress.action).toMatch(/cannot reach api\.telegram\.org/i);
     // …and do not misreport the unknown webhook state as "no webhook".
     const webhook = by.webhook;
-    expect(["fail", "skip"]).toContain(webhook.status);
+    expect(webhook.status).toBe("skip");
     expect(webhook.detail ?? "").toMatch(/ECONNRESET|fetch failed|network error/i);
+    expect(webhook.action).toMatch(/egress step first/i);
     await c.stopTelegram();
   });
 
