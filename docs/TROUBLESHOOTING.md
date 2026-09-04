@@ -144,9 +144,35 @@ retrying (the top-bar pill shows `Live` / `Offline`). Common causes on Railway:
 - Set `GITHUB_WEBHOOK_SECRET` and use it as the GitHub App "Webhook secret".
 - The `X-Hub-Signature-256` header must be present on every request.
 
-## Telegram messages not sending
+## Telegram bot is connected but silent
 
-- Without `TELEGRAM_BOT_TOKEN`, the **mock** bot logs messages instead of sending. Set `TELEGRAM_BOT_TOKEN` and point the webhook at `/integrations/telegram/webhook`.
+The two failure directions are separate: **sending** (`sendMessage`) and
+**receiving** (webhook or long polling). Most "my bot doesn't answer" reports are
+receiving-path problems, so check them in this order:
+
+```bash
+curl -s localhost:8080/integrations/telegram/status        # connected? receiving? transport?
+curl -s localhost:8080/integrations/telegram/diagnostics   # Telegram's own view + fixes[]
+```
+
+- Without `TELEGRAM_BOT_TOKEN` the **mock** bot only logs messages. Set the token.
+- `transport: "off"` → nothing is listening. `POST /integrations/telegram/transport {"mode":"auto"}` (or the UI's **📡 Use long polling**) fixes it without redeploying.
+- `webhookInfo.last_error_message` mentions HTTPS → Telegram cannot use that URL;
+  set `PUBLIC_WEB_BASE_URL` (public HTTPS) or stay on polling.
+- `pending_update_count > 0` → Telegram has updates queued but the endpoint is
+  failing/unreachable. A non-2xx answer (or a `TELEGRAM_WEBHOOK_SECRET` mismatch,
+  which returns 401) makes Telegram stop delivering and eventually drop the webhook.
+- `Polling error: ... 409` → another replica is polling with the same token (or a
+  webhook was re-registered). Run one polling replica, or use the webhook.
+- `Forbidden: bot was blocked by the user` → the user blocked the bot; `/unblock` is not
+  a platform bug.
+- Nothing in the log at all and `ECONNRESET`/`ETIMEDOUT` reaching `api.telegram.org`
+  → outbound network is blocked by the host's egress policy.
+- The bot answers English but ignores messages in a **group** → Telegram's privacy
+  mode only forwards commands/@mentions; use `/privacy` in @BotFather.
+
+Formatting looks wrong (stray `*` or `<b>`) → the adapter sends `parse_mode: "HTML"`
+with escaped text; a custom provider/tool that writes its own messages must do the same.
 
 ## A run fails at a step
 

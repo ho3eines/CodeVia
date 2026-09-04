@@ -43,9 +43,14 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return getProjectOptionCatalog();
   });
 
-  // List projects
-  app.get("/projects", { schema: { tags: ["projects"] } }, async () => {
-    return container.projectRepo.findMany().map((r) => hydrateProject(r.data));
+  // List projects — yours, plus shared/unowned ones (seed data and single-user
+  // installs carry no owner, so nothing disappears when auth is enabled).
+  app.get("/projects", { schema: { tags: ["projects"] } }, async (req) => {
+    const { user } = resolveRequestUser(req, container);
+    return container.projectRepo
+      .findMany()
+      .map((r) => hydrateProject(r.data))
+      .filter((p) => !p.ownerId || p.ownerId === user.id);
   });
 
   // Create project + auto-onboard (Agent Generator / Skills / Workflow / Rules)
@@ -68,6 +73,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       );
     }
     const { user, authenticated } = resolveRequestUser(req, container);
+    const ownerId = user.id;
     const resolved = resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github });
     const tokenInfo = resolved.source === "user-oauth" ? describeUserGitHubToken(container.kv, user.id) : undefined;
     const githubConnection: ProjectGithubConnection = {
@@ -77,6 +83,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     };
     try {
       let project = await container.agentManager.createProject({
+        ownerId,
         name,
         slug: typeof body.slug === "string" && body.slug.trim() ? body.slug.trim() : undefined,
         description: String(body.description ?? ""),

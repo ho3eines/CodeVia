@@ -13,7 +13,12 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
       environment: getEnv().NODE_ENV,
       simulationMode: getEnv().ENABLE_SIMULATION_MODE,
       githubConnected: container.github.kind === "real",
-      telegramConnected: await container.telegram.health(),
+      // "connected" must mean *the bot can receive messages*, not just that a
+      // token exists — that difference is what made "it's configured but silent"
+      // impossible to see. `receiving` tells you which transport is live.
+      telegramConnected: container.telegramStatus().enabled,
+      telegramTransport: container.telegramStatus().transport,
+      telegramMode: container.telegramStatus().mode,
       defaultMock: getEnv().MOCK_AI_DEFAULT,
       databasePath: getEnv().DATABASE_PATH,
     };

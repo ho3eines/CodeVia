@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "seed": "tsx src/db/seed.ts"
+    "seed": "tsx src/db/seed.ts",
+    "mock:telegram": "node scripts/mock-telegram-api.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",

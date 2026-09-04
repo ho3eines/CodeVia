@@ -1599,41 +1599,181 @@
   on("/telegram", async () => {
     const status = await api("/integrations/telegram/status");
     const accounts = status.accounts || [];
-    $("#content").innerHTML = `<div class="overview"><div><h1>Telegram Integration</h1><p>Per-user Telegram bots — each user connects their own token & AccountId and gets a real bot.</p></div>
+    const receiving = status.transport || "off";
+    const recvBadge = receiving === "off"
+      ? `<span class="badge badge-err">not receiving</span>`
+      : status.ready && receiving === "polling"
+        ? `<span class="badge badge-ok">long polling</span>`
+        : status.ready && receiving === "webhook"
+          ? `<span class="badge badge-ok">webhook</span>`
+          : `<span class="badge badge-err">${esc(receiving)} — broken</span>`;
+    const fixes = (status.fixes || []).length
+      ? `<div class="field-hint err" style="margin-top:8px">${status.fixes.map((f) => `• ${esc(f)}`).join("<br/>")}</div>`
+      : "";
+    const poll = status.polling || {};
+    $("#content").innerHTML = `<div class="overview"><div><h1>Telegram Integration</h1><p>Per-user Telegram bots — connect a token and the platform receives your messages, with or without a public URL.</p></div>
         <button class="btn btn-primary" onclick="openTelegramAccount()">＋ Connect a bot</button></div>
       <div class="grid-2">
-        <div class="card card-body"><div class="card-title">Platform connection</div>
-          <div class="status-grid"><div class="status-item"><span class="status-dot ${status.globalConnected?'healthy':'warn'}"></span>${status.globalConnected?'Global bot (TELEGRAM_BOT_TOKEN)':'No global bot token — connect your own bot below'}</div></div>
-          <div class="meter-row"><span class="lbl">Webhook URL</span><span class="val mono" style="font-size:10px;word-break:break-all">${esc(status.webhookUrl || "—")}</span></div>
-          <p style="color:var(--text-muted);font-size:11px">After connecting a bot, set its webhook to the URL above (or use “Connect” which attempts it automatically). Commands: /start /projects /agents /task /run /status /tests /issues /pr /memory /skills</p>
+        <div class="card card-body"><div class="card-title">Platform connection ${recvBadge}</div>
+          <div class="status-grid"><div class="status-item"><span class="status-dot ${status.ready ? "healthy" : status.configured ? "warn" : "err"}"></span>${status.globalConnected ? `Global bot (TELEGRAM_BOT_TOKEN)${status.botUsername ? " · @" + esc(status.botUsername) : ""}` : status.configured ? `A token is set but Telegram rejected it${status.botUsername ? " · @" + esc(status.botUsername) : ""} — press 🧪 Run connection test` : "No global bot token — connect your own bot below"}</div></div>
+          <div class="meter-row"><span class="lbl">Receiving mode</span><span class="val mono">${esc(status.mode || "auto")} → ${esc(receiving)}</span></div>
+          <div class="meter-row"><span class="lbl">Bot API</span><span class="val mono">${esc(status.apiBase || "https://api.telegram.org")}${status.realApi === false ? ' <span class="badge badge-err">not Telegram</span>' : ""}</span></div>
+          ${receiving === "polling"
+            ? `<div class="meter-row"><span class="lbl">Poller</span><span class="val">${poll.running ? `✅ running · ${poll.updatesReceived || 0} update(s)` : "⏹ stopped"}</span></div>
+               <div class="field-hint">No public URL needed — the bot asks Telegram for updates. Works on a laptop, a NAT'ed VPS, or a preview host.</div>`
+            : `<div class="meter-row"><span class="lbl">Webhook URL</span><span class="val mono" style="font-size:10px;word-break:break-all">${esc(status.webhookUrl || "—")}</span></div>
+               <div class="meter-row"><span class="lbl">Telegram sees</span><span class="val mono">${esc((status.webhookInfo && status.webhookInfo.url) || "no webhook yet")}</span></div>`}
+          ${poll.lastError ? `<div class="field-hint err">${esc(poll.lastError)}</div>` : ""}
+          ${fixes}
+          <div class="provider-actions" style="margin-top:10px">
+            <button class="btn" onclick="telegramTransport('polling')">📡 Use long polling</button>
+            <button class="btn" onclick="telegramTransport('webhook')">🔗 Use webhook</button>
+            <button class="btn btn-ghost" onclick="telegramTest()">🧪 Run connection test</button>
+            <button class="btn btn-ghost" onclick="telegramDiagnostics()">🩺 Diagnostics</button>
+            <button class="btn btn-ghost" onclick="telegramTransport('off')">⏹ Stop receiving</button>
+          </div>
+          <p style="color:var(--text-muted);font-size:11px;margin-top:8px">Commands: /start /projects /agents /task /run /status /tests /issues /pr /memory /skills /id /ping — or just write your request in Persian. Docs: <span class="mono">docs/TELEGRAM_SETUP.md</span></p>
         </div>
-        <div class="card card-body"><div class="card-title">Preview</div>
-          <div class="field"><label>Message</label><input class="input" id="tg-msg" placeholder="/start"/></div>
-          <button class="btn btn-primary" id="tg-send">Send</button>
-          <div class="card mt"><div class="card-body" id="tg-out" style="background:var(--bg);min-height:80px"></div></div>
+        <div class="card card-body"><div class="card-title">Preview (no bot needed)</div>
+          <div class="field"><label>Message</label><input class="input" id="tg-msg" placeholder="/start" value="/start"/></div>
+          <button class="btn btn-primary" id="tg-send">Show reply</button>
+          <div class="card mt" id="tg-out" style="background:var(--bg);min-height:80px"></div>
         </div>
       </div>
       <div class="card card-body mt"><div class="card-title">Your bots (${accounts.length})</div>
         ${accounts.length ? `<div class="grid-2">${accounts.map((a) => `<div class="card card-body">
-          <div class="card-title">${esc(a.name || a.botUsername || a.botId || a.accountId || "Bot account")} ${a.connected ? '<span class="badge badge-ok">connected</span>' : '<span class="badge badge-err">disconnected</span>'}</div>
+          <div class="card-title">${esc(a.name || a.botUsername || a.botId || a.accountId || "Bot account")} ${a.connected ? '<span class="badge badge-ok">connected</span>' : '<span class="badge badge-err">disconnected</span>'} ${a.transport === "polling" ? '<span class="badge badge-info">polling</span>' : a.webhookSet ? '<span class="badge badge-ok">webhook</span>' : '<span class="badge badge-muted">not receiving</span>'}</div>
           <div class="meter-row"><span class="lbl">Bot</span><span class="val mono">${esc(a.botUsername || a.botId || "—")}</span></div>
           <div class="meter-row"><span class="lbl">AccountId</span><span class="val mono">${esc(a.accountId || "—")}</span></div>
-          <div class="meter-row"><span class="lbl">Chat</span><span class="val mono">${esc(a.chatId || "—")}</span></div>
+          <div class="meter-row"><span class="lbl">Chat</span><span class="val mono">${esc(a.chatId || "—")}${a.paired ? "" : ' <span class="badge badge-warn">not linked</span>'}</span></div>
+          ${a.pairCode ? `<div class="field-hint">Send <span class="mono">/pair ${esc(a.pairCode)}</span> to your bot to link this chat. <button class="btn btn-ghost" style="padding:1px 6px;font-size:10px" onclick="navigator.clipboard&&navigator.clipboard.writeText('/pair ${esc(a.pairCode)}');toast('Copied','Paste it in Telegram','ok')">copy</button></div>` : ""}
           <div class="meter-row"><span class="lbl">Token</span><span class="val mono">${esc(a.tokenMasked || "—")}</span></div>
-          <div class="meter-row"><span class="lbl">Webhook</span><span class="val">${a.webhookSet ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
-          ${a.lastError ? `<div class="field-hint err">${esc(a.lastError)}</div>` : ""}
+          <div class="meter-row"><span class="lbl">Last check</span><span class="val mono">${esc(a.lastCheckedAt || "—")}</span></div>
+          ${a.lastError ? `<div class="field-hint ${a.webhookSet || a.pollingActive ? "" : "err"}">${esc(a.lastError)}</div>` : ""}
           <div class="provider-actions">
-            <button class="btn" onclick="telegramConnect('${esc(a.id)}')">↻ Connect</button>
+            <button class="btn" onclick="telegramConnect('${esc(a.id)}')">↻ Reconnect</button>
+            <button class="btn" onclick="telegramAccountPoll('${esc(a.id)}', ${a.pollingActive ? "false" : "true"})">${a.pollingActive ? "⏹ Stop polling" : "📡 Poll for me"}</button>
             <button class="btn btn-ghost" onclick="openTelegramAccount('${esc(a.id)}')">Edit</button>
+            <button class="btn btn-ghost" onclick="telegramRepair('${esc(a.id)}')">🔗 Link another chat</button>
             <button class="btn btn-danger" onclick="telegramDelete('${esc(a.id)}')">Delete</button>
           </div>
-        </div>`).join("")}</div>` : emptyState("📱", "No bot connected", "Enter your Telegram bot token + AccountId to connect a real account for this user.")}
+        </div>`).join("")}</div>` : emptyState("📱", "No bot connected", "Enter your Telegram bot token (from @BotFather) to connect a real account for this user.")}
       </div>`;
-    $("#tg-send").onclick = async () => {
-      const r = await api("/integrations/telegram/command", { method: "POST", body: { text: $("#tg-msg").value } });
-      $("#tg-out").innerHTML = `<pre style="white-space:pre-wrap">${esc(JSON.stringify(r, null, 2))}</pre>`;
+    const renderPreview = (r) => {
+      const reply = r && r.reply;
+      const kb = (reply && reply.keyboard) || [];
+      $("#tg-out").innerHTML = r && r.error
+        ? `<div class="error-state"><h4>Bot error</h4><p style="font-size:12px">${esc(r.error)}</p></div>`
+        : reply
+          ? `<div style="padding:8px 10px"><div style="white-space:pre-wrap;font-size:12px">${esc(String(reply.text || "").replace(/[*`]/g, ""))}</div>
+             ${kb.length ? `<div class="flex" style="flex-wrap:wrap;gap:6px;margin-top:10px">${kb.map((row) => row.map((btn) => `<button class="btn btn-ghost" style="font-size:11px" onclick="telegramPreviewButton('${esc(btn.callback_data || "")}')">${esc(btn.text)}</button>`).join("")).join("")}</div>` : ""}</div>`
+          : `<div class="field-hint">${esc(r && r.delivered ? "Sent to your Telegram chat." : "That update has no reply — send /start or type a request.")}</div>`;
     };
+    window.telegramPreviewButton = async (data) => {
+      if (!data) return;
+      try { renderPreview(await api("/integrations/telegram/command", { method: "POST", body: { callbackData: data } })); }
+      catch (e) { toast("Preview failed", e.message, "err"); }
+    };
+    $("#tg-send").onclick = async () => {
+      try { renderPreview(await api("/integrations/telegram/command", { method: "POST", body: { text: $("#tg-msg").value } })); }
+      catch (e) { toast("Preview failed", e.message, "err"); }
+    };
+    renderPreview(await api("/integrations/telegram/command", { method: "POST", body: { text: "/start" } }));
   });
+  /**
+   * "Each user brings their own bot": the token is typed here, never in an env
+   * var. Until a chat is paired the bot answers nobody, so a token that leaks in
+   * a group or a screenshot cannot be used to read someone's projects.
+   */
+  window.renderTelegramSettings = async () => {
+    const host = $("#tg-settings");
+    if (!host) return;
+    let st;
+    try { st = await api("/integrations/telegram/status"); } catch (e) { host.innerHTML = ""; return; }
+    const accounts = st.accounts || [];
+    const rows = accounts.length
+      ? accounts.map((a) => `<div class="card card-body" style="margin-bottom:8px">
+          <div class="card-title">${esc(a.name || a.botUsername || "Bot")}
+            ${a.connected ? '<span class="badge badge-ok">token ok</span>' : '<span class="badge badge-err">token rejected</span>'}
+            ${a.paired ? '<span class="badge badge-ok">linked</span>' : '<span class="badge badge-warn">not linked</span>'}
+            <span class="badge badge-muted">${esc(a.transport || "off")}</span></div>
+          <div class="meter-row"><span class="lbl">Bot</span><span class="val mono">${esc(a.botUsername ? "@" + a.botUsername : "—")} · ${esc(a.tokenMasked || "")}</span></div>
+          <div class="meter-row"><span class="lbl">Answers chat</span><span class="val mono">${esc(a.chatId || "nobody yet")}</span></div>
+          ${a.pairCode ? `<div class="meter-row"><span class="lbl">Pairing code</span><span class="val mono" style="font-size:14px;letter-spacing:2px">${esc(a.pairCode)}</span></div>
+            <div class="field-hint">Send <span class="mono">/pair ${esc(a.pairCode)}</span> to your bot on Telegram — that chat becomes the only one it answers.</div>` : ""}
+          ${a.lastError ? `<div class="field-hint err">${esc(a.lastError)}</div>` : ""}
+          <div class="provider-actions" style="margin-top:8px">
+            <button class="btn" onclick="openTelegramAccount('${esc(a.id)}')">✏️ Edit</button>
+            <button class="btn btn-ghost" onclick="telegramAccountPoll('${esc(a.id)}', ${a.pollingActive ? "false" : "true"})">${a.pollingActive ? "⏹ Stop polling" : "📡 Poll for me"}</button>
+            <button class="btn btn-ghost" onclick="telegramRepair('${esc(a.id)}')">🔗 Link another chat</button>
+            <button class="btn btn-ghost" onclick="telegramConnect('${esc(a.id)}')">🔄 Re-check</button>
+            <button class="btn btn-ghost" onclick="telegramDelete('${esc(a.id)}')">🗑</button>
+          </div>
+        </div>`).join("")
+      : `<div class="field-hint">No bot connected yet. Each person here can use their own Telegram bot — create one with <span class="mono">@BotFather → /newbot</span> and paste the token below. No server variable, no webhook, no tunnel needed.</div>`;
+    host.innerHTML = `<div class="card card-body mt"><div class="card-title">Your Telegram bot ${st.realApi === false ? '<span class="badge badge-err">not Telegram (TELEGRAM_API_BASE)</span>' : ""}</div>
+        ${rows}
+        <div class="provider-actions" style="margin-top:6px">
+          <button class="btn btn-primary" onclick="openTelegramAccount()">＋ Connect a bot</button>
+          <button class="btn btn-ghost" onclick="telegramTest()">🧪 Run connection test</button>
+          <a class="btn btn-ghost" href="#/telegram">Full Telegram console →</a>
+        </div>
+      </div>`;
+  };
+
+  window.telegramRepair = async (id) => {
+    try {
+      await api(`/integrations/telegram/accounts/${id}`, { method: "PATCH", body: { pair: true } });
+      toast("New pairing code issued", "Send /pair <code> to your bot to link a chat.", "ok");
+      refreshCurrent();
+    } catch (e) { toast("Could not re-pair", e.message, "err"); }
+  };
+
+  window.telegramTest = async () => {
+    const btn = document.activeElement;
+    if (btn) btn.disabled = true;
+    try {
+      const t = await api("/integrations/telegram/test");
+      const icon = (st) => st === "pass" ? "✅" : st === "fail" ? "❌" : "⏭️";
+      const rows = (t.steps || []).map((st) => `<div class="card card-body" style="margin-bottom:8px;padding:8px 10px">
+          <div class="card-title" style="font-size:12px">${icon(st.status)} ${esc(st.label)}</div>
+          ${st.detail ? `<div class="field-hint" style="font-size:11px">${esc(st.detail)}</div>` : ""}
+          ${st.action ? `<div style="margin-top:6px;font-size:11.5px;color:var(--text)">👉 ${esc(st.action)}</div>` : ""}
+        </div>`).join("");
+      const verdictBadge = t.verdict === "ready" ? '<span class="badge badge-ok">ready</span>' : t.verdict === "degraded" ? '<span class="badge badge-warn">needs attention</span>' : '<span class="badge badge-err">blocked</span>';
+      openModal(`Telegram connection test ${verdictBadge}`, `
+        <p style="font-size:12px;color:var(--text-muted)">${esc(t.summary)} · transport: <span class="mono">${esc(t.transport)}</span> (mode ${esc(t.mode)})</p>
+        <div style="max-height:56vh;overflow:auto">${rows}</div>
+        <div class="provider-actions">
+          <button class="btn" onclick="telegramTransport('polling')">📡 Switch to long polling</button>
+          <button class="btn" onclick="telegramTransport('webhook')">🔗 Re-register webhook</button>
+          <button class="btn btn-ghost" onclick="telegramTest()">↻ Run again</button>
+        </div>`);
+    } catch (e) { toast("Connection test failed", e.message, "err"); }
+    finally { if (btn) btn.disabled = false; }
+  };
+  window.telegramTransport = async (mode) => {
+    try {
+      const r = await api("/integrations/telegram/transport", { method: "POST", body: { mode } });
+      // A requested mode that could not come up is a warning with the reason, not a success.
+      toast(r.ok ? "Telegram transport updated" : "Could not switch transport", r.message || `now ${r.transport}`, r.ok ? (r.transport === "off" ? "warn" : "ok") : "err");
+      refreshCurrent();
+    } catch (e) { toast("Could not change transport", e.message, "err"); }
+  };
+  window.telegramDiagnostics = async () => {
+    try {
+      const d = await api("/integrations/telegram/diagnostics");
+      openModal("Telegram diagnostics", `<pre style="white-space:pre-wrap;font-size:11px;max-height:60vh;overflow:auto">${esc(JSON.stringify(d, null, 2))}</pre>
+        <div class="field-hint">Live from Telegram: getMe + getWebhookInfo + the local poller state.</div>`);
+    } catch (e) { toast("Diagnostics failed", e.message, "err"); }
+  };
+  window.telegramAccountPoll = async (id, active) => {
+    try {
+      await api(`/integrations/telegram/accounts/${id}/transport`, { method: "POST", body: { transport: active ? "polling" : "webhook" } });
+      toast(active ? "Long polling started" : "Switched back to webhook", "", "ok");
+      refreshCurrent();
+    } catch (e) { toast("Could not change the account transport", e.message, "err"); }
+  };
   window.openTelegramAccount = async (editId) => {
     const existing = editId ? (await api("/integrations/telegram/accounts")).find((a) => a.id === editId) : null;
     openModal(editId ? "Edit Telegram bot" : "Connect Telegram bot", `
@@ -1649,6 +1789,8 @@
       const body = { token, accountId: $("#ta-account").value.trim(), chatId: $("#ta-chat").value.trim(), name: $("#ta-name").value.trim() };
       try {
         const r = editId ? await api(`/integrations/telegram/accounts/${editId}`, { method: "PATCH", body }) : await api("/integrations/telegram/accounts", { method: "POST", body });
+        if (r && r.warning) toast("Bot connected — but note", r.warning, "warn");
+        if (r && r.pairing) toast("Now link your chat", r.pairing.howto, "warn");
         closeModal(); toast(editId ? "Bot updated" : "Bot connected", (r.account?.botUsername || r.botUsername || "Telegram bot") + (r.account?.webhookSet ? " · webhook set" : ""), r.account?.connected || r.connected ? "ok" : "warn"); refreshCurrent();
       } catch (e) { toast("Connection failed", e.message, "err"); }
     };
@@ -1680,7 +1822,9 @@
           <p style="color:var(--text-muted);font-size:12px">Secrets are stored as references (e.g. OPENAI_API_KEY) and are never included in exports.</p>
           <p style="color:var(--text-muted);font-size:11px">💡 بکاپ شامل تنظیمات GitHub Login (بدون secrets) است. در Railway، قبل از Redeploy بکاپ بگیرید و بعد از دیپلی (که دیتابیس موقت پاک می‌شود) Restore کنید تا تنظیمات برگردند — یا Volume را طبق راهنمای Admin متصل کنید تا دیگر نیازی به این نباشد.</p>
         </div>
-      </div>`;
+      </div>
+      <div id="tg-settings"></div>`;
+    renderTelegramSettings();
     const restoreBtn = $("#restore-btn");
     const restoreFile = $("#restore-file");
     if (restoreBtn && restoreFile) {

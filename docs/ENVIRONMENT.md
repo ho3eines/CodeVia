@@ -57,9 +57,15 @@ The stored `Provider` config stores only `secretRef` (e.g. `OPENAI_API_KEY`) —
 
 | Variable | Description |
 |----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
-| `TELEGRAM_WEBHOOK_SECRET` | Optional webhook secret |
-| `ENABLE_TELEGRAM` | `true` to enable the bot interactions |
+| `TELEGRAM_BOT_TOKEN` | The **operator's** bot token. Optional: each user can instead paste their own token in Settings → Telegram (encrypted at rest, chat-paired), which is the multi-user path |
+| `TELEGRAM_MODE` | `auto` (default) · `polling` · `webhook` · `off` — how updates are received |
+| `TELEGRAM_POLL_TIMEOUT` | Long-poll hold seconds (default 25) |
+| `TELEGRAM_WEBHOOK_SECRET` | Optional webhook secret (`X-Telegram-Bot-Api-Secret-Token`, enforced on the webhook route when set) |
+| `TELEGRAM_WEBHOOK_URL` | Explicit public webhook URL override |
+| `TELEGRAM_WEBHOOK_INSECURE` | `true` keeps an `http://` webhook URL for a public host (behind a proxy that only forwards `x-forwarded-proto: http`). Never use it with `localhost` — Telegram cannot reach that anyway |
+| `TELEGRAM_WEBHOOK_ALLOW_LOOPBACK` | `true` skips both the https and the localhost rule so the webhook round-trip can be tested locally or through a tunnel. Off by default; never set it in production |
+| `TELEGRAM_API_BASE` | Bot API base; only change for a proxy/mirror or offline testing. While it is set, the UI marks the bot "not Telegram" and the connection test fails on purpose — a token verified against a mock is not verified |
+| `ENABLE_TELEGRAM` | Legacy "I want Telegram" flag — a token is enough; `TELEGRAM_MODE=off` is the opt-out |
 
 Without a token, a **MockTelegramService** is used (messages are recorded/logged), so local development needs no credentials.
 
