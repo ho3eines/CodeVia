@@ -201,4 +201,7 @@ offset, retries). These are the steps only an operator can do:
 | `connection refused` / `timed out` in `webhookInfo.last_error_message` | URL is public but the app is not answering | fix ingress/auth/replica, or use polling |
 | `Polling error: … 409` | a webhook is registered, or two replicas poll the same token | **🔗 Use webhook** (or keep one polling replica) |
 | `telegram getMe network error: fetch failed — ECONNRESET` | this host cannot reach `api.telegram.org` | allow that egress, or run the app somewhere with internet access |
+| `webhook URL must be HTTPS (got "http://<public-host>/…")` | the base was configured/derived as `http` | fixed automatically now: a **public** host configured as `http://` is upgraded to `https://`. If you really need http (internal proxy), set `TELEGRAM_WEBHOOK_INSECURE=true` |
+| `TELEGRAM_API_BASE is set to … — this instance is talking to that endpoint, NOT to api.telegram.org` | a mock/proxy base is configured, so "verified token" results are fake | unset `TELEGRAM_API_BASE` for a real bot; it exists for the offline mock and mirrors |
+| `Nothing was sent to Telegram: …` | our own check rejected the URL before calling Telegram | fix that one reason — Telegram was never involved, so don't debug its settings |
 | `Forbidden: bot was blocked by the user` | you blocked the bot | `/unblock` it in Telegram |

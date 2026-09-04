@@ -176,6 +176,8 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
       webhookUrl: webhookUrlFor(publicBase),
       transport: status.transport,
       mode: status.mode,
+      apiBase: status.apiBase,
+      realApi: status.realApi,
       botUsername: status.botUsername,
       webhookSet: status.webhookSet,
       webhookError: status.webhookError,

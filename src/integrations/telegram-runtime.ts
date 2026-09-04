@@ -1,6 +1,8 @@
 import type { ITelegramService, TelegramWebhookInfo } from "./telegram.js";
 import {
   isTelegramUnreachable,
+  isRealTelegramApi,
+  telegramApiBase,
   getTelegramWebhookPath,
   getPublicBaseUrl,
   isTelegramConnection,
@@ -31,6 +33,9 @@ export interface TelegramRuntimeStatus {
   enabled: boolean;
   /** A token is configured (may still be rejected by Telegram — see `tokenProblem`). */
   configured: boolean;
+  /** Bot API endpoint in use, and whether it is the real Telegram one. */
+  apiBase: string;
+  realApi: boolean;
   /** The bot is actually alive: a receive path is running and Telegram accepted us. */
   ready: boolean;
   mode: TelegramMode;
@@ -442,6 +447,16 @@ export class TelegramRuntime {
     const conn = this.connection;
     const push = (step: TelegramTestStep) => steps.push(step);
 
+    if (!isRealTelegramApi()) {
+      push({
+        name: "apiBase",
+        label: "Bot API endpoint",
+        status: "fail",
+        detail: `TELEGRAM_API_BASE points at ${telegramApiBase()}, so nothing below this line touched real Telegram — a token can "verify" here while the real bot stays untouched.`,
+        action: "Unset TELEGRAM_API_BASE to talk to api.telegram.org (that variable exists for the offline mock and for proxies/mirrors).",
+      });
+    }
+
     if (!conn) {
       push({
         name: "token",
@@ -635,7 +650,19 @@ export class TelegramRuntime {
     }
     const polling = this.poller?.status();
     if (polling?.lastError) fixes.push(`Polling error: ${polling.lastError}`);
-    fixes.push(...telegramWebhookFixHints(this.webhookInfo, this.transport));
+    // A URL we rejected ourselves is the *only* thing to fix here — don't also
+    // report Telegram's resulting "no webhook is set".
+    fixes.push(...telegramWebhookFixHints(
+      this.webhookInfo,
+      this.transport,
+      this.registeredWebhookUrl ? undefined : this.webhookError,
+      Boolean(this.registeredWebhookUrl),
+    ));
+    // A non-default Bot API base means nothing here touched the real Telegram:
+    // tokens "verify", webhooks "register", and yet no user ever gets a message.
+    if (!isRealTelegramApi()) {
+      fixes.push(`TELEGRAM_API_BASE is set to ${telegramApiBase()} — this instance is talking to that endpoint, NOT to api.telegram.org. Unset it for a real bot (it exists for the offline mock and for proxies/mirrors).`);
+    }
     // Only nag when a real bot is configured and *still* nothing is arriving —
     // in mock/off mode the note already explains the situation.
     const optedOut = this.currentMode === "off";
@@ -654,6 +681,8 @@ export class TelegramRuntime {
     return {
       enabled: !!conn && !tokenProblem,
       configured: !!conn,
+      apiBase: telegramApiBase(),
+      realApi: isRealTelegramApi(),
       ready,
       mode: this.currentMode,
       transport: this.transport,

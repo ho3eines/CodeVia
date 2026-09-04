@@ -1425,6 +1425,7 @@
         <div class="card card-body"><div class="card-title">Platform connection ${recvBadge}</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot ${status.ready ? "healthy" : status.configured ? "warn" : "err"}"></span>${status.globalConnected ? `Global bot (TELEGRAM_BOT_TOKEN)${status.botUsername ? " · @" + esc(status.botUsername) : ""}` : status.configured ? `A token is set but Telegram rejected it${status.botUsername ? " · @" + esc(status.botUsername) : ""} — press 🧪 Run connection test` : "No global bot token — connect your own bot below"}</div></div>
           <div class="meter-row"><span class="lbl">Receiving mode</span><span class="val mono">${esc(status.mode || "auto")} → ${esc(receiving)}</span></div>
+          <div class="meter-row"><span class="lbl">Bot API</span><span class="val mono">${esc(status.apiBase || "https://api.telegram.org")}${status.realApi === false ? ' <span class="badge badge-err">not Telegram</span>' : ""}</span></div>
           ${receiving === "polling"
             ? `<div class="meter-row"><span class="lbl">Poller</span><span class="val">${poll.running ? `✅ running · ${poll.updatesReceived || 0} update(s)` : "⏹ stopped"}</span></div>
                <div class="field-hint">No public URL needed — the bot asks Telegram for updates. Works on a laptop, a NAT'ed VPS, or a preview host.</div>`

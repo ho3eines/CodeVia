@@ -19,6 +19,8 @@ import { freshDb } from "./test-helpers.js";
 
 const ENV_KEYS = [
   "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_API_BASE",
+  "TELEGRAM_WEBHOOK_INSECURE",
   "TELEGRAM_MODE",
   "TELEGRAM_WEBHOOK_SECRET",
   "PUBLIC_WEB_BASE_URL",
@@ -407,6 +409,45 @@ describe("Telegram HTTP surface", () => {
     expect(body.transport).toBe("off");
     expect(body.polling?.running ?? false).toBe(false);
     expect(body.note ?? body.fixes.join(" ")).toMatch(/rejected the bot token|unauthorized/i);
+  });
+
+  it("upgrades an http public base to https instead of blaming the operator", async () => {
+    // Preview proxies and TLS-terminated ingresses answer on https at the same
+    // host — an `http://PUBLIC_WEB_BASE_URL` is a scheme typo, not a missing URL.
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    process.env.PUBLIC_WEB_BASE_URL = "http://my-app.up.railway.app";
+    getEnvFresh();
+    mockTelegramApi();
+    expect(getPublicBaseUrl()).toBe("https://my-app.up.railway.app");
+    const srv = await boot();
+    const res = await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "webhook" } });
+    expect(res.json().ok).toBe(true);
+    expect(res.json().status.webhookUrl).toBe("https://my-app.up.railway.app/integrations/telegram/webhook");
+    // An explicit opt-out is still honoured for a real http-only host.
+    process.env.TELEGRAM_WEBHOOK_INSECURE = "true";
+    getEnvFresh();
+    expect(getPublicBaseUrl()).toBe("http://my-app.up.railway.app");
+  });
+
+  it("refuses to pretend a mock Bot API is Telegram", async () => {
+    // The trap this exists for: an instance with TELEGRAM_API_BASE set "verified"
+    // a real token against the offline mock, so the UI looked green while no bot
+    // was wired to anything.
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    process.env.TELEGRAM_API_BASE = "http://127.0.0.1:8099";
+    getEnvFresh();
+    mockTelegramApi();
+    const srv = await boot();
+    const body = (await srv.inject({ method: "GET", url: "/integrations/telegram/status" })).json();
+    expect(body.realApi).toBe(false);
+    expect(body.apiBase).toBe("http://127.0.0.1:8099");
+    expect(body.fixes.join(" ")).toMatch(/NOT to api\.telegram\.org/i);
+
+    const t = (await srv.inject({ method: "GET", url: "/integrations/telegram/test" })).json();
+    expect(t.verdict).not.toBe("ready");
+    const first = t.steps[0];
+    expect(first.label).toMatch(/Bot API endpoint/i);
+    expect(first.action).toMatch(/Unset TELEGRAM_API_BASE/i);
   });
 
   it("does not report success when the requested transport cannot come up", async () => {

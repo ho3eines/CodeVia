@@ -534,6 +534,24 @@ export function isLocalHost(host: string): boolean {
   return h === "localhost" || h.startsWith("localhost:") || h === "127.0.0.1" || h.startsWith("127.") || h.endsWith(".local");
 }
 
+/**
+ * The Bot API base in use. Anything other than api.telegram.org means this
+ * instance is not talking to Telegram at all (a proxy/mirror, or the offline
+ * mock from `npm run mock:telegram`) — worth saying out loud, because every
+ * "success" from it is fake and every error is meaningless.
+ */
+export function telegramApiBase(): string {
+  try {
+    return (getEnv().TELEGRAM_API_BASE || "https://api.telegram.org").replace(/\/$/, "");
+  } catch {
+    return "https://api.telegram.org";
+  }
+}
+
+export function isRealTelegramApi(): boolean {
+  return telegramApiBase() === "https://api.telegram.org";
+}
+
 /** `TELEGRAM_WEBHOOK_INSECURE=true` opts out of the https upgrade for public hosts. */
 function forceHttpsForPublicHosts(): boolean {
   try {
@@ -543,9 +561,30 @@ function forceHttpsForPublicHosts(): boolean {
   }
 }
 
+/**
+ * Telegram only ever POSTs to an https URL, so an `http://` base whose host is
+ * public is treated as a scheme typo rather than a config error: preview proxies,
+ * Railway, Fly and most ingresses answer on the same host over TLS. Without this,
+ * `PUBLIC_WEB_BASE_URL=http://xyz.app` produced "webhook URL must be HTTPS — set
+ * PUBLIC_WEB_BASE_URL" while it *was* set, which sends people in circles.
+ * Loopback stays untouched (there is no TLS to upgrade to), and
+ * `TELEGRAM_WEBHOOK_INSECURE=true` disables the upgrade entirely.
+ */
+function upgradeInsecurePublicBase(base: string | undefined): string {
+  if (!base || !forceHttpsForPublicHosts()) return base ?? "";
+  if (!/^http:\/\//i.test(base)) return base;
+  let host = "";
+  try {
+    host = new URL(base).hostname;
+  } catch {
+    return base;
+  }
+  return isLocalHost(host) ? base : base.replace(/^http:\/\//i, "https://");
+}
+
 export function getPublicBaseUrl(host?: string, proto?: string): string {
   const env = getEnv();
-  if (env.PUBLIC_WEB_BASE_URL?.trim()) return env.PUBLIC_WEB_BASE_URL.trim();
+  if (env.PUBLIC_WEB_BASE_URL?.trim()) return upgradeInsecurePublicBase(env.PUBLIC_WEB_BASE_URL.trim());
   if (learnedPublicBaseUrl) return learnedPublicBaseUrl;
   // Derive from the caller's request: the proxy forwards the real scheme/host.
   if (host && !isLocalHost(host)) {
@@ -557,7 +596,7 @@ export function getPublicBaseUrl(host?: string, proto?: string): string {
     const scheme = proto === "http" && !forceHttpsForPublicHosts() ? "http" : "https";
     return `${scheme}://${host}`;
   }
-  return env.WEB_BASE_URL;
+  return upgradeInsecurePublicBase(env.WEB_BASE_URL);
 }
 
 export function getTelegramWebhookPath(): string {
@@ -703,21 +742,47 @@ export function isTelegramUnreachable(error: string | undefined): boolean {
 }
 
 /** Actionable guidance for the most common "bot is silent" causes. */
-export function telegramWebhookFixHints(info: TelegramWebhookInfo | undefined, mode: string): string[] {
+/**
+ * Human "do this" lines for the webhook state.
+ *
+ * `localError` is a problem we caught *before* calling Telegram (e.g. the URL
+ * failed validation). In that case Telegram's own "no webhook is registered" is a
+ * consequence, not a second bug — repeating it produces two competing actions and
+ * people start debugging the wrong one.
+ */
+export function telegramWebhookFixHints(
+  info: TelegramWebhookInfo | undefined,
+  mode: string,
+  localError?: string,
+  registeredByUs?: boolean,
+): string[] {
   const hints: string[] = [];
   const err = info?.lastError ?? "";
+  if (localError) {
+    hints.push(`Nothing was sent to Telegram: ${localError}`);
+    if ((info?.pendingUpdateCount ?? 0) > 0) {
+      hints.push(`${info?.pendingUpdateCount} update(s) are queued at Telegram meanwhile — they arrive as soon as a receive path is registered.`);
+    }
+    return hints;
+  }
   // A failed *query* is not "no webhook" — say which one it is, or people debug
   // a registration that was never the problem.
   if (isTelegramUnreachable(err)) {
     hints.push(`Cannot query Telegram (${err}) — this host has no outbound HTTPS to api.telegram.org. Fix egress first; webhook and polling both need it.`);
     return hints;
   }
-  if (info?.empty === true && mode !== "polling") hints.push("No webhook is registered and polling is off — the bot cannot receive messages. Set TELEGRAM_MODE=polling.");
+  // We registered a webhook successfully a moment ago but Telegram's own view is
+  // still empty: that is usually a few seconds of lag (or a mock/proxy that does
+  // not echo it), not a missing registration — do not tell people to flip to
+  // polling when their push delivery is actually fine.
+  const lag = Boolean(registeredByUs) && info?.empty === true && !err;
+  if (lag) hints.push(`Telegram has not reported the webhook yet (${info?.url || "no url"}) — this usually clears within a few seconds. Re-run the connection test before changing anything.`);
+  else if (info?.empty === true && mode !== "polling") hints.push("No webhook is registered and polling is off — the bot cannot receive messages. Set TELEGRAM_MODE=polling.");
   if (/HTTPS URL must be provided/i.test(err)) hints.push("Telegram rejected the webhook URL: it must be public HTTPS. Set PUBLIC_WEB_BASE_URL or TELEGRAM_WEBHOOK_URL.");
   if (/connection refused|timed out|not enough|bad webhook/i.test(err)) {
     hints.push(`Telegram cannot reach ${info?.url ?? "the webhook URL"} (${err}). Make sure the app is publicly reachable, then press "Reconnect".`);
   }
-  if (mode === "webhook" && !info?.url) hints.push('TELEGRAM_MODE=webhook but no webhook is set — run "Refresh webhook" or switch to TELEGRAM_MODE=auto.');
+  if (mode === "webhook" && !info?.url && !lag) hints.push('TELEGRAM_MODE=webhook but no webhook is set — run "Refresh webhook" or switch to TELEGRAM_MODE=auto.');
   if ((info?.pendingUpdateCount ?? 0) > 0) {
     hints.push(`${info?.pendingUpdateCount} update(s) queued at Telegram but not delivered — the webhook endpoint is failing or unreachable.`);
   }
