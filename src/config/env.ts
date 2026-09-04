@@ -117,6 +117,9 @@ const EnvSchema = z.object({
   //   webhook — always setWebhook (fails loudly when there is no public HTTPS URL)
   //   off     — never receive updates (send-only, e.g. notifications from CI)
   TELEGRAM_MODE: envEnum(["auto", "polling", "webhook", "off"] as const, "auto"),
+  // Keep `http://` webhook URLs for public hosts (Telegram normally rejects
+  // them; only set this when an HTTPS-terminating proxy is not in front).
+  TELEGRAM_WEBHOOK_INSECURE: envBoolean(false),
   // Long-poll hold time in seconds (Telegram allows 0-60; 25 is a good default).
   TELEGRAM_POLL_TIMEOUT: envNumber(25, 0),
   // Telegram Bot API base. Only change it when a proxy/mirror is required — or

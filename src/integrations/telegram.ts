@@ -523,13 +523,33 @@ export function resetLearnedPublicBaseUrl(): void {
   learnedPublicBaseUrl = undefined;
 }
 
+/** Hosts Telegram can never reach. */
+export function isLocalHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === "localhost" || h.startsWith("localhost:") || h === "127.0.0.1" || h.startsWith("127.") || h.endsWith(".local");
+}
+
+/** `TELEGRAM_WEBHOOK_INSECURE=true` opts out of the https upgrade for public hosts. */
+function forceHttpsForPublicHosts(): boolean {
+  try {
+    return getEnv().TELEGRAM_WEBHOOK_INSECURE !== true;
+  } catch {
+    return true;
+  }
+}
+
 export function getPublicBaseUrl(host?: string, proto?: string): string {
   const env = getEnv();
   if (env.PUBLIC_WEB_BASE_URL?.trim()) return env.PUBLIC_WEB_BASE_URL.trim();
   if (learnedPublicBaseUrl) return learnedPublicBaseUrl;
   // Derive from the caller's request: the proxy forwards the real scheme/host.
-  if (host && !/localhost|127\.0\.0\.1/i.test(host)) {
-    const scheme = proto === "https" ? "https" : proto === "http" ? "http" : "https";
+  if (host && !isLocalHost(host)) {
+    // Telegram only accepts HTTPS webhooks. A proxy that reports
+    // `x-forwarded-proto: http` in front of a public host (TLS terminated at the
+    // edge — Railway, Fly, most k8s ingresses, preview proxies) used to produce
+    // `http://host/...` and get rejected with "an HTTPS URL must be provided".
+    // For a public host we therefore assume https.
+    const scheme = proto === "http" && !forceHttpsForPublicHosts() ? "http" : "https";
     return `${scheme}://${host}`;
   }
   return env.WEB_BASE_URL;

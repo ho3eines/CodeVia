@@ -143,3 +143,43 @@ HTML formatting are all exercised for real.
    webhook (or run exactly one polling replica); the poller already reports this.
 5. `connection refused`/`ECONNRESET` to `api.telegram.org` → outbound traffic is
    blocked by the network/egress policy; the log says so explicitly.
+
+---
+
+## 9. What *you* have to do (checklist)
+
+The platform automates everything it can (webhook registration, polling fallback,
+offset, retries). These are the steps only an operator can do:
+
+**BotFather**
+1. `/newbot` (or `/mybots` → API tokens → `/revoke` if the token was ever shared) → copy the token.
+2. Groups only: `/setprivacy` → *Disable*, otherwise the bot sees just commands/@mentions.
+3. Nothing else in BotFather — **do not** paste a webhook URL there; the platform registers it.
+
+**Railway / server**
+4. Variables → `TELEGRAM_BOT_TOKEN=<token>`. That is the minimum for a working bot.
+5. Redeploy (env changes need a restart).
+6. Optional, only if you specifically want push delivery:
+   `PUBLIC_WEB_BASE_URL=https://<app>.up.railway.app` (Railway's domain is already public HTTPS)
+   and `TELEGRAM_WEBHOOK_SECRET=<any random string>` so nobody else can POST fake updates to
+   your webhook. `ENABLE_TELEGRAM` and a tunnel are **not** required.
+7. Optional: run exactly **one** replica while using long polling — two replicas polling one
+   token make Telegram answer `409 Conflict`.
+
+**In the UI (Telegram page)**
+8. Press **🧪 Run connection test** — it walks token → egress → webhook → endpoint → transport
+   and prints the one action that fixes each failing step.
+9. Send `/start` to your bot in Telegram. No answer? Send `/ping` to the bot: it reports the
+   transport it is actually using and what to fix.
+10. Still silent? `curl -s https://<app>/integrations/telegram/diagnostics` and read `fixes[]`.
+
+**Meaning of the common webhook errors**
+
+| Message you see | What it means | Do this |
+|---|---|---|
+| `webhook URL must be HTTPS (got "http://localhost:8080/…")` | no public URL was learned | set `PUBLIC_WEB_BASE_URL`, or press **📡 Use long polling** |
+| `bad webhook: An HTTPS URL must be provided for webhook` | Telegram refused the URL | same as above |
+| `connection refused` / `timed out` in `webhookInfo.last_error_message` | URL is public but the app is not answering | fix ingress/auth/replica, or use polling |
+| `Polling error: … 409` | a webhook is registered, or two replicas poll the same token | **🔗 Use webhook** (or keep one polling replica) |
+| `telegram getMe network error: fetch failed — ECONNRESET` | this host cannot reach `api.telegram.org` | allow that egress, or run the app somewhere with internet access |
+| `Forbidden: bot was blocked by the user` | you blocked the bot | `/unblock` it in Telegram |

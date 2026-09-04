@@ -1433,6 +1433,7 @@
           <div class="provider-actions" style="margin-top:10px">
             <button class="btn" onclick="telegramTransport('polling')">📡 Use long polling</button>
             <button class="btn" onclick="telegramTransport('webhook')">🔗 Use webhook</button>
+            <button class="btn btn-ghost" onclick="telegramTest()">🧪 Run connection test</button>
             <button class="btn btn-ghost" onclick="telegramDiagnostics()">🩺 Diagnostics</button>
             <button class="btn btn-ghost" onclick="telegramTransport('off')">⏹ Stop receiving</button>
           </div>
@@ -1482,6 +1483,29 @@
     };
     renderPreview(await api("/integrations/telegram/command", { method: "POST", body: { text: "/start" } }));
   });
+  window.telegramTest = async () => {
+    const btn = document.activeElement;
+    if (btn) btn.disabled = true;
+    try {
+      const t = await api("/integrations/telegram/test");
+      const icon = (st) => st === "pass" ? "✅" : st === "fail" ? "❌" : "⏭️";
+      const rows = (t.steps || []).map((st) => `<div class="card card-body" style="margin-bottom:8px;padding:8px 10px">
+          <div class="card-title" style="font-size:12px">${icon(st.status)} ${esc(st.label)}</div>
+          ${st.detail ? `<div class="field-hint" style="font-size:11px">${esc(st.detail)}</div>` : ""}
+          ${st.action ? `<div style="margin-top:6px;font-size:11.5px;color:var(--text)">👉 ${esc(st.action)}</div>` : ""}
+        </div>`).join("");
+      const verdictBadge = t.verdict === "ready" ? '<span class="badge badge-ok">ready</span>' : t.verdict === "degraded" ? '<span class="badge badge-warn">needs attention</span>' : '<span class="badge badge-err">blocked</span>';
+      openModal(`Telegram connection test ${verdictBadge}`, `
+        <p style="font-size:12px;color:var(--text-muted)">${esc(t.summary)} · transport: <span class="mono">${esc(t.transport)}</span> (mode ${esc(t.mode)})</p>
+        <div style="max-height:56vh;overflow:auto">${rows}</div>
+        <div class="provider-actions">
+          <button class="btn" onclick="telegramTransport('polling')">📡 Switch to long polling</button>
+          <button class="btn" onclick="telegramTransport('webhook')">🔗 Re-register webhook</button>
+          <button class="btn btn-ghost" onclick="telegramTest()">↻ Run again</button>
+        </div>`);
+    } catch (e) { toast("Connection test failed", e.message, "err"); }
+    finally { if (btn) btn.disabled = false; }
+  };
   window.telegramTransport = async (mode) => {
     try {
       const r = await api("/integrations/telegram/transport", { method: "POST", body: { mode } });

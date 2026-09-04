@@ -8,6 +8,16 @@ import {
   validateTelegramWebhookUrl,
 } from "./telegram.js";
 import { TelegramPoller, type TelegramPollerStatus, type TelegramPollStateStore } from "./telegram-poller.js";
+
+/** Loopback check for a full URL (Telegram can never deliver to it). */
+function isLocalHostUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname;
+    return h === "localhost" || h === "127.0.0.1" || h.startsWith("127.") || h.endsWith(".local");
+  } catch {
+    return true;
+  }
+}
 import type { TelegramBot } from "./telegram-bot.js";
 import type { TelegramAccount } from "../domain/telegram.js";
 import { accountTelegramService } from "./telegram.js";
@@ -35,6 +45,24 @@ export interface TelegramRuntimeStatus {
   lastCheckedAt?: string;
   fixes: string[];
   note?: string;
+}
+
+export interface TelegramTestStep {
+  name: string;
+  label: string;
+  /** "pass" | "fail" | "skip" — skip means "not applicable here", not broken. */
+  status: "pass" | "fail" | "skip";
+  detail?: string;
+  /** What the operator must actually do, when the step is not a pass. */
+  action?: string;
+}
+
+export interface TelegramConnectionTest {
+  steps: TelegramTestStep[];
+  verdict: "ready" | "blocked" | "degraded";
+  summary: string;
+  transport: TelegramTransport;
+  mode: TelegramMode;
 }
 
 export interface TelegramRuntimeDeps {
@@ -389,6 +417,161 @@ export class TelegramRuntime {
   private webhookSet(ok: boolean): void {
     this.transport = ok ? "webhook" : this.transport;
     if (ok) this.registeredWebhookUrl = this.webhookUrl;
+  }
+
+  /**
+   * End-to-end "is my bot wired up correctly" check, in the order things
+   * actually break: token → outbound network → webhook registration → our own
+   * endpoint being reachable and answering 200 → a transport that is running.
+   * Each failing step carries the one action that fixes it, so the answer to
+   * "the webhook has an error" is a specific instruction, not a guess.
+   */
+  async connectionTest(): Promise<TelegramConnectionTest> {
+    const steps: TelegramTestStep[] = [];
+    const conn = this.connection;
+    const push = (step: TelegramTestStep) => steps.push(step);
+
+    if (!conn) {
+      push({
+        name: "token",
+        label: "Bot token",
+        status: "fail",
+        detail: "The platform is running the mock Telegram service.",
+        action: "Set TELEGRAM_BOT_TOKEN (from @BotFather), or connect a bot in the UI, then restart.",
+      });
+      return { steps, verdict: "blocked", summary: "No real Telegram connection is configured.", transport: this.transport, mode: this.currentMode };
+    }
+
+    const me = await conn.getMe();
+    const networkish = /network error|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up/i.test(me.error ?? "");
+    push({
+      name: "token",
+      label: "Bot token is accepted by Telegram",
+      status: me.ok ? "pass" : "fail",
+      detail: me.ok ? `@${me.result?.username ?? "?"} (id ${me.result?.id ?? "?"})` : me.error,
+      action: me.ok
+        ? undefined
+        : networkish
+          ? undefined
+          : "Copy a fresh token from @BotFather (/token) and set TELEGRAM_BOT_TOKEN — it changes when you run /revoke.",
+    });
+    push({
+      name: "egress",
+      label: "This server can reach api.telegram.org",
+      status: me.ok ? "pass" : networkish ? "fail" : "pass",
+      detail: networkish ? me.error : "outbound HTTPS to Telegram works",
+      action: networkish
+        ? "Your network is blocking outbound traffic to api.telegram.org (egress policy, corporate proxy, or a sandboxed host). Allow that host, or run CodeVia somewhere with internet access — no webhook/polling setting can work around it."
+        : undefined,
+    });
+
+    const info = await conn.getWebhookInfo();
+    this.webhookInfo = info;
+    const expected = this.webhookUrl ?? (this.started ? this.webhookUrlFor(this.resolveBaseUrl()) : undefined);
+    if (info.lastError) {
+      push({
+        name: "webhook",
+        label: "Telegram can deliver to the webhook",
+        status: "fail",
+        detail: `${info.url ?? "(no url)"} — ${info.lastError}${info.pendingUpdateCount ? ` (${info.pendingUpdateCount} update(s) queued)` : ""}`,
+        action: /HTTPS URL must be provided/i.test(info.lastError ?? "")
+          ? "Telegram requires a public HTTPS webhook. Set PUBLIC_WEB_BASE_URL=https://<your-app>.up.railway.app (or TELEGRAM_WEBHOOK_URL), or just switch to long polling."
+          : "Telegram cannot reach that URL. Check the app is publicly exposed (health endpoint answers from outside), that the path is not behind auth, and that the replica receiving traffic is this one — or switch to long polling.",
+      });
+    } else if (info.url && expected && info.url !== expected) {
+      push({
+        name: "webhook",
+        label: "Registered webhook points at this deployment",
+        status: "fail",
+        detail: `Telegram is posting to ${info.url}, this instance expects ${expected}.`,
+        action: "Two environments share one bot token. Give each its own bot, or press “Re-register webhook” here to point it at this deployment.",
+      });
+    } else if (info.url) {
+      push({ name: "webhook", label: "Registered webhook points at this deployment", status: "pass", detail: info.url });
+    } else {
+      push({
+        name: "webhook",
+        label: "Webhook registration",
+        status: this.transport === "polling" ? "skip" : "fail",
+        detail: this.transport === "polling"
+          ? "No webhook — not needed while long polling is active."
+          : "Telegram has no webhook for this bot and polling is not running.",
+        action: this.transport === "polling"
+          ? undefined
+          : `Press 🔗 Use webhook (registers ${expected ?? "the public URL"}) or 📡 Use long polling.`,
+      });
+    }
+
+    // Probe our own webhook endpoint: proves the route exists, is public and
+    // answers 200 (a non-2xx makes Telegram stop delivering and eventually drop
+    // the webhook — the classic "connected but silent").
+    const probeUrl = expected;
+    if (!probeUrl || isLocalHostUrl(probeUrl)) {
+      push({
+        name: "endpoint",
+        label: "Webhook endpoint answers 200",
+        status: "skip",
+        detail: probeUrl ? `${probeUrl} is a loopback URL — Telegram cannot post to it, so it was not probed.` : "no public URL to probe",
+        action: "Set PUBLIC_WEB_BASE_URL to the public HTTPS URL of this deployment to enable this check — or use long polling.",
+      });
+    } else {
+      try {
+        const probe = await fetch(probeUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.deps.webhookSecret ? { "X-Telegram-Bot-Api-Secret-Token": this.deps.webhookSecret } : {}),
+          },
+          // A payload with no text/callback is parsed and ignored by the handler.
+          body: JSON.stringify({ update_id: 0, message: { chat: { id: 0 }, from: { id: 0 } } }),
+          signal: AbortSignal.timeout(8000),
+        });
+        push({
+          name: "endpoint",
+          label: "Webhook endpoint answers 200",
+          status: probe.ok ? "pass" : "fail",
+          detail: `${probeUrl} → HTTP ${probe.status}`,
+          action: probe.ok
+            ? undefined
+            : `The endpoint answered ${probe.status}. It must always answer 200: check the path is in the public allowlist, that no proxy/auth sits in front of it, and that REQUIRE_AUTH is not gating /integrations/telegram/webhook.`,
+        });
+      } catch (err) {
+        push({
+          name: "endpoint",
+          label: "Webhook endpoint answers 200",
+          status: "fail",
+          detail: `self-request failed: ${err instanceof Error ? err.message : String(err)}`,
+          action: "This server cannot reach its own public URL (DNS/ingress/redirect). Fix the public route, or use long polling.",
+        });
+      }
+    }
+
+    const polling = this.poller?.status();
+    push({
+      name: "transport",
+      label: "A receive path is running",
+      status: this.transport === "webhook" ? "pass" : this.transport === "polling" ? (polling?.running ? "pass" : "fail") : "fail",
+      detail: this.transport === "polling"
+        ? `long polling ${polling?.running ? `running — ${polling.updatesReceived} update(s) read, offset ${polling.offset ?? 0}` : "NOT running"}${polling?.lastError ? ` · last error: ${polling.lastError}` : ""}`
+        : this.transport === "webhook"
+          ? "webhook registered"
+          : "nothing is receiving updates",
+      action: this.transport === "off" ? 'Press 📡 Use long polling (works with only a token), or POST /integrations/telegram/transport {"mode":"auto"}.' : polling?.resolvingConflict ? "Polling is fighting a webhook/second instance for the same token — keep exactly one receiver." : undefined,
+    });
+
+    const fails = steps.filter((st) => st.status === "fail");
+    const blocked = fails.some((st) => st.name === "token" || st.name === "egress");
+    return {
+      steps,
+      verdict: blocked ? "blocked" : fails.length ? "degraded" : "ready",
+      summary: blocked
+        ? "Telegram itself is unreachable or the token is rejected — fix that first, nothing else can work."
+        : fails.length === 0
+          ? "The bot is wired up: token valid and a receive path is running."
+          : `${fails.length} step(s) need attention — see the actions below.`,
+      transport: this.transport,
+      mode: this.currentMode,
+    };
   }
 
   /**

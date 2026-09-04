@@ -175,6 +175,9 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     };
   });
 
+  /** Step-by-step "what do I have to do" answer, from Telegram's own point of view. */
+  app.get("/integrations/telegram/test", { schema: { tags: ["telegram"] } }, async () => runtime.connectionTest());
+
   // Round-trip diagnostics straight from Telegram's own view of this bot.
   app.get("/integrations/telegram/diagnostics", { schema: { tags: ["telegram"] } }, async (req) => {
     const status = await runtime.diagnostics(true);

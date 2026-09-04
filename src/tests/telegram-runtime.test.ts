@@ -3,7 +3,12 @@ import type { FastifyInstance } from "fastify";
 import { getEnvFresh } from "../config/env.js";
 import { Container } from "../app/container.js";
 import { buildServer } from "../http/app.js";
-import { resetLearnedPublicBaseUrl } from "../integrations/telegram.js";
+import {
+  getPublicBaseUrl,
+  getTelegramWebhookUrl,
+  resetLearnedPublicBaseUrl,
+  validateTelegramWebhookUrl,
+} from "../integrations/telegram.js";
 import { freshDb } from "./test-helpers.js";
 
 /**
@@ -17,6 +22,7 @@ const ENV_KEYS = [
   "TELEGRAM_MODE",
   "TELEGRAM_WEBHOOK_SECRET",
   "PUBLIC_WEB_BASE_URL",
+  "TELEGRAM_WEBHOOK_INSECURE",
   "WEB_BASE_URL",
   "ENABLE_TELEGRAM",
   "REQUIRE_AUTH",
@@ -35,7 +41,7 @@ let fetchBodies: Record<string, unknown>[];
 type Reply = { status: number; body: Record<string, unknown> };
 
 /** Scriptable Telegram Bot API. Any method not in `routes` answers ok:true. */
-function mockTelegramApi(routes: Record<string, Reply> = {}): void {
+function mockTelegramApi(routes: Record<string, Reply> = {}, opts: { networkDown?: boolean } = {}): void {
   const orig = globalThis.fetch;
   (globalThis as { __restoreFetch?: () => void }).__restoreFetch = () => {
     globalThis.fetch = orig;
@@ -43,6 +49,9 @@ function mockTelegramApi(routes: Record<string, Reply> = {}): void {
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     const method = url.slice(url.lastIndexOf("/") + 1);
+    if (opts.networkDown) {
+      throw Object.assign(new Error("fetch failed"), { cause: { code: "ECONNRESET" } });
+    }
     fetchCalls.push(method);
     fetchBodies.push(init?.body && typeof init.body === "string" ? JSON.parse(init.body) : {});
     const reply = routes[method] ?? { status: 200, body: { ok: true, result: method === "getMe" ? { id: 42, username: "codevia_test_bot" } : method === "getUpdates" ? [] : method === "getWebhookInfo" ? { url: "" } : true } };
@@ -218,6 +227,67 @@ describe("Telegram receive path (webhook vs long polling)", () => {
     expect(fetchCalls).not.toContain("getUpdates");
     expect(c.telegramStatus().fixes).toEqual([]);
     await c.stopTelegram();
+  });
+});
+
+describe("Telegram connection test (what the operator must do)", () => {
+  it("lists every step with a pass when the bot is correctly wired", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    getEnvFresh();
+    mockTelegramApi();
+    const c = newContainer();
+    await c.ensureSeed();
+    await c.startTelegram();
+    const t = await c.telegramRuntime.connectionTest();
+    const by = Object.fromEntries(t.steps.map((st) => [st.name, st]));
+    expect(by.token.status).toBe("pass");
+    expect(by.egress.status).toBe("pass");
+    expect(by.transport.status).toBe("pass");
+    // Loopback dev URL: the probe is skipped rather than reported as broken.
+    expect(by.endpoint.status).toBe("skip");
+    expect(by.webhook.status).toBe("skip");
+    expect(t.verdict).toBe("ready");
+    await c.stopTelegram();
+  });
+
+  it("names blocked egress as the root cause instead of blaming the webhook", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    getEnvFresh();
+    mockTelegramApi({}, { networkDown: true });
+    const c = newContainer();
+    await c.ensureSeed();
+    await c.startTelegram();
+    const t = await c.telegramRuntime.connectionTest();
+    const by = Object.fromEntries(t.steps.map((st) => [st.name, st]));
+    expect(t.verdict).toBe("blocked");
+    expect(by.egress.status).toBe("fail");
+    expect(by.egress.action).toMatch(/api\.telegram\.org/);
+    await c.stopTelegram();
+  });
+
+  it("detects another environment stealing the webhook", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    process.env.PUBLIC_WEB_BASE_URL = "https://staging.example.com";
+    process.env.TELEGRAM_MODE = "webhook";
+    getEnvFresh();
+    mockTelegramApi({
+      getWebhookInfo: { status: 200, body: { ok: true, result: { url: "https://prod.example.com/integrations/telegram/webhook" } } },
+    });
+    const c = newContainer();
+    await c.ensureSeed();
+    await c.startTelegram();
+    const t = await c.telegramRuntime.connectionTest();
+    const webhook = t.steps.find((st) => st.name === "webhook");
+    expect(webhook?.status).toBe("fail");
+    expect(webhook?.detail).toContain("https://prod.example.com");
+    expect(webhook?.action).toMatch(/share one bot token/i);
+    await c.stopTelegram();
+  });
+
+  it("assumes HTTPS for a public host even when the proxy says http (Telegram rejects http webhooks)", () => {
+    const base = getPublicBaseUrl("8080-codevia.e2b.app", "http");
+    expect(base).toBe("https://8080-codevia.e2b.app");
+    expect(validateTelegramWebhookUrl(getTelegramWebhookUrl("my-app.up.railway.app", "http")).ok).toBe(true);
   });
 });
 
