@@ -72,8 +72,9 @@ const EnvSchema = z.object({
   GITHUB_APP_PRIVATE_KEY: z.string().optional(),
   // GitHub App webhook secret for signature validation
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
-  // GitHub OAuth login (user sign-in via github.com)
-  GITHUB_OAUTH_SCOPE: z.string().default("read:user user:email"),
+  // GitHub OAuth login (user sign-in via github.com). Blank = platform default
+  // ("repo read:user user:email" — `repo` is needed to list private repos).
+  GITHUB_OAUTH_SCOPE: z.string().default(""),
   GITHUB_OAUTH_CALLBACK_URL: z.string().optional(),
 
   // Platform auth sessions (HMAC-signed opaque tokens for GitHub-login users)

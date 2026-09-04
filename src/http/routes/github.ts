@@ -1,27 +1,71 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
 import { verifyGithubSignature, getWebhookSecret } from "../../github/webhook.js";
+import { GitHubAuthError } from "../../github/real-service.js";
+import { resolveGitHubForUser, isServerGitHubEnabled } from "../../github/registry.js";
+import type { ResolvedGitHub } from "../../github/registry.js";
 import { eventBus, generateCorrelationId } from "../../events/bus.js";
 import { logger } from "../../logger.js";
 import { resolveRequestUser } from "../auth.js";
+import { describeUserGitHubToken } from "../../auth/github-tokens.js";
+import { getEnv } from "../../config/env.js";
+
+/** Map a GitHub failure to a proper HTTP status + actionable message (never a 200 with `{error}`). */
+function githubError(reply: FastifyReply, err: unknown, resolved?: ResolvedGitHub): { error: string; source?: string; hint?: string } {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof GitHubAuthError) {
+    reply.code(err.status === 403 ? 403 : 401);
+    const hint =
+      resolved?.source === "user-oauth"
+        ? "GitHub rejected your login token (revoked or expired). Log out and log in with GitHub again."
+        : "GitHub rejected the server token. Check GITHUB_TOKEN (PAT / installation token) — GITHUB_CLIENT_SECRET is not a token.";
+    return { error: message, source: resolved?.source, hint };
+  }
+  reply.code(502);
+  return { error: message, source: resolved?.source, hint: "GitHub API request failed — see server logs." };
+}
 
 export function registerGithubRoutes(app: FastifyInstance, container: Container): void {
+  const resolveFor = (req: FastifyRequest): ResolvedGitHub & { userId?: string; authenticated: boolean } => {
+    const { user, authenticated } = resolveRequestUser(req, container);
+    const r = resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github });
+    return { ...r, userId: user.id, authenticated };
+  };
+
   app.get("/integrations/github/status", { schema: { tags: ["github"] } }, async (req) => {
     const kind = container.github.kind;
-    let repoCount = 0;
-    if (kind === "real") {
-      try {
-        repoCount = (await container.github.listRepositories()).length;
-      } catch {
-        repoCount = 0;
-      }
-    }
     const { isGitHubOAuthConfigured } = await import("../../auth/github-oauth.js");
     const { user, authenticated } = resolveRequestUser(req, container);
+    const resolved = resolveFor(req);
+    const userToken = authenticated ? describeUserGitHubToken(container.kv, user.id) : { stored: false, scopes: [], canReadPrivateRepos: false };
+    let repoCount = 0;
+    let repoError: string | undefined;
+    let viewer: { login: string; name?: string; scopes: string[] } | undefined;
+    // This endpoint is public (the SPA needs it before login). Never spend the
+    // server token's rate limit — or reveal its owner — for anonymous callers
+    // in strict mode.
+    const allowLive = authenticated || !getEnv().REQUIRE_AUTH;
+    if (resolved.source !== "mock" && allowLive) {
+      try {
+        viewer = await resolved.service.getViewer();
+        repoCount = (await resolved.service.listRepositories({ limit: 300 })).length;
+      } catch (err) {
+        repoError = err instanceof Error ? err.message : String(err);
+      }
+    } else {
+      repoCount = (await resolved.service.listRepositories()).length;
+    }
     return {
-      connected: kind === "real",
+      connected: kind === "real" || resolved.source === "user-oauth",
       kind,
+      /** Which credential the repo picker uses for this request. */
+      source: resolved.source,
+      sourceHint: resolved.hint,
+      serverTokenEnabled: isServerGitHubEnabled(),
       repoCount,
+      repoError,
+      viewer,
+      userToken,
       sourceOfTruth: true,
       oauthConfigured: isGitHubOAuthConfigured(),
       authenticated,
@@ -29,48 +73,64 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
     };
   });
 
-  app.get("/github/repositories", { schema: { tags: ["github"] } }, async () => {
+  /**
+   * Repositories visible to the current session. Query params:
+   *   ?q=substring   filter on owner/name/description
+   *   ?limit=N       cap (default 300)
+   * Response: { repositories, source, hint, viewer? }
+   */
+  app.get("/github/repositories", { schema: { tags: ["github"] } }, async (req, reply) => {
+    const q = req.query as { q?: string; limit?: string };
+    const resolved = resolveFor(req);
     try {
-      return await container.github.listRepositories();
+      const repositories = await resolved.service.listRepositories({
+        query: q.q,
+        limit: q.limit ? Number(q.limit) : undefined,
+      });
+      return { repositories, source: resolved.source, scopes: resolved.scopes, hint: resolved.hint, count: repositories.length };
     } catch (err) {
-      return { error: String(err) };
+      return githubError(reply, err, resolved);
     }
   });
 
-  app.get("/github/repositories/:owner/:name/branches", { schema: { tags: ["github"] } }, async (req) => {
+  app.get("/github/repositories/:owner/:name/branches", { schema: { tags: ["github"] } }, async (req, reply) => {
     const { owner, name } = req.params as { owner: string; name: string };
+    const resolved = resolveFor(req);
     try {
-      return await container.github.listBranches({ owner, name });
+      return await resolved.service.listBranches({ owner, name });
     } catch (err) {
-      return { error: String(err) };
+      return githubError(reply, err, resolved);
     }
   });
 
-  app.get("/github/repositories/:owner/:name/commits", { schema: { tags: ["github"] } }, async (req) => {
+  app.get("/github/repositories/:owner/:name/commits", { schema: { tags: ["github"] } }, async (req, reply) => {
     const { owner, name } = req.params as { owner: string; name: string };
     const q = req.query as { branch?: string };
+    const resolved = resolveFor(req);
     try {
-      return await container.github.listCommits({ owner, name }, q.branch);
+      return await resolved.service.listCommits({ owner, name }, q.branch);
     } catch (err) {
-      return { error: String(err) };
+      return githubError(reply, err, resolved);
     }
   });
 
-  app.post("/github/repositories/:owner/:name/branches", { schema: { tags: ["github"] } }, async (req) => {
+  app.post("/github/repositories/:owner/:name/branches", { schema: { tags: ["github"] } }, async (req, reply) => {
     const { owner, name } = req.params as { owner: string; name: string };
     const b = req.body as Record<string, unknown>;
+    const resolved = resolveFor(req);
     try {
-      return await container.github.createBranch({ owner, name }, String(b.name), String(b.baseSha));
+      return await resolved.service.createBranch({ owner, name }, String(b.name), String(b.baseSha));
     } catch (err) {
-      return { error: String(err) };
+      return githubError(reply, err, resolved);
     }
   });
 
-  app.post("/github/repositories/:owner/:name/pull-requests", { schema: { tags: ["github"] } }, async (req) => {
+  app.post("/github/repositories/:owner/:name/pull-requests", { schema: { tags: ["github"] } }, async (req, reply) => {
     const { owner, name } = req.params as { owner: string; name: string };
     const b = req.body as Record<string, unknown>;
+    const resolved = resolveFor(req);
     try {
-      return await container.github.createPullRequest(
+      return await resolved.service.createPullRequest(
         { owner, name },
         String(b.title),
         String(b.body ?? ""),
@@ -78,7 +138,7 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
         String(b.base),
       );
     } catch (err) {
-      return { error: String(err) };
+      return githubError(reply, err, resolved);
     }
   });
 

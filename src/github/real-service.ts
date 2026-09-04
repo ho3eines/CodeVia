@@ -1,31 +1,70 @@
 import type {
   IGitHubService,
   GithubRepoRef,
+  GithubRepository,
+  GithubViewer,
   GithubBranch,
   GithubCommit,
   GithubPullRequest,
   GithubIssue,
   GithubRelease,
   GithubFile,
+  ListRepositoriesOptions,
 } from "./types.js";
-import { getEnv } from "../config/env.js";
 import { logger } from "../logger.js";
 
+export interface RealGitHubServiceOptions {
+  /**
+   * Token resolver. Defaults to `GITHUB_TOKEN` from the environment. A
+   * per-user adapter passes the user's OAuth access token instead so the
+   * repository list reflects *their* GitHub account.
+   */
+  token?: string | (() => string | undefined);
+  /** Override the API base (GitHub Enterprise). */
+  baseUrl?: string;
+  /** Label used in errors/logs ("server token" vs. "user session"). */
+  label?: string;
+  /** Injectable fetch (tests / proxies). Defaults to the global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+/** Thrown when GitHub rejects the credential (401/403) — callers map this to actionable UI hints. */
+export class GitHubAuthError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "GitHubAuthError";
+  }
+}
+
+const MAX_PAGE = 100;
+
 /**
- * GitHub REST API adapter. Requires a GitHub token from the environment (via the
- * secret manager). All operations are performed through `fetch` against the REST
- * API, keeping the platform free of SDK coupling. A GitHub App installation could
- * supply an installation token via the same interface.
+ * GitHub REST API adapter. Requires a GitHub token (server `GITHUB_TOKEN` via the
+ * secret manager, or a user OAuth token). All operations are performed through
+ * `fetch` against the REST API, keeping the platform free of SDK coupling. A
+ * GitHub App installation could supply an installation token via the same
+ * interface.
  */
 export class RealGitHubService implements IGitHubService {
   readonly kind = "real" as const;
-  private base = "https://api.github.com";
+  private base: string;
+  private readonly tokenSource: () => string | undefined;
+  private readonly label: string;
+  private readonly fetchImpl: typeof fetch;
 
-  private getToken(): string {
+  constructor(opts: RealGitHubServiceOptions = {}) {
+    this.base = (opts.baseUrl ?? process.env.GITHUB_API_BASE_URL ?? "https://api.github.com").replace(/\/$/, "");
+    const t = opts.token;
     // NOTE: GITHUB_CLIENT_SECRET is an OAuth *app secret*, never an API token —
     // only GITHUB_TOKEN (PAT / OAuth user token / App installation token) works here.
-    const token = process.env.GITHUB_TOKEN;
-    if (!token) throw new Error("GitHub token not configured (GITHUB_TOKEN)");
+    this.tokenSource = typeof t === "function" ? t : t ? () => t : () => process.env.GITHUB_TOKEN;
+    this.label = opts.label ?? "GITHUB_TOKEN";
+    this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init));
+  }
+
+  private getToken(): string {
+    const token = this.tokenSource();
+    if (!token) throw new GitHubAuthError(`GitHub token not configured (${this.label})`, 401);
     return token;
   }
 
@@ -34,33 +73,80 @@ export class RealGitHubService implements IGitHubService {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${this.getToken()}`,
       "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "codevia-platform",
     };
   }
 
+  private async request(path: string, init?: RequestInit): Promise<Response> {
+    const url = path.startsWith("http") ? path : `${this.base}${path}`;
+    const res = await this.fetchImpl(url, {
+      ...init,
+      headers: { ...this.headers(), ...(init?.headers ?? {}) },
+      signal: init?.signal ?? AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) {
+      const text = (await res.text().catch(() => "")).slice(0, 200);
+      if (res.status === 401 || res.status === 403) {
+        throw new GitHubAuthError(`GitHub ${res.status} (${this.label}) ${url}: ${text}`, res.status);
+      }
+      throw new Error(`GitHub ${res.status} ${url}: ${text}`);
+    }
+    return res;
+  }
+
   private async json<T>(path: string, init?: RequestInit): Promise<T> {
-    const url = `${this.base}${path}`;
-    const res = await fetch(url, { ...init, headers: { ...this.headers(), ...(init?.headers ?? {}) } });
-    if (!res.ok) throw new Error(`GitHub ${res.status} ${url}: ${(await res.text()).slice(0, 200)}`);
+    const res = await this.request(path, init);
     return (await res.json()) as T;
   }
 
-  async listRepositories(): Promise<GithubRepoRef[]> {
-    const res = await this.json<Array<{ full_name: string }>>("/user/repos?per_page=100");
-    return res.map((r) => {
-      const [owner, name] = r.full_name.split("/");
-      return { owner, name };
-    });
+  /** Follow `Link: <…>; rel="next"` pagination up to `limit` items. */
+  private async paginate<T>(path: string, limit: number): Promise<T[]> {
+    const out: T[] = [];
+    let next: string | undefined = path;
+    while (next && out.length < limit) {
+      const res: Response = await this.request(next);
+      const page = (await res.json()) as T[];
+      out.push(...page);
+      next = parseNextLink(res.headers.get("link"));
+    }
+    return out.slice(0, limit);
+  }
+
+  async getViewer(): Promise<GithubViewer> {
+    const res = await this.request("/user");
+    const u = (await res.json()) as { login: string; name?: string | null };
+    const scopes = (res.headers.get("x-oauth-scopes") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return { login: u.login, name: u.name ?? undefined, scopes };
+  }
+
+  async listRepositories(opts: ListRepositoriesOptions = {}): Promise<GithubRepository[]> {
+    const limit = Math.max(1, Math.min(opts.limit ?? 300, 1000));
+    // `affiliation=owner,collaborator,organization_member` returns every repo
+    // the token can see (private ones require the `repo` scope). Sorted by
+    // most recently pushed so the relevant repos surface first.
+    const raw = await this.paginate<RawRepo>(
+      `/user/repos?per_page=${MAX_PAGE}&sort=pushed&direction=desc&affiliation=owner,collaborator,organization_member`,
+      limit,
+    );
+    const q = (opts.query ?? "").trim().toLowerCase();
+    return raw
+      .map(toRepository)
+      .filter((r) => !q || r.fullName.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q));
   }
 
   async listBranches(repo: GithubRepoRef): Promise<GithubBranch[]> {
-    const res = await this.json<Array<{ name: string; commit: { sha: string } }>>(
-      `/repos/${repo.owner}/${repo.name}/branches?per_page=100`,
+    const res = await this.paginate<{ name: string; commit: { sha: string } }>(
+      `/repos/${repo.owner}/${repo.name}/branches?per_page=${MAX_PAGE}`,
+      500,
     );
     return res.map((b) => ({ name: b.name, sha: b.commit.sha }));
   }
 
   async listCommits(repo: GithubRepoRef, branch?: string): Promise<GithubCommit[]> {
-    const q = branch ? `?sha=${branch}&per_page=30` : "?per_page=30";
+    const q = branch ? `?sha=${encodeURIComponent(branch)}&per_page=30` : "?per_page=30";
     const res = await this.json<
       Array<{
         sha: string;
@@ -100,9 +186,12 @@ export class RealGitHubService implements IGitHubService {
 
   async listIssues(repo: GithubRepoRef): Promise<GithubIssue[]> {
     const res = await this.json<
-      Array<{ number: number; title: string; state: string; html_url: string }>
+      Array<{ number: number; title: string; state: string; html_url: string; pull_request?: unknown }>
     >(`/repos/${repo.owner}/${repo.name}/issues?state=open&per_page=50`);
-    return res.map((i) => ({ number: i.number, title: i.title, state: i.state, htmlUrl: i.html_url }));
+    // The issues endpoint also returns PRs — keep only real issues.
+    return res
+      .filter((i) => !i.pull_request)
+      .map((i) => ({ number: i.number, title: i.title, state: i.state, htmlUrl: i.html_url }));
   }
 
   async listReleases(repo: GithubRepoRef): Promise<GithubRelease[]> {
@@ -114,10 +203,11 @@ export class RealGitHubService implements IGitHubService {
 
   async getFile(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFile | undefined> {
     try {
-      const q = branch ? `?ref=${branch}` : "";
+      const q = branch ? `?ref=${encodeURIComponent(branch)}` : "";
       const res = await this.json<{ content: string; sha: string }>(`/repos/${repo.owner}/${repo.name}/contents/${path}${q}`);
       return { path, content: Buffer.from(res.content, "base64").toString("utf8"), sha: res.sha };
     } catch (err) {
+      if (err instanceof GitHubAuthError) throw err;
       logger.debug(`GitHub getFile missing: ${path}`, { err: String(err) });
       return undefined;
     }
@@ -139,7 +229,7 @@ export class RealGitHubService implements IGitHubService {
     parentSha?: string,
   ): Promise<GithubCommit> {
     const branchData = (await this.json<{ commit: { sha: string } }>(
-      `/repos/${repo.owner}/${repo.name}/branches/${branch}`,
+      `/repos/${repo.owner}/${repo.name}/branches/${encodeURIComponent(branch)}`,
     )) as { commit: { sha: string } } | undefined;
     const sha = parentSha ?? branchData?.commit.sha;
     if (!sha) throw new Error("Cannot commit: branch has no HEAD sha");
@@ -226,4 +316,45 @@ export class RealGitHubService implements IGitHubService {
       body: JSON.stringify({ body }),
     });
   }
+}
+
+interface RawRepo {
+  full_name: string;
+  name: string;
+  owner: { login: string };
+  private: boolean;
+  default_branch: string;
+  description?: string | null;
+  html_url?: string;
+  language?: string | null;
+  pushed_at?: string;
+  updated_at?: string;
+  archived?: boolean;
+  permissions?: { admin: boolean; push: boolean; pull: boolean };
+}
+
+function toRepository(r: RawRepo): GithubRepository {
+  return {
+    owner: r.owner?.login ?? r.full_name.split("/")[0],
+    name: r.name ?? r.full_name.split("/")[1],
+    fullName: r.full_name,
+    private: !!r.private,
+    defaultBranch: r.default_branch || "main",
+    description: r.description ?? undefined,
+    htmlUrl: r.html_url,
+    language: r.language ?? undefined,
+    updatedAt: r.pushed_at ?? r.updated_at,
+    archived: !!r.archived,
+    permissions: r.permissions,
+  };
+}
+
+/** Extract the `rel="next"` URL from a GitHub `Link` header. */
+export function parseNextLink(link: string | null): string | undefined {
+  if (!link) return undefined;
+  for (const part of link.split(",")) {
+    const m = /<([^>]+)>\s*;\s*rel="next"/.exec(part.trim());
+    if (m) return m[1];
+  }
+  return undefined;
 }

@@ -1,12 +1,15 @@
 import type {
   IGitHubService,
   GithubRepoRef,
+  GithubRepository,
+  GithubViewer,
   GithubBranch,
   GithubCommit,
   GithubPullRequest,
   GithubIssue,
   GithubRelease,
   GithubFile,
+  ListRepositoriesOptions,
 } from "./types.js";
 
 interface MockRepo {
@@ -17,7 +20,18 @@ interface MockRepo {
   pulls: GithubPullRequest[];
   issues: GithubIssue[];
   releases: GithubRelease[];
+  defaultBranch: string;
+  description?: string;
+  language?: string;
+  private: boolean;
 }
+
+/** Demo repositories seeded into every mock instance so the repo picker is never empty offline. */
+export const MOCK_DEMO_REPOS: Array<{ owner: string; name: string; description: string; language: string; private?: boolean }> = [
+  { owner: "acme", name: "accounting", description: "Demo: .NET + SQL Server accounting system", language: "C#" },
+  { owner: "acme", name: "storefront", description: "Demo: React + Node.js storefront", language: "TypeScript", private: true },
+  { owner: "acme", name: "mobile-app", description: "Demo: Flutter mobile app", language: "Dart" },
+];
 
 /**
  * In-memory GitHub implementation. Provides the full operation surface for
@@ -30,9 +44,35 @@ export class MockGitHubService implements IGitHubService {
   private repos = new Map<string, MockRepo>();
   private counter = 1;
 
-  seedRepo(owner: string, name: string, opts?: { files?: GithubFile[]; branch?: string }): GithubRepoRef {
+  constructor(opts: { seedDemoRepos?: boolean } = {}) {
+    if (opts.seedDemoRepos !== false) {
+      for (const d of MOCK_DEMO_REPOS) {
+        this.seedRepo(d.owner, d.name, {
+          description: d.description,
+          language: d.language,
+          private: d.private,
+          files: [{ path: "README.md", content: `# ${d.name}\n\n${d.description}\n` }],
+        });
+      }
+    }
+  }
+
+  seedRepo(
+    owner: string,
+    name: string,
+    opts?: { files?: GithubFile[]; branch?: string; description?: string; language?: string; private?: boolean },
+  ): GithubRepoRef {
     const key = `${owner}/${name}`;
     const branch = opts?.branch ?? "main";
+    const existing = this.repos.get(key);
+    // Re-seeding an existing repo (e.g. onboarding a project onto a demo repo)
+    // only adds missing files — it never wipes commits/PRs made by agents.
+    if (existing) {
+      for (const f of opts?.files ?? []) if (!existing.files.has(f.path)) existing.files.set(f.path, f);
+      if (!existing.branches.has(branch)) existing.branches.set(branch, existing.commits[0]?.sha ?? this.sha("seed"));
+      if (opts?.description) existing.description = opts.description;
+      return existing.ref;
+    }
     const files = new Map<string, GithubFile>();
     for (const f of opts?.files ?? []) files.set(f.path, f);
     const now = new Date().toISOString();
@@ -45,9 +85,17 @@ export class MockGitHubService implements IGitHubService {
       pulls: [],
       issues: [],
       releases: [],
+      defaultBranch: branch,
+      description: opts?.description,
+      language: opts?.language,
+      private: !!opts?.private,
     };
     this.repos.set(key, repo);
     return { owner, name };
+  }
+
+  async getViewer(): Promise<GithubViewer> {
+    return { login: "mock-user", name: "Mock GitHub User", scopes: ["repo", "read:user", "user:email"] };
   }
 
   private repo(ref: GithubRepoRef): MockRepo {
@@ -62,8 +110,23 @@ export class MockGitHubService implements IGitHubService {
     return "0000000" + Math.abs(h).toString(16).slice(-7);
   }
 
-  async listRepositories(): Promise<GithubRepoRef[]> {
-    return [...this.repos.values()].map((r) => r.ref);
+  async listRepositories(opts: ListRepositoriesOptions = {}): Promise<GithubRepository[]> {
+    const q = (opts.query ?? "").trim().toLowerCase();
+    const list: GithubRepository[] = [...this.repos.values()].map((r) => ({
+      owner: r.ref.owner,
+      name: r.ref.name,
+      fullName: `${r.ref.owner}/${r.ref.name}`,
+      private: r.private,
+      defaultBranch: r.defaultBranch,
+      description: r.description,
+      htmlUrl: `https://github.com/${r.ref.owner}/${r.ref.name}`,
+      language: r.language,
+      updatedAt: r.commits[0]?.date,
+      archived: false,
+      permissions: { admin: true, push: true, pull: true },
+    }));
+    const filtered = list.filter((r) => !q || r.fullName.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q));
+    return filtered.slice(0, Math.max(1, opts.limit ?? 300));
   }
 
   async listBranches(ref: GithubRepoRef): Promise<GithubBranch[]> {

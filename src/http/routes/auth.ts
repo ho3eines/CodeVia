@@ -19,6 +19,7 @@ import {
 import { resolveRequestUser } from "../auth.js";
 import { getEnv } from "../../config/env.js";
 import { logger } from "../../logger.js";
+import { deleteUserGitHubToken, describeUserGitHubToken, storeUserGitHubToken } from "../../auth/github-tokens.js";
 
 /**
  * GitHub OAuth login + session routes.
@@ -126,13 +127,21 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
     const next = parsedState.next ?? "#/github";
 
     try {
-      const { accessToken } = await exchangeCodeForToken(code, {
+      const { accessToken, scope } = await exchangeCodeForToken(code, {
         clientId: cfg.clientId,
         clientSecret: cfg.clientSecret,
         redirectUri: cfg.redirectUri,
       });
       const profile = await fetchGitHubUser(accessToken);
       const { user, created } = container.userRepo.upsertGitHubUser(profile);
+      // Keep the user's GitHub token (encrypted) so the platform can list and
+      // work with *their* repositories — previously it was discarded here,
+      // which is why the repository picker was always empty.
+      try {
+        storeUserGitHubToken(container.kv, user.id, accessToken, { scopes: scope, login: profile.login });
+      } catch (err) {
+        logger.warn("could not persist user GitHub token", { err: String(err) });
+      }
       await container.auditRepo.record({
         userId: user.id,
         action: created ? "auth.github.signup" : "auth.github.login",
@@ -164,9 +173,12 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
   app.get("/auth/me", { schema: { tags: ["auth"] } }, async (req) => {
     const { user, authenticated } = resolveRequestUser(req, container);
     const eff = getEffectiveGitHubLoginSettings(container.kv);
+    const gh = authenticated ? describeUserGitHubToken(container.kv, user.id) : { stored: false, scopes: [], canReadPrivateRepos: false };
     return {
       authenticated,
       user,
+      /** Whether this session can list the user's own GitHub repositories. */
+      githubToken: { stored: gh.stored, scopes: gh.scopes, canReadPrivateRepos: gh.canReadPrivateRepos, login: gh.login },
       // Login config + strict mode (env REQUIRE_AUTH, overridden by the Admin
       // panel toggle). `loginEnabled` matches what the guard actually enforces:
       // strict mode only rejects when OAuth is configured (otherwise the
@@ -177,7 +189,16 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
     };
   });
 
-  app.post("/auth/logout", { schema: { tags: ["auth"] } }, async (_req, reply) => {
+  app.post("/auth/logout", { schema: { tags: ["auth"] } }, async (req, reply) => {
+    // Drop the stored GitHub token together with the session.
+    const { user, authenticated } = resolveRequestUser(req, container);
+    if (authenticated) {
+      try {
+        deleteUserGitHubToken(container.kv, user.id);
+      } catch {
+        /* best effort */
+      }
+    }
     reply.header("Set-Cookie", buildClearSessionCookie());
     return { ok: true };
   });

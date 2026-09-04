@@ -53,6 +53,14 @@ export class ProviderRegistry {
     return [...this.providers.values()];
   }
 
+  /**
+   * Drop the cached adapter for a provider so the next `resolve()` re-reads its
+   * configuration (base URL, secret ref, auth type…). Called after PATCH/DELETE.
+   */
+  invalidate(id: string): void {
+    this.providers.delete(id);
+  }
+
   async chat(req: ChatRequest, config: ModelProvider): Promise<ChatResponse> {
     const provider = this.resolve(config);
     return provider.chat(req);

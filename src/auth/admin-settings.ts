@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getEnv } from "../config/env.js";
 import type { KvStore } from "../db/kv.js";
-import { getOAuthRedirectUri } from "./github-oauth.js";
+import { DEFAULT_GITHUB_OAUTH_SCOPE, getOAuthRedirectUri } from "./github-oauth.js";
 import type { OAuthConfig } from "./github-oauth.js";
 
 /* ------------------------------------------------------------------ *
@@ -167,7 +167,7 @@ export function getEffectiveGitHubLoginSettings(kv?: KvStore): EffectiveGitHubLo
     scope = admin.scope;
     scopeSource = "admin";
   } else {
-    scope = env.GITHUB_OAUTH_SCOPE || "read:user user:email";
+    scope = env.GITHUB_OAUTH_SCOPE || DEFAULT_GITHUB_OAUTH_SCOPE;
     scopeSource = env.GITHUB_OAUTH_SCOPE ? "env" : "default";
   }
 

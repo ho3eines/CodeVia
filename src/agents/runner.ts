@@ -153,7 +153,8 @@ export class AgentRunner {
       const model = this.deps.modelRepo.findById(candidate.id)?.data;
       if (!model) continue;
       const providerConfig = this.deps.providerRepo.findById(model.providerId)?.data;
-      if (!providerConfig) continue;
+      // Deactivated providers must never be called, even if their models are still active.
+      if (!providerConfig || !providerConfig.active) continue;
       try {
         const provider = this.deps.providerRegistry.resolve(providerConfig);
         const response = await provider.chat({

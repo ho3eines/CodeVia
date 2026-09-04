@@ -266,3 +266,45 @@ code, pre { font-family: var(--mono); }
 .mb { margin-bottom: 12px; }
 .flex { display: flex; align-items: center; gap: 8px; }
 .spacer { flex: 1; }
+
+/* ---- Multi-select chips (project capabilities) ---- */
+.chip-group { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); min-height: 38px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--text-muted); font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; transition: all .12s ease; line-height: 1.4; }
+.chip:hover { border-color: var(--primary); color: var(--text); }
+.chip.on { background: rgba(37,99,235,0.12); border-color: var(--primary); color: var(--primary); }
+.chip.on::before { content: "✓"; font-size: 10px; }
+.chip.core { opacity: .85; }
+.chip.core.on { cursor: default; }
+.chip-add { display: inline-flex; align-items: center; gap: 6px; }
+.chip-add input { padding: 4px 8px; font-size: 12px; min-width: 150px; }
+.field-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.field-hint.warn { color: var(--warn); }
+.field-hint.err { color: var(--err); }
+.select-count { font-weight: 500; color: var(--text-muted); font-size: 11px; margin-left: 6px; }
+
+/* ---- Repository picker ---- */
+.repo-picker { border: 1px solid var(--border); border-radius: 10px; background: var(--bg); padding: 10px; }
+.repo-picker .repo-search { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.repo-picker .repo-search .input { flex: 1; }
+.repo-picker .repo-list { max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); }
+.repo-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12px; }
+.repo-row:last-child { border-bottom: 0; }
+.repo-row:hover { background: var(--bg); }
+.repo-row.selected { background: rgba(37,99,235,0.08); }
+.repo-row .repo-name { font-family: var(--mono); font-weight: 600; }
+.repo-row .repo-desc { color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.repo-row .repo-meta { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+.repo-row .check { width: 16px; text-align: center; color: var(--primary); font-weight: 700; }
+.repo-selected { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.repo-sel-row { display: grid; grid-template-columns: 1fr auto auto auto auto; gap: 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); font-size: 12px; }
+.repo-sel-row .select, .repo-sel-row .input { padding: 4px 8px; font-size: 12px; width: auto; }
+.repo-sel-row .repo-name { font-family: var(--mono); font-weight: 600; }
+.repo-sel-row .cfg { font-size: 11px; color: var(--text-muted); white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+.repo-empty { padding: 14px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.provider-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.provider-actions .btn { padding: 5px 10px; font-size: 12px; }
+.test-result { margin-top: 8px; font-size: 11px; padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); white-space: pre-wrap; }
+.test-result.ok { border-color: rgba(22,163,74,0.4); }
+.test-result.err { border-color: rgba(220,38,38,0.4); }
+[dir="rtl"] .repo-row .repo-meta { margin-left: 0; margin-right: auto; }
+@media (max-width: 760px) { .repo-sel-row { grid-template-columns: 1fr 1fr; } }

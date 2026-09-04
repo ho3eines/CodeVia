@@ -16,11 +16,29 @@ with it, users click **🐙 Login with GitHub** in the UI (`#/github`).
    (local: `http://localhost:8080/auth/github/callback`).
 4. Copy **Client ID** → `GITHUB_CLIENT_ID`, generate a **Client secret** → `GITHUB_CLIENT_SECRET`.
 5. Set `AUTH_SECRET` to any random 32+ char string (signs sessions + OAuth state).
-6. (Optional) `GITHUB_OAUTH_SCOPE` (default `read:user user:email`),
+6. (Optional) `GITHUB_OAUTH_SCOPE` (default `repo read:user user:email` — `repo` is what
+   lets the repository picker list **private** repositories; use `public_repo read:user user:email`
+   for public-only access),
    `GITHUB_OAUTH_CALLBACK_URL` (overrides the callback URL),
    `REQUIRE_AUTH=true` (reject unauthenticated API calls with 401 instead of demo mode).
 7. Restart. Open `#/github` → **Login with GitHub**.
    The **first user to log in becomes `owner`**; later users become `developer`.
+
+### Where do the repositories in the project form come from?
+
+The login stores the user's OAuth access token **encrypted (AES-256-GCM, key derived
+from `AUTH_SECRET`)** in the runtime store. `GET /github/repositories`, the GitHub
+page and the **repository picker in "Create Project"** then list *that user's*
+repositories (paginated, private ones included when the `repo` scope was granted).
+The token is never returned by any API and is deleted on logout. Resolution order:
+
+1. the logged-in user's GitHub token (`source: user-oauth`),
+2. the server-wide `GITHUB_TOKEN` when `GITHUB_ENABLED=true` or `NODE_ENV=production` (`source: server-token`),
+3. built-in demo repositories from the mock service (`source: mock`, local dev).
+
+If the picker shows "demo/mock" although you are logged in, log out and in again
+(sessions created before this feature have no stored token) — the GitHub page
+shows the active source and a hint for exactly this case.
 
 > **Admin panel shortcut:** after the first login, open `#/admin` → **GitHub Login**.
 > There you can set the Client ID, callback URL, scope and the "require login"

@@ -1,4 +1,13 @@
-import type { AgentType, Project, Task } from "../domain/entities.js";
+import type { AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task } from "../domain/entities.js";
+import {
+  agentTypesForProject,
+  configRepoOf,
+  hydrateProject,
+  legacyFieldsFromCapabilities,
+  normalizeCapabilities,
+  normalizeRepositories,
+  skillsForCapabilities,
+} from "../domain/project-options.js";
 import type { ProjectRepository, TaskRepository, WorkflowRepository } from "../domain/repos.js";
 import type { AgentRepository } from "./agent-repo.js";
 import type { RunRepository, CostRepository, AuditRepository, NotificationRepository } from "../observability/repos.js";
@@ -33,11 +42,22 @@ export interface CreateProjectInput {
   name: string;
   slug?: string;
   description: string;
-  configRepo: string;
+  /** Primary (config) repository `owner/name`. Optional when `repositories` is given. */
+  configRepo?: string;
   branch?: string;
+  /** All linked repositories (multi-repo). The config repo is the `isConfigRepo`/first one. */
+  repositories?: Array<Partial<ProjectRepositoryLink> | string>;
+  /** Multi-select project profile. */
+  capabilities?: Partial<Record<keyof ProjectCapabilities, unknown>>;
+  githubConnection?: ProjectGithubConnection;
+  /** @deprecated legacy single values — merged into `capabilities` */
   primaryLanguage?: string;
+  /** @deprecated */
   framework?: string;
+  /** @deprecated */
   database?: string;
+  /** @deprecated */
+  deploymentTarget?: string;
   tech?: string[];
   defaultModelId?: string;
   settings?: Project["settings"];
@@ -87,16 +107,37 @@ export class AgentManager {
 
   async createProject(input: CreateProjectInput): Promise<Project> {
     const now = new Date().toISOString();
-    const project: Project = {
-      id: `proj-${randomUUID().slice(0, 8)}`,
-      slug: input.slug ?? this.slugify(input.name),
-      name: input.name,
-      description: input.description,
-      configRepo: input.configRepo,
-      branch: input.branch ?? "main",
+    const repositories = normalizeRepositories(input.repositories, { repo: input.configRepo, branch: input.branch });
+    const cfg = configRepoOf(repositories);
+    if (!cfg) {
+      throw Object.assign(new Error("A GitHub repository (owner/name) is required — pick one from the connected account"), { statusCode: 400 });
+    }
+    const capabilities = normalizeCapabilities(input.capabilities, {
       primaryLanguage: input.primaryLanguage,
       framework: input.framework,
       database: input.database,
+      deploymentTarget: input.deploymentTarget,
+      tech: input.tech,
+    });
+    const legacy = legacyFieldsFromCapabilities(capabilities);
+    const slug = input.slug ?? this.slugify(input.name);
+    if (this.deps.projectRepo.findBySlug(slug)) {
+      throw Object.assign(new Error(`A project with slug "${slug}" already exists`), { statusCode: 409 });
+    }
+    const project: Project = {
+      id: `proj-${randomUUID().slice(0, 8)}`,
+      slug,
+      name: input.name,
+      description: input.description,
+      configRepo: cfg.repo,
+      branch: cfg.branch,
+      repositories,
+      capabilities,
+      githubConnection: input.githubConnection,
+      primaryLanguage: legacy.primaryLanguage,
+      framework: legacy.framework,
+      database: legacy.database,
+      deploymentTarget: legacy.deploymentTarget,
       defaultModelId: input.defaultModelId,
       settings:
         input.settings ??
@@ -129,20 +170,26 @@ export class AgentManager {
 
   /** Online onboarding: analyze repo, generate agents/skills/workflows/rules. */
   async onboardProject(projectId: string, tech: string[] = []): Promise<{ agents: number; skills: number }> {
-    const project = this.deps.projectRepo.findById(projectId)?.data;
-    if (!project) throw new Error(`Project ${projectId} not found`);
+    const stored = this.deps.projectRepo.findById(projectId)?.data;
+    if (!stored) throw new Error(`Project ${projectId} not found`);
+    const project = hydrateProject(stored);
     // In mock mode, seed a starter .ai-engineering repo so the platform can be
     // exercised end-to-end without real GitHub credentials.
     this.ensureMockRepo(project);
-    const agents = this.deps.agentGenerator.generate(project, { defaultModelId: project.defaultModelId, tech });
+    const agentTypes = agentTypesForProject(project.capabilities);
+    const agents = this.deps.agentGenerator.generate(project, { defaultModelId: project.defaultModelId, tech, agentTypes });
     const seeded = this.deps.skillsRepo.seedBuiltIns();
-    // Attach relevant skills to the project settings.
+    // Attach relevant skills to the project settings: skills implied by the
+    // selected capabilities + keyword matches on the description/tech hints.
+    const implied = skillsForCapabilities(project.capabilities);
+    const known = new Set(this.deps.skillsRepo.findMany().map((r) => r.data.slug));
     const relevant = this.deps.skillsRepo
       .findMany()
       .filter((r) => this.skillsRelevant(r.data.slug, tech, project))
       .map((r) => r.data.slug);
-    this.deps.projectRepo.upsert({ ...project, settings: { ...project.settings, skills: [...new Set(relevant)] } }, { key: project.slug });
-    logger.info(`onboarded project ${projectId}`, { agents: agents.length, skills: seeded });
+    const skills = [...new Set([...implied.filter((s) => known.has(s)), ...relevant])];
+    this.deps.projectRepo.upsert({ ...project, settings: { ...project.settings, skills } }, { key: project.slug });
+    logger.info(`onboarded project ${projectId}`, { agents: agents.length, agentTypes: agentTypes.length, skills: skills.length });
     return { agents: agents.length, skills: seeded };
   }
 
@@ -150,29 +197,40 @@ export class AgentManager {
   private ensureMockRepo(project: Project): void {
     if (this.deps.github.kind !== "mock") return;
     const mock = this.deps.github as unknown as {
-      seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string }): { owner: string; name: string };
+      seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string; description?: string }): { owner: string; name: string };
     };
-    const [owner, ...rest] = project.configRepo.split("/");
-    const name = rest.join("/") || "repo";
-    const starter = [
-      { path: "README.md", content: `# ${project.name}\n\n${project.description}\n` },
-      { path: ".ai-engineering/project.yaml", content: this.projectYaml(project) },
-      { path: ".ai-engineering/rules/coding.md", content: "# Coding Rules\n- Follow existing conventions.\n- No secrets in code.\n" },
-      { path: ".ai-engineering/rules/git.md", content: "# Git Rules\n- Feature branches, conventional commits, PRs.\n" },
-    ];
-    mock.seedRepo(owner, name, { files: starter, branch: project.branch });
-    logger.debug(`seeded mock repo ${project.configRepo}`);
+    for (const link of project.repositories.length ? project.repositories : [{ repo: project.configRepo, branch: project.branch, isConfigRepo: true }]) {
+      const [owner, ...rest] = link.repo.split("/");
+      const name = rest.join("/") || "repo";
+      const starter = [{ path: "README.md", content: `# ${project.name}\n\n${project.description}\n` }];
+      if (link.isConfigRepo) {
+        starter.push(
+          { path: ".ai-engineering/project.yaml", content: this.projectYaml(project) },
+          { path: ".ai-engineering/rules/coding.md", content: "# Coding Rules\n- Follow existing conventions.\n- No secrets in code.\n" },
+          { path: ".ai-engineering/rules/git.md", content: "# Git Rules\n- Feature branches, conventional commits, PRs.\n" },
+        );
+      }
+      mock.seedRepo(owner, name, { files: starter, branch: link.branch, description: project.description });
+      logger.debug(`seeded mock repo ${link.repo}`);
+    }
   }
 
   private projectYaml(project: Project): string {
+    const list = (values: string[]): string => (values.length ? values.map((v) => `\n    - ${v}`).join("") : " []");
+    const c = project.capabilities;
     return [
       "project:",
       `  name: ${project.name}`,
       `  slug: ${project.slug}`,
-      `  framework: ${project.framework ?? "unknown"}`,
-      `  language: ${project.primaryLanguage ?? "unknown"}`,
-      `  database: ${project.database ?? "unknown"}`,
       `  branch: ${project.branch}`,
+      `  platforms:${list(c.platforms)}`,
+      `  languages:${list(c.languages)}`,
+      `  frameworks:${list(c.frameworks)}`,
+      `  databases:${list(c.databases)}`,
+      `  deployment:${list(c.deploymentTargets)}`,
+      `  features:${list(c.features)}`,
+      `  integrations:${list(c.integrations)}`,
+      `  repositories:${list(project.repositories.map((r) => `${r.repo}@${r.branch} (${r.role})`))}`,
     ].join("\n");
   }
 
@@ -185,8 +243,10 @@ export class AgentManager {
    * whose slug was a known needle "always relevant" regardless of the project).
    */
   private skillsRelevant(slug: string, tech: string[], project: Project): boolean {
+    const c = project.capabilities;
+    const capText = [...c.platforms, ...c.languages, ...c.frameworks, ...c.databases, ...c.deploymentTargets, ...c.features, ...c.integrations].join(" ");
     const projText =
-      `${project.description} ${project.framework ?? ""} ${project.database ?? ""} ${project.primaryLanguage ?? ""} ${tech.join(" ")}`.toLowerCase();
+      `${project.description} ${project.framework ?? ""} ${project.database ?? ""} ${project.primaryLanguage ?? ""} ${capText} ${tech.join(" ")}`.toLowerCase();
     const keywords = slug
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, " ")

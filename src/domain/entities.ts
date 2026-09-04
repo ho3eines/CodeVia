@@ -110,17 +110,77 @@ export interface Skill {
 /* ------------------------------------------------------------------ *
  * Project
  * ------------------------------------------------------------------ */
+
+/** Role a linked repository plays inside a project (multi-repo projects). */
+export type ProjectRepositoryRole =
+  | "primary"
+  | "frontend"
+  | "backend"
+  | "mobile"
+  | "infra"
+  | "docs"
+  | "library"
+  | "other";
+
+/** A GitHub repository linked to a project. Picked from the connected account. */
+export interface ProjectRepositoryLink {
+  /** `owner/name` */
+  repo: string;
+  branch: string;
+  role: ProjectRepositoryRole;
+  /** Whether `.ai-engineering/` (agents, prompts, memory…) lives in this repo. */
+  isConfigRepo?: boolean;
+  private?: boolean;
+  defaultBranch?: string;
+  htmlUrl?: string;
+  addedAt?: ISODate;
+}
+
+/** How the platform talks to GitHub for this project. */
+export interface ProjectGithubConnection {
+  kind: "user-oauth" | "server-token" | "mock";
+  /** For `user-oauth`: the platform user whose GitHub login token is used. */
+  userId?: ID;
+  login?: string;
+}
+
+/**
+ * Multi-select project profile. Every dimension is a list so a project can be
+ * e.g. web + mobile, Postgres + Redis, React + .NET at the same time. The
+ * legacy single-value fields on Project (`framework`, `database`, …) are kept
+ * in sync with the first entry of each list for older code paths/prompts.
+ */
+export interface ProjectCapabilities {
+  platforms: string[];
+  languages: string[];
+  frameworks: string[];
+  databases: string[];
+  deploymentTargets: string[];
+  features: string[];
+  integrations: string[];
+  /** Agent roster to generate/enable for this project (empty = all 18 types). */
+  agentTypes: AgentType[];
+}
+
 export interface Project {
   id: ID;
   slug: string;
   name: string;
   description: string;
-  /** Root .ai-engineering repo (GitHub) that acts as source of truth. */
+  /** Root .ai-engineering repo (GitHub) that acts as source of truth (= primary repository). */
   configRepo: string;
   branch: string;
+  /** All repositories linked to the project (the first / `isConfigRepo` one mirrors `configRepo`). */
+  repositories: ProjectRepositoryLink[];
+  capabilities: ProjectCapabilities;
+  githubConnection?: ProjectGithubConnection;
+  /** @deprecated derived from capabilities.languages[0] — kept for prompts/back-compat */
   primaryLanguage?: string;
+  /** @deprecated derived from capabilities.frameworks[0] */
   framework?: string;
+  /** @deprecated derived from capabilities.databases[0] */
   database?: string;
+  /** @deprecated derived from capabilities.deploymentTargets[0] */
   deploymentTarget?: string;
   defaultModelId?: ID;
   defaultAgentId?: ID;
