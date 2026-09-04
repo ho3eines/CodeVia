@@ -50,6 +50,79 @@ function withStatus(p: ModelProvider): ModelProvider & { readiness: ReturnType<t
   };
 }
 
+/**
+
+ * Discover and add models from a provider after creation.
+ * This fetches the model catalog and adds any new models to the repository.
+ */
+async function discoverAndAddModels(
+  providerId: string,
+  config: ModelProvider,
+  container: Container
+): Promise<string[]> {
+  // Resolve the provider adapter
+  const provider = container.providerRegistry.resolve(config);
+
+  // Test connection and fetch models
+  const testResult = await testProviderConnection(config, { timeoutMs: 15000 });
+
+  if (!testResult.ok) {
+    // Connection failed - don't add models
+    return [];
+  }
+
+  // Fetch models from the provider
+  let models: ProviderModelInfo[] = [];
+  try {
+    models = await provider.listModels();
+  } catch (err) {
+    logger.warn(`Failed to list models for provider ${providerId}`, { err: String(err) });
+    return [];
+  }
+
+  // Extract model IDs and add to repository
+  const existingModels = new Set(
+    container.modelRepo.findMany().map((m) => m.data.modelId)
+  );
+
+  const added: string[] = [];
+  for (const modelInfo of models) {
+    const modelId = modelInfo.id.replace(/^models\//, "").trim();
+    if (!modelId || existingModels.has(modelId)) continue;
+
+    try {
+      container.modelRepo.create({
+        providerId,
+        modelId,
+        displayName: modelInfo.displayName || modelId,
+        contextWindow: Number(modelInfo.contextWindow) || 128000,
+        inputCostPer1k: 0,
+        outputCostPer1k: 0,
+        capabilities: {
+          vision: false,
+          tools: true,
+          structuredOutput: false,
+          code: true,
+          reasoning: false,
+          streaming: true,
+        },
+        active: true,
+        priority: 100,
+        fallbackPriority: 100,
+        tags: [],
+      });
+      added.push(modelId);
+    } catch (err) {
+      logger.warn(
+        `Failed to add model ${modelId} for provider ${providerId}`,
+        { err: String(err) }
+      );
+    }
+  }
+
+  return added;
+}
+
 function numberOr(v: unknown, fallback: number): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -182,7 +255,26 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     draft.active = b.active === false ? false : readiness.ready;
     const p = container.providerRepo.create(draft);
     reply.code(201);
-    return withStatus(p);
+    const status = withStatus(p);
+
+    // 🤖 Auto-discover and add models from the newly created provider
+    try {
+      const added = await discoverAndAddModels(p.id, p, container);
+      if (added.length > 0) {
+        logger.info(`Discovered ${added.length} models for new provider ${p.name} (${p.id})`);
+      }
+      // Optionally attach discovered model count to the response
+      status.discoveredModels = added.length;
+      status.message = added.length
+        ? `Provider created and ${added.length} model(s) discovered automatically`
+        : "Provider created (no models discovered)";
+    } catch (err) {
+      logger.warn(`Model discovery failed for new provider ${p.id}`, { err: String(err) });
+      status.discoveredModels = 0;
+      status.message = "Provider created (model discovery failed - check logs)";
+    }
+
+    return status;
   });
 
   app.get("/providers/:id", { schema: { tags: ["providers"] } }, async (req, reply) => {
