@@ -113,16 +113,29 @@ describe("auth guard — strict mode with GitHub login configured", () => {
 
   it("rejects API calls without a session", async () => {
     const srv = await boot();
-    for (const url of ["/auth/me", "/dashboard", "/projects", "/admin/settings"]) {
+    for (const url of ["/dashboard", "/projects", "/admin/settings"]) {
       const res = await srv.inject({ method: "GET", url });
       expect(res.statusCode, url).toBe(401);
       expect(res.json().message).toMatch(/Authentication required/);
     }
   });
 
+  it("keeps session introspection public so logged-out clients get state, not 401s", async () => {
+    const srv = await boot();
+    const me = await srv.inject({ method: "GET", url: "/auth/me" });
+    expect(me.statusCode).toBe(200);
+    expect(me.json().authenticated).toBe(false);
+    const logout = await srv.inject({ method: "POST", url: "/auth/logout" });
+    expect(logout.statusCode).toBe(200);
+    expect(logout.json().ok).toBe(true);
+    const status = await srv.inject({ method: "GET", url: "/auth/github/status" });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().authenticated).toBe(false);
+  });
+
   it("keeps the SPA shell, static assets, socket.io and the OAuth handshake public", async () => {
     const srv = await boot();
-    for (const url of ["/", "/app.js", "/app.css", "/index.html", "/health", "/ready", "/auth/github/status", "/integrations/github/status"]) {
+    for (const url of ["/", "/app.js", "/app.css", "/index.html", "/health", "/ready", "/auth/me", "/auth/github/status", "/integrations/github/status"]) {
       const res = await srv.inject({ method: "GET", url });
       expect(res.statusCode, url).toBe(200);
     }

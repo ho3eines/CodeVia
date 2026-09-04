@@ -60,6 +60,33 @@ The platform logs a loud startup warning (`GitHub OAuth callback resolves to a
 local address: …`) in production when it detects this, so check the service
 logs after each deploy.
 
+## Console shows `GET /auth/me 401` / `GET /github/repositories 401` while logged out
+
+Expected in strict mode (`REQUIRE_AUTH` on) **on older builds**: the session
+check itself went through the auth guard, so every logged-out page load logged
+401s. Current builds keep session introspection public — `GET /auth/me`,
+`POST /auth/logout` and `GET /auth/github/status` always answer `200` with
+`{ authenticated: false }` when logged out, and the UI skips protected calls
+until you sign in. If you still see these 401s, redeploy to the latest build
+and then **Login with GitHub** (`#/github`); protected data endpoints
+(`/dashboard`, `/github/repositories`, …) correctly return `401` until then.
+
+## `WebSocket connection to 'wss://…/socket.io/…' failed: ERR_CONNECTION_RESET`
+
+The realtime channel (run/step status only) connects via Socket.IO: it first
+handshakes over HTTPS polling, then tries to upgrade to a websocket. A failed
+upgrade is **non-fatal** — the client silently stays on long-polling and keeps
+retrying (the top-bar pill shows `Live` / `Offline`). Common causes on Railway:
+
+- **More than one replica without sticky sessions** — polling lands on instance
+  A, the upgrade lands on instance B, which doesn't know the session id and
+  resets the connection. Fix: scale the service to **1 replica** (or enable
+  session affinity) — realtime state is in-memory per instance.
+- **A redeploy/restart between handshake and upgrade** — transient; the client
+  reconnects automatically.
+- **A proxy stripping the `Upgrade: websocket` header** — polling fallback
+  keeps updates flowing; no action needed.
+
 ## Webhook signature invalid (`401`)
 
 - Set `GITHUB_WEBHOOK_SECRET` and use it as the GitHub App "Webhook secret".

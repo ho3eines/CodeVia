@@ -104,9 +104,35 @@
 
   /* ---------- realtime ---------- */
   let socket = null;
+  function setLivePill(online) {
+    const pill = $("#live-pill");
+    if (!pill) return;
+    pill.classList.toggle("offline", !online);
+    const label = pill.querySelector("span:last-child") || pill;
+    if (label && label !== pill) label.textContent = online ? " Live" : " Offline";
+    pill.title = online ? "Realtime connected" : "Realtime disconnected — retrying automatically";
+  }
   function connectSocket() {
     if (typeof io === "undefined") return;
-    socket = io();
+    // Reconnect forever with backoff; a failed websocket upgrade (common
+    // behind proxies) silently falls back to long-polling instead of
+    // spamming the console with ERR_CONNECTION_RESET noise.
+    try {
+      socket = io({
+        transports: ["polling", "websocket"],
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 10000,
+        randomizationFactor: 0.5,
+        timeout: 20000,
+        withCredentials: true,
+      });
+    } catch (_) { return; }
+    socket.on("connect", () => setLivePill(true));
+    socket.on("disconnect", () => setLivePill(false));
+    // Swallow handshake/upgrade errors: the client keeps retrying in the
+    // background and the pill shows the state. Never throws into route().
+    socket.on("connect_error", () => setLivePill(false));
     socket.on("run.updated", (ev) => {
       if (ev.runId && location.hash.startsWith("#/runs")) refreshCurrent();
       if (ev.data && ev.data.status === "succeeded") toast("Run completed", ev.runId, "ok");
@@ -594,7 +620,8 @@
     const slot = $("#user-slot");
     if (!slot) return;
     try {
-      // /auth/me is 401 in strict mode when logged out — treat that as "no session".
+      // /auth/me is public and answers { authenticated: false } when logged
+      // out — the catch below is only for network/server-unreachable errors.
       const me = await api("/auth/me").catch((e) => {
         if (e && e.status === 401) return { authenticated: false, user: null };
         throw e;
@@ -630,9 +657,15 @@
   }
   on("/github", async () => {
     const status = await api("/integrations/github/status");
-    const repos = await api("/github/repositories").catch(() => []);
+    // /auth/me is public session introspection (always 200): use it to decide
+    // whether the protected repositories call would succeed. Skipping the
+    // request while logged out avoids a guaranteed 401 (+ console noise) in
+    // strict mode; the login card below is shown instead.
     const me = await api("/auth/me").catch(() => ({ authenticated: false, user: null }));
     const oauthStatus = await api("/auth/github/status").catch(() => ({ configured: false, diagnostics: {} }));
+    const repos = me.authenticated
+      ? await api("/github/repositories").catch(() => [])
+      : [];
     const diag = oauthStatus.diagnostics || {};
     const setupStepsHtml = oauthStatus.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);text-align:left;margin:8px 0 0 16px">${oauthStatus.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
     const mismatchWarn = diag.callbackUrlMismatchRisk ? `<p style="color:var(--warn, #d97706);font-size:11px">⚠️ Callback mismatch: GitHub App callback must be <span class="mono">${esc(oauthStatus.redirectUri||"")}</span></p>` : "";
