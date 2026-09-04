@@ -142,14 +142,30 @@
   // Render a provider/model test result with the requested URL + discovered models.
   function renderTestResult(r) {
     if (!r) return "";
-    const url = r.url ? `<div class="test-url mono" style="margin-top:6px;font-size:10px;word-break:break-all">→ ${esc(r.url)}</div>` : "";
+    // Surface EVERY URL the platform will hit (catalog + chat). Each on its own
+    // line so the user can verify the platform follows the provider's docs.
+    const allUrls = Array.from(new Set([r.catalogUrl, r.chatUrl, ...(r.urls || []), r.url].filter(Boolean)));
+    const urlLabels = {
+      catalog: "📚 catalog (model list)",
+      chat: "💬 chat (completion)",
+    };
+    const classify = (u) => {
+      if (u === r.catalogUrl) return urlLabels.catalog;
+      if (u === r.chatUrl) return urlLabels.chat;
+      return "→ request";
+    };
+    const urlsSection = allUrls.length
+      ? `<div class="test-urls" style="margin-top:6px;display:flex;flex-direction:column;gap:3px">
+          ${allUrls.map((u) => `<div class="mono" style="font-size:10px;word-break:break-all"><span class="badge badge-muted">${esc(classify(u))}</span> ${esc(u)}</div>`).join("")}
+        </div>`
+      : "";
     const infos = r.modelInfos || [];
     const list = infos.slice(0, 12).map((m) => `<div class="test-model" style="margin-top:3px"><span class="mono">${esc(m.id)}</span> ${capsBadges(m.capabilities)}</div>`).join("");
     const modelsSection = list ? `<div class="test-models" style="margin-top:6px">${list}${infos.length > 12 ? "…" : ""}</div>` : "";
     const caps = r.detectedCapabilities || r.capabilities;
     const capsSection = caps && typeof caps === "object" ? `<div style="margin-top:6px">Capabilities: ${capsBadges(caps)}</div>` : "";
     const found = typeof r.found === "boolean" ? ` <span class="badge badge-${r.found ? "ok" : "err"}">${r.found ? "found in catalog" : "not in catalog"}</span>` : "";
-    return `<div class="test-result ${r.ok ? "ok" : "err"}">${r.ok ? "✓" : "✗"} ${esc(r.message)}${found}${r.hint ? "<br>" + esc(r.hint) : ""}${modelsSection}${capsSection}${url}</div>`;
+    return `<div class="test-result ${r.ok ? "ok" : "err"}">${r.ok ? "✓" : "✗"} ${esc(r.message)}${found}${r.hint ? "<br>" + esc(r.hint) : ""}${modelsSection}${capsSection}${urlsSection}</div>`;
   }
 
   /* ---------- modal ---------- */
@@ -950,21 +966,103 @@
     const providers = await api("/providers").catch(() => []);
     openModal("Add Model", `
       <div class="field"><label>Provider</label><select class="select" id="m-prov">${providers.map((p) => `<option value="${esc(p.id)}" ${p.active ? "" : "disabled"}>${esc(p.name)}${p.active ? "" : " (inactive)"}</option>`).join("")}</select></div>
-      <div class="field"><label>Model ID <span class="select-count">provider's model name — capabilities are detected automatically</span></label><input class="input mono" id="m-id" placeholder="gpt-4o-mini / claude-sonnet-4-5 / gemini-2.5-pro"/></div>
-      <div class="field"><label>Display name <span class="select-count">optional — auto-filled from Model ID</span></label><input class="input" id="m-name" placeholder="GPT-4o mini"/></div>
+      <div class="field"><label>Model <span class="select-count">pick from the provider's live catalog — capabilities are detected automatically</span></label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select class="select" id="m-id" style="flex:1"></select>
+          <button class="btn" id="m-refresh" type="button" title="Re-fetch the catalog from the provider">↻</button>
+        </div>
+        <div class="field-hint" id="m-catalog-hint">Loading catalog…</div>
+      </div>
+      <div class="field"><label>Display name <span class="select-count">optional — auto-filled from the model</span></label><input class="input" id="m-name" placeholder=""/></div>
       <div class="grid-2"><div class="field"><label>Context window</label><input class="input" id="m-ctx" value="128000"/></div><div class="field"><label>Priority (lower = preferred)</label><input class="input" id="m-prio" value="100"/></div></div>
-      <div class="field-hint">Capabilities (vision / tools / reasoning / structured output / code / streaming) are detected automatically from the model. Use <strong>Test</strong> to verify the model & see the exact endpoint.</div>
+      <div id="m-caps-preview" class="field-hint" style="margin-top:-4px">Capabilities (vision / tools / reasoning / structured output / code / streaming) are detected automatically from the model id. Use <strong>Test</strong> to verify the model &amp; see the exact endpoint.</div>
       <div class="flex"><button class="btn" id="m-test">Test model</button><button class="btn btn-primary" id="m-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>
       <div id="m-test-result"></div>`);
-    $("#m-id").addEventListener("input", () => {
+    // --- Catalog loading: fetch live models from the provider, populate dropdown. ---
+    let lastCatalog = [];
+    let lastInfo = null;
+    const renderCapsPreview = () => {
+      const el = document.getElementById("m-caps-preview");
       const id = $("#m-id").value.trim();
-      if (id && !$("#m-name").value.trim()) $("#m-name").placeholder = id;
-    });
+      if (!id) { el.innerHTML = "Pick a model to see its auto-detected capabilities."; return; }
+      const detected = lastInfo?.capabilities || (window.__modelDetected?.() ?? null);
+      if (detected) el.innerHTML = `Detected capabilities: ${capsBadges(detected)}`;
+      else el.innerHTML = "Capabilities will be auto-detected when the model is saved.";
+    };
+    window.__modelDetected = () => lastInfo?.capabilities;
+    const loadCatalog = async (providerId) => {
+      const hint = $("#m-catalog-hint");
+      const sel = $("#m-id");
+      sel.innerHTML = `<option value="">Loading…</option>`;
+      hint.textContent = "Loading catalog from provider…";
+      try {
+        const r = await api(`/providers/${encodeURIComponent(providerId)}/models`);
+        lastCatalog = r.models || [];
+        if (!r.ok) {
+          sel.innerHTML = `<option value="">— catalog unavailable —</option>`;
+          hint.innerHTML = `⚠ ${esc(r.message || "Cannot list models")} — you can still type a model id manually below.`;
+          // allow free-text fallback
+          sel.outerHTML = `<input class="input mono" id="m-id" placeholder="gpt-4o / claude-sonnet-4-5 / ..." style="flex:1"/>`;
+          document.getElementById("m-id").addEventListener("input", renderCapsPreview);
+          return;
+        }
+        if (!lastCatalog.length) {
+          sel.innerHTML = `<option value="">— provider returned no models —</option>`;
+          hint.textContent = "The provider did not return a model list — you can type the model id manually.";
+          sel.outerHTML = `<input class="input mono" id="m-id" placeholder="gpt-4o / claude-sonnet-4-5 / ..." style="flex:1"/>`;
+          document.getElementById("m-id").addEventListener("input", renderCapsPreview);
+          return;
+        }
+        sel.innerHTML = lastCatalog.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
+        // Auto-pick the first and update the display-name placeholder + cap preview.
+        const first = lastCatalog[0];
+        sel.value = first;
+        lastInfo = (r.modelInfos || []).find((m) => m.id === first) || null;
+        $("#m-ctx").value = lastInfo?.contextWindow || 128000;
+        if (!$("#m-name").value.trim()) $("#m-name").placeholder = first;
+        hint.innerHTML = `${r.modelInfos?.length ?? lastCatalog.length} model(s) from <span class="mono">${esc(r.catalogUrl || "")}</span> · chat: <span class="mono">${esc(r.chatUrl || "")}</span>`;
+        renderCapsPreview();
+      } catch (e) {
+        sel.innerHTML = `<option value="">— error —</option>`;
+        hint.innerHTML = `⚠ ${esc(e.message)}`;
+        sel.outerHTML = `<input class="input mono" id="m-id" placeholder="gpt-4o / claude-sonnet-4-5 / ..." style="flex:1"/>`;
+        document.getElementById("m-id").addEventListener("input", renderCapsPreview);
+      }
+    };
+    // Initial load — use the first selectable provider.
+    const initial = providers.find((p) => p.active) || providers[0];
+    if (initial) {
+      $("#m-prov").value = initial.id;
+      await loadCatalog(initial.id);
+    }
+    $("#m-prov").addEventListener("change", () => loadCatalog($("#m-prov").value));
+    $("#m-refresh").onclick = () => loadCatalog($("#m-prov").value);
+    // When the user picks a different model, refresh the auto-derived fields.
+    const onPick = () => {
+      const id = $("#m-id").value.trim();
+      if (!id) { renderCapsPreview(); return; }
+      // If the dropdown is currently a <select>, find the matching modelInfo.
+      const sel = $("#m-id");
+      if (sel.tagName === "SELECT") {
+        const inf = (lastCatalog.length ? null : null); // noop, we keep lastInfo from lastCatalog
+        // Try to find the info in the current select's data (we don't have it stored, so re-fetch is needed)
+      }
+      // Always (re)fetch this single model via /models/test to refresh detected capabilities.
+      api("/models/test", { method: "POST", body: { providerId: $("#m-prov").value, modelId: id } })
+        .then((r) => {
+          lastInfo = { id, contextWindow: r.contextWindow || 128000, capabilities: r.detectedCapabilities || r.capabilities };
+          $("#m-ctx").value = lastInfo.contextWindow;
+          if (!$("#m-name").value.trim()) $("#m-name").placeholder = id;
+          renderCapsPreview();
+        })
+        .catch(() => renderCapsPreview());
+    };
+    $("#m-id").addEventListener("change", onPick);
     $("#m-test").onclick = async () => {
       const el = $("#m-test-result");
       const modelId = $("#m-id").value.trim();
       const providerId = $("#m-prov").value;
-      if (!modelId) { toast("Model ID required", "", "err"); return; }
+      if (!modelId) { toast("Model required", "", "err"); return; }
       if (!providerId) { toast("Provider required", "", "err"); return; }
       el.innerHTML = `<div class="test-result">Testing…</div>`;
       try {
@@ -983,7 +1081,7 @@
     };
     $("#m-go").onclick = async () => {
       const modelId = $("#m-id").value.trim();
-      if (!modelId) { toast("Model ID required", "", "err"); return; }
+      if (!modelId) { toast("Model required", "", "err"); return; }
       try {
         const m = await api("/models", { method: "POST", body: {
           providerId: $("#m-prov").value, modelId, displayName: $("#m-name").value.trim() || modelId,
@@ -1016,15 +1114,42 @@
   /* PROVIDERS */
   on("/providers", async () => {
     const list = await api("/providers");
+    // For each provider, derive the catalog/chat URL the platform will hit,
+    // so users can see the documented endpoint without having to run a test.
+    const urlHints = (p) => {
+      const base = String(p.baseUrl || "").replace(/\/+$/, "");
+      let catalog, chat, fmt = p.apiFormat;
+      if (fmt === "anthropic") {
+        catalog = base.endsWith("/v1") ? `${base}/models?limit=50` : `${base}/v1/models?limit=50`;
+        chat = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;
+      } else if (fmt === "gemini") {
+        const b = base.endsWith("/v1beta") ? base : `${base}/v1beta`;
+        catalog = `${b}/models`;
+        chat = `${b}/models/<model>:generateContent`;
+      } else if (fmt === "ollama") {
+        const b = base.endsWith("/v1") ? base.slice(0, -3) : base;
+        catalog = `${b}/api/tags`;
+        chat = `${b}/api/chat`;
+      } else {
+        // openai / openrouter / azure-openai / openai-compatible / custom
+        const b = base.endsWith("/v1") ? base : (base ? `${base}/v1` : base);
+        catalog = `${b}/models`;
+        chat = `${b}/chat/completions`;
+      }
+      return { catalog, chat };
+    };
     $("#content").innerHTML = `<div class="overview"><div><h1>Providers</h1><p>Provider-agnostic model providers. Use an env-var reference or paste the key (stored encrypted).</p></div><button class="btn btn-primary" onclick="openProvider()">＋ Add Provider</button></div>
       <div class="grid-3">${list.map((p) => {
         const ready = p.readiness?.ready !== false;
+        const u = urlHints(p);
         return `<div class="card card-body" id="prov-${esc(p.id)}">
         <div class="card-title">${esc(p.name)} ${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</div>
         <div class="meter-row"><span class="lbl">Type</span><span class="val">${esc(p.type)}</span></div>
         <div class="meter-row"><span class="lbl">Format</span><span class="val">${esc(p.apiFormat)}</span></div>
         <div class="meter-row"><span class="lbl">Secret</span><span class="val mono">${esc(p.secretRef || "—")} ${p.keyPresent ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}${p.secretValuePresent ? ` <span class="badge badge-info">${esc(p.secretMasked || "stored")}</span>` : ""}</span></div>
         <div class="meter-row"><span class="lbl">Base URL</span><span class="val mono" style="font-size:10px">${esc(p.baseUrl || "—")}</span></div>
+        <div class="meter-row"><span class="lbl">Catalog</span><span class="val mono" style="font-size:10px;word-break:break-all" title="${esc(u.catalog)}">${esc(u.catalog)}</span></div>
+        <div class="meter-row"><span class="lbl">Chat</span><span class="val mono" style="font-size:10px;word-break:break-all" title="${esc(u.chat)}">${esc(u.chat)}</span></div>
         <div class="meter-row"><span class="lbl">Timeout</span><span class="val">${p.timeoutMs}ms</span></div>
         ${ready ? "" : `<div class="field-hint warn">⚠ ${esc(p.readiness.reason)}${p.readiness.hint ? " — " + esc(p.readiness.hint) : ""}</div>`}
         <div class="provider-actions">
@@ -1081,12 +1206,50 @@
         <div class="field"><label>Timeout (ms)</label><input class="input" id="pv-timeout" value="${cur.timeoutMs || 60000}"/></div>
         <div class="field"><label>Max tokens default</label><input class="input" id="pv-maxtok" value="${cur.maxTokensDefault || 4096}"/></div>
       </div>
+      <div class="field"><label>Endpoints the platform will request <span class="select-count">derived from the docs (OpenAI=OpenAI uses /v1; Anthropic adds /v1 for you; Gemini uses /v1beta; Ollama uses /api/tags)</span></label>
+        <div class="field-hint mono" id="pv-urls" style="font-size:11px;line-height:1.6;word-break:break-all"></div>
+      </div>
       <div class="flex"><button class="btn" id="pv-test">Test connection</button><button class="btn btn-primary" id="pv-go">${editId ? "Save" : "Create"}</button><button class="btn" onclick="closeModal()">Cancel</button></div>
       <div id="pv-test-result"></div>`);
+    // Live URL preview (matches the documented path for each api format).
+    const computeUrls = () => {
+      const base = String($("#pv-base").value || "").replace(/\/+$/, "");
+      const fmt = $("#pv-format").value;
+      let catalog = "—", chat = "—";
+      if (fmt === "anthropic") {
+        catalog = base.endsWith("/v1") ? `${base}/models?limit=50` : (base ? `${base}/v1/models?limit=50` : "—");
+        chat = base.endsWith("/v1") ? `${base}/messages` : (base ? `${base}/v1/messages` : "—");
+      } else if (fmt === "gemini") {
+        const b = base.endsWith("/v1beta") ? base : (base ? `${base}/v1beta` : "");
+        catalog = b ? `${b}/models` : "—";
+        chat = b ? `${b}/models/<model>:generateContent` : "—";
+      } else if (fmt === "ollama") {
+        const b = base.endsWith("/v1") ? base.slice(0, -3) : base;
+        catalog = b ? `${b}/api/tags` : "—";
+        chat = b ? `${b}/api/chat` : "—";
+      } else {
+        // openai / openrouter / azure-openai / openai-compatible / custom
+        const b = base.endsWith("/v1") ? base : (base ? `${base}/v1` : "");
+        catalog = b ? `${b}/models` : "—";
+        chat = b ? `${b}/chat/completions` : "—";
+      }
+      return { catalog, chat };
+    };
+    const renderUrls = () => {
+      const u = computeUrls();
+      $("#pv-urls").innerHTML = `📚 <strong>catalog</strong>: ${esc(u.catalog)}<br>💬 <strong>chat</strong>: ${esc(u.chat)}`;
+    };
+    renderUrls();
+    ["#pv-base", "#pv-format", "#pv-type"].forEach((sel) => {
+      const el = $(sel); if (!el) return;
+      el.addEventListener("input", renderUrls);
+      el.addEventListener("change", renderUrls);
+    });
     const applyPreset = () => {
       const pr = meta.presets?.[$("#pv-type").value]; if (!pr) return;
       if (!editId) { $("#pv-base").value = pr.baseUrl || ""; $("#pv-secret").value = pr.secretRef || ""; if (!$("#pv-name").value) $("#pv-name").placeholder = pr.label; }
       $("#pv-auth").value = pr.authType; $("#pv-format").value = pr.apiFormat;
+      renderUrls();
     };
     $("#pv-type").addEventListener("change", applyPreset);
     $("#pv-secret").addEventListener("input", () => {

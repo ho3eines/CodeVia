@@ -203,4 +203,60 @@ describe("model test + auto-detected capabilities", () => {
     // Surfaces the endpoint the model catalog would be requested from.
     expect(body.test && body.test.url).toBe("https://llm.example/v1/models");
   });
+
+  it("returns both catalogUrl and chatUrl from the providers/test draft endpoint", async () => {
+    const srv = await boot();
+    const r = await srv.inject({
+      method: "POST",
+      url: "/providers/test",
+      payload: { type: "anthropic", baseUrl: "https://api.anthropic.com", secretRef: "ANTHROPIC_API_KEY", authType: "api-key", apiFormat: "anthropic" },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.catalogUrl).toBe("https://api.anthropic.com/v1/models?limit=50");
+    expect(body.chatUrl).toBe("https://api.anthropic.com/v1/messages");
+    expect(body.urls).toEqual(expect.arrayContaining([body.catalogUrl, body.chatUrl]));
+    expect(body.apiFormat).toBe("anthropic");
+  });
+
+  it("returns the documented Gemini URLs (no /v1, /v1beta is added by the platform)", async () => {
+    const srv = await boot();
+    const r = await srv.inject({
+      method: "POST",
+      url: "/providers/test",
+      payload: { type: "gemini", baseUrl: "https://generativelanguage.googleapis.com", secretRef: "GEMINI_API_KEY", authType: "api-key", apiFormat: "gemini" },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.catalogUrl).toBe("https://generativelanguage.googleapis.com/v1beta/models");
+    expect(body.chatUrl).toContain("/v1beta/models/");
+    expect(body.chatUrl).toContain(":generateContent");
+  });
+
+  it("returns the documented Ollama URLs (no /v1, /api/tags is used)", async () => {
+    const srv = await boot();
+    const r = await srv.inject({
+      method: "POST",
+      url: "/providers/test",
+      payload: { type: "ollama", baseUrl: "http://localhost:11434", authType: "none", apiFormat: "ollama" },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.catalogUrl).toBe("http://localhost:11434/api/tags");
+    expect(body.apiFormat).toBe("ollama");
+  });
+
+  it("GET /providers/:id/models returns the catalog + chat URLs (used by the Add-Model dropdown)", async () => {
+    const srv = await boot();
+    const r = await srv.inject({ method: "GET", url: "/providers/provider-openai/models" });
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.providerId).toBe("provider-openai");
+    expect(body.catalogUrl).toBe("https://api.openai.com/v1/models");
+    expect(body.chatUrl).toBe("https://api.openai.com/v1/chat/completions");
+    expect(body.urls).toEqual(expect.arrayContaining([body.catalogUrl, body.chatUrl]));
+    // When the key is missing, the catalog cannot be enumerated.
+    expect(body.ok).toBe(false);
+    expect(body.models).toEqual([]);
+  });
 });
