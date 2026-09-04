@@ -157,10 +157,24 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
 
   // Session introspection: always 200, even when logged out (or when strict
   // mode is on). Callers use `{ authenticated: false }` to render a login
-  // button instead of treating a 401 as an error.
+  // button instead of treating a 401 as an error. The response also carries
+  // the effective strict-mode config so the SPA can decide *upfront* whether
+  // protected API calls would 401 — letting it show the login screen without
+  // ever firing a request that fails (avoids guaranteed 401 console noise).
   app.get("/auth/me", { schema: { tags: ["auth"] } }, async (req) => {
     const { user, authenticated } = resolveRequestUser(req, container);
-    return { authenticated, user };
+    const eff = getEffectiveGitHubLoginSettings(container.kv);
+    return {
+      authenticated,
+      user,
+      // Login config + strict mode (env REQUIRE_AUTH, overridden by the Admin
+      // panel toggle). `loginEnabled` matches what the guard actually enforces:
+      // strict mode only rejects when OAuth is configured (otherwise the
+      // platform falls back to demo mode so nobody is locked out).
+      loginConfigured: eff.configured,
+      requireAuth: eff.requireAuth && eff.configured,
+      redirectUri: eff.redirectUri,
+    };
   });
 
   app.post("/auth/logout", { schema: { tags: ["auth"] } }, async (_req, reply) => {
