@@ -176,12 +176,36 @@ export class AgentManager {
     ].join("\n");
   }
 
+  /**
+   * Decide whether a skill is relevant to a project. We match the skill's own
+   * keyword tokens against the project profile (description / framework /
+   * database / language / explicit tech hints), plus a small alias table for
+   * common stacks (e.g. "sqlserver" <-> "sql server"). Unlike the old logic we do
+   * NOT feed the skill's own slug into the search text (which made every skill
+   * whose slug was a known needle "always relevant" regardless of the project).
+   */
   private skillsRelevant(slug: string, tech: string[], project: Project): boolean {
-    const text = `${slug} ${project.description} ${project.framework ?? ""} ${project.database ?? ""}`.toLowerCase();
-    const needles = ["dotnet", "csharp", "aspnetcore", "blazor", "react", "nodejs", "sqlserver", "postgresql", "docker", "github", "git", "security", "testing"].filter(
-      (n) => text.includes(n),
-    );
-    return needles.length > 0;
+    const projText =
+      `${project.description} ${project.framework ?? ""} ${project.database ?? ""} ${project.primaryLanguage ?? ""} ${tech.join(" ")}`.toLowerCase();
+    const keywords = slug
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(" ")
+      .filter(Boolean);
+    const aliases: Record<string, string[]> = {
+      sqlserver: ["sql server", "sqlserver", "mssql"],
+      aspnetcore: ["asp.net", "aspnetcore", ".net"],
+      dotnet: [".net", "dotnet", "c#"],
+      csharp: ["c#", "csharp", ".net"],
+      nodejs: ["node", "nodejs", "javascript"],
+      postgresql: ["postgres", "postgresql"],
+      testing: ["test", "testing", "qa"],
+      docker: ["docker", "container", "compose"],
+      github: ["github", "git"],
+      git: ["github", "git"],
+      security: ["security", "auth", "oauth"],
+    };
+    return keywords.some((w) => projText.includes(w) || (aliases[w] ?? []).some((a) => projText.includes(a)));
   }
 
   /* ---------------- Task creation & execution ---------------- */
@@ -267,7 +291,7 @@ export class AgentManager {
   }
 
   private shouldHeal(task: Task): boolean {
-    const text = "${task.title} ${task.description}".toLowerCase();
+    const text = `${task.title} ${task.description}`.toLowerCase();
     return /test|fail|bug|error/.test(text);
   }
 

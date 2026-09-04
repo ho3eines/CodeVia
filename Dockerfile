@@ -18,18 +18,21 @@ FROM node:22-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
-# Non-root user for safety.
-RUN groupadd -r codevia && useradd -r -g codevia codevia \
-  && mkdir -p /app/data && chown -R codevia:codevia /app
-USER codevia
-
-# Install only production dependencies in the runtime image.
-COPY --from=build --chown=codevia:codevia /app/package.json /app/package-lock.json ./
-RUN npm ci --omit=dev
+# Install only production dependencies in the runtime image (as root, so npm
+# has a writable cache), then clean the cache to keep the image small.
+COPY --from=build /app/package.json /app/package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Reference the compiled output + static UI.
-COPY --from=build --chown=codevia:codevia /app/dist ./dist
-COPY --from=build --chown=codevia:codevia /app/public ./public
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/public ./public
+
+# Non-root user for safety — created AFTER npm ci so the install runs as root.
+# HOME points at /app so anything npm/node writes at runtime stays writable.
+RUN groupadd -r codevia && useradd -r -g codevia -d /app codevia \
+  && mkdir -p /app/data && chown -R codevia:codevia /app
+ENV HOME=/app
+USER codevia
 
 EXPOSE 8080
 ENV PORT=8080
