@@ -9,6 +9,7 @@ import {
   buildSessionCookie,
   b64urlEncode,
   b64urlDecode,
+  getLocalhostCallbackWarning,
 } from "../auth/github-oauth.js";
 import { UserRepository } from "../auth/users.js";
 import { freshDb } from "./test-helpers.js";
@@ -151,5 +152,26 @@ describe("UserRepository GitHub upsert", () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe("Localhost callback warning (production misconfiguration guard)", () => {
+  it("warns when the callback is localhost", () => {
+    const warning = getLocalhostCallbackWarning("http://localhost:8080/auth/github/callback");
+    expect(warning).toBeDefined();
+    expect(warning).toContain("http://localhost:8080/auth/github/callback");
+    expect(warning).toContain("PUBLIC_WEB_BASE_URL");
+  });
+
+  it("warns for 127.0.0.1 and 0.0.0.0", () => {
+    expect(getLocalhostCallbackWarning("http://127.0.0.1:8080/auth/github/callback")).toBeDefined();
+    expect(getLocalhostCallbackWarning("http://0.0.0.0:8080/auth/github/callback")).toBeDefined();
+  });
+
+  it("stays silent for public hosts and unparseable URLs", () => {
+    expect(
+      getLocalhostCallbackWarning("https://codevia-production.up.railway.app/auth/github/callback"),
+    ).toBeUndefined();
+    expect(getLocalhostCallbackWarning("not a url")).toBeUndefined();
   });
 });

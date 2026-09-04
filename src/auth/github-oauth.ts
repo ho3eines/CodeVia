@@ -33,6 +33,33 @@ export function getOAuthRedirectUri(): string {
   return `${String(base).replace(/\/$/, "")}/auth/github/callback`;
 }
 
+/**
+ * Production guard for the most common Railway misconfiguration:
+ * `PUBLIC_WEB_BASE_URL` left as `http://localhost:8080`, so the OAuth callback
+ * is derived from a local address. After authorizing on GitHub the browser can
+ * never be redirected back to a localhost URL, the login silently never
+ * completes, and no session cookie is ever set (401 on `/auth/me`).
+ * Returns an actionable warning message, or undefined when the callback is
+ * fine (or cannot be parsed).
+ */
+export function getLocalhostCallbackWarning(redirectUri: string): string | undefined {
+  let host = "";
+  try {
+    host = new URL(redirectUri).hostname;
+  } catch {
+    return undefined;
+  }
+  if (!["localhost", "127.0.0.1", "0.0.0.0"].includes(host)) return undefined;
+  return (
+    `GitHub OAuth callback resolves to a local address: ${redirectUri}. ` +
+    `In production the browser can never be redirected back to it, so the login ` +
+    `will never complete and no session cookie will be set (401 on /auth/me). ` +
+    `Set PUBLIC_WEB_BASE_URL (or GITHUB_OAUTH_CALLBACK_URL / the Admin "Callback URL") to ` +
+    `your public URL (e.g. https://<app>.up.railway.app) and make the GitHub OAuth App's ` +
+    `"Authorization callback URL" match it exactly.`
+  );
+}
+
 export function getOAuthConfig(): OAuthConfig | undefined {
   const env = getEnv();
   if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) return undefined;
