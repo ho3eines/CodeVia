@@ -22,7 +22,9 @@
         const j = await res.json();
         msg = j.message || j.error || msg;
       } catch (_) { /* ignore */ }
-      throw new Error(msg);
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
     }
     return res.status === 204 ? null : res.json();
   }
@@ -52,6 +54,20 @@
   }
   function renderError(err) {
     $("#content").innerHTML = `<div class="error-state"><h4>Something went wrong</h4><pre>${esc(err && (err.message || err))}</pre><div class="flex mt"><button class="btn btn-primary" onclick="location.reload()">Retry</button></div></div>`;
+  }
+  /* Strict mode (REQUIRE_AUTH) + no session: show a login screen instead of a raw 401. */
+  async function renderLoginRequired() {
+    const st = await api("/auth/github/status").catch(() => ({ configured: false }));
+    const next = encodeURIComponent(location.hash || "#/dashboard");
+    $("#content").innerHTML = `<div class="card card-body" style="max-width:520px;margin:40px auto;text-align:center">
+      <div class="empty-emoji" style="font-size:44px">🔐</div>
+      <h2 style="margin:12px 0 6px">Sign in required</h2>
+      <p style="color:var(--text-muted)">This CodeVia instance requires a GitHub login for API access.</p>
+      ${st.configured
+        ? `<div class="flex mt" style="justify-content:center"><a class="btn btn-primary" href="/auth/github/login?next=${next}" style="text-decoration:none">🐙 Login with GitHub</a></div>`
+        : `<div class="error-state mt" style="text-align:left"><h4>GitHub login is not configured</h4>
+            <p style="font-size:12px;color:var(--text-muted)">Strict mode is on, but there is no way to sign in yet. Set <span class="mono">GITHUB_CLIENT_ID</span> + <span class="mono">GITHUB_CLIENT_SECRET</span> + <span class="mono">AUTH_SECRET</span> in the environment (or set <span class="mono">REQUIRE_AUTH=false</span>) and redeploy. See <span class="mono">docs/GITHUB_SETUP.md</span>.</p></div>`}
+    </div>`;
   }
   function emptyState(emoji, title, text) {
     return `<div class="empty"><div class="empty-emoji">${emoji}</div><h3>${esc(title)}</h3><p>${esc(text || "")}</p></div>`;
@@ -143,7 +159,8 @@
 
   async function route() {
     showSkeleton();
-    const hash = location.hash.replace(/^#/, "") || "/dashboard";
+    // Strip the query part ("#/github?login=success") before matching routes.
+    const hash = (location.hash.replace(/^#/, "").split("?")[0]) || "/dashboard";
     renderNav();
     const [pathKey, ...rest] = hash.split("/").filter(Boolean);
     const key = "/" + (pathKey || "dashboard");
@@ -152,11 +169,16 @@
     const handler = matched.handler;
     const params = matched.params || {};
     const title = $("#topbar-title");
+    handleLoginResultParams();
     try {
       await handler(rest, params);
     } catch (err) {
-      renderError(err);
-      toast("Error", err.message, "err");
+      if (err && err.status === 401) {
+        await renderLoginRequired();
+      } else {
+        renderError(err);
+        toast("Error", err.message, "err");
+      }
     } finally {
       const shown = titleMap[matched.pattern] || titleMap[full] || titleMap[key] || "Dashboard";
       title.textContent = document.title = shown;
@@ -555,7 +577,11 @@
     const slot = $("#user-slot");
     if (!slot) return;
     try {
-      const me = await api("/auth/me");
+      // /auth/me is 401 in strict mode when logged out — treat that as "no session".
+      const me = await api("/auth/me").catch((e) => {
+        if (e && e.status === 401) return { authenticated: false, user: null };
+        throw e;
+      });
       if (me.authenticated && me.user && me.user.externalId !== "demo") {
         const avatar = me.user.avatarUrl ? `<img src="${esc(me.user.avatarUrl)}" alt="" style="width:22px;height:22px;border-radius:50%;vertical-align:-6px;margin-right:6px"/>` : "👤 ";
         slot.innerHTML = `<span class="pill" title="${esc(me.user.email || "")} (${esc(me.user.role)})">${avatar}${esc(me.user.name)}</span> <button class="btn btn-ghost" id="logout-btn" style="padding:4px 10px">Logout</button>`;
@@ -573,19 +599,22 @@
       }
     } catch (_) { /* leave slot empty when API unreachable */ }
   }
-  on("/github", async () => {
-    const status = await api("/integrations/github/status");
-    const repos = await api("/github/repositories").catch(() => []);
-    const me = await api("/auth/me").catch(() => ({ authenticated: false, user: null }));
+  /* Login result toasts — the OAuth callback can land on any hash route (?login=success|error). */
+  function handleLoginResultParams() {
     const q = new URLSearchParams((location.hash.split("?")[1] || ""));
     if (q.get("login") === "success" && !sessionStorage.getItem("cv-welcomed")) {
       sessionStorage.setItem("cv-welcomed", "1");
-      toast("GitHub login successful", me.user ? me.user.name : "", "ok");
+      api("/auth/me").then((me) => toast("GitHub login successful", me && me.user ? me.user.name : "", "ok")).catch(() => toast("GitHub login successful", "", "ok"));
       renderUserSlot();
     }
     if (q.get("login") === "error") {
       toast("GitHub login failed", q.get("reason") || "Please try again.", "err");
     }
+  }
+  on("/github", async () => {
+    const status = await api("/integrations/github/status");
+    const repos = await api("/github/repositories").catch(() => []);
+    const me = await api("/auth/me").catch(() => ({ authenticated: false, user: null }));
     const loginCard = me.authenticated && me.user && me.user.externalId !== "demo"
       ? `<div class="card card-body"><div class="card-title">GitHub Login</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot healthy"></span>Logged in</div></div>

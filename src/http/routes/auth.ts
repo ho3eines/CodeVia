@@ -7,9 +7,10 @@ import {
   createOAuthState,
   exchangeCodeForToken,
   fetchGitHubUser,
+  readOAuthState,
+  sanitizeNextLocation,
   SESSION_TTL_MS,
   signSession,
-  verifyOAuthState,
 } from "../../auth/github-oauth.js";
 import {
   getEffectiveGitHubLoginSettings,
@@ -52,7 +53,9 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
         hint: "An admin can set the Client ID in Admin → GitHub Login; GITHUB_CLIENT_SECRET must be set in the environment. See docs/GITHUB_SETUP.md.",
       };
     }
-    const state = createOAuthState();
+    const q = (req.query ?? {}) as Record<string, unknown>;
+    // Optional in-app destination after login (hash routes only — see sanitizeNextLocation).
+    const state = createOAuthState(undefined, { next: sanitizeNextLocation(q.next) });
     const url = buildAuthorizeUrl({
       clientId: cfg.clientId,
       redirectUri: cfg.redirectUri,
@@ -60,7 +63,7 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
       state,
     });
     const wantsJson =
-      String((req.query as Record<string, unknown> | undefined)?.format ?? "") === "json" ||
+      String(q.format ?? "") === "json" ||
       String(req.headers.accept ?? "").includes("application/json");
     if (wantsJson) return { url, state };
     reply.redirect(url, 302);
@@ -84,11 +87,23 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
       return reply;
     };
 
-    if (oauthError) return fail(`GitHub rejected the login (${oauthError})`, String(q.error_description ?? ""));
     const cfg = getEffectiveOAuthConfig(container.kv);
+    if (oauthError) {
+      // Surface the most common misconfiguration with an actionable message.
+      const detail = String(q.error_description ?? "");
+      if (oauthError === "redirect_uri_mismatch") {
+        return fail(
+          `GitHub rejected the login (redirect_uri_mismatch): the OAuth App's "Authorization callback URL" must be exactly ${cfg?.redirectUri ?? "<PUBLIC_WEB_BASE_URL>/auth/github/callback"}`,
+          detail,
+        );
+      }
+      return fail(`GitHub rejected the login (${oauthError})`, detail);
+    }
     if (!cfg) return fail("GitHub OAuth is not configured on this server");
     if (!code) return fail("Missing ?code — restart the login from CodeVia");
-    if (!verifyOAuthState(state)) return fail("Invalid or expired login state — please try again");
+    const parsedState = readOAuthState(state);
+    if (!parsedState) return fail("Invalid or expired login state — please try again");
+    const next = parsedState.next ?? "#/github";
 
     try {
       const { accessToken } = await exchangeCodeForToken(code, {
@@ -112,7 +127,8 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
       logger.info(`github login: ${profile.login} (${user.role})`);
       const wantsJson = String(req.headers.accept ?? "").includes("application/json");
       if (wantsJson) return { ok: true, token, user, created };
-      reply.redirect("/#/github?login=success", 302);
+      const sep = next.includes("?") ? "&" : "?";
+      reply.redirect(`/${next}${sep}login=success`, 302);
       return reply;
     } catch (err) {
       return fail("GitHub login failed", err instanceof Error ? err.message : String(err));

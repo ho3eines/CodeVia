@@ -1,5 +1,43 @@
 import { z } from "zod";
 
+const TRUE_VALUES = new Set(["1", "true", "yes", "y", "on"]);
+const FALSE_VALUES = new Set(["0", "false", "no", "n", "off"]);
+
+/**
+ * Lenient boolean parser for environment flags.
+ *
+ * `z.coerce.boolean()` runs `Boolean(value)`, so ANY non-empty string — including
+ * `"false"` and `"0"` — becomes `true`. That turned `REQUIRE_AUTH=false` into a
+ * strict-auth lockout in production. This helper understands the usual
+ * spellings; blank/unset means "use the default"; anything else is returned
+ * untouched so zod reports a clear validation error instead of guessing.
+ */
+export function parseEnvBoolean(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "boolean") return value;
+  const s = String(value).trim().toLowerCase();
+  if (s === "") return undefined;
+  if (TRUE_VALUES.has(s)) return true;
+  if (FALSE_VALUES.has(s)) return false;
+  return undefined;
+}
+
+function isRecognizedBoolean(value: unknown): boolean {
+  if (value === undefined || value === null || typeof value === "boolean") return true;
+  const s = String(value).trim().toLowerCase();
+  return s === "" || TRUE_VALUES.has(s) || FALSE_VALUES.has(s);
+}
+
+const envBoolean = (defaultValue: boolean) =>
+  z.preprocess(
+    (v) => (isRecognizedBoolean(v) ? parseEnvBoolean(v) : v),
+    z
+      .boolean({
+        invalid_type_error: 'expected a boolean ("true"/"false", "1"/"0", "yes"/"no", "on"/"off")',
+      })
+      .default(defaultValue),
+  );
+
 /**
  * Environment variable contract. All secrets come from environment variables /
  * secret management (Railway Variables, Railway Secrets, Secret Manager). They are
@@ -40,16 +78,18 @@ const EnvSchema = z.object({
 
   // Platform auth sessions (HMAC-signed opaque tokens for GitHub-login users)
   AUTH_SECRET: z.string().optional(),
-  REQUIRE_AUTH: z.coerce.boolean().default(false),
+  // Strict mode: unauthenticated API calls get 401. Accepts true/false, 1/0,
+  // yes/no, on/off (blank = default false).
+  REQUIRE_AUTH: envBoolean(false),
 
   // Telegram Bot
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_WEBHOOK_SECRET: z.string().optional(),
 
   // Platform control
-  ENABLE_TELEGRAM: z.coerce.boolean().default(false),
-  ENABLE_SIMULATION_MODE: z.coerce.boolean().default(true),
-  MOCK_AI_DEFAULT: z.coerce.boolean().default(true),
+  ENABLE_TELEGRAM: envBoolean(false),
+  ENABLE_SIMULATION_MODE: envBoolean(true),
+  MOCK_AI_DEFAULT: envBoolean(true),
 
   // Web UI
   WEB_BASE_URL: z.string().default("http://localhost:8080"),
