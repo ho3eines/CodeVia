@@ -16,6 +16,7 @@ import {
   getEffectiveGitHubLoginSettings,
   getEffectiveOAuthConfig,
 } from "../../auth/admin-settings.js";
+import { resolveRequestUser } from "../auth.js";
 import { getEnv } from "../../config/env.js";
 import { logger } from "../../logger.js";
 
@@ -31,9 +32,10 @@ import { logger } from "../../logger.js";
 export function registerAuthRoutes(app: FastifyInstance, container: Container): void {
   app.get("/auth/github/status", { schema: { tags: ["auth"] } }, async (req) => {
     const eff = getEffectiveGitHubLoginSettings(container.kv);
-    const user = (req as typeof req & { authenticated?: boolean }).authenticated
-      ? req.user
-      : undefined;
+    // Public endpoint: the auth hook is skipped, so resolve the session here
+    // instead of relying on middleware-attached flags.
+    const session = resolveRequestUser(req, container);
+    const user = session.authenticated ? session.user : undefined;
     return {
       configured: eff.configured,
       redirectUri: eff.redirectUri,
@@ -45,7 +47,7 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
       clientSecretConfigured: eff.clientSecretConfigured,
       secrets: eff.secrets,
       diagnostics: eff.diagnostics,
-      authenticated: !!(req as typeof req & { authenticated?: boolean }).authenticated,
+      authenticated: session.authenticated,
       user: user ?? null,
       setupHint: eff.setupHint,
       setupSteps: eff.setupSteps,
@@ -153,9 +155,12 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
     }
   });
 
+  // Session introspection: always 200, even when logged out (or when strict
+  // mode is on). Callers use `{ authenticated: false }` to render a login
+  // button instead of treating a 401 as an error.
   app.get("/auth/me", { schema: { tags: ["auth"] } }, async (req) => {
-    const authenticated = !!(req as typeof req & { authenticated?: boolean }).authenticated;
-    return { authenticated, user: req.user };
+    const { user, authenticated } = resolveRequestUser(req, container);
+    return { authenticated, user };
   });
 
   app.post("/auth/logout", { schema: { tags: ["auth"] } }, async (_req, reply) => {

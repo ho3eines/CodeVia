@@ -99,7 +99,14 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   await app.register(swaggerUi, { routePrefix: "/docs" });
 
   // Realtime: Socket.io broadcast; only observable status/step/result, never CoT.
-  const io = new SocketIOServer(app.server, { cors: { origin: "*" }, transports: ["websocket", "polling"] });
+  const io = new SocketIOServer(app.server, {
+    cors: { origin: true, credentials: true },
+    transports: ["websocket", "polling"],
+    allowUpgrades: true,
+    pingInterval: 25000,
+    pingTimeout: 20000,
+    maxHttpBufferSize: 1 * 1024 * 1024,
+  });
   live.bind({
     emit: (event) => io.emit(event.type, event),
   });
@@ -157,8 +164,9 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   });
 
   // Global auth guard for everything not whitelisted. Public/unauthenticated
-  // endpoints (health, docs, webhooks, the OAuth handshake) are skipped;
-  // everything else attaches the current user context for permission checks.
+  // endpoints (health, docs, webhooks, the OAuth handshake, session
+  // introspection) are skipped; everything else attaches the current user
+  // context for permission checks.
   const PUBLIC_PREFIXES = [
     "/health",
     "/ready",
@@ -169,6 +177,13 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     "/auth/github/login",
     "/auth/github/callback",
     "/auth/github/status",
+    // Session introspection must never 401: the SPA calls /auth/me on every
+    // load to learn whether it is logged in, and /auth/logout is idempotent.
+    // Both resolve the user from the session directly in their handlers and
+    // answer `{ authenticated: false }` when logged out, so the UI can render
+    // a login button instead of tripping the browser's 401 console noise.
+    "/auth/me",
+    "/auth/logout",
     "/integrations/github/status",
     // Socket.io handshake/polling — realtime is observable status only.
     "/socket.io/",
