@@ -10,6 +10,11 @@ import { resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken } from "../../auth/github-tokens.js";
 import { getEnv } from "../../config/env.js";
 
+function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
+  reply.code(status);
+  return { error: message, ...extra };
+}
+
 /** Map a GitHub failure to a proper HTTP status + actionable message (never a 200 with `{error}`). */
 function githubError(reply: FastifyReply, err: unknown, resolved?: ResolvedGitHub): { error: string; source?: string; hint?: string } {
   const message = err instanceof Error ? err.message : String(err);
@@ -88,6 +93,40 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
         limit: q.limit ? Number(q.limit) : undefined,
       });
       return { repositories, source: resolved.source, scopes: resolved.scopes, hint: resolved.hint, count: repositories.length };
+    } catch (err) {
+      return githubError(reply, err, resolved);
+    }
+  });
+
+  /** Create a new repository on the connected account (user can then pick it). */
+  app.post("/github/repositories", { schema: { tags: ["github"] } }, async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const name = String(b.name ?? "").trim();
+    if (!/^[A-Za-z0-9_.-]+$/.test(name)) return fail(reply, 400, "Repository name is required and can only contain letters, digits, '.', '_', '-'");
+    const resolved = resolveFor(req);
+    try {
+      const repo = await resolved.service.createRepository({
+        name,
+        owner: typeof b.owner === "string" && b.owner.trim() ? b.owner.trim() : undefined,
+        description: typeof b.description === "string" ? b.description.trim() : undefined,
+        private: b.private === true,
+        autoInit: b.autoInit !== false,
+        defaultBranch: typeof b.defaultBranch === "string" && b.defaultBranch.trim() ? b.defaultBranch.trim() : "main",
+      });
+      reply.code(201);
+      return { repository: repo, source: resolved.source };
+    } catch (err) {
+      return githubError(reply, err, resolved);
+    }
+  });
+
+  app.get("/github/repositories/:owner/:name/files", { schema: { tags: ["github"] } }, async (req, reply) => {
+    const { owner, name } = req.params as { owner: string; name: string };
+    const q = req.query as { branch?: string; path?: string };
+    const resolved = resolveFor(req);
+    try {
+      const files = await resolved.service.listFiles({ owner, name }, q.branch, q.path);
+      return { files, source: resolved.source, count: files.length };
     } catch (err) {
       return githubError(reply, err, resolved);
     }

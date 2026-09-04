@@ -1,4 +1,5 @@
 import type { ModelProvider } from "../domain/entities.js";
+import { decryptSecret } from "../auth/encrypted-secrets.js";
 
 export interface ProviderTestResult {
   ok: boolean;
@@ -14,9 +15,21 @@ export interface ProviderTestResult {
   models?: string[];
 }
 
-/** Resolve the API key for a provider config from the process environment (never stored). */
+/**
+ * Resolve the API key for a provider config. A stored secret value (typed into
+ * the UI and encrypted at rest) wins over the environment variable reference so
+ * providers can be configured without a deploy-time env var.
+ */
 export function resolveProviderKey(config: ModelProvider): string | undefined {
+  const stored = decryptSecret(config.secretValueEnc, "provider-secret");
+  if (stored) return stored;
   return config.secretRef ? process.env[config.secretRef] : undefined;
+}
+
+/** True when a non-network readable secret material exists for a provider. */
+export function providerHasSecret(config: ModelProvider): boolean {
+  if (config.authType === "none" || config.type === "mock") return true;
+  return !!config.secretValueEnc || (!!config.secretRef && !!process.env[config.secretRef]);
 }
 
 export function providerNeedsKey(config: ModelProvider): boolean {
@@ -27,18 +40,20 @@ export function providerNeedsKey(config: ModelProvider): boolean {
 export function providerReadiness(config: ModelProvider): { ready: boolean; reason?: string; hint?: string } {
   if (config.type === "mock") return { ready: true };
   if (providerNeedsKey(config)) {
-    if (!config.secretRef) {
+    if (!config.secretRef && !config.secretValueEnc) {
       return {
         ready: false,
-        reason: "No secret reference configured",
-        hint: "Set 'Secret Ref' to the name of the environment variable holding the API key (e.g. OPENAI_API_KEY).",
+        reason: "No API key configured",
+        hint: "Set 'Secret Ref' to the name of an environment variable holding the API key (e.g. OPENAI_API_KEY), or paste the key in the 'API key' field (stored encrypted).",
       };
     }
     if (!resolveProviderKey(config)) {
       return {
         ready: false,
-        reason: `Environment variable ${config.secretRef} is not set on the server`,
-        hint: `Add ${config.secretRef}=<your key> to the server environment (.env / docker-compose) and restart, then activate the provider.`,
+        reason: config.secretRef ? `Environment variable ${config.secretRef} is not set on the server` : "Stored API key can no longer be decrypted",
+        hint: config.secretRef
+          ? `Add ${config.secretRef}=<your key> to the server environment (.env / docker-compose) and restart, or paste the key directly in the provider form.`
+          : "AUTH_SECRET may have changed — re-enter the API key in the provider form.",
       };
     }
   }

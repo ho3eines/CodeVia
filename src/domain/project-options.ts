@@ -63,8 +63,11 @@ export const FRAMEWORK_OPTIONS: ProjectOption[] = [
   { value: "svelte", label: "Svelte / SvelteKit" },
   { value: "dotnet", label: ".NET", skills: ["dotnet", "csharp"], agents: ["backend-developer"] },
   { value: "aspnetcore", label: "ASP.NET Core", skills: ["aspnetcore", "dotnet", "csharp"] },
-  { value: "blazor", label: "Blazor", skills: ["blazor", "dotnet"] },
+  { value: "blazor", label: "Blazor", skills: ["blazor", "dotnet", "csharp"] },
+  { value: "mudblazor", label: "MudBlazor", skills: ["mudblazor", "blazor", "dotnet", "csharp"], agents: ["backend-developer", "frontend-developer"] },
   { value: "dotnet-maui", label: ".NET MAUI / WPF", skills: ["dotnet", "csharp"] },
+  { value: "html", label: "HTML", skills: ["ui-design", "html"] },
+  { value: "css", label: "CSS", skills: ["ui-design", "css"] },
   { value: "nodejs-express", label: "Node.js / Express", skills: ["nodejs", "restapi"] },
   { value: "nestjs", label: "NestJS", skills: ["nodejs", "typescript", "restapi"] },
   { value: "fastify", label: "Fastify", skills: ["nodejs", "restapi"] },
@@ -198,6 +201,8 @@ export interface ProjectOptionCatalog {
   agentTypes: ProjectOption[];
   repositoryRoles: Array<{ value: string; label: string }>;
   coreAgentTypes: AgentType[];
+  /** Keys that should render as single-select (e.g. Database). */
+  singleSelectKeys?: string[];
 }
 
 export function getProjectOptionCatalog(): ProjectOptionCatalog {
@@ -212,6 +217,7 @@ export function getProjectOptionCatalog(): ProjectOptionCatalog {
     agentTypes: AGENT_TYPE_OPTIONS,
     repositoryRoles: REPOSITORY_ROLE_OPTIONS,
     coreAgentTypes: CORE_AGENT_TYPES,
+    singleSelectKeys: ["databases"],
   };
 }
 
@@ -259,6 +265,8 @@ export function canonicalOption(dimension: keyof typeof OPTION_INDEX, value: str
     "asp.net": ["aspnetcore"], "asp.net core": ["aspnetcore"], "aspnet": ["aspnetcore"],
     "node": ["nodejs-express", "javascript"], "nodejs": ["nodejs-express", "javascript"], "node.js": ["nodejs-express", "javascript"], "express": ["nodejs-express"],
     "sql server": ["sqlserver"], "mssql": ["sqlserver"], "sql-server": ["sqlserver"], "postgres": ["postgresql"], "pg": ["postgresql"], "mongo": ["mongodb"],
+    "sqlite": ["sqlite"], "sql-lite": ["sqlite"], "sql lite": ["sqlite"], "sqlite3": ["sqlite"], "oracle": ["oracle"],
+    "mudblazor": ["mudblazor"], "mud": ["mudblazor"], "html": ["html"], "css": ["css"], "html5": ["html"], "css3": ["css"],
     "maria": ["mysql"], "mariadb": ["mysql"], "k8s": ["kubernetes"], "next": ["nextjs"], "next.js": ["nextjs"], "ts": ["typescript"], "js": ["javascript"],
     "react native": ["react-native"], "android": ["mobile-android"], "ios": ["mobile-ios"], "website": ["web"], "webapp": ["web"], "web app": ["web"],
     "golang": ["go"], "py": ["python"], "spring": ["spring-boot"], "springboot": ["spring-boot"], "vuejs": ["vue"], "nuxt": ["vue"], "sveltekit": ["svelte"],

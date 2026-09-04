@@ -9,7 +9,9 @@ import type {
   GithubIssue,
   GithubRelease,
   GithubFile,
+  GithubTreeEntry,
   ListRepositoriesOptions,
+  CreateRepositoryOptions,
 } from "./types.js";
 import { logger } from "../logger.js";
 
@@ -135,6 +137,42 @@ export class RealGitHubService implements IGitHubService {
     return raw
       .map(toRepository)
       .filter((r) => !q || r.fullName.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q));
+  }
+
+  async createRepository(opts: CreateRepositoryOptions): Promise<GithubRepository> {
+    const name = opts.name.trim();
+    if (!name || !/^[A-Za-z0-9_.-]+$/.test(name)) throw new Error(`Invalid repository name "${name}"`);
+    const payload: Record<string, unknown> = {
+      name,
+      description: opts.description ?? "",
+      private: !!opts.private,
+      auto_init: opts.autoInit !== false,
+      default_branch: opts.defaultBranch ?? "main",
+    };
+    if (opts.owner) payload.owner = opts.owner;
+    const raw = await this.json<RawRepo>(`/user/repos`, { method: "POST", body: JSON.stringify(payload) });
+    return toRepository(raw);
+  }
+
+  /** Recursively list repository files under `path` (default root) via the contents API. */
+  async listFiles(repo: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]> {
+    const out: GithubTreeEntry[] = [];
+    const seen = new Set<string>();
+    const q = branch ? `?ref=${encodeURIComponent(branch)}` : "";
+    const walk = async (dir: string): Promise<void> => {
+      const urlPath = dir ? dir.replace(/^\/+|\/+$/g, "") : "";
+      const res = await this.request(`/repos/${repo.owner}/${repo.name}/contents/${urlPath}${q}`);
+      const body = (await res.json()) as Array<{ path: string; type: string; size?: number }>;
+      for (const item of body ?? []) {
+        if (seen.has(item.path)) continue;
+        seen.add(item.path);
+        out.push({ path: item.path, type: item.type === "tree" ? "tree" : "blob", size: item.size });
+        if (item.type === "tree" && out.length < 8000) await walk(item.path);
+        if (out.length >= 8000) return;
+      }
+    };
+    await walk(path ?? "");
+    return out;
   }
 
   async listBranches(repo: GithubRepoRef): Promise<GithubBranch[]> {

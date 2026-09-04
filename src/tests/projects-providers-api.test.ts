@@ -101,10 +101,11 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     expect(enabled).toContain("orchestrator");
     expect(enabled).not.toContain("devops");
 
-    // GET returns the hydrated document
+    // GET returns the hydrated document (mock repo detection adds React alongside Next.js)
     const got = (await srv.inject({ method: "GET", url: `/projects/${p.id}` })).json();
     expect(got.repositories).toHaveLength(2);
-    expect(got.capabilities.frameworks).toEqual(["nextjs"]);
+    expect(got.capabilities.frameworks).toContain("nextjs");
+    expect(got.capabilities.frameworks).toContain("react");
 
     // repositories sub-resource: link, re-point config, unlink
     const linked = (await srv.inject({ method: "POST", url: `/projects/${p.id}/repositories`, payload: { repo: "acme/accounting", role: "library" } })).json();
@@ -154,6 +155,40 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     expect(p.capabilities.frameworks).toEqual(["dotnet"]);
     expect(p.capabilities.databases).toEqual(["sqlserver"]);
   });
+
+  it("inspects the repository, detects the stack/skills and ensures Agent.md (mock repo)", async () => {
+    const srv = await boot();
+    const res = await srv.inject({
+      method: "POST",
+      url: "/projects",
+      payload: {
+        name: "MudStack",
+        configRepo: "acme/mudstack",
+        capabilities: {
+          languages: ["csharp"],
+          frameworks: ["dotnet", "mudblazor", "html", "css"],
+          databases: ["sqlserver"],
+        },
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const p = res.json();
+    expect(p.capabilities.frameworks).toContain("mudblazor");
+    expect(p.capabilities.frameworks).toContain("html");
+    expect(p.capabilities.databases).toEqual(["sqlserver"]); // single-select: detected/selected one remains
+    expect(p.settings.skills).toContain("mudblazor");
+    expect(p.settings.skills).toContain("sqlserver");
+    expect(p.settings.skills).toContain("html");
+    expect(p.settings.skills).toContain("css");
+
+    const mgr = container.agentManager as unknown as { inspectRepository: (project: Record<string, unknown>) => Promise<{ files: string[] }> };
+    const inspect = await mgr.inspectRepository(p);
+    expect(inspect.files).toContain("Agent.md");
+    // The mock GitHub repo receives Agent.md during onboarding.
+    const agentMd = await container.github.getFile({ owner: "acme", name: "mudstack" }, "Agent.md");
+    expect(agentMd?.content).toContain("# Project");
+    expect(agentMd?.content).toContain("MudBlazor");
+  });
 });
 
 describe("providers API — approval flow", () => {
@@ -197,6 +232,34 @@ describe("providers API — approval flow", () => {
     const noKey = (await srv.inject({ method: "POST", url: "/providers", payload: { name: "OpenRouter", type: "openrouter" } })).json();
     expect(noKey.active).toBe(false);
     expect(noKey.readiness.ready).toBe(false);
+
+    // A provider can also store a literal API key (encrypted at rest) so it
+    // works without a deploy-time env var — the key is never echoed back.
+    const stored = await srv.inject({ method: "POST", url: "/providers", payload: { name: "Stored Key", type: "openai-compatible", baseUrl: "https://llm.example/v1", secretValue: "sk-1234567890abcdef", authType: "bearer" } });
+    expect(stored.statusCode).toBe(201);
+    const storedBody = stored.json();
+    expect(storedBody.secretValuePresent).toBe(true);
+    expect(storedBody.keyPresent).toBe(true);
+    expect(storedBody.readiness.ready).toBe(true);
+    expect(JSON.stringify(storedBody)).not.toContain("sk-1234567890abcdef");
+    const masked = storedBody.secretMasked || "";
+    expect(masked).toContain("•");
+
+    // Editing a provider without retyping the key must keep the stored secret.
+    const kept = await srv.inject({ method: "PATCH", url: `/providers/${storedBody.id}`, payload: { name: "Stored Key", baseUrl: "https://llm.example/v2", secretValue: "" } });
+    expect(kept.statusCode).toBe(200);
+    const keptBody = kept.json();
+    expect(keptBody.baseUrl).toBe("https://llm.example/v2");
+    expect(keptBody.secretValuePresent).toBe(true);
+    expect(keptBody.keyPresent).toBe(true);
+    expect(JSON.stringify(keptBody)).not.toContain("sk-1234567890abcdef");
+
+    // A new literal key replaces the old one (and is still never echoed).
+    const replaced = await srv.inject({ method: "PATCH", url: `/providers/${storedBody.id}`, payload: { secretValue: "sk-abcdef9876543210" } });
+    expect(replaced.statusCode).toBe(200);
+    const replacedBody = replaced.json();
+    expect(replacedBody.secretValuePresent).toBe(true);
+    expect(JSON.stringify(replacedBody)).not.toContain("sk-abcdef9876543210");
   });
 
   it("tests, invalidates the adapter cache and deletes providers (cascade to models)", async () => {

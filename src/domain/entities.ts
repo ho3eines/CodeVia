@@ -45,6 +45,12 @@ export interface ModelProvider {
   baseUrl?: string;
   /** Secret reference, e.g. OPENAI_API_KEY. Never a literal key. */
   secretRef?: string;
+  /**
+   * Optional literal API key encrypted at rest (AES-256-GCM, derived from
+   * AUTH_SECRET). Useful when there is no deploy-time env var to reference;
+   * only kept opaque in responses.
+   */
+  secretValueEnc?: string;
   authType: "bearer" | "api-key" | "none";
   apiFormat: "openai" | "anthropic" | "gemini" | "ollama" | "custom";
   timeoutMs: number;

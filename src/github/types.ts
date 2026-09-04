@@ -74,6 +74,22 @@ export interface GithubFile {
   sha?: string;
 }
 
+/** Lightweight file-system entry returned by the repository tree API. */
+export interface GithubTreeEntry {
+  path: string;
+  type: "blob" | "tree";
+  size?: number;
+}
+
+export interface CreateRepositoryOptions {
+  name: string;
+  owner?: string;
+  description?: string;
+  private?: boolean;
+  autoInit?: boolean;
+  defaultBranch?: string;
+}
+
 /**
  * GitHub abstraction. Agents and platform services depend only on this interface,
  * not on a vendor SDK. Implementations: RealGitHubService (REST) and
@@ -82,6 +98,8 @@ export interface GithubFile {
 export interface IGitHubService {
   readonly kind: "real" | "mock";
   listRepositories(opts?: ListRepositoriesOptions): Promise<GithubRepository[]>;
+  createRepository(opts: CreateRepositoryOptions): Promise<GithubRepository>;
+  listFiles(repo: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]>;
   getViewer(): Promise<GithubViewer>;
   listBranches(repo: GithubRepoRef): Promise<GithubBranch[]>;
   listCommits(repo: GithubRepoRef, branch?: string): Promise<GithubCommit[]>;
