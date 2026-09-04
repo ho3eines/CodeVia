@@ -122,9 +122,11 @@ describe("auth guard — strict mode with GitHub login configured", () => {
 
   it("keeps session introspection public so logged-out clients get state, not 401s", async () => {
     const srv = await boot();
-    const me = await srv.inject({ method: "GET", url: "/auth/me" });
-    expect(me.statusCode).toBe(200);
-    expect(me.json().authenticated).toBe(false);
+    for (const url of ["/auth/me", "/auth/me?source=spa"]) {
+      const me = await srv.inject({ method: "GET", url });
+      expect(me.statusCode, url).toBe(200);
+      expect(me.json().authenticated).toBe(false);
+    }
     const logout = await srv.inject({ method: "POST", url: "/auth/logout" });
     expect(logout.statusCode).toBe(200);
     expect(logout.json().ok).toBe(true);
@@ -141,6 +143,8 @@ describe("auth guard — strict mode with GitHub login configured", () => {
     }
     const js = await srv.inject({ method: "GET", url: "/app.js" });
     expect(js.headers["content-type"]).toMatch(/javascript/);
+    expect(js.body).toContain("window.refreshCurrent = refreshCurrent");
+    expect(js.body.match(/api\("\/auth\/me"\)/g)).toHaveLength(1);
     const login = await srv.inject({ method: "GET", url: "/auth/github/login" });
     expect(login.statusCode).toBe(302);
     expect(login.headers.location).toMatch(/^https:\/\/github\.com\/login\/oauth\/authorize\?/);

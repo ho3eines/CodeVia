@@ -45,9 +45,20 @@
       authState.user = me.user || null;
       authState.requireAuth = !!me.requireAuth;
       authState.loginConfigured = !!me.loginConfigured;
-    } catch (_) {
-      // Network/server unreachable: leave last-known state; route handler
-      // errors surface normally.
+    } catch (err) {
+      // A 401 here means the server is enforcing authentication before its
+      // session-introspection route (for example, an older Railway image is
+      // still running). Treat that as strict mode so we do not immediately
+      // request every protected resource and produce a cascade of 401s.
+      // Network failures are left alone so a temporary outage is not shown as
+      // a login problem.
+      if (err && err.status === 401) {
+        authState.authenticated = false;
+        authState.user = null;
+        authState.requireAuth = true;
+        const status = await apiRaw("/auth/github/status").catch(() => null);
+        authState.loginConfigured = !!status?.ok && !!status.body?.configured;
+      }
     }
     return authState;
   }
@@ -285,8 +296,13 @@
     document.documentElement.setAttribute("dir", pref);
   }
   function refreshCurrent() {
-    route();
+    return route();
   }
+  // Views are rendered with inline handlers in the generated HTML. Functions
+  // declared inside this IIFE are not visible to inline `onclick` attributes,
+  // so expose the refresh action explicitly for those handlers and realtime
+  // callbacks.
+  window.refreshCurrent = refreshCurrent;
   $("#cmd-palette-btn")?.addEventListener("click", () => openPalette());
 
   /* ---------- Command Palette ---------- */
@@ -690,12 +706,10 @@
     const q = new URLSearchParams((location.hash.split("?")[1] || ""));
     if (q.get("login") === "success" && !sessionStorage.getItem("cv-welcomed")) {
       sessionStorage.setItem("cv-welcomed", "1");
-      // Name comes from the authState refresh that route() performs next;
-      // renderUserSlot() is called again there. Fire the toast immediately
-      // and let route() re-render the slot with the authenticated user.
-      api("/auth/me")
-        .then((me) => toast("GitHub login successful", me && me.user ? me.user.name : "", "ok"))
-        .catch(() => toast("GitHub login successful", "", "ok"));
+      // route() refreshes authState immediately after this function returns
+      // and re-renders the user slot. Do not call /auth/me here as well: that
+      // created duplicate requests (and duplicate 401s on stale deployments).
+      toast("GitHub login successful", "", "ok");
     }
     if (q.get("login") === "error") {
       toast("GitHub login failed", q.get("reason") || "Please try again.", "err");
@@ -1028,10 +1042,8 @@
   window.addEventListener("hashchange", route);
   renderNav();
   connectSocket();
-  // Prime session state before the first render so the user slot + route gate
-  // have correct login status (no flash of "Demo mode", no early 401).
-  refreshAuthState().then(() => {
-    renderUserSlot();
-    route();
-  });
+  // route() primes session state before the first render. Calling
+  // refreshAuthState() here as well used to issue two /auth/me requests on
+  // every page load and could race the route gate.
+  route();
 })();
