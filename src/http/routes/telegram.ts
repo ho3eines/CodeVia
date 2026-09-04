@@ -7,7 +7,6 @@ import {
   encryptTelegramToken,
   getTelegramWebhookUrl,
   maskTelegramToken,
-  resolveTelegramService,
   setTelegramWebhook,
   testTelegramToken,
 } from "../../integrations/telegram.js";
@@ -21,15 +20,22 @@ function fail(reply: FastifyReply, status: number, message: string, extra: Recor
 }
 
 export function registerTelegramRoutes(app: FastifyInstance, container: Container): void {
-  const globalTelegram = resolveTelegramService();
-  const telegram = globalTelegram;
+  // Reuse the container's singleton Telegram service (same token connection the
+  // rest of the platform and the worker use), rather than creating a fresh one.
+  const telegram = container.telegram;
   const botDeps = {
     projectRepo: container.projectRepo,
     taskRepo: container.taskRepo,
+    workflowRepo: container.workflowRepo,
+    conversationRepo: container.conversationRepo,
     agentRepo: container.agentRepo,
     runRepo: container.runRepo,
     agentManager: container.agentManager,
     github: container.github,
+    modelRepo: container.modelRepo,
+    skillRepo: container.skillRepo,
+    memoryRepo: container.memoryRepo,
+    queue: container.queue,
     logger: logger.child({ component: "telegram-bot" }),
   };
   const bot = new TelegramBot({ telegram, ...botDeps });
@@ -60,14 +66,19 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
     if (!me.ok) {
       return { ...account, connected: false, lastError: me.error, botId: account.botId, botUsername: account.botUsername, updatedAt: new Date().toISOString() };
     }
-    const webhookResult = await setTelegramWebhook(token, getTelegramWebhookUrl());
+    // The bot token is real (getMe passed). A webhook is required for the bot to
+    // receive updates, but Telegram demands a public HTTPS URL. If the platform
+    // only has a localhost URL (local dev), still mark the bot as connected so
+    // `status` is accurate, but surface a clear, actionable message.
+    const webhookUrl = getTelegramWebhookUrl();
+    const webhookResult = await setTelegramWebhook(token, webhookUrl);
     const updated: TelegramAccount = {
       ...account,
       botId: me.botId ?? account.botId,
       botUsername: me.username ?? account.botUsername,
       connected: true,
       webhookSet: webhookResult.ok,
-      lastError: webhookResult.ok ? undefined : `API OK but webhook not set: ${webhookResult.error}`,
+      lastError: webhookResult.ok ? undefined : `Bot is live, but it can't receive messages yet: ${webhookResult.error}`,
       updatedAt: new Date().toISOString(),
     };
     container.telegramAccountRepo.upsert(updated);

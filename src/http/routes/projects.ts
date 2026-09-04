@@ -76,7 +76,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       login: tokenInfo?.login,
     };
     try {
-      const project = await container.agentManager.createProject({
+      let project = await container.agentManager.createProject({
         name,
         slug: typeof body.slug === "string" && body.slug.trim() ? body.slug.trim() : undefined,
         description: String(body.description ?? ""),
@@ -99,11 +99,6 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
         defaultModelId: body.defaultModelId as string | undefined,
         tech: Array.isArray(body.tech) ? (body.tech as string[]) : [],
       });
-
-      // Ensure databases single-select (keep only first value)
-      if (project.capabilities.databases.length > 1) {
-        project.capabilities.databases = [project.capabilities.databases[0]];
-      }
 
       // Compute skills from the selected capabilities
       const skills = skillsForCapabilities(project.capabilities);
