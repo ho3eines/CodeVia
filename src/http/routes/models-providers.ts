@@ -5,6 +5,8 @@ import {
   providerReadiness,
   providerHasSecret,
   testProviderConnection,
+  testModelChat,
+  DEFAULT_MODEL_TEST_MESSAGE,
   type ProviderTestResult,
 } from "../../ai/provider-test.js";
 import { detectModelCapabilities, detectModelInfo } from "../../ai/provider-urls.js";
@@ -192,9 +194,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     return m;
   });
 
-  // Pre-registration model test: verifies a provider + model (before the model
-  // is saved), surfaces the exact endpoint, confirms the model is in the catalog,
-  // and reports the auto-detected capabilities.
+  // Pre-registration model test (before the model is saved). Two modes:
+  //  - with `message` in the body → sends ONE real chat message to the model and
+  //    returns the exact chat URL + the model's reply (what the Test button uses);
+  //  - without `message` → cheap detection only: auto-detected capabilities +
+  //    catalog lookup (used by the Add-Model dropdown; never costs a completion).
+  // Never persists anything.
   app.post("/models/test", { schema: { tags: ["models"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const providerId = String(b.providerId ?? "").trim();
@@ -203,40 +208,50 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (!prow) return fail(reply, 400, `Unknown provider "${providerId}"`);
     const modelId = String(b.modelId ?? "").trim();
     if (!modelId) return fail(reply, 400, "modelId is required");
-    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
     const info = detectModelInfo(modelId);
-    // `found` is only meaningful when the catalog was actually enumerated.
+    const message = typeof b.message === "string" ? b.message.trim() : "";
+    if (message) {
+      const chat = await testModelChat(prow.data, info.id, { message, timeoutMs: 15000 });
+      return {
+        providerId,
+        capabilities: info.capabilities,
+        detectedCapabilities: info.capabilities,
+        ...chat,
+      };
+    }
+    // Detection-only mode: verify reachability + catalog membership, no completion call.
+    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
     const catalogChecked = Array.isArray(test.models);
     const found = catalogChecked ? test.models!.includes(info.id) : undefined;
     return {
       providerId,
       modelId: info.id,
       found,
+      contextWindow: info.contextWindow,
       capabilities: info.capabilities,
       detectedCapabilities: info.capabilities,
       ...test,
     };
   });
 
-  // Live check for a specific model: verifies the provider, surfaces the URL,
-  // confirms the model is in the catalog, and reports its detected capabilities.
+  // Live chat test for a saved model: sends ONE real message to the model and
+  // returns the exact chat URL + the model's reply. Accepts an optional custom
+  // message in the body so users can ask the model anything from the UI.
   app.post("/models/:id/test", { schema: { tags: ["models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const b = (req.body ?? {}) as Record<string, unknown>;
     const r = container.modelRepo.findById(id);
     if (!r) return fail(reply, 404, "model not found");
     const prow = container.providerRepo.findById(r.data.providerId);
     if (!prow) return fail(reply, 404, `Provider not found for model "${r.data.modelId}"`);
-    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
     const modelId = r.data.modelId;
-    const catalogChecked = Array.isArray(test.models);
-    const found = catalogChecked ? test.models!.includes(modelId) : undefined;
+    const message = typeof b.message === "string" && b.message.trim() ? b.message : DEFAULT_MODEL_TEST_MESSAGE;
+    const chat = await testModelChat(prow.data, modelId, { message, timeoutMs: 15000 });
     return {
-      modelId,
       providerId: prow.data.id,
-      found,
       capabilities: r.data.capabilities,
       detectedCapabilities: detectModelInfo(modelId).capabilities,
-      ...test,
+      ...chat,
     };
   });
 
@@ -335,8 +350,11 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   });
 
   // Pre-registration connectivity test — never saves anything. Feeds the
-  // "Test connection" button inside the Add Provider form so users can verify a
-  // provider (and see the endpoint + models) BEFORE committing it.
+  // "Test connection" button inside the Add/Edit Provider form so users can
+  // verify the EXACT values currently in the form (and see the endpoint +
+  // models) BEFORE committing them. When `providerId` is passed (edit mode)
+  // and no new key was typed, the stored encrypted key is used for the test —
+  // the edit form never re-displays secrets, so re-typing must not be required.
   app.post("/providers/test", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const type = String(b.type ?? "openai") as ModelProvider["type"];
@@ -349,6 +367,14 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const baseUrl = typeof b.baseUrl === "string" && b.baseUrl.trim() ? b.baseUrl.trim() : preset.baseUrl;
     const secretRef = typeof b.secretRef === "string" && b.secretRef.trim() ? b.secretRef.trim() : preset.secretRef;
     const secretValue = typeof b.secretValue === "string" && b.secretValue.trim() ? b.secretValue.trim() : undefined;
+    // Edit mode: fall back to the key already stored for this provider so the
+    // user can test form changes without re-entering the secret.
+    let inheritedSecretValueEnc: string | undefined;
+    const editProviderId = typeof b.providerId === "string" ? b.providerId.trim() : "";
+    if (!secretValue && editProviderId) {
+      const stored = container.providerRepo.findById(editProviderId);
+      if (stored) inheritedSecretValueEnc = stored.data.secretValueEnc;
+    }
     const name = String(b.name ?? "").trim() || preset.label;
     const draft: ModelProvider = {
       id: "draft",
@@ -357,8 +383,11 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       baseUrl,
       secretRef,
       // Encrypt the pasted key just long enough to be read back by the test;
-      // nothing is stored.
-      secretValueEnc: secretValue ? JSON.stringify(encryptSecret(secretValue, "provider-secret")) : undefined,
+      // nothing is stored. In edit mode the stored key is reused (still never
+      // re-persisted by this endpoint).
+      secretValueEnc: secretValue
+        ? JSON.stringify(encryptSecret(secretValue, "provider-secret"))
+        : inheritedSecretValueEnc,
       authType,
       apiFormat,
       timeoutMs: numberOr(b.timeoutMs, 60000),
