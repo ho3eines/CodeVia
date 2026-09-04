@@ -127,7 +127,15 @@ export interface EffectiveGitHubLoginSettings {
     githubWebhookSecret: boolean;
     authSecret: boolean;
   };
+  /** Detailed diagnostics for actionable error messages (never exposes secret values). */
+  diagnostics: {
+    clientIdMissing: boolean;
+    clientSecretMissing: boolean;
+    authSecretMissing: boolean;
+    callbackUrlMismatchRisk: boolean;
+  };
   setupHint?: string;
+  setupSteps?: string[];
 }
 
 /** Resolve the effective GitHub login configuration (env > admin > default). */
@@ -137,6 +145,7 @@ export function getEffectiveGitHubLoginSettings(kv?: KvStore): EffectiveGitHubLo
 
   const clientId = env.GITHUB_CLIENT_ID || admin.clientId || undefined;
   const clientSecretConfigured = !!env.GITHUB_CLIENT_SECRET;
+  const authSecretConfigured = !!env.AUTH_SECRET || !!env.GITHUB_WEBHOOK_SECRET || env.NODE_ENV !== "production";
   const configured = !!clientId && clientSecretConfigured;
 
   let redirectUri: string;
@@ -172,6 +181,53 @@ export function getEffectiveGitHubLoginSettings(kv?: KvStore): EffectiveGitHubLo
     requireAuthSource = "env";
   }
 
+  const diagnostics = {
+    clientIdMissing: !clientId,
+    clientSecretMissing: !clientSecretConfigured,
+    authSecretMissing: !authSecretConfigured,
+    callbackUrlMismatchRisk: false,
+  };
+
+  // Build actionable hints
+  let setupHint: string | undefined;
+  const setupSteps: string[] = [];
+  if (!configured) {
+    if (!clientId && !clientSecretConfigured) {
+      setupHint = "GitHub login is not configured: Client ID and Client Secret are both missing.";
+      setupSteps.push("1) Create a GitHub OAuth App at https://github.com/settings/developers → OAuth Apps → New OAuth App");
+      setupSteps.push(`2) Authorization callback URL must be exactly: ${redirectUri}`);
+      setupSteps.push("3) Set Client ID in Admin → GitHub Login (this page) OR as GITHUB_CLIENT_ID env variable");
+      setupSteps.push("4) Set GITHUB_CLIENT_SECRET and AUTH_SECRET (any random 32+ char string) in Railway Variables / .env and redeploy");
+    } else if (!clientId) {
+      setupHint = "Client ID is missing — set it below (or as GITHUB_CLIENT_ID env).";
+      setupSteps.push("Set the Client ID from your GitHub OAuth App here and Save.");
+      if (!clientSecretConfigured) setupSteps.push("Also set GITHUB_CLIENT_SECRET in environment and redeploy.");
+    } else if (!clientSecretConfigured) {
+      setupHint = "Client ID is set, but GITHUB_CLIENT_SECRET is missing in environment — login will fail until it is set.";
+      setupSteps.push("Go to Railway → Your Service → Variables (or .env locally) and add GITHUB_CLIENT_SECRET=<your OAuth App Client Secret>");
+      setupSteps.push("Also ensure AUTH_SECRET is set (e.g. openssl rand -hex 32) — required to sign sessions");
+      setupSteps.push("Redeploy / restart the service after adding variables");
+      setupSteps.push(`Verify: Authorization callback URL in GitHub OAuth App must be exactly ${redirectUri}`);
+    }
+    if (diagnostics.authSecretMissing && env.NODE_ENV === "production") {
+      setupSteps.push("⚠️ AUTH_SECRET is missing in production — sessions cannot be signed. Set AUTH_SECRET env (any 32+ random chars).");
+    }
+  } else if (diagnostics.authSecretMissing) {
+    setupHint = "GitHub login is configured, but AUTH_SECRET is missing in production — sessions will fail.";
+  }
+
+  // Heuristic: if redirectUri looks like localhost but PUBLIC_WEB_BASE_URL is set to something else, warn
+  try {
+    const envBase = (env.PUBLIC_WEB_BASE_URL ?? env.WEB_BASE_URL ?? "").replace(/\/$/, "");
+    if (envBase && !redirectUri.startsWith(envBase)) {
+      diagnostics.callbackUrlMismatchRisk = true;
+      if (configured) {
+        setupHint = `Login is configured but callback URL mismatch risk: GitHub OAuth App callback is ${redirectUri} but PUBLIC_WEB_BASE_URL is ${envBase}/auth/github/callback`;
+        setupSteps.push(`Ensure GitHub OAuth App → Authorization callback URL = ${redirectUri}`);
+      }
+    }
+  } catch {}
+
   return {
     configured,
     clientId,
@@ -188,9 +244,9 @@ export function getEffectiveGitHubLoginSettings(kv?: KvStore): EffectiveGitHubLo
       githubWebhookSecret: !!env.GITHUB_WEBHOOK_SECRET,
       authSecret: !!env.AUTH_SECRET,
     },
-    setupHint: configured
-      ? undefined
-      : "Set the Client ID here and GITHUB_CLIENT_SECRET in the environment, then users can log in with GitHub.",
+    diagnostics,
+    setupHint: configured && !diagnostics.authSecretMissing ? undefined : setupHint,
+    setupSteps: setupSteps.length ? setupSteps : undefined,
   };
 }
 
