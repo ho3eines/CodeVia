@@ -33,7 +33,7 @@ Strict login mode (`REQUIRE_AUTH`) is on, but no GitHub session exists.
 - Strict mode can also be toggled from `#/admin` → **GitHub Login** → *Require
   GitHub login for API* (stored in the runtime DB, overrides the env value).
 
-## GitHub login fails with `redirect_uri_mismatch`
+## GitHub login fails with `redirect_uri_mismatch` — or the browser "never comes back"
 
 The OAuth App's **Authorization callback URL** must match the platform's
 callback **exactly**: `https://<your-app>.up.railway.app/auth/github/callback`.
@@ -41,6 +41,24 @@ Check `GET /auth/github/status` → `redirectUri` and compare it with the value
 in GitHub → Settings → Developer settings → OAuth Apps. Set
 `PUBLIC_WEB_BASE_URL=https://<your-app>.up.railway.app` (or
 `GITHUB_OAUTH_CALLBACK_URL`) so the platform derives the same URL.
+
+Symptoms when the two URLs disagree:
+
+- **`redirect_uri_mismatch` page / `#/github?login=error`** — the app sends a
+  `redirect_uri` (derived from env) that differs from what is registered on
+  GitHub.
+- **Login works on GitHub but the app never returns, and `/auth/me` / the API
+  answer `401 (Unauthorized)`** — the OAuth App has a *local* callback URL
+  registered (e.g. `http://localhost:8080/auth/github/callback`, or the
+  production env still has `PUBLIC_WEB_BASE_URL=http://localhost:8080`). After
+  authorizing, GitHub redirects the browser to `localhost:8080` (your own
+  machine), so the session cookie (`cv_session`) is never set on the deployed
+  app. Fix: point **both** — `PUBLIC_WEB_BASE_URL` on Railway **and** the
+  OAuth App callback — at the public URL, redeploy, log in again.
+
+The platform logs a loud startup warning (`GitHub OAuth callback resolves to a
+local address: …`) in production when it detects this, so check the service
+logs after each deploy.
 
 ## Webhook signature invalid (`401`)
 
