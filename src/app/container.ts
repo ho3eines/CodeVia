@@ -27,6 +27,8 @@ import { WorkflowEngine } from "../workflow/engine.js";
 import { Worker } from "../workers/worker.js";
 import { logger } from "../logger.js";
 import type { IGitHubService } from "../github/types.js";
+import { BackupService } from "../backup/service.js";
+import { BackupScheduler } from "../backup/scheduler.js";
 
 /**
  * Composition root — constructs and wires the whole runtime. Every service/domain
@@ -80,6 +82,8 @@ export class Container {
   readonly workflowEngine: WorkflowEngine;
   readonly agentManager: AgentManager;
   readonly worker: Worker;
+  readonly backupService: BackupService;
+  readonly backupScheduler: BackupScheduler;
 
   constructor() {
     this.agentRunner = new AgentRunner({
@@ -132,6 +136,20 @@ export class Container {
       telegram: this.telegram,
       notificationRepo: this.notificationRepo,
       logger: logger.child({ component: "worker" }),
+    });
+    this.backupService = new BackupService({
+      db: this.db,
+      kv: this.kv,
+      github: this.github,
+      auditRepo: this.auditRepo,
+      notificationRepo: this.notificationRepo,
+      providerRegistry: this.providerRegistry,
+      logger: logger.child({ component: "backup" }),
+    });
+    this.backupScheduler = new BackupScheduler({
+      kv: this.kv,
+      backup: this.backupService,
+      logger: logger.child({ component: "backup-scheduler" }),
     });
   }
 

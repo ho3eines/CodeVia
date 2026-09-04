@@ -46,12 +46,17 @@ async function main() {
   // Start the background worker so job enqueues are consumed off the UI thread.
   const stopWorker = await container.worker.start(1000);
 
+  // Start the admin-configured system backup scheduler (reads settings from the
+  // kv store; runs a full GitHub snapshot whenever the cron expression matches).
+  const stopBackupScheduler = container.backupScheduler.start();
+
   await app.listen({ host: env.HOST, port: env.PORT });
   logger.info(`CodeVia platform listening on http://${env.HOST}:${env.PORT} (env=${env.NODE_ENV})`);
 
   const shutdown = async (signal: string) => {
     logger.warn(`received ${signal}, shutting down`);
     await container.stopTelegram().catch(() => undefined);
+    stopBackupScheduler();
     stopWorker();
     io.close();
     await app.close();

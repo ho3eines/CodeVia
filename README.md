@@ -143,6 +143,7 @@ Features: responsive, dark/light mode, **RTL/Persian-friendly**, command palette
 | [docs/API.md](docs/API.md) | REST API reference (OpenAPI at `/docs`) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Implementation roadmap (Phases 1–15) |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues & fixes |
+| [docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md) | Full runtime backup to GitHub, scheduling, restore |
 
 ---
 
