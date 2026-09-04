@@ -44,6 +44,11 @@ async function main() {
 }
 
 main().catch((err) => {
-  logger.fatal("fatal startup error", { err: String(err) });
+  const detail = err instanceof Error ? (err.stack || `${err.name}: ${err.message}`) : String(err);
+  logger.fatal("fatal startup error", { error: detail });
+  // Railway's log viewer may display only the structured message and hide
+  // metadata fields. Print the actual startup failure as a separate line so
+  // volume/permission, SQLite, and environment errors are actionable.
+  console.error(`fatal startup error: ${detail}`);
   process.exit(1);
 });

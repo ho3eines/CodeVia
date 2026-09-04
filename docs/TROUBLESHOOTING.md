@@ -3,6 +3,7 @@
 ## The platform won't start
 
 - **`Invalid environment configuration`** — a required env var is missing/invalid. Check `.env.example` against your `.env`.
+- **`EACCES`, `permission denied`, or only repeated `fatal startup error` after `Mounting volume` on Railway** — Railway volumes are mounted as root, while the Docker image runs as `codevia`. Set `RAILWAY_RUN_UID=0` in Railway Variables, use `/app/data` as the volume mount path, set `DATABASE_PATH=/app/data/codevia.db`, and redeploy. The startup handler prints the underlying error on current builds instead of hiding it in log metadata.
 - **Port already in use** — change `PORT` or stop the other process.
 - **`node:sqlite`** — requires Node ≥ 22. Ensure your runtime uses Node 22+ (`docker` image uses `node:22-slim`).
 
