@@ -22,7 +22,9 @@ export class RealGitHubService implements IGitHubService {
   private base = "https://api.github.com";
 
   private getToken(): string {
-    const token = process.env.GITHUB_TOKEN ?? process.env.GITHUB_CLIENT_SECRET;
+    // NOTE: GITHUB_CLIENT_SECRET is an OAuth *app secret*, never an API token —
+    // only GITHUB_TOKEN (PAT / OAuth user token / App installation token) works here.
+    const token = process.env.GITHUB_TOKEN;
     if (!token) throw new Error("GitHub token not configured (GITHUB_TOKEN)");
     return token;
   }

@@ -87,11 +87,24 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 |--------|------|-------------|
 | GET/POST | `/memory`, `/memory/:id` | GitHub-backed memory entries |
 
+## Auth (GitHub OAuth login)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/auth/github/status` | Is OAuth configured? + current user (public) |
+| GET | `/auth/github/login` | 302 redirect to `github.com` authorize (or `?format=json` → `{url, state}`) |
+| GET | `/auth/github/callback?code&state` | Code exchange → session cookie → redirect to `#/github?login=success` |
+| GET | `/auth/me` | Current user (`{authenticated, user}` — demo user when logged out) |
+| POST | `/auth/logout` | Clear session cookie |
+
+Sessions travel via the HttpOnly `cv_session` cookie or `Authorization: Bearer <token>`.
+The first GitHub user to log in becomes `owner`; later users become `developer`.
+
 ## GitHub
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/integrations/github/status` | Connection status |
+| GET | `/integrations/github/status` | Connection status (now also `oauthConfigured`, `authenticated`, `user`) |
 | GET | `/github/repositories` | List repos |
 | GET | `/github/repositories/:owner/:name/branches` | Branches |
 | GET | `/github/repositories/:owner/:name/commits` | Commits |
@@ -150,6 +163,10 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | GET | `/admin/roles` | RBAC matrix |
 | GET | `/admin/usage` | Usage/aggregates |
 | GET | `/admin/provider-health` | Provider health |
+| GET | `/admin/settings` | Admin settings view: effective GitHub login config (with per-field source), secret presence flags, user counts (owner/admin only) |
+| PUT | `/admin/settings/github` | Update GitHub login settings: `clientId`, `callbackUrl`, `scope`, `requireAuth` — empty string clears back to env/default (owner/admin only) |
+| GET | `/admin/users` | List login users (owner/admin only) |
+| PATCH | `/admin/users/:id/role` | Change a user's role; refuses to demote the last owner (owner/admin only) |
 
 ---
 

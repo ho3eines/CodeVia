@@ -2,6 +2,7 @@ import { getDb } from "../db/client.js";
 import { getQueue } from "../db/queue.js";
 import { getKv } from "../db/kv.js";
 import { getProjectRepo, getTaskRepo, getWorkflowRepo, getConversationRepo, getMemoryRepo } from "../domain/repos.js";
+import { getUserRepo } from "../auth/users.js";
 import type { ModelProvider } from "../domain/entities.js";
 import { getAgentRepo } from "../agents/agent-repo.js";
 import { getRunRepo, getCostRepo, getAuditRepo, getNotificationRepo } from "../observability/repos.js";
@@ -33,6 +34,7 @@ export class Container {
   readonly queue = getQueue();
   readonly kv = getKv();
 
+  readonly userRepo = getUserRepo();
   readonly projectRepo = getProjectRepo();
   readonly taskRepo = getTaskRepo();
   readonly workflowRepo = getWorkflowRepo();

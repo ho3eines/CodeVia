@@ -3,9 +3,16 @@
   "use strict";
 
   /* ---------- API client ---------- */
+  function authHeaders() {
+    try {
+      const t = localStorage.getItem("cv_token");
+      return t ? { Authorization: "Bearer " + t } : {};
+    } catch (_) { return {}; }
+  }
   async function api(path, opts = {}) {
     const res = await fetch(path, {
-      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders(), ...(opts.headers || {}) },
       method: opts.method || "GET",
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
@@ -544,21 +551,75 @@
   window.addMemory = () => openModal("Add Memory Entry", `<div class="field"><label>Type</label><select class="select" id="mm-type">${["architecture","business","technical","decision","bug","knowledge","lesson","conversation"].map(t=>`<option>${t}</option>`).join("")}</select></div><div class="field"><label>Key</label><input class="input" id="mm-key"/></div><div class="field"><label>Content</label><textarea class="textarea" id="mm-content"></textarea></div><button class="btn btn-primary" id="mm-go">Save</button>`);
 
   /* GITHUB */
+  async function renderUserSlot() {
+    const slot = $("#user-slot");
+    if (!slot) return;
+    try {
+      const me = await api("/auth/me");
+      if (me.authenticated && me.user && me.user.externalId !== "demo") {
+        const avatar = me.user.avatarUrl ? `<img src="${esc(me.user.avatarUrl)}" alt="" style="width:22px;height:22px;border-radius:50%;vertical-align:-6px;margin-right:6px"/>` : "👤 ";
+        slot.innerHTML = `<span class="pill" title="${esc(me.user.email || "")} (${esc(me.user.role)})">${avatar}${esc(me.user.name)}</span> <button class="btn btn-ghost" id="logout-btn" style="padding:4px 10px">Logout</button>`;
+        $("#logout-btn").onclick = async () => {
+          await api("/auth/logout", { method: "POST" }).catch(() => {});
+          try { localStorage.removeItem("cv_token"); } catch (_) {}
+          toast("Logged out", "Signed out of GitHub.", "ok");
+          renderUserSlot(); refreshCurrent();
+        };
+      } else {
+        const st = await api("/auth/github/status").catch(() => ({ configured: false }));
+        slot.innerHTML = st.configured
+          ? `<a class="btn btn-primary" href="/auth/github/login" style="padding:6px 12px;text-decoration:none">🐙 Login with GitHub</a>`
+          : `<a class="btn btn-ghost" href="#/github" title="GitHub OAuth not configured" style="padding:6px 12px;text-decoration:none">👤 Demo mode</a>`;
+      }
+    } catch (_) { /* leave slot empty when API unreachable */ }
+  }
   on("/github", async () => {
     const status = await api("/integrations/github/status");
     const repos = await api("/github/repositories").catch(() => []);
+    const me = await api("/auth/me").catch(() => ({ authenticated: false, user: null }));
+    const q = new URLSearchParams((location.hash.split("?")[1] || ""));
+    if (q.get("login") === "success" && !sessionStorage.getItem("cv-welcomed")) {
+      sessionStorage.setItem("cv-welcomed", "1");
+      toast("GitHub login successful", me.user ? me.user.name : "", "ok");
+      renderUserSlot();
+    }
+    if (q.get("login") === "error") {
+      toast("GitHub login failed", q.get("reason") || "Please try again.", "err");
+    }
+    const loginCard = me.authenticated && me.user && me.user.externalId !== "demo"
+      ? `<div class="card card-body"><div class="card-title">GitHub Login</div>
+          <div class="status-grid"><div class="status-item"><span class="status-dot healthy"></span>Logged in</div></div>
+          <p>${me.user.avatarUrl ? `<img src="${esc(me.user.avatarUrl)}" alt="" style="width:28px;height:28px;border-radius:50%;vertical-align:-8px;margin-right:8px"/>` : ""}<strong>${esc(me.user.name)}</strong></p>
+          <p class="mono" style="color:var(--text-muted);font-size:12px">${esc(me.user.email || "")} · role: ${esc(me.user.role)}</p>
+          <button class="btn" id="gh-logout">Logout</button></div>`
+      : status.oauthConfigured
+        ? `<div class="card card-body"><div class="card-title">GitHub Login</div>
+          <div class="status-grid"><div class="status-item"><span class="status-dot warn"></span>Not logged in</div></div>
+          <p style="color:var(--text-muted);font-size:12px">Sign in with your GitHub account. The first user to log in becomes <strong>owner</strong>.</p>
+          <a class="btn btn-primary" href="/auth/github/login" style="text-decoration:none">🐙 Login with GitHub</a></div>`
+        : `<div class="card card-body"><div class="card-title">GitHub Login</div>
+          <div class="status-grid"><div class="status-item"><span class="status-dot warn"></span>Not configured</div></div>
+          <p style="color:var(--text-muted);font-size:12px">Set <span class="mono">GITHUB_CLIENT_ID</span> + <span class="mono">GITHUB_CLIENT_SECRET</span> and restart — see <span class="mono">docs/GITHUB_SETUP.md</span>. Local dev continues in demo mode.</p></div>`;
     $("#content").innerHTML = `
       <div class="overview"><div><h1>GitHub Integration</h1><p>GitHub is the source of truth for persistent project data</p></div>
-        <button class="btn" onclick="api('/integrations/github/status').then(()=>refreshCurrent())">Refresh</button></div>
+        <button class="btn" onclick="refreshCurrent()">Refresh</button></div>
       <div class="grid-3">
         <div class="card card-body"><div class="card-title">Connection</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot ${status.connected?'healthy':'warn'}"></span>${status.connected?'Connected':'Mock (dev)'}</div></div>
           <p style="color:var(--text-muted);font-size:12px">Kind: ${esc(status.kind)} · Source of truth: ${status.sourceOfTruth}</p>
         </div>
-        <div class="card card-body" style="grid-column:span 2"><div class="card-title">Repositories (${Array.isArray(repos)?repos.length:0})</div>
+        ${loginCard}
+        <div class="card card-body"><div class="card-title">Repositories (${Array.isArray(repos)?repos.length:0})</div>
           ${Array.isArray(repos) && repos.length ? `<div class="table-wrap"><table><thead><tr><th>Owner</th><th>Name</th></tr></thead><tbody>${repos.map((r)=>`<tr><td>${esc(r.owner)}</td><td class="mono">${esc(r.name)}</td></tr>`).join("")}</tbody></table></div>` : emptyState("🐙", "No repos", "Connect GitHub or use the mock provider for local development.")}
         </div>
       </div>`;
+    const lo = $("#gh-logout");
+    if (lo) lo.onclick = async () => {
+      await api("/auth/logout", { method: "POST" }).catch(() => {});
+      try { localStorage.removeItem("cv_token"); } catch (_) {}
+      toast("Logged out", "Signed out of GitHub.", "ok");
+      renderUserSlot(); refreshCurrent();
+    };
   });
 
   /* TELEGRAM */
@@ -609,6 +670,8 @@
   on("/admin", async () => {
     const h = await api("/admin/health");
     const usage = await api("/admin/usage");
+    const adm = await api("/admin/settings").catch((e) => ({ _forbidden: e.message }));
+    const users = await api("/admin/users").catch(() => null);
     $("#content").innerHTML = `<div class="overview"><div><h1>Admin</h1><p>System health & usage</p></div></div>
       <div class="stat-grid">
         <div class="card stat"><div class="stat-label">API</div><div class="stat-value" style="font-size:18px">${h.api.status}</div></div>
@@ -629,7 +692,54 @@
           <div class="meter-row"><span class="lbl">Runs</span><span class="val">${usage.runs}</span></div>
           <div class="meter-row"><span class="lbl">Cost</span><span class="val">${money(usage.costs.costUsd)}</span></div>
         </div>
+      </div>
+      <div class="grid-2 mt">
+        <div class="card card-body"><div class="card-title">GitHub Login ${adm.github ? (adm.github.configured ? '<span class="badge badge-ok">configured</span>' : '<span class="badge badge-warn">not configured</span>') : ''}</div>
+          ${adm._forbidden ? `<p style="color:var(--text-muted);font-size:12px">Login settings are visible to owners/admins only (${esc(adm._forbidden)}).</p>` : `
+          <div class="field"><label>OAuth Client ID ${adm.github?.clientIdSource === "env" ? '<span class="badge badge-muted">env</span>' : ""}</label>
+            <input class="input mono" id="adm-gh-client" placeholder="Iv1.… / Ov23.…" value="${esc(adm.github?.stored?.clientId || "")}" ${adm.github?.envOverrides?.clientId ? "disabled" : ""}/>
+            ${adm.github?.envOverrides?.clientId ? `<p style="color:var(--text-muted);font-size:11px">Set via GITHUB_CLIENT_ID env — effective: <span class="mono">${esc(adm.github.clientId || "")}</span></p>` : ""}</div>
+          <div class="field"><label>Callback URL (optional) ${adm.github?.redirectUriSource === "env" ? '<span class="badge badge-muted">env</span>' : adm.github?.redirectUriSource === "admin" ? '<span class="badge badge-info">admin</span>' : ""}</label>
+            <input class="input mono" id="adm-gh-callback" placeholder="(auto) ${esc(adm.github?.redirectUri || "")}" value="${esc(adm.github?.stored?.callbackUrl || "")}" ${adm.github?.envOverrides?.callbackUrl ? "disabled" : ""}/></div>
+          <div class="field"><label>Scope ${adm.github?.scopeSource === "env" ? '<span class="badge badge-muted">env</span>' : adm.github?.scopeSource === "admin" ? '<span class="badge badge-info">admin</span>' : ""}</label>
+            <input class="input mono" id="adm-gh-scope" value="${esc(adm.github?.stored?.scope || adm.github?.scope || "")}" placeholder="read:user user:email"/></div>
+          <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="adm-gh-require" ${adm.github?.requireAuth ? "checked" : ""}/> Require GitHub login for API ${adm.github?.requireAuthSource === "env" ? '<span class="badge badge-muted">env</span>' : '<span class="badge badge-info">admin</span>'}</label></div>
+          <div class="meter-row"><span class="lbl">Client Secret</span><span class="val">${adm.github?.clientSecretConfigured ? '<span class="badge badge-ok">set (env)</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
+          <div class="meter-row"><span class="lbl">GitHub Token</span><span class="val">${adm.github?.secrets?.githubToken ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
+          <div class="meter-row"><span class="lbl">Webhook Secret</span><span class="val">${adm.github?.secrets?.githubWebhookSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
+          <div class="meter-row"><span class="lbl">Session Secret</span><span class="val">${adm.github?.secrets?.authSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
+          ${adm.github?.setupHint ? `<p style="color:var(--text-muted);font-size:12px">${esc(adm.github.setupHint)}</p>` : ""}
+          <p style="color:var(--text-muted);font-size:11px">Secrets live in environment variables only and are never stored here. Empty fields follow env/defaults.</p>
+          <div class="flex mt"><button class="btn btn-primary" id="adm-gh-save">Save</button><a class="btn" href="/auth/github/login" style="text-decoration:none">Test login</a></div>`}
+        </div>
+        <div class="card card-body"><div class="card-title">Users ${users ? `(${users.length})` : ""}</div>
+          ${users ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th></th></tr></thead><tbody>
+            ${users.map((u) => `<tr><td>${u.avatarUrl ? `<img src="${esc(u.avatarUrl)}" alt="" style="width:20px;height:20px;border-radius:50%;vertical-align:-5px;margin-right:6px"/>` : ""}<strong>${esc(u.name)}</strong><div class="mono" style="color:var(--text-muted);font-size:11px">${esc(u.email || "")} · ${esc(u.externalId)}</div></td>
+            <td><select class="select" data-role-for="${u.id}" style="max-width:130px">${["owner", "admin", "developer", "reviewer", "viewer"].map((r) => `<option value="${r}" ${u.role === r ? "selected" : ""}>${r}</option>`).join("")}</select></td>
+            <td><button class="btn btn-ghost" data-save-role="${u.id}">Save</button></td></tr>`).join("")}
+          </tbody></table></div>` : `<p style="color:var(--text-muted);font-size:12px">User management is visible to owners/admins only.</p>`}
+        </div>
       </div>`;
+    const ghSave = $("#adm-gh-save");
+    if (ghSave) ghSave.onclick = async () => {
+      try {
+        await api("/admin/settings/github", { method: "PUT", body: {
+          clientId: $("#adm-gh-client").value,
+          callbackUrl: $("#adm-gh-callback").value,
+          scope: $("#adm-gh-scope").value,
+          requireAuth: $("#adm-gh-require").checked,
+        }});
+        toast("GitHub login settings saved", "", "ok"); refreshCurrent();
+      } catch (e) { toast("Save failed", e.message, "err"); }
+    };
+    $$("[data-save-role]").forEach((btn) => btn.addEventListener("click", async () => {
+      const id = btn.dataset.saveRole;
+      const role = document.querySelector(`[data-role-for="${id}"]`).value;
+      try {
+        await api(`/admin/users/${id}/role`, { method: "PATCH", body: { role } });
+        toast("Role updated", role, "ok"); refreshCurrent();
+      } catch (e) { toast("Update failed", e.message, "err"); }
+    }));
   });
 
   /* SEARCH */
@@ -649,5 +759,6 @@
   window.addEventListener("hashchange", route);
   renderNav();
   connectSocket();
+  renderUserSlot();
   route();
 })();

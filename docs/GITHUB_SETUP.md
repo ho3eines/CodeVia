@@ -1,10 +1,46 @@
 # GitHub Setup Guide
 
-GitHub is the **source of truth** for persistent project data.
+GitHub is the **source of truth** for persistent project data. It is also the
+platform's **user login** (OAuth).
 
 ---
 
-## 1. Choose an auth method
+## 0. User login via GitHub OAuth (recommended)
+
+Without this, the platform runs in **demo mode** (a built-in `Demo Owner`);
+with it, users click **🐙 Login with GitHub** in the UI (`#/github`).
+
+1. GitHub → Settings → Developer settings → **OAuth Apps** → New OAuth App.
+2. **Homepage URL**: `https://<your-app>.up.railway.app` (local: `http://localhost:8080`).
+3. **Authorization callback URL**: `https://<your-app>.up.railway.app/auth/github/callback`
+   (local: `http://localhost:8080/auth/github/callback`).
+4. Copy **Client ID** → `GITHUB_CLIENT_ID`, generate a **Client secret** → `GITHUB_CLIENT_SECRET`.
+5. Set `AUTH_SECRET` to any random 32+ char string (signs sessions + OAuth state).
+6. (Optional) `GITHUB_OAUTH_SCOPE` (default `read:user user:email`),
+   `GITHUB_OAUTH_CALLBACK_URL` (overrides the callback URL),
+   `REQUIRE_AUTH=true` (reject unauthenticated API calls with 401 instead of demo mode).
+7. Restart. Open `#/github` → **Login with GitHub**.
+   The **first user to log in becomes `owner`**; later users become `developer`.
+
+> **Admin panel shortcut:** after the first login, open `#/admin` → **GitHub Login**.
+> There you can set the Client ID, callback URL, scope and the "require login"
+> toggle without touching env files or restarting. Precedence per field is
+> **env → admin → default** (a field set via env shows an `env` badge and is
+> locked in the UI). Secrets (`GITHUB_CLIENT_SECRET`, tokens, `AUTH_SECRET`)
+> always stay in environment variables — the admin page only shows whether
+> each one is set, never its value. User roles are managed in `#/admin` →
+> **Users** (the last owner cannot be demoted).
+
+How it works: `GET /auth/github/login` → 302 to `github.com/login/oauth/authorize`
+(signed `state`, 10-min expiry) → `GET /auth/github/callback?code&state` exchanges
+the code, fetches `GET /user` (+ `/user/emails`), upserts the user row, and sets
+an HttpOnly `cv_session` cookie (7-day HMAC-signed token). The SPA also sends it
+as `Authorization: Bearer …`. `GET /auth/me` reports the current user;
+`POST /auth/logout` clears the session.
+
+---
+
+## 1. Choose a repo-access method
 
 The platform supports a **GitHub App + OAuth** architecture. At minimum you need a token for the REST adapter.
 
