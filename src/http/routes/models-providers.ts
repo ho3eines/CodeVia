@@ -350,8 +350,11 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   });
 
   // Pre-registration connectivity test — never saves anything. Feeds the
-  // "Test connection" button inside the Add Provider form so users can verify a
-  // provider (and see the endpoint + models) BEFORE committing it.
+  // "Test connection" button inside the Add/Edit Provider form so users can
+  // verify the EXACT values currently in the form (and see the endpoint +
+  // models) BEFORE committing them. When `providerId` is passed (edit mode)
+  // and no new key was typed, the stored encrypted key is used for the test —
+  // the edit form never re-displays secrets, so re-typing must not be required.
   app.post("/providers/test", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const type = String(b.type ?? "openai") as ModelProvider["type"];
@@ -364,6 +367,14 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const baseUrl = typeof b.baseUrl === "string" && b.baseUrl.trim() ? b.baseUrl.trim() : preset.baseUrl;
     const secretRef = typeof b.secretRef === "string" && b.secretRef.trim() ? b.secretRef.trim() : preset.secretRef;
     const secretValue = typeof b.secretValue === "string" && b.secretValue.trim() ? b.secretValue.trim() : undefined;
+    // Edit mode: fall back to the key already stored for this provider so the
+    // user can test form changes without re-entering the secret.
+    let inheritedSecretValueEnc: string | undefined;
+    const editProviderId = typeof b.providerId === "string" ? b.providerId.trim() : "";
+    if (!secretValue && editProviderId) {
+      const stored = container.providerRepo.findById(editProviderId);
+      if (stored) inheritedSecretValueEnc = stored.data.secretValueEnc;
+    }
     const name = String(b.name ?? "").trim() || preset.label;
     const draft: ModelProvider = {
       id: "draft",
@@ -372,8 +383,11 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       baseUrl,
       secretRef,
       // Encrypt the pasted key just long enough to be read back by the test;
-      // nothing is stored.
-      secretValueEnc: secretValue ? JSON.stringify(encryptSecret(secretValue, "provider-secret")) : undefined,
+      // nothing is stored. In edit mode the stored key is reused (still never
+      // re-persisted by this endpoint).
+      secretValueEnc: secretValue
+        ? JSON.stringify(encryptSecret(secretValue, "provider-secret"))
+        : inheritedSecretValueEnc,
       authType,
       apiFormat,
       timeoutMs: numberOr(b.timeoutMs, 60000),

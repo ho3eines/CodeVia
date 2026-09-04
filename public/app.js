@@ -1287,21 +1287,21 @@
       if (v && !/^[A-Z][A-Z0-9_]*$/i.test(v)) { h.className = "field-hint err"; h.textContent = "This must be an environment variable NAME like OPENAI_API_KEY (not the key value)."; }
       else { h.className = "field-hint"; h.textContent = v ? `The server reads process.env.${v}` : ""; }
     });
-    // Test connection BEFORE saving. In edit mode we test the live stored
-    // provider; in add mode we test the draft config via the pre-registration
-    // endpoint (which never persists anything).
+    // Test connection BEFORE saving — always tests the values currently in the
+    // form (draft), never the old stored config. In edit mode the providerId is
+    // passed along so the server can use the already-stored key when the key
+    // field is left empty (the form never re-displays secrets).
     $("#pv-test").onclick = async () => {
       const el = $("#pv-test-result");
       const body = {
         name: $("#pv-name").value.trim(), type: $("#pv-type").value, baseUrl: $("#pv-base").value.trim(), secretRef: $("#pv-secret").value.trim(),
         secretValue: $("#pv-value").value.trim(),
         authType: $("#pv-auth").value, apiFormat: $("#pv-format").value, timeoutMs: Number($("#pv-timeout").value) || 60000, maxTokensDefault: Number($("#pv-maxtok").value) || 4096,
+        ...(editId ? { providerId: editId } : {}),
       };
-      el.innerHTML = `<div class="test-result">Testing…</div>`;
+      el.innerHTML = `<div class="test-result">Testing the values currently in the form…</div>`;
       try {
-        const r = editId
-          ? await api(`/providers/${editId}/test`, { method: "POST" })
-          : await api("/providers/test", { method: "POST", body });
+        const r = await api("/providers/test", { method: "POST", body });
         el.innerHTML = renderTestResult(r);
         toast(r.ok ? "Provider connection OK" : "Provider test failed", r.message, r.ok ? "ok" : "err");
       } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }

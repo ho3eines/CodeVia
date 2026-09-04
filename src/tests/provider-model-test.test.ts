@@ -411,6 +411,71 @@ describe("model chat test — send a message, see the reply", () => {
 });
 
 describe("provider create + saved-provider tests", () => {
+  it("auto-discovers and adds the provider's models right after create", async () => {
+    const srv = await boot();
+    const captured = stubFetch((url) =>
+      url.endsWith("/models")
+        ? new Response(JSON.stringify({ data: [{ id: "lm-1" }, { id: "lm-2" }] }), { status: 200 })
+        : new Response("{}", { status: 404 }),
+    );
+    const r = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Local LLM", type: "openai-compatible", baseUrl: "http://localhost:9999/v1", authType: "none", apiFormat: "openai" },
+    });
+    expect(r.statusCode).toBe(201);
+    const body = r.json();
+    expect(body.active).toBe(true);
+    // Models discovered from the live catalog and added automatically.
+    expect(body.discoveredModels).toBe(2);
+    expect(body.test.ok).toBe(true);
+    expect(body.test.url).toBe("http://localhost:9999/v1/models");
+    expect(body.message).toMatch(/2 model/);
+    // They really landed in the Model Registry.
+    const models = (await srv.inject({ method: "GET", url: "/models" })).json();
+    expect(models.map((m: { modelId: string }) => m.modelId)).toEqual(expect.arrayContaining(["lm-1", "lm-2"]));
+    expect(models.filter((m: { providerId: string }) => m.providerId === body.id)).toHaveLength(2);
+    expect(captured[0].url).toBe("http://localhost:9999/v1/models");
+  });
+
+  it("edit-mode draft test reuses the stored key without re-typing it (and never persists)", async () => {
+    const srv = await boot();
+    stubFetch((url) =>
+      url.endsWith("/models")
+        ? new Response(JSON.stringify({ data: [] }), { status: 200 })
+        : new Response("{}", { status: 404 }),
+    );
+    const providersBefore = (await srv.inject({ method: "GET", url: "/providers" })).json().length;
+    const created = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Keyed", type: "openai-compatible", baseUrl: "https://llm.example/v1", authType: "bearer", secretValue: "sk-stored-123456" },
+    });
+    expect(created.statusCode).toBe(201);
+    const pid = created.json().id;
+    // Test the CURRENT form values without retyping the key → stored key is used.
+    const r = await srv.inject({
+      method: "POST",
+      url: "/providers/test",
+      payload: { providerId: pid, type: "openai-compatible", baseUrl: "https://llm.example/v1", authType: "bearer" },
+    });
+    const body = r.json();
+    expect(body.ok).toBe(true);
+    expect(body.keyPresent).toBe(true);
+    expect(body.checked).toBe(true);
+    expect(body.message).toContain("GET https://llm.example/v1/models");
+    // Unknown providerId simply means no stored key to inherit.
+    const r2 = await srv.inject({
+      method: "POST",
+      url: "/providers/test",
+      payload: { providerId: "missing-id", type: "openai-compatible", baseUrl: "https://llm.example/v1", authType: "bearer" },
+    });
+    expect(r2.json().ok).toBe(false);
+    expect(r2.json().keyPresent).toBe(false);
+    // The draft test persisted nothing.
+    expect((await srv.inject({ method: "GET", url: "/providers" })).json().length).toBe(providersBefore + 1);
+  });
+
   it("auto-detects capabilities when the client omits them", async () => {
     const srv = await boot();
     const r = await srv.inject({

@@ -66,7 +66,7 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | GET | `/providers/presets` | Provider types + per-type defaults (`baseUrl`, `secretRef`, `authType`, `apiFormat`) used by the Add Provider form. Anthropic default omits `/v1` (the platform appends it) |
 | GET | `/providers` | Providers, each with `readiness {ready, reason?, hint?}` and `keyPresent` (is the env var behind `secretRef` set?) |
 | POST | `/providers` | Create (secret **references** only — a literal key in `secretRef` is rejected with `400`; duplicate name → `409`). Auto-activates only when immediately usable; auto-discovers models via the live catalog |
-| POST | `/providers/test` | Pre-registration connectivity test (before saving): verifies the draft config, returns `{url, catalogUrl, chatUrl, urls, models, modelInfos, ...}` — the `message` always states the destination (`GET <url> → ...` or where it *would* go). Never persists |
+| POST | `/providers/test` | Pre-registration connectivity test (before saving): verifies **the exact values currently in the form**, returns `{url, catalogUrl, chatUrl, urls, models, modelInfos, ...}` — the `message` always states the destination (`GET <url> → ...` or where it *would* go). Pass `providerId` in edit mode and the stored key is reused when no new key is typed. Never persists |
 | GET/PATCH | `/providers/:id` | Detail / update (drops the cached adapter so new config is used) |
 | POST | `/providers/:id/activate` | Approve/enable. `422` + `hint` when the key is missing; `?force=true` overrides |
 | POST | `/providers/:id/deactivate` | Disable (the runner skips inactive providers even if their models are active) |
