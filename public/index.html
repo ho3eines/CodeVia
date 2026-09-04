@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CodeVia — AI Engineering Agent Platform</title>
+  <meta name="description" content="Multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled AI engineering platform." />
+  <link rel="stylesheet" href="/app.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236d5efc'/%3E%3Ctext x='16' y='22' font-size='18' fill='white' text-anchor='middle' font-family='monospace'%3EC%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">C</div>
+        <div class="brand-text">
+          <strong>CodeVia</strong>
+          <span>AI Engineering Org</span>
+        </div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-footer">
+        <button class="btn btn-ghost" id="theme-toggle">🌙 Theme</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menu-toggle" aria-label="Toggle menu">☰</button>
+        <div class="topbar-title" id="topbar-title">Dashboard</div>
+        <div class="topbar-actions">
+          <button class="cmd-btn" id="cmd-palette-btn" title="Command Palette (Ctrl+K)">
+            <span class="kbd">Ctrl</span><span class="kbd">K</span> Search
+          </button>
+          <span class="pill pill-live" id="live-pill"><span class="dot"></span> Live</span>
+        </div>
+      </header>
+
+      <section class="content" id="content">
+        <div class="skeleton-page" id="loading">
+          <div class="skeleton-line w60"></div>
+          <div class="skeleton-line w90"></div>
+          <div class="skeleton-card-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-container" id="toasts"></div>
+
+  <!-- Command Palette -->
+  <div class="modal-backdrop" id="palette-backdrop" hidden>
+    <div class="palette" id="palette">
+      <input id="palette-input" placeholder="Type a command or search…" autocomplete="off" />
+      <ul class="palette-list" id="palette-list"></ul>
+      <div class="palette-hint">↑↓ navigate · Enter select · Esc close</div>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div class="modal-backdrop" id="modal-backdrop" hidden>
+    <div class="modal" id="modal">
+      <div class="modal-head">
+        <h3 id="modal-title"></h3>
+        <button class="icon-btn" id="modal-close">×</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
