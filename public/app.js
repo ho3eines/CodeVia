@@ -114,6 +114,26 @@
       items.map(([href, icon, text]) => `<a href="${href}" data-href="${href}"><span class="nav-icon">${icon}</span>${text}</a>`).join("")
     ).join("");
   }
+  // Match a path against registered routes, supporting ":param" segments.
+  function matchRoute(path) {
+    const segments = path.split("/").filter(Boolean);
+    // Prefer exact literal keys first, then parameterized patterns in registration order.
+    if (routes[path]) return { handler: routes[path], params: {}, pattern: path };
+    for (const pattern of Object.keys(routes)) {
+      const pSegs = pattern.split("/").filter(Boolean);
+      if (pSegs.length !== segments.length) continue;
+      const params = {};
+      let ok = true;
+      for (let i = 0; i < pSegs.length; i++) {
+        const p = pSegs[i];
+        if (p.startsWith(":")) params[p.slice(1)] = decodeURIComponent(segments[i]);
+        else if (p !== segments[i]) { ok = false; break; }
+      }
+      if (ok) return { handler: routes[pattern], params, pattern };
+    }
+    return null;
+  }
+
   async function route() {
     showSkeleton();
     const hash = location.hash.replace(/^#/, "") || "/dashboard";
@@ -121,15 +141,18 @@
     const [pathKey, ...rest] = hash.split("/").filter(Boolean);
     const key = "/" + (pathKey || "dashboard");
     const full = "/" + [pathKey, ...rest].join("/");
-    let handler = routes[full] || routes[key] || routes["/dashboard"];
-    let title = $("#topbar-title");
+    const matched = matchRoute(full) || matchRoute(key) || matchRoute("/dashboard");
+    const handler = matched.handler;
+    const params = matched.params || {};
+    const title = $("#topbar-title");
     try {
-      await handler(rest);
+      await handler(rest, params);
     } catch (err) {
       renderError(err);
       toast("Error", err.message, "err");
     } finally {
-      title.textContent = document.title = titleMap[full] || titleMap[key] || "Dashboard";
+      const shown = titleMap[matched.pattern] || titleMap[full] || titleMap[key] || "Dashboard";
+      title.textContent = document.title = shown;
       $("nav").setAttribute("aria-current", "true");
       $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.href === key));
       setLangDir();
@@ -140,6 +163,8 @@
     "/providers": "Providers", "/skills": "Skills", "/workflows": "Workflows", "/tasks": "Tasks",
     "/runs": "Runs", "/conversations": "Conversations", "/memory": "Memory", "/github": "GitHub",
     "/telegram": "Telegram", "/settings": "Settings", "/admin": "Admin", "/search": "Search",
+    "/projects/:id": "Project", "/agents/:id": "Agent", "/workflows/:id": "Workflow",
+    "/runs/:id/console": "Run Console", "/conversations/:id": "Conversation",
   };
   function setLangDir() {
     const pref = localStorage.getItem("cv-dir") || "ltr";
