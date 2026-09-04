@@ -167,7 +167,11 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   // endpoints (health, docs, webhooks, the OAuth handshake, session
   // introspection) are skipped; everything else attaches the current user
   // context for permission checks.
-  const PUBLIC_PREFIXES = [
+  // Keep the public allowlist path-based and exact. `request.url` can contain a
+  // query string (and some proxies can pass an absolute URL); comparing the raw
+  // value made it too easy for a legitimate `/auth/me?…` request to miss the
+  // allowlist and receive a 401 before its handler ran.
+  const PUBLIC_PATHS = new Set([
     "/health",
     "/ready",
     "/live",
@@ -185,28 +189,37 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     "/auth/me",
     "/auth/logout",
     "/integrations/github/status",
-    // Socket.io handshake/polling — realtime is observable status only.
-    "/socket.io/",
-  ];
+  ]);
+  // Socket.io and Swagger expose subpaths below these public roots.
+  const PUBLIC_PATH_PREFIXES = ["/docs/", "/socket.io/"];
+  const requestPath = (url: string): string => {
+    const raw = url.split("?")[0];
+    if (/^https?:\/\//i.test(raw)) {
+      try { return new URL(raw).pathname; } catch { /* use raw below */ }
+    }
+    return raw;
+  };
+  const isPublicPath = (url: string): boolean => {
+    const pathname = requestPath(url);
+    return PUBLIC_PATHS.has(pathname) || PUBLIC_PATH_PREFIXES.some((p) => pathname.startsWith(p));
+  };
   // The SPA shell + its assets must always load, otherwise nobody can reach the
   // login button (and a 401 on /app.js renders a blank page). Data still goes
   // through the guarded API, so this exposes nothing beyond the static files.
   const isStaticAsset = (request: { method: string; url: string }): boolean => {
     if (request.method !== "GET" && request.method !== "HEAD") return false;
-    const pathname = request.url.split("?")[0];
-    return staticAssetPaths.has(pathname);
+    return staticAssetPaths.has(requestPath(request.url));
   };
   const isSpaNavigation = (request: { method: string; url: string; headers: Record<string, unknown> }): boolean => {
     if (request.method !== "GET" && request.method !== "HEAD") return false;
-    const pathname = request.url.split("?")[0];
+    const pathname = requestPath(request.url);
     if (pathname.startsWith("/api")) return false;
     const accept = String(request.headers.accept ?? "");
     // Real browser navigations ask for HTML; API clients (fetch/XHR) don't.
     return accept.includes("text/html");
   };
   app.addHook("onRequest", async (request, reply) => {
-    const url = request.url;
-    if (url === "/" || PUBLIC_PREFIXES.some((p) => url.startsWith(p))) {
+    if (requestPath(request.url) === "/" || isPublicPath(request.url)) {
       return;
     }
     if (isStaticAsset(request) || (request.is404 && isSpaNavigation(request))) {
