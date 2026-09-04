@@ -37,11 +37,9 @@ Copy `.env.example` → `.env` and set the values you want (see [ENVIRONMENT.md]
    - `OPENAI_API_KEY=…` (and/or others)
    - `TELEGRAM_BOT_TOKEN=…`
    - `PUBLIC_WEB_BASE_URL=https://<your-app>.up.railway.app`
-4. Add a Volume with mount path `/app/data` to persist the runtime DB. Railway
-   mounts volumes as root; this image intentionally runs as the `codevia` user,
-   so also add the Railway variable `RAILWAY_RUN_UID=0` (or use an entrypoint
-   that changes the mounted volume ownership). Without it SQLite can fail at
-   startup with `permission denied`.
+4. Add a Volume with mount path `/app/data` to persist the runtime DB. The
+   image entrypoint detects the root-owned Railway mount, fixes its ownership,
+   and then drops privileges to the `codevia` user before starting Node.
 5. Deploy.
 
 Health: Railway polls `/health`.

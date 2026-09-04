@@ -30,11 +30,13 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/public ./public
 
 # Non-root user for safety — created AFTER npm ci so the install runs as root.
-# HOME points at /app so anything npm/node writes at runtime stays writable.
+# The entrypoint starts as root long enough to initialize a mounted volume, then
+# drops back to this user before launching Node.
 RUN groupadd -r codevia && useradd -r -g codevia -d /app codevia \
   && mkdir -p /app/data && chown -R codevia:codevia /app
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 ENV HOME=/app
-USER codevia
 
 EXPOSE 8080
 ENV PORT=8080
