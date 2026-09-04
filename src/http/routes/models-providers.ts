@@ -432,6 +432,30 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     return { providerId: id, ...result };
   });
 
+  // List the live model catalog for a saved provider. Powers the "Add Model"
+  // dropdown — users should pick a model from the catalog (with auto-detected
+  // capabilities) instead of typing model ids manually.
+  app.get("/providers/:id/models", { schema: { tags: ["providers", "models"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const r = container.providerRepo.findById(id);
+    if (!r) return fail(reply, 404, "provider not found");
+    const result = await testProviderConnection(r.data, { timeoutMs: 15000 });
+    return {
+      providerId: id,
+      providerName: r.data.name,
+      apiFormat: r.data.apiFormat,
+      catalogUrl: result.catalogUrl,
+      chatUrl: result.chatUrl,
+      urls: result.urls,
+      ok: result.ok,
+      keyPresent: result.keyPresent,
+      message: result.message,
+      hint: result.hint,
+      models: result.models ?? [],
+      modelInfos: result.modelInfos ?? [],
+    };
+  });
+
   app.delete("/providers/:id", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.providerRepo.findById(id);

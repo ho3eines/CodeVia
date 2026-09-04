@@ -1,6 +1,11 @@
 import type { ModelProvider } from "../domain/entities.js";
 import { decryptSecret } from "../auth/encrypted-secrets.js";
-import { buildModelsEndpoint } from "./provider-urls.js";
+import {
+  buildModelsEndpoint,
+  buildChatEndpoint,
+  buildAnthropicChatEndpoint,
+  buildGeminiChatEndpoint,
+} from "./provider-urls.js";
 import type { DetectedModelInfo } from "./provider-urls.js";
 import { detectModelInfo } from "./provider-urls.js";
 
@@ -16,14 +21,44 @@ export interface ProviderTestResult {
   hint?: string;
   /** Exact URL the provider's model catalog was requested from (so the user can verify it). */
   url?: string;
-  /** Any additional URLs the test touched (e.g. chat endpoint authes). */
+  /** Every URL the test touched (catalog + chat). Surfaced to the UI so the user can see what is being hit. */
   urls?: string[];
+  /** Catalog endpoint — used by Add-Model to populate a dropdown. */
+  catalogUrl?: string;
+  /** Chat / completion endpoint — the URL a real call will be made to. */
+  chatUrl?: string;
+  /** Provider type that produced these URLs (so the UI can label them). */
+  apiFormat?: ModelProvider["apiFormat"];
+  /** True when the chat endpoint was also called. */
+  chatChecked?: boolean;
   /** Model ids discovered from the provider (best effort, capped). */
   models?: string[];
   /** Discovered models with inferred capabilities (id + metadata). */
   modelInfos?: DetectedModelInfo[];
-  /** Whether a real chat completion was attempted (model-level tests). */
-  chatChecked?: boolean;
+}
+
+/**
+ * Build the *full* set of URLs the platform will hit for a provider — the
+ * catalog (for /v1/models, /v1beta/models, /api/tags) and the chat endpoint
+ * for the vendor's documented format. Surfaced everywhere we test a provider
+ * (saved, draft, pre-registration) so the user can verify what is hit.
+ */
+export function buildAllEndpoints(
+  config: ModelProvider,
+  apiKey?: string,
+): { catalogUrl: string; chatUrl: string; urls: string[] } {
+  const cat = buildModelsEndpoint(config, apiKey);
+  const chat =
+    config.apiFormat === "anthropic"
+      ? buildAnthropicChatEndpoint(config)
+      : config.apiFormat === "gemini"
+        ? buildGeminiChatEndpoint(config, "detect", apiKey)
+        : buildChatEndpoint(config);
+  return {
+    catalogUrl: cat.url,
+    chatUrl: chat,
+    urls: Array.from(new Set([cat.url, chat])),
+  };
 }
 
 /**
@@ -92,12 +127,16 @@ export function providerTestNotReady(
 ): ProviderTestResult {
   const keyPresent = !!resolveProviderKey(config);
   const readiness = providerReadiness(config);
+  const eps = buildAllEndpoints(config, keyPresent ? resolveProviderKey(config) : undefined);
   return {
     ok: false,
     keyPresent,
     checked: false,
     url,
-    urls: url ? [url] : undefined,
+    urls: eps.urls,
+    catalogUrl: eps.catalogUrl,
+    chatUrl: eps.chatUrl,
+    apiFormat: config.apiFormat,
     message: readiness.reason ?? "Provider not ready",
     hint: readiness.hint,
   };
@@ -115,22 +154,33 @@ export async function testProviderConnection(
   opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<ProviderTestResult> {
   const keyPresent = !!resolveProviderKey(config);
+  const apiKey = resolveProviderKey(config);
   if (config.type === "mock") {
-    return { ok: true, keyPresent: false, checked: false, message: "Mock provider is always available (no network call)." };
+    const eps = buildAllEndpoints(config, undefined);
+    return {
+      ok: true,
+      keyPresent: false,
+      checked: false,
+      urls: eps.urls,
+      catalogUrl: eps.catalogUrl,
+      chatUrl: eps.chatUrl,
+      apiFormat: config.apiFormat,
+      message: "Mock provider is always available (no network call).",
+    };
   }
   const readiness = providerReadiness(config);
-  const url = buildModelsEndpoint(config, resolveProviderKey(config)).url;
+  const eps = buildAllEndpoints(config, apiKey);
   if (!readiness.ready) {
-    return providerTestNotReady(config, url);
+    return providerTestNotReady(config, eps.catalogUrl);
   }
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = Math.min(opts.timeoutMs ?? 10_000, config.timeoutMs || 10_000);
-  const { headers } = buildModelsEndpoint(config, resolveProviderKey(config));
+  const { headers } = buildModelsEndpoint(config, apiKey);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const started = Date.now();
   try {
-    const res = await fetchImpl(url, { method: "GET", headers, signal: ctrl.signal });
+    const res = await fetchImpl(eps.catalogUrl, { method: "GET", headers, signal: ctrl.signal });
     const latencyMs = Date.now() - started;
     let body: unknown = undefined;
     try {
@@ -147,8 +197,11 @@ export async function testProviderConnection(
         checked: true,
         status: res.status,
         latencyMs,
-        url,
-        urls: [url],
+        url: eps.catalogUrl,
+        urls: eps.urls,
+        catalogUrl: eps.catalogUrl,
+        chatUrl: eps.chatUrl,
+        apiFormat: config.apiFormat,
         message: `Connected (${res.status}) in ${latencyMs}ms — ${modelIds.length} model(s) visible`,
         models: modelIds,
         modelInfos,
@@ -162,7 +215,20 @@ export async function testProviderConnection(
         : res.status === 404
           ? "Endpoint not found — check the Base URL and API format."
           : undefined;
-    return { ok: false, keyPresent, checked: true, status: res.status, latencyMs, url, urls: [url], message: `Provider returned ${res.status}: ${apiMessage}`, hint };
+    return {
+      ok: false,
+      keyPresent,
+      checked: true,
+      status: res.status,
+      latencyMs,
+      url: eps.catalogUrl,
+      urls: eps.urls,
+      catalogUrl: eps.catalogUrl,
+      chatUrl: eps.chatUrl,
+      apiFormat: config.apiFormat,
+      message: `Provider returned ${res.status}: ${apiMessage}`,
+      hint,
+    };
   } catch (err) {
     const aborted = err instanceof Error && err.name === "AbortError";
     return {
@@ -170,8 +236,11 @@ export async function testProviderConnection(
       keyPresent,
       checked: true,
       latencyMs: Date.now() - started,
-      url,
-      urls: [url],
+      url: eps.catalogUrl,
+      urls: eps.urls,
+      catalogUrl: eps.catalogUrl,
+      chatUrl: eps.chatUrl,
+      apiFormat: config.apiFormat,
       message: aborted ? `Timed out after ${timeoutMs}ms` : `Network error: ${err instanceof Error ? err.message : String(err)}`,
       hint: "The server could not reach the provider — check the Base URL, outbound network access, or proxy settings.",
     };
