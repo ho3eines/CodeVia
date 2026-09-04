@@ -20,12 +20,14 @@ export interface GithubConnection {
  */
 export function resolveGitHubService(): IGitHubService {
   const env = getEnv();
-  const token = process.env.GITHUB_TOKEN || process.env.GITHUB_CLIENT_SECRET;
+  const token = process.env.GITHUB_TOKEN;
   // Use the real REST adapter in production (or when explicitly enabled) with a
   // token. Local dev/test defaults to the mock so the platform never requires
   // GitHub credentials to boot — a project can still connect to real GitHub via
   // the integration settings in production.
-  const enabled = env.NODE_ENV === "production" || process.env.GITHUB_ENABLED === "true";
+  // (GITHUB_CLIENT_SECRET is intentionally NOT accepted here: it is the OAuth
+  // app secret, not an API token, and the old fallback caused confusing 401s.)
+  const enabled = env.NODE_ENV === "production" || env.GITHUB_ENABLED === "true" || process.env.GITHUB_ENABLED === "true";
   if (token && enabled) {
     logger.info("Using RealGitHubService");
     return new RealGitHubService();

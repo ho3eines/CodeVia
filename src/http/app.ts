@@ -26,6 +26,7 @@ import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerSearchRoutes } from "./routes/search.js";
 import { registerObservabilityRoutes } from "./routes/observability.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { registerAuthRoutes } from "./routes/auth.js";
 import { authMiddleware } from "./auth.js";
 import { getEnv } from "../config/env.js";
 
@@ -83,6 +84,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
         { name: "tasks", description: "Tasks & runs" },
         { name: "runs", description: "AI run console" },
         { name: "memory", description: "GitHub-backed memory" },
+        { name: "auth", description: "GitHub OAuth login & sessions" },
         { name: "github", description: "GitHub integration & webhooks" },
         { name: "telegram", description: "Telegram integration" },
         { name: "conversations", description: "Conversations" },
@@ -132,6 +134,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
 
   registerHealthRoutes(app, container);
   guarded(() => {
+    registerAuthRoutes(app, container);
     registerDashboardRoutes(app, container);
     registerProjectRoutes(app, container);
     registerAgentRoutes(app, container);
@@ -152,7 +155,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   // Global auth guard for everything not whitelisted. Public/unauthenticated
   // endpoints (health, docs, webhooks) are skipped; everything else attaches the
   // current user context for permission checks.
-  const PUBLIC_PREFIXES = ["/health", "/ready", "/live", "/docs", "/webhooks/github", "/integrations/telegram/webhook"];
+  const PUBLIC_PREFIXES = ["/health", "/ready", "/live", "/docs", "/webhooks/github", "/integrations/telegram/webhook", "/auth/github/login", "/auth/github/callback", "/auth/github/status"];
   app.addHook("onRequest", async (request, reply) => {
     const url = request.url;
     if (url === "/" || PUBLIC_PREFIXES.some((p) => url.startsWith(p))) {

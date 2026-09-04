@@ -26,12 +26,21 @@ const EnvSchema = z.object({
   OLLAMA_BASE_URL: z.string().default("http://127.0.0.1:11434"),
 
   // GitHub: OAuth App / GitHub App
+  GITHUB_TOKEN: z.string().optional(),
+  GITHUB_ENABLED: z.string().optional(),
   GITHUB_CLIENT_ID: z.string().optional(),
   GITHUB_CLIENT_SECRET: z.string().optional(),
   GITHUB_APP_ID: z.string().optional(),
   GITHUB_APP_PRIVATE_KEY: z.string().optional(),
   // GitHub App webhook secret for signature validation
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
+  // GitHub OAuth login (user sign-in via github.com)
+  GITHUB_OAUTH_SCOPE: z.string().default("read:user user:email"),
+  GITHUB_OAUTH_CALLBACK_URL: z.string().optional(),
+
+  // Platform auth sessions (HMAC-signed opaque tokens for GitHub-login users)
+  AUTH_SECRET: z.string().optional(),
+  REQUIRE_AUTH: z.coerce.boolean().default(false),
 
   // Telegram Bot
   TELEGRAM_BOT_TOKEN: z.string().optional(),

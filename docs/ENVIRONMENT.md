@@ -39,8 +39,12 @@ The stored `Provider` config stores only `secretRef` (e.g. `OPENAI_API_KEY`) —
 
 | Variable | Description |
 |----------|-------------|
-| `GITHUB_TOKEN` | Personal access token / OAuth token for the real REST adapter |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth App |
+| `GITHUB_TOKEN` | Personal access token / OAuth token for the real REST adapter (the ONLY API token — `GITHUB_CLIENT_SECRET` is not a token) |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth App (user login via `/auth/github/*`) |
+| `GITHUB_OAUTH_SCOPE` | OAuth scope, default `read:user user:email` |
+| `GITHUB_OAUTH_CALLBACK_URL` | Overrides `<base>/auth/github/callback` for the OAuth flow |
+| `AUTH_SECRET` | Signs login sessions + OAuth state (**required in production** for login) |
+| `REQUIRE_AUTH` | `true` → unauthenticated API calls get 401 (default `false` = demo mode locally) |
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | GitHub App (installation) |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for `/webhooks/github` signature validation |
 | `GITHUB_ENABLED` | Set `true` to use the real adapter; otherwise the mock is used for local dev/test (even if a token is present) |

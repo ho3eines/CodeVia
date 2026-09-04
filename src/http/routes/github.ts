@@ -5,10 +5,20 @@ import { eventBus, generateCorrelationId } from "../../events/bus.js";
 import { logger } from "../../logger.js";
 
 export function registerGithubRoutes(app: FastifyInstance, container: Container): void {
-  app.get("/integrations/github/status", { schema: { tags: ["github"] } }, async () => {
+  app.get("/integrations/github/status", { schema: { tags: ["github"] } }, async (req) => {
     const kind = container.github.kind;
     const repoCount = kind === "mock" ? 0 : 0;
-    return { connected: kind === "real", kind, repoCount, sourceOfTruth: true };
+    const { isGitHubOAuthConfigured } = await import("../../auth/github-oauth.js");
+    const authenticated = !!(req as typeof req & { authenticated?: boolean }).authenticated;
+    return {
+      connected: kind === "real",
+      kind,
+      repoCount,
+      sourceOfTruth: true,
+      oauthConfigured: isGitHubOAuthConfigured(),
+      authenticated,
+      user: authenticated ? req.user : null,
+    };
   });
 
   app.get("/github/repositories", { schema: { tags: ["github"] } }, async () => {
