@@ -670,6 +670,8 @@
   on("/admin", async () => {
     const h = await api("/admin/health");
     const usage = await api("/admin/usage");
+    const adm = await api("/admin/settings").catch((e) => ({ _forbidden: e.message }));
+    const users = await api("/admin/users").catch(() => null);
     $("#content").innerHTML = `<div class="overview"><div><h1>Admin</h1><p>System health & usage</p></div></div>
       <div class="stat-grid">
         <div class="card stat"><div class="stat-label">API</div><div class="stat-value" style="font-size:18px">${h.api.status}</div></div>
@@ -690,7 +692,54 @@
           <div class="meter-row"><span class="lbl">Runs</span><span class="val">${usage.runs}</span></div>
           <div class="meter-row"><span class="lbl">Cost</span><span class="val">${money(usage.costs.costUsd)}</span></div>
         </div>
+      </div>
+      <div class="grid-2 mt">
+        <div class="card card-body"><div class="card-title">GitHub Login ${adm.github ? (adm.github.configured ? '<span class="badge badge-ok">configured</span>' : '<span class="badge badge-warn">not configured</span>') : ''}</div>
+          ${adm._forbidden ? `<p style="color:var(--text-muted);font-size:12px">Login settings are visible to owners/admins only (${esc(adm._forbidden)}).</p>` : `
+          <div class="field"><label>OAuth Client ID ${adm.github?.clientIdSource === "env" ? '<span class="badge badge-muted">env</span>' : ""}</label>
+            <input class="input mono" id="adm-gh-client" placeholder="Iv1.… / Ov23.…" value="${esc(adm.github?.stored?.clientId || "")}" ${adm.github?.envOverrides?.clientId ? "disabled" : ""}/>
+            ${adm.github?.envOverrides?.clientId ? `<p style="color:var(--text-muted);font-size:11px">Set via GITHUB_CLIENT_ID env — effective: <span class="mono">${esc(adm.github.clientId || "")}</span></p>` : ""}</div>
+          <div class="field"><label>Callback URL (optional) ${adm.github?.redirectUriSource === "env" ? '<span class="badge badge-muted">env</span>' : adm.github?.redirectUriSource === "admin" ? '<span class="badge badge-info">admin</span>' : ""}</label>
+            <input class="input mono" id="adm-gh-callback" placeholder="(auto) ${esc(adm.github?.redirectUri || "")}" value="${esc(adm.github?.stored?.callbackUrl || "")}" ${adm.github?.envOverrides?.callbackUrl ? "disabled" : ""}/></div>
+          <div class="field"><label>Scope ${adm.github?.scopeSource === "env" ? '<span class="badge badge-muted">env</span>' : adm.github?.scopeSource === "admin" ? '<span class="badge badge-info">admin</span>' : ""}</label>
+            <input class="input mono" id="adm-gh-scope" value="${esc(adm.github?.stored?.scope || adm.github?.scope || "")}" placeholder="read:user user:email"/></div>
+          <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="adm-gh-require" ${adm.github?.requireAuth ? "checked" : ""}/> Require GitHub login for API ${adm.github?.requireAuthSource === "env" ? '<span class="badge badge-muted">env</span>' : '<span class="badge badge-info">admin</span>'}</label></div>
+          <div class="meter-row"><span class="lbl">Client Secret</span><span class="val">${adm.github?.clientSecretConfigured ? '<span class="badge badge-ok">set (env)</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
+          <div class="meter-row"><span class="lbl">GitHub Token</span><span class="val">${adm.github?.secrets?.githubToken ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
+          <div class="meter-row"><span class="lbl">Webhook Secret</span><span class="val">${adm.github?.secrets?.githubWebhookSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
+          <div class="meter-row"><span class="lbl">Session Secret</span><span class="val">${adm.github?.secrets?.authSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
+          ${adm.github?.setupHint ? `<p style="color:var(--text-muted);font-size:12px">${esc(adm.github.setupHint)}</p>` : ""}
+          <p style="color:var(--text-muted);font-size:11px">Secrets live in environment variables only and are never stored here. Empty fields follow env/defaults.</p>
+          <div class="flex mt"><button class="btn btn-primary" id="adm-gh-save">Save</button><a class="btn" href="/auth/github/login" style="text-decoration:none">Test login</a></div>`}
+        </div>
+        <div class="card card-body"><div class="card-title">Users ${users ? `(${users.length})` : ""}</div>
+          ${users ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th></th></tr></thead><tbody>
+            ${users.map((u) => `<tr><td>${u.avatarUrl ? `<img src="${esc(u.avatarUrl)}" alt="" style="width:20px;height:20px;border-radius:50%;vertical-align:-5px;margin-right:6px"/>` : ""}<strong>${esc(u.name)}</strong><div class="mono" style="color:var(--text-muted);font-size:11px">${esc(u.email || "")} · ${esc(u.externalId)}</div></td>
+            <td><select class="select" data-role-for="${u.id}" style="max-width:130px">${["owner", "admin", "developer", "reviewer", "viewer"].map((r) => `<option value="${r}" ${u.role === r ? "selected" : ""}>${r}</option>`).join("")}</select></td>
+            <td><button class="btn btn-ghost" data-save-role="${u.id}">Save</button></td></tr>`).join("")}
+          </tbody></table></div>` : `<p style="color:var(--text-muted);font-size:12px">User management is visible to owners/admins only.</p>`}
+        </div>
       </div>`;
+    const ghSave = $("#adm-gh-save");
+    if (ghSave) ghSave.onclick = async () => {
+      try {
+        await api("/admin/settings/github", { method: "PUT", body: {
+          clientId: $("#adm-gh-client").value,
+          callbackUrl: $("#adm-gh-callback").value,
+          scope: $("#adm-gh-scope").value,
+          requireAuth: $("#adm-gh-require").checked,
+        }});
+        toast("GitHub login settings saved", "", "ok"); refreshCurrent();
+      } catch (e) { toast("Save failed", e.message, "err"); }
+    };
+    $$("[data-save-role]").forEach((btn) => btn.addEventListener("click", async () => {
+      const id = btn.dataset.saveRole;
+      const role = document.querySelector(`[data-role-for="${id}"]`).value;
+      try {
+        await api(`/admin/users/${id}/role`, { method: "PATCH", body: { role } });
+        toast("Role updated", role, "ok"); refreshCurrent();
+      } catch (e) { toast("Update failed", e.message, "err"); }
+    }));
   });
 
   /* SEARCH */

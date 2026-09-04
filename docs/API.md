@@ -163,6 +163,10 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 | GET | `/admin/roles` | RBAC matrix |
 | GET | `/admin/usage` | Usage/aggregates |
 | GET | `/admin/provider-health` | Provider health |
+| GET | `/admin/settings` | Admin settings view: effective GitHub login config (with per-field source), secret presence flags, user counts (owner/admin only) |
+| PUT | `/admin/settings/github` | Update GitHub login settings: `clientId`, `callbackUrl`, `scope`, `requireAuth` — empty string clears back to env/default (owner/admin only) |
+| GET | `/admin/users` | List login users (owner/admin only) |
+| PATCH | `/admin/users/:id/role` | Change a user's role; refuses to demote the last owner (owner/admin only) |
 
 ---
 

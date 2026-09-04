@@ -70,9 +70,16 @@ export function authMiddleware(opts: { container: Container; can?: Permission })
         throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
       }
     }
-    // Optional strict mode: when REQUIRE_AUTH=true, API callers must present a
-    // valid GitHub-login session instead of silently using the demo user.
-    const requireAuth = process.env.REQUIRE_AUTH === "true";
+    // Optional strict mode: the Admin panel toggle overrides REQUIRE_AUTH env.
+    // When on, API callers must present a valid GitHub-login session instead
+    // of silently using the demo user.
+    let requireAuth = process.env.REQUIRE_AUTH === "true";
+    try {
+      const { getEffectiveRequireAuth } = await import("../auth/admin-settings.js");
+      requireAuth = getEffectiveRequireAuth(opts.container.kv);
+    } catch {
+      // kv unavailable (tests) — fall back to the env flag.
+    }
     if (requireAuth && !authenticated && !req.headers["x-user-id"]) {
       reply.code(401);
       throw Object.assign(new Error("Authentication required (GitHub login)"), { statusCode: 401 });

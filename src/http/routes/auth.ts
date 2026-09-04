@@ -7,13 +7,14 @@ import {
   createOAuthState,
   exchangeCodeForToken,
   fetchGitHubUser,
-  getOAuthConfig,
-  getOAuthRedirectUri,
-  isGitHubOAuthConfigured,
   SESSION_TTL_MS,
   signSession,
   verifyOAuthState,
 } from "../../auth/github-oauth.js";
+import {
+  getEffectiveGitHubLoginSettings,
+  getEffectiveOAuthConfig,
+} from "../../auth/admin-settings.js";
 import { getEnv } from "../../config/env.js";
 import { logger } from "../../logger.js";
 
@@ -28,29 +29,27 @@ import { logger } from "../../logger.js";
  */
 export function registerAuthRoutes(app: FastifyInstance, container: Container): void {
   app.get("/auth/github/status", { schema: { tags: ["auth"] } }, async (req) => {
-    const cfg = getOAuthConfig();
+    const eff = getEffectiveGitHubLoginSettings(container.kv);
     const user = (req as typeof req & { authenticated?: boolean }).authenticated
       ? req.user
       : undefined;
     return {
-      configured: !!cfg,
-      redirectUri: cfg?.redirectUri ?? getOAuthRedirectUri(),
-      scope: cfg?.scope ?? getEnv().GITHUB_OAUTH_SCOPE,
+      configured: eff.configured,
+      redirectUri: eff.redirectUri,
+      scope: eff.scope,
       authenticated: !!(req as typeof req & { authenticated?: boolean }).authenticated,
       user: user ?? null,
-      setupHint: cfg
-        ? undefined
-        : "Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET (see docs/GITHUB_SETUP.md), then restart.",
+      setupHint: eff.setupHint,
     };
   });
 
   app.get("/auth/github/login", { schema: { tags: ["auth"] } }, async (req, reply) => {
-    const cfg = getOAuthConfig();
+    const cfg = getEffectiveOAuthConfig(container.kv);
     if (!cfg) {
       reply.code(503);
       return {
         error: "GitHub OAuth is not configured",
-        hint: "Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET, then restart. See docs/GITHUB_SETUP.md.",
+        hint: "An admin can set the Client ID in Admin → GitHub Login; GITHUB_CLIENT_SECRET must be set in the environment. See docs/GITHUB_SETUP.md.",
       };
     }
     const state = createOAuthState();
@@ -86,12 +85,17 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
     };
 
     if (oauthError) return fail(`GitHub rejected the login (${oauthError})`, String(q.error_description ?? ""));
-    if (!isGitHubOAuthConfigured()) return fail("GitHub OAuth is not configured on this server");
+    const cfg = getEffectiveOAuthConfig(container.kv);
+    if (!cfg) return fail("GitHub OAuth is not configured on this server");
     if (!code) return fail("Missing ?code — restart the login from CodeVia");
     if (!verifyOAuthState(state)) return fail("Invalid or expired login state — please try again");
 
     try {
-      const { accessToken } = await exchangeCodeForToken(code);
+      const { accessToken } = await exchangeCodeForToken(code, {
+        clientId: cfg.clientId,
+        clientSecret: cfg.clientSecret,
+        redirectUri: cfg.redirectUri,
+      });
       const profile = await fetchGitHubUser(accessToken);
       const { user, created } = container.userRepo.upsertGitHubUser(profile);
       await container.auditRepo.record({

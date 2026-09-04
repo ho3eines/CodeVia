@@ -22,6 +22,15 @@ with it, users click **🐙 Login with GitHub** in the UI (`#/github`).
 7. Restart. Open `#/github` → **Login with GitHub**.
    The **first user to log in becomes `owner`**; later users become `developer`.
 
+> **Admin panel shortcut:** after the first login, open `#/admin` → **GitHub Login**.
+> There you can set the Client ID, callback URL, scope and the "require login"
+> toggle without touching env files or restarting. Precedence per field is
+> **env → admin → default** (a field set via env shows an `env` badge and is
+> locked in the UI). Secrets (`GITHUB_CLIENT_SECRET`, tokens, `AUTH_SECRET`)
+> always stay in environment variables — the admin page only shows whether
+> each one is set, never its value. User roles are managed in `#/admin` →
+> **Users** (the last owner cannot be demoted).
+
 How it works: `GET /auth/github/login` → 302 to `github.com/login/oauth/authorize`
 (signed `state`, 10-min expiry) → `GET /auth/github/callback?code&state` exchanges
 the code, fetches `GET /user` (+ `/user/emails`), upserts the user row, and sets
