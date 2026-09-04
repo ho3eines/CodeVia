@@ -822,10 +822,33 @@
           <div class="meter-row"><span class="lbl">Telegram</span><span class="val">${s.telegramConnected}</span></div>
         </div>
         <div class="card card-body"><div class="card-title">Backup & Import/Export</div>
-          <div class="flex"><button class="btn" onclick="downloadBackup()">⬇ System Backup</button><button class="btn" onclick="refreshCurrent()">Refresh</button></div>
+          <div class="flex"><button class="btn" onclick="downloadBackup()">⬇ System Backup</button><button class="btn" id="restore-btn">⬆ Restore Backup</button><button class="btn" onclick="refreshCurrent()">Refresh</button></div>
+          <input type="file" id="restore-file" accept="application/json,.json" style="display:none"/>
           <p style="color:var(--text-muted);font-size:12px">Secrets are stored as references (e.g. OPENAI_API_KEY) and are never included in exports.</p>
+          <p style="color:var(--text-muted);font-size:11px">💡 بکاپ شامل تنظیمات GitHub Login (بدون secrets) است. در Railway، قبل از Redeploy بکاپ بگیرید و بعد از دیپلی (که دیتابیس موقت پاک می‌شود) Restore کنید تا تنظیمات برگردند — یا Volume را طبق راهنمای Admin متصل کنید تا دیگر نیازی به این نباشد.</p>
         </div>
       </div>`;
+    const restoreBtn = $("#restore-btn");
+    const restoreFile = $("#restore-file");
+    if (restoreBtn && restoreFile) {
+      restoreBtn.onclick = () => restoreFile.click();
+      restoreFile.onchange = async () => {
+        const f = restoreFile.files?.[0];
+        restoreFile.value = "";
+        if (!f) return;
+        try {
+          const data = JSON.parse(await f.text());
+          if (!data.adminSettings || typeof data.adminSettings !== "object") {
+            throw new Error("فایل Backup بخش adminSettings ندارد — از نسخه جدیدتر بکاپ بگیرید");
+          }
+          await api("/settings/restore", { method: "POST", body: { adminSettings: data.adminSettings } });
+          toast("Backup restored", "GitHub login settings were restored.", "ok");
+          refreshCurrent();
+        } catch (e) {
+          toast("Restore failed", e.message, "err");
+        }
+      };
+    }
   });
   window.downloadBackup = async () => {
     const b = await api("/settings/backup");
@@ -840,6 +863,27 @@
     const adm = await api("/admin/settings").catch((e) => ({ _forbidden: e.message }));
     const users = await api("/admin/users").catch(() => null);
     const diag = adm.github?.diagnostics || {};
+    // Ephemeral-storage warning: when the DB is on container-local storage the
+    // admin GitHub settings (and users/data) are wiped on every deploy — the
+    // reason the user has to "fix the GitHub settings again" each time.
+    const st = h.storage || {};
+    const recipe = [
+      "GITHUB_CLIENT_ID=" + (adm.github?.stored?.clientId || ""),
+      "GITHUB_CLIENT_SECRET=<your OAuth App client secret>",
+      "GITHUB_OAUTH_CALLBACK_URL=" + (adm.github?.redirectUri || ""),
+      "PUBLIC_WEB_BASE_URL=" + String(adm.github?.redirectUri || "").replace(/\/auth\/github\/callback$/, ""),
+      "AUTH_SECRET=<keep the SAME random 32+ chars you already set>",
+      "REQUIRE_AUTH=" + (adm.github?.requireAuth ? "true" : "false"),
+    ].join("\n");
+    const storageWarnHtml = st.warning ? `
+      <div class="card card-body" style="border:1px solid #f59e0b;background:#fffbeb">
+        <div class="card-title" style="color:#92400e">⚠️ ذخیره‌سازی موقت — تنظیمات بعد از هر Redeploy پاک می‌شوند</div>
+        <p style="font-size:12px;color:#92400e;margin:4px 0">دیتابیس روی فایل‌سیستم موقت کانتینر است (<span class="mono">${esc(st.dir || h.database.path)}</span>). در Railway هر Redeploy یک کانتینر تازه می‌سازد و همه‌چیز — تنظیمات GitHub Login، کاربران و داده‌ها — پاک می‌شود. به همین دلیل هر بار باید تنظیمات را دوباره وارد کنید.</p>
+        <p style="font-size:12px;color:#92400e;margin:8px 0 4px"><strong>راه‌حل دائمی (فقط یک‌بار):</strong> در Railway → سرویس CodeVia → Settings → <strong>Storage</strong> → <strong>Add Volume</strong> → Mount Path را بگذارید <span class="mono">${esc(st.dir || "/app/data")}</span> → سپس یک Redeploy. از این به بعد تنظیمات و داده‌ها بین دیپلی‌ها ماندگار می‌شود.</p>
+        <p style="font-size:12px;color:#92400e;margin:8px 0 4px"><strong>یا</strong> همین مقادیر را یک‌بار در <strong>Railway → Variables</strong> ثبت کنید تا تنظیمات لاگین بدون Volume هم دائمی باشد (env ارجحیت بالاتر از پنل Admin دارد):</p>
+        <pre id="env-recipe" style="background:#fff;border:1px solid #fde68a;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;direction:ltr;margin:6px 0">${esc(recipe)}</pre>
+        <div class="flex" style="gap:8px"><button class="btn" id="env-copy-btn">📋 Copy Variables</button></div>
+      </div>` : "";
     const stepsHtml = adm.github?.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);margin:8px 0 0 18px;text-align:left">${adm.github.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
     const mismatchWarn = diag.callbackUrlMismatchRisk ? `<p style="color:var(--warn, #d97706);font-size:11px">⚠️ Callback URL mismatch risk — check GitHub OAuth App settings.</p>` : "";
     $("#content").innerHTML = `<div class="overview"><div><h1>Admin</h1><p>System health & usage</p></div></div>
@@ -849,6 +893,7 @@
         <div class="card stat"><div class="stat-label">Queue</div><div class="stat-value" style="font-size:18px">${h.queue.status}</div></div>
         <div class="card stat"><div class="stat-label">Providers</div><div class="stat-value" style="font-size:18px">${h.providers.length}</div></div>
       </div>
+      ${storageWarnHtml}
       <div class="grid-2">
         <div class="card card-body"><div class="card-title">Component Health</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot ${h.database.status==='healthy'?'healthy':'down'}"></span>Database</div><div class="status-item"><span class="status-dot ${h.github.status==='connected'?'healthy':'warn'}"></span>GitHub</div><div class="status-item"><span class="status-dot ${h.telegram.status==='connected'?'healthy':'warn'}"></span>Telegram</div><div class="status-item"><span class="status-dot healthy"></span>API</div></div>
@@ -954,6 +999,16 @@
         toast("Role updated", role, "ok"); refreshCurrent();
       } catch (e) { toast("Update failed", e.message, "err"); }
     }));
+    const envCopy = document.getElementById("env-copy-btn");
+    if (envCopy) envCopy.onclick = async () => {
+      const txt = document.getElementById("env-recipe")?.textContent || "";
+      try {
+        await navigator.clipboard.writeText(txt);
+        toast("Copied", "Paste the variables into Railway → Variables.", "ok");
+      } catch (_) {
+        toast("Copy failed", "Select and copy the text manually.", "err");
+      }
+    };
   });
 
   /* SEARCH */

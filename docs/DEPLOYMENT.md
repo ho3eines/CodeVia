@@ -48,6 +48,33 @@ Run two services from the same image:
 - **Web/API** service: `CMD node dist/index.js` (starts the HTTP server **and** an in-process worker). Single-node deployments are fine.
 - **Worker** service: to run only the worker, add an env flag (e.g. `WORKER_ONLY=true`) and start `node dist/index.js` with the worker-only branch. (This is the extension point for horizontal scaling; the queue is the shared runtime store.)
 
+### Option C — persistent storage (REQUIRED on Railway to keep settings)
+
+The runtime SQLite DB (`DATABASE_PATH=/app/data/codevia.db`) stores the
+admin-managed **GitHub login settings**, the user table and cached platform
+data. On Railway the container filesystem is **ephemeral**: every deploy
+starts a fresh container, so anything in `/app/data` is **wiped** — the
+symptom is "I have to re-enter the GitHub settings after every deploy" and
+users getting logged out on every deploy.
+
+**Attach a volume (one time, permanent fix):**
+
+1. Railway dashboard → your project → **CodeVia service** → **Settings** (or the **Storage** tab).
+2. **Add Volume** → Name: `data` → **Mount Path: `/app/data`** → Add.
+3. Trigger a **Redeploy** so the service picks up the volume.
+4. Verify: open the web UI → `#/admin` — the amber "ephemeral storage"
+   warning card must be gone (`/admin/health` → `storage.onPersistentVolume: true`).
+
+> Until a volume is attached, `#/admin` shows an amber warning with the exact
+> steps, and `#/settings` offers **System Backup / Restore Backup** (includes
+> the non-secret GitHub login settings) as a manual fallback: download a
+> backup before a deploy, restore it afterwards.
+>
+> Alternative without a volume: set the login config as **Railway Variables**
+> (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_OAUTH_CALLBACK_URL`,
+> `AUTH_SECRET`, `REQUIRE_AUTH`) — env values persist across deploys and take
+> precedence over the admin panel.
+
 ---
 
 ## 4. Health / Readiness / Liveness

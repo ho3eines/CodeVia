@@ -31,6 +31,20 @@ with it, users click **🐙 Login with GitHub** in the UI (`#/github`).
 > each one is set, never its value. User roles are managed in `#/admin` →
 > **Users** (the last owner cannot be demoted).
 
+> **Keeping the settings (important on Railway):** the admin panel values live
+> in the runtime DB at `/app/data`. On Railway that path is **ephemeral**
+> unless a **volume** is attached to `/app/data`
+> ([DEPLOYMENT.md](DEPLOYMENT.md) → *Option C — persistent storage*). Without
+> it, every deploy wipes the DB — you'd have to re-enter the GitHub settings
+> and re-login each time. Two permanent options: (1) attach the Railway
+> volume (one time, recommended), or (2) set `GITHUB_CLIENT_ID` /
+> `GITHUB_CLIENT_SECRET` / `GITHUB_OAUTH_CALLBACK_URL` / `AUTH_SECRET` as
+> **Railway Variables** — env values persist across deploys and take
+> precedence over the panel. `#/settings` also offers **System Backup /
+> Restore Backup** (includes the non-secret login settings) as a manual
+> fallback. Note: changing `AUTH_SECRET` invalidates every existing session
+> (users must log in once more); sessions otherwise last 7 days.
+
 How it works: `GET /auth/github/login` → 302 to `github.com/login/oauth/authorize`
 (signed `state`, 10-min expiry) → `GET /auth/github/callback?code&state` exchanges
 the code, fetches `GET /user` (+ `/user/emails`), upserts the user row, and sets

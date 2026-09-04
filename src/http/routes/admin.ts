@@ -8,6 +8,7 @@ import {
   getGitHubAdminSettings,
   saveGitHubAdminSettings,
 } from "../../auth/admin-settings.js";
+import { getStorageInfo } from "../../app/storage.js";
 
 /** Only owner/admin roles may read or change admin settings. */
 function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
@@ -30,6 +31,9 @@ export function registerAdminRoutes(app: FastifyInstance, container: Container):
     return {
       api: { status: "healthy", pid: process.pid, uptime: process.uptime() },
       database: { status: dbOk ? "healthy" : "down", path: getEnv().DATABASE_PATH },
+      // Persistence diagnostics: warns when the DB is on ephemeral container
+      // storage (settings/users wiped on every Railway deploy).
+      storage: await getStorageInfo(),
       queue: { status: "healthy", ...queueStats },
       github: { status: container.github.kind === "real" ? "connected" : "mock", kind: container.github.kind },
       telegram: { status: (await container.telegram.health()) ? "connected" : "mock" },
