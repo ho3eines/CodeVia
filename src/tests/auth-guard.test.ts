@@ -113,7 +113,7 @@ describe("auth guard — strict mode with GitHub login configured", () => {
 
   it("rejects API calls without a session", async () => {
     const srv = await boot();
-    for (const url of ["/auth/me", "/dashboard", "/projects", "/admin/settings", "/integrations/github/status"]) {
+    for (const url of ["/auth/me", "/dashboard", "/projects", "/admin/settings"]) {
       const res = await srv.inject({ method: "GET", url });
       expect(res.statusCode, url).toBe(401);
       expect(res.json().message).toMatch(/Authentication required/);
@@ -122,7 +122,7 @@ describe("auth guard — strict mode with GitHub login configured", () => {
 
   it("keeps the SPA shell, static assets, socket.io and the OAuth handshake public", async () => {
     const srv = await boot();
-    for (const url of ["/", "/app.js", "/app.css", "/index.html", "/health", "/ready", "/auth/github/status"]) {
+    for (const url of ["/", "/app.js", "/app.css", "/index.html", "/health", "/ready", "/auth/github/status", "/integrations/github/status"]) {
       const res = await srv.inject({ method: "GET", url });
       expect(res.statusCode, url).toBe(200);
     }

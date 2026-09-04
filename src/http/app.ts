@@ -169,6 +169,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     "/auth/github/login",
     "/auth/github/callback",
     "/auth/github/status",
+    "/integrations/github/status",
     // Socket.io handshake/polling — realtime is observable status only.
     "/socket.io/",
   ];

@@ -3,13 +3,21 @@ import type { Container } from "../../app/container.js";
 import { verifyGithubSignature, getWebhookSecret } from "../../github/webhook.js";
 import { eventBus, generateCorrelationId } from "../../events/bus.js";
 import { logger } from "../../logger.js";
+import { resolveRequestUser } from "../auth.js";
 
 export function registerGithubRoutes(app: FastifyInstance, container: Container): void {
   app.get("/integrations/github/status", { schema: { tags: ["github"] } }, async (req) => {
     const kind = container.github.kind;
-    const repoCount = kind === "mock" ? 0 : 0;
+    let repoCount = 0;
+    if (kind === "real") {
+      try {
+        repoCount = (await container.github.listRepositories()).length;
+      } catch {
+        repoCount = 0;
+      }
+    }
     const { isGitHubOAuthConfigured } = await import("../../auth/github-oauth.js");
-    const authenticated = !!(req as typeof req & { authenticated?: boolean }).authenticated;
+    const { user, authenticated } = resolveRequestUser(req, container);
     return {
       connected: kind === "real",
       kind,
@@ -17,7 +25,7 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
       sourceOfTruth: true,
       oauthConfigured: isGitHubOAuthConfigured(),
       authenticated,
-      user: authenticated ? req.user : null,
+      user: authenticated ? user : null,
     };
   });
 
