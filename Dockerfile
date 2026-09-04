@@ -20,8 +20,10 @@ WORKDIR /app
 
 # Install only production dependencies in the runtime image (as root, so npm
 # has a writable cache), then clean the cache to keep the image small.
+# npm_config_cache is pinned to /tmp so npm never touches a home directory.
+ENV npm_config_cache=/tmp/.npm
 COPY --from=build /app/package.json /app/package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --no-audit --no-fund && rm -rf /tmp/.npm
 
 # Reference the compiled output + static UI.
 COPY --from=build /app/dist ./dist
