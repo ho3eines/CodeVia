@@ -230,6 +230,59 @@ describe("Telegram receive path (webhook vs long polling)", () => {
   });
 });
 
+describe("Telegram webhook transport (end-to-end through the route)", () => {
+  it("registers the webhook and answers an inbound update with a menu", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    process.env.PUBLIC_WEB_BASE_URL = "https://codevia.up.railway.app";
+    getEnvFresh();
+    const sentBodies: Record<string, unknown>[] = [];
+    mockTelegramApi({
+      sendMessage: { status: 200, body: { ok: true, result: { message_id: 1 } } },
+      setWebhook: { status: 200, body: { ok: true, result: true } },
+    });
+    const srv = await boot();
+    // capture what the platform sends back to Telegram
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/sendMessage")) sentBodies.push(JSON.parse(String(init?.body)));
+      return orig(input as never, init);
+    }) as typeof fetch;
+    try {
+      const status = await container!.startTelegram();
+      expect(status.transport).toBe("webhook");
+
+      const inbound = await srv.inject({
+        method: "POST",
+        url: "/integrations/telegram/webhook",
+        payload: { update_id: 1, message: { chat: { id: 555010, type: "private" }, from: { id: 555010 }, text: "/start" } },
+      });
+      expect(inbound.statusCode).toBe(200);
+      expect(inbound.json().ok).toBe(true);
+      expect(sentBodies).toHaveLength(1);
+      expect(sentBodies[0]).toMatchObject({ chat_id: "555010", parse_mode: "HTML" });
+      expect(String(sentBodies[0].text)).toContain("<b>CodeVia");
+      expect((sentBodies[0].reply_markup as { inline_keyboard: unknown[] }).inline_keyboard.length).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("keeps answering 200 when a handler throws (a 5xx makes Telegram drop the webhook)", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
+    process.env.PUBLIC_WEB_BASE_URL = "https://codevia.up.railway.app";
+    getEnvFresh();
+    mockTelegramApi();
+    const srv = await boot();
+    const res = await srv.inject({
+      method: "POST",
+      url: "/integrations/telegram/webhook",
+      payload: { update_id: 2, message: { chat: { id: 7 }, from: { id: 7 }, text: "/ping" } },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+});
+
 describe("Telegram connection test (what the operator must do)", () => {
   it("lists every step with a pass when the bot is correctly wired", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
