@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { Project, ProjectGithubConnection, ProjectRepositoryLink } from "../../domain/entities.js";
+import { skillsForCapabilities } from "../../domain/project-options.js";
 import {
   configRepoOf,
   getProjectOptionCatalog,
@@ -98,6 +99,25 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
         defaultModelId: body.defaultModelId as string | undefined,
         tech: Array.isArray(body.tech) ? (body.tech as string[]) : [],
       });
+
+      // Ensure databases single-select (keep only first value)
+      if (project.capabilities.databases.length > 1) {
+        project.capabilities.databases = [project.capabilities.databases[0]];
+      }
+
+      // Compute skills from the selected capabilities
+      const skills = skillsForCapabilities(project.capabilities);
+
+      // Attach skills to the project settings
+      project.settings = {
+        ...project.settings,
+        skills: skills ?? [],
+      };
+
+      // Persist the updated project (including skills)
+      const updated = save({ ...project, id: project.id });
+      project = updated;
+
       const agents = container.agentRepo.byProject(project.id).filter((a) => a.enabled).length;
       reply.code(201);
       return { ...project, agents };
