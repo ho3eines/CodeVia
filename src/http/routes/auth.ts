@@ -37,20 +37,38 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
     return {
       configured: eff.configured,
       redirectUri: eff.redirectUri,
+      redirectUriSource: eff.redirectUriSource,
       scope: eff.scope,
+      scopeSource: eff.scopeSource,
+      clientId: eff.clientId ? `${eff.clientId.slice(0, 4)}••••${eff.clientId.slice(-4)}` : undefined,
+      clientIdSource: eff.clientIdSource,
+      clientSecretConfigured: eff.clientSecretConfigured,
+      secrets: eff.secrets,
+      diagnostics: eff.diagnostics,
       authenticated: !!(req as typeof req & { authenticated?: boolean }).authenticated,
       user: user ?? null,
       setupHint: eff.setupHint,
+      setupSteps: eff.setupSteps,
     };
   });
 
   app.get("/auth/github/login", { schema: { tags: ["auth"] } }, async (req, reply) => {
+    const eff = getEffectiveGitHubLoginSettings(container.kv);
     const cfg = getEffectiveOAuthConfig(container.kv);
     if (!cfg) {
       reply.code(503);
       return {
         error: "GitHub OAuth is not configured",
-        hint: "An admin can set the Client ID in Admin → GitHub Login; GITHUB_CLIENT_SECRET must be set in the environment. See docs/GITHUB_SETUP.md.",
+        hint: eff.setupHint ?? "An admin can set the Client ID in Admin → GitHub Login; GITHUB_CLIENT_SECRET must be set in the environment. See docs/GITHUB_SETUP.md.",
+        diagnostics: {
+          clientIdMissing: eff.diagnostics.clientIdMissing,
+          clientSecretMissing: eff.diagnostics.clientSecretMissing,
+          authSecretMissing: eff.diagnostics.authSecretMissing,
+          redirectUri: eff.redirectUri,
+          clientIdSource: eff.clientIdSource,
+          clientSecretConfigured: eff.clientSecretConfigured,
+        },
+        setupSteps: eff.setupSteps,
       };
     }
     const q = (req.query ?? {}) as Record<string, unknown>;

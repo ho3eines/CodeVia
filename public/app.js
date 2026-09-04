@@ -18,15 +18,29 @@
     });
     if (!res.ok) {
       let msg = res.statusText;
+      let body = null;
       try {
-        const j = await res.json();
-        msg = j.message || j.error || msg;
+        body = await res.json();
+        msg = body.message || body.error || body.hint || msg;
       } catch (_) { /* ignore */ }
       const err = new Error(msg);
       err.status = res.status;
+      err.body = body;
       throw err;
     }
     return res.status === 204 ? null : res.json();
+  }
+  // Raw fetch that returns json body even on error (for diagnostics)
+  async function apiRaw(path, opts = {}) {
+    const res = await fetch(path, {
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders(), ...(opts.headers || {}) },
+      method: opts.method || "GET",
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    let body = null;
+    try { body = await res.json(); } catch (_) {}
+    return { ok: res.ok, status: res.status, body, headers: res.headers };
   }
 
   /* ---------- helpers ---------- */
@@ -59,14 +73,17 @@
   async function renderLoginRequired() {
     const st = await api("/auth/github/status").catch(() => ({ configured: false }));
     const next = encodeURIComponent(location.hash || "#/dashboard");
-    $("#content").innerHTML = `<div class="card card-body" style="max-width:520px;margin:40px auto;text-align:center">
+    const stepsHtml = st.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);text-align:left;margin:8px 0 0 18px">${st.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
+    $("#content").innerHTML = `<div class="card card-body" style="max-width:560px;margin:40px auto;text-align:center">
       <div class="empty-emoji" style="font-size:44px">🔐</div>
       <h2 style="margin:12px 0 6px">Sign in required</h2>
       <p style="color:var(--text-muted)">This CodeVia instance requires a GitHub login for API access.</p>
       ${st.configured
         ? `<div class="flex mt" style="justify-content:center"><a class="btn btn-primary" href="/auth/github/login?next=${next}" style="text-decoration:none">🐙 Login with GitHub</a></div>`
         : `<div class="error-state mt" style="text-align:left"><h4>GitHub login is not configured</h4>
-            <p style="font-size:12px;color:var(--text-muted)">Strict mode is on, but there is no way to sign in yet. Set <span class="mono">GITHUB_CLIENT_ID</span> + <span class="mono">GITHUB_CLIENT_SECRET</span> + <span class="mono">AUTH_SECRET</span> in the environment (or set <span class="mono">REQUIRE_AUTH=false</span>) and redeploy. See <span class="mono">docs/GITHUB_SETUP.md</span>.</p></div>`}
+            <p style="font-size:12px;color:var(--text-muted)">${esc(st.setupHint || "Strict mode is on, but there is no way to sign in yet.")}</p>
+            ${stepsHtml}
+            <p style="font-size:11px;color:var(--text-muted);margin-top:8px">یا <span class="mono">REQUIRE_AUTH=false</span> را تنظیم کنید و سرویس را ری‌استارت کنید تا بدون ورود کار کند — <span class="mono">docs/GITHUB_SETUP.md</span> را ببینید.</p></div>`}
     </div>`;
   }
   function emptyState(emoji, title, text) {
@@ -615,20 +632,42 @@
     const status = await api("/integrations/github/status");
     const repos = await api("/github/repositories").catch(() => []);
     const me = await api("/auth/me").catch(() => ({ authenticated: false, user: null }));
-    const loginCard = me.authenticated && me.user && me.user.externalId !== "demo"
-      ? `<div class="card card-body"><div class="card-title">GitHub Login</div>
+    const oauthStatus = await api("/auth/github/status").catch(() => ({ configured: false, diagnostics: {} }));
+    const diag = oauthStatus.diagnostics || {};
+    const setupStepsHtml = oauthStatus.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);text-align:left;margin:8px 0 0 16px">${oauthStatus.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
+    const mismatchWarn = diag.callbackUrlMismatchRisk ? `<p style="color:var(--warn, #d97706);font-size:11px">⚠️ Callback mismatch: GitHub App callback must be <span class="mono">${esc(oauthStatus.redirectUri||"")}</span></p>` : "";
+    let loginCard = "";
+    if (me.authenticated && me.user && me.user.externalId !== "demo") {
+      loginCard = `<div class="card card-body"><div class="card-title">GitHub Login</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot healthy"></span>Logged in</div></div>
           <p>${me.user.avatarUrl ? `<img src="${esc(me.user.avatarUrl)}" alt="" style="width:28px;height:28px;border-radius:50%;vertical-align:-8px;margin-right:8px"/>` : ""}<strong>${esc(me.user.name)}</strong></p>
           <p class="mono" style="color:var(--text-muted);font-size:12px">${esc(me.user.email || "")} · role: ${esc(me.user.role)}</p>
-          <button class="btn" id="gh-logout">Logout</button></div>`
-      : status.oauthConfigured
-        ? `<div class="card card-body"><div class="card-title">GitHub Login</div>
+          <button class="btn" id="gh-logout">Logout</button></div>`;
+    } else if (oauthStatus.configured) {
+      loginCard = `<div class="card card-body"><div class="card-title">GitHub Login</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot warn"></span>Not logged in</div></div>
           <p style="color:var(--text-muted);font-size:12px">Sign in with your GitHub account. The first user to log in becomes <strong>owner</strong>.</p>
-          <a class="btn btn-primary" href="/auth/github/login" style="text-decoration:none">🐙 Login with GitHub</a></div>`
-        : `<div class="card card-body"><div class="card-title">GitHub Login</div>
+          <p style="color:var(--text-muted);font-size:11px" class="mono">Callback: ${esc(oauthStatus.redirectUri||"")}</p>
+          ${mismatchWarn}
+          <a class="btn btn-primary" href="/auth/github/login" style="text-decoration:none">🐙 Login with GitHub</a>
+          <button class="btn" id="gh-diag-btn" style="margin-left:6px">Diagnose</button>
+          <div id="gh-diag" style="margin-top:8px;font-size:11px;color:var(--text-muted)"></div></div>`;
+    } else {
+      loginCard = `<div class="card card-body"><div class="card-title">GitHub Login — Not configured</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot warn"></span>Not configured</div></div>
-          <p style="color:var(--text-muted);font-size:12px">Set <span class="mono">GITHUB_CLIENT_ID</span> + <span class="mono">GITHUB_CLIENT_SECRET</span> and restart — see <span class="mono">docs/GITHUB_SETUP.md</span>. Local dev continues in demo mode.</p></div>`;
+          ${oauthStatus.setupHint ? `<p style="color:var(--warn, #d97706);font-size:12px">${esc(oauthStatus.setupHint)}</p>` : `<p style="color:var(--text-muted);font-size:12px">Set <span class="mono">GITHUB_CLIENT_ID</span> + <span class="mono">GITHUB_CLIENT_SECRET</span> and restart — see <span class="mono">docs/GITHUB_SETUP.md</span>.</p>`}
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;margin:8px 0;text-align:left">
+            <div class="meter-row"><span class="lbl">Client ID</span><span class="val">${diag.clientIdMissing ? '<span class="badge badge-err">missing</span>' : '<span class="badge badge-ok">set</span>'}</span></div>
+            <div class="meter-row"><span class="lbl">Client Secret</span><span class="val">${diag.clientSecretMissing ? '<span class="badge badge-err">missing (env)</span>' : '<span class="badge badge-ok">set (env)</span>'}</span></div>
+            <div class="meter-row"><span class="lbl">Session Secret</span><span class="val">${oauthStatus.secrets?.authSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
+            <div class="meter-row"><span class="lbl">Callback</span><span class="val mono" style="font-size:10px">${esc(oauthStatus.redirectUri||"—")}</span></div>
+          </div>
+          ${setupStepsHtml}
+          ${mismatchWarn}
+          <p style="color:var(--text-muted);font-size:11px;margin-top:8px">💡 بعد از ذخیره Client ID، باید <span class="mono">GITHUB_CLIENT_SECRET</span> و <span class="mono">AUTH_SECRET</span> را در Railway → Variables (یا .env) تنظیم کنید و سرویس را Redeploy کنید.</p>
+          <div class="flex mt"><a class="btn btn-primary" href="#/admin">Go to Admin → GitHub Login</a><button class="btn" id="gh-diag-btn2">Diagnose</button></div>
+          <div id="gh-diag2" style="margin-top:8px;font-size:11px;color:var(--text-muted)"></div></div>`;
+    }
     $("#content").innerHTML = `
       <div class="overview"><div><h1>GitHub Integration</h1><p>GitHub is the source of truth for persistent project data</p></div>
         <button class="btn" onclick="refreshCurrent()">Refresh</button></div>
@@ -636,6 +675,7 @@
         <div class="card card-body"><div class="card-title">Connection</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot ${status.connected?'healthy':'warn'}"></span>${status.connected?'Connected':'Mock (dev)'}</div></div>
           <p style="color:var(--text-muted);font-size:12px">Kind: ${esc(status.kind)} · Source of truth: ${status.sourceOfTruth}</p>
+          <p style="color:var(--text-muted);font-size:11px">OAuth configured: ${oauthStatus.configured ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-err">no</span>'}</p>
         </div>
         ${loginCard}
         <div class="card card-body"><div class="card-title">Repositories (${Array.isArray(repos)?repos.length:0})</div>
@@ -649,6 +689,25 @@
       toast("Logged out", "Signed out of GitHub.", "ok");
       renderUserSlot(); refreshCurrent();
     };
+    const diagHandler = async (targetId) => {
+      const el = document.getElementById(targetId);
+      if (!el) return;
+      el.innerHTML = "Checking…";
+      const r = await apiRaw("/auth/github/login?format=json").catch(() => null);
+      if (!r) { el.innerHTML = "Unable to contact server"; return; }
+      if (r.ok) {
+        el.innerHTML = `<span style="color:var(--success, #16a34a)">✓ Login URL ready — redirect to GitHub works. <a href="${esc(r.body?.url||"/auth/github/login")}">Test now</a></span>`;
+      } else {
+        const b = r.body || {};
+        el.innerHTML = `<div style="color:var(--error, #dc2626);border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg);text-align:left">`+
+          `<strong>${esc(b.error||"Not configured")}</strong><br/>${esc(b.hint||"")}`+
+          (b.setupSteps ? `<ol style="margin:6px 0 0 16px;font-size:11px">${b.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "")+
+          (b.diagnostics ? `<pre style="margin-top:6px;font-size:10px;white-space:pre-wrap">${esc(JSON.stringify(b.diagnostics,null,2))}</pre>` : "")+
+          `</div>`;
+      }
+    };
+    const b1 = document.getElementById("gh-diag-btn"); if (b1) b1.onclick = () => diagHandler("gh-diag");
+    const b2 = document.getElementById("gh-diag-btn2"); if (b2) b2.onclick = () => diagHandler("gh-diag2");
   });
 
   /* TELEGRAM */
@@ -701,6 +760,9 @@
     const usage = await api("/admin/usage");
     const adm = await api("/admin/settings").catch((e) => ({ _forbidden: e.message }));
     const users = await api("/admin/users").catch(() => null);
+    const diag = adm.github?.diagnostics || {};
+    const stepsHtml = adm.github?.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);margin:8px 0 0 18px;text-align:left">${adm.github.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
+    const mismatchWarn = diag.callbackUrlMismatchRisk ? `<p style="color:var(--warn, #d97706);font-size:11px">⚠️ Callback URL mismatch risk — check GitHub OAuth App settings.</p>` : "";
     $("#content").innerHTML = `<div class="overview"><div><h1>Admin</h1><p>System health & usage</p></div></div>
       <div class="stat-grid">
         <div class="card stat"><div class="stat-label">API</div><div class="stat-value" style="font-size:18px">${h.api.status}</div></div>
@@ -723,23 +785,30 @@
         </div>
       </div>
       <div class="grid-2 mt">
-        <div class="card card-body"><div class="card-title">GitHub Login ${adm.github ? (adm.github.configured ? '<span class="badge badge-ok">configured</span>' : '<span class="badge badge-warn">not configured</span>') : ''}</div>
+        <div class="card card-body"><div class="card-title">GitHub Login ${adm.github ? (adm.github.configured ? '<span class="badge badge-ok">configured ✓</span>' : '<span class="badge badge-warn">not configured ✗</span>') : ''}</div>
           ${adm._forbidden ? `<p style="color:var(--text-muted);font-size:12px">Login settings are visible to owners/admins only (${esc(adm._forbidden)}).</p>` : `
-          <div class="field"><label>OAuth Client ID ${adm.github?.clientIdSource === "env" ? '<span class="badge badge-muted">env</span>' : ""}</label>
+          ${adm.github?.configured ? `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px;margin-bottom:12px"><strong style="color:#16a34a">✓ GitHub login is configured</strong><p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Callback: <span class="mono">${esc(adm.github.redirectUri||"")}</span></p></div>` : `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;margin-bottom:12px"><strong style="color:#dc2626">✗ GitHub login not ready</strong>${adm.github?.setupHint ? `<p style="font-size:12px;color:#991b1b;margin:6px 0 0">${esc(adm.github.setupHint)}</p>` : ""}${stepsHtml}${mismatchWarn}</div>`}
+          <div class="field"><label>OAuth Client ID ${adm.github?.clientIdSource === "env" ? '<span class="badge badge-muted">env</span>' : adm.github?.clientIdSource === "admin" ? '<span class="badge badge-info">admin</span>' : ""}</label>
             <input class="input mono" id="adm-gh-client" placeholder="Iv1.… / Ov23.…" value="${esc(adm.github?.stored?.clientId || "")}" ${adm.github?.envOverrides?.clientId ? "disabled" : ""}/>
-            ${adm.github?.envOverrides?.clientId ? `<p style="color:var(--text-muted);font-size:11px">Set via GITHUB_CLIENT_ID env — effective: <span class="mono">${esc(adm.github.clientId || "")}</span></p>` : ""}</div>
+            ${adm.github?.envOverrides?.clientId ? `<p style="color:var(--text-muted);font-size:11px">Set via GITHUB_CLIENT_ID env — effective: <span class="mono">${esc(adm.github.clientId || "")}</span></p>` : adm.github?.clientId ? `<p style="color:var(--text-muted);font-size:11px">Effective: <span class="mono">${esc(adm.github.clientId)}</span> <span class="badge badge-muted">${esc(adm.github.clientIdSource||"")}</span></p>` : `<p style="color:var(--warn, #d97706);font-size:11px">⚠️ خالی است — Client ID را از GitHub OAuth App کپی کنید (مثال: Ov23liXXXXXXXX)</p>`}</div>
           <div class="field"><label>Callback URL (optional) ${adm.github?.redirectUriSource === "env" ? '<span class="badge badge-muted">env</span>' : adm.github?.redirectUriSource === "admin" ? '<span class="badge badge-info">admin</span>' : ""}</label>
-            <input class="input mono" id="adm-gh-callback" placeholder="(auto) ${esc(adm.github?.redirectUri || "")}" value="${esc(adm.github?.stored?.callbackUrl || "")}" ${adm.github?.envOverrides?.callbackUrl ? "disabled" : ""}/></div>
+            <input class="input mono" id="adm-gh-callback" placeholder="(auto) ${esc(adm.github?.redirectUri || "")}" value="${esc(adm.github?.stored?.callbackUrl || "")}" ${adm.github?.envOverrides?.callbackUrl ? "disabled" : ""}/>
+            <p style="color:var(--text-muted);font-size:11px">باید دقیقا با <span class="mono">Authorization callback URL</span> در GitHub OAuth App برابر باشد: <span class="mono">${esc(adm.github?.redirectUri || "")}</span></p></div>
           <div class="field"><label>Scope ${adm.github?.scopeSource === "env" ? '<span class="badge badge-muted">env</span>' : adm.github?.scopeSource === "admin" ? '<span class="badge badge-info">admin</span>' : ""}</label>
             <input class="input mono" id="adm-gh-scope" value="${esc(adm.github?.stored?.scope || adm.github?.scope || "")}" placeholder="read:user user:email"/></div>
-          <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="adm-gh-require" ${adm.github?.requireAuth ? "checked" : ""}/> Require GitHub login for API ${adm.github?.requireAuthSource === "env" ? '<span class="badge badge-muted">env</span>' : '<span class="badge badge-info">admin</span>'}</label></div>
-          <div class="meter-row"><span class="lbl">Client Secret</span><span class="val">${adm.github?.clientSecretConfigured ? '<span class="badge badge-ok">set (env)</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
-          <div class="meter-row"><span class="lbl">GitHub Token</span><span class="val">${adm.github?.secrets?.githubToken ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
-          <div class="meter-row"><span class="lbl">Webhook Secret</span><span class="val">${adm.github?.secrets?.githubWebhookSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
-          <div class="meter-row"><span class="lbl">Session Secret</span><span class="val">${adm.github?.secrets?.authSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
-          ${adm.github?.setupHint ? `<p style="color:var(--text-muted);font-size:12px">${esc(adm.github.setupHint)}</p>` : ""}
+          <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="adm-gh-require" ${adm.github?.requireAuth ? "checked" : ""}/> Require GitHub login for API ${adm.github?.requireAuthSource === "env" ? '<span class="badge badge-muted">env</span>' : '<span class="badge badge-info">admin</span>'}</label>
+            <p style="color:var(--text-muted);font-size:11px">اگر روشن باشد، همه APIها بدون لاگین 401 می‌دهند. فقط وقتی لاگین سالم شد روشن کنید.</p></div>
+          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;margin:10px 0">
+            <div class="meter-row"><span class="lbl">Client ID</span><span class="val">${adm.github?.clientId ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
+            <div class="meter-row"><span class="lbl">Client Secret</span><span class="val">${adm.github?.clientSecretConfigured ? '<span class="badge badge-ok">set (env)</span>' : '<span class="badge badge-err">missing — set GITHUB_CLIENT_SECRET in env</span>'}</span></div>
+            <div class="meter-row"><span class="lbl">Session Secret</span><span class="val">${adm.github?.secrets?.authSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing — set AUTH_SECRET</span>'}</span></div>
+            <div class="meter-row"><span class="lbl">GitHub Token</span><span class="val">${adm.github?.secrets?.githubToken ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set (optional)</span>'}</span></div>
+            <div class="meter-row"><span class="lbl">Webhook Secret</span><span class="val">${adm.github?.secrets?.githubWebhookSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
+          </div>
+          ${adm.github && !adm.github.configured ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px;margin:8px 0"><p style="font-size:12px;margin:0"><strong>چرا بعد از ذخیره هنوز خطا می‌دهد؟</strong></p><p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">ذخیره Client ID فقط نیمی از کار است. باید <span class="mono">GITHUB_CLIENT_SECRET</span> و <span class="mono">AUTH_SECRET</span> را هم در محیط (Railway Variables یا .env) تنظیم کنید و سرویس را <strong>Redeploy / Restart</strong> کنید. این مقادیر هرگز در دیتابیس ذخیره نمی‌شوند و فقط از env خوانده می‌شوند.</p><p style="font-size:11px;margin:6px 0 0"><strong>Railway:</strong> Service → Variables → New Variable → GITHUB_CLIENT_SECRET=… , AUTH_SECRET=… (مثال: <span class="mono">openssl rand -hex 32</span>) → Redeploy</p><p style="font-size:11px;margin:6px 0 0"><strong>Local:</strong> در <span class="mono">.env</span> اضافه کنید سپس <span class="mono">docker compose up --build</span> یا <span class="mono">npm run dev</span></p></div>` : ""}
           <p style="color:var(--text-muted);font-size:11px">Secrets live in environment variables only and are never stored here. Empty fields follow env/defaults.</p>
-          <div class="flex mt"><button class="btn btn-primary" id="adm-gh-save">Save</button><a class="btn" href="/auth/github/login" style="text-decoration:none">Test login</a></div>`}
+          <div class="flex mt" style="gap:8px;flex-wrap:wrap"><button class="btn btn-primary" id="adm-gh-save">Save</button><button class="btn" id="adm-gh-test">Test login</button><button class="btn btn-ghost" id="adm-gh-diag">Diagnose</button></div>
+          <div id="adm-gh-result" style="margin-top:10px"></div>`}
         </div>
         <div class="card card-body"><div class="card-title">Users ${users ? `(${users.length})` : ""}</div>
           ${users ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th></th></tr></thead><tbody>
@@ -749,17 +818,54 @@
           </tbody></table></div>` : `<p style="color:var(--text-muted);font-size:12px">User management is visible to owners/admins only.</p>`}
         </div>
       </div>`;
-    const ghSave = $("#adm-gh-save");
+    const ghSave = document.getElementById("adm-gh-save");
     if (ghSave) ghSave.onclick = async () => {
+      const btn = ghSave; btn.disabled = true; btn.textContent = "Saving…";
       try {
-        await api("/admin/settings/github", { method: "PUT", body: {
-          clientId: $("#adm-gh-client").value,
-          callbackUrl: $("#adm-gh-callback").value,
-          scope: $("#adm-gh-scope").value,
-          requireAuth: $("#adm-gh-require").checked,
+        const res = await api("/admin/settings/github", { method: "PUT", body: {
+          clientId: document.getElementById("adm-gh-client").value,
+          callbackUrl: document.getElementById("adm-gh-callback").value,
+          scope: document.getElementById("adm-gh-scope").value,
+          requireAuth: document.getElementById("adm-gh-require").checked,
         }});
-        toast("GitHub login settings saved", "", "ok"); refreshCurrent();
-      } catch (e) { toast("Save failed", e.message, "err"); }
+        toast("GitHub login settings saved", res.effective?.configured ? "✓ Configured — now set env secrets if missing and redeploy" : (res.effective?.setupHint || ""), res.effective?.configured ? "ok" : "warn");
+        const diagEl = document.getElementById("adm-gh-result");
+        if (diagEl) {
+          if (res.effective?.configured) {
+            diagEl.innerHTML = `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px"><strong style="color:#16a34a">✓ Saved and configured</strong><p style="font-size:11px;margin:6px 0 0">Callback: <span class="mono">${esc(res.effective.redirectUri||"")}</span></p><p style="font-size:11px;margin:4px 0 0">اگر Client Secret یا AUTH_SECRET هنوز missing است، آنها را در env تنظیم و Redeploy کنید.</p><a class="btn btn-primary" href="/auth/github/login" style="margin-top:8px;text-decoration:none">Test login now</a></div>`;
+          } else {
+            diagEl.innerHTML = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px"><strong style="color:#dc2626">Saved but still not configured</strong><p style="font-size:11px;margin:6px 0 0">${esc(res.effective?.setupHint||"")}</p>${res.effective?.setupSteps ? `<ol style="font-size:11px;margin:6px 0 0 16px">${res.effective.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}</div>`;
+          }
+        }
+        setTimeout(refreshCurrent, 1500);
+      } catch (e) {
+        const diagEl = document.getElementById("adm-gh-result");
+        if (diagEl) diagEl.innerHTML = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;color:#991b1b;font-size:12px">${esc(e.message||"Save failed")}${e.body?.setupSteps ? `<ol style="margin:6px 0 0 16px">${e.body.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}</div>`;
+        toast("Save failed", e.message, "err");
+      } finally { btn.disabled = false; btn.textContent = "Save"; }
+    };
+    const testBtn = document.getElementById("adm-gh-test");
+    if (testBtn) testBtn.onclick = async () => {
+      const el = document.getElementById("adm-gh-result");
+      if (el) el.innerHTML = "Testing…";
+      const r = await apiRaw("/auth/github/login?format=json");
+      if (el) {
+        if (r.ok) {
+          el.innerHTML = `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px"><strong style="color:#16a34a">✓ Ready — GitHub login URL works</strong><p style="font-size:11px;margin:6px 0 0;word-break:break-all" class="mono">${esc(r.body?.url||"")}</p><a class="btn btn-primary" href="${esc(r.body?.url||"/auth/github/login")}" style="margin-top:8px;text-decoration:none">Go to GitHub login</a></div>`;
+        } else {
+          const b = r.body || {};
+          el.innerHTML = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;text-align:left"><strong style="color:#dc2626">${esc(b.error||"Not configured")}</strong><p style="font-size:11px;margin:6px 0 0">${esc(b.hint||"")}</p>${b.setupSteps ? `<ol style="font-size:11px;margin:6px 0 0 16px">${b.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}${b.diagnostics ? `<pre style="margin-top:6px;font-size:10px;white-space:pre-wrap;background:var(--bg);padding:6px;border-radius:6px">${esc(JSON.stringify(b.diagnostics,null,2))}</pre>` : ""}</div>`;
+        }
+      }
+    };
+    const diagBtn = document.getElementById("adm-gh-diag");
+    if (diagBtn) diagBtn.onclick = async () => {
+      const el = document.getElementById("adm-gh-result");
+      if (!el) return;
+      el.innerHTML = "Loading diagnostics…";
+      const s = await api("/auth/github/status").catch(()=>null);
+      const a = await api("/admin/settings").catch(()=>null);
+      if (el) el.innerHTML = `<pre style="white-space:pre-wrap;font-size:11px;background:var(--bg);padding:10px;border-radius:8px;border:1px solid var(--border)">${esc(JSON.stringify({ status:s, admin:a?.github }, null, 2))}</pre>`;
     };
     $$("[data-save-role]").forEach((btn) => btn.addEventListener("click", async () => {
       const id = btn.dataset.saveRole;
