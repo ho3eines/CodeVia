@@ -1,11 +1,13 @@
 import type { AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task } from "../domain/entities.js";
 import {
   agentTypesForProject,
+  canonicalOption,
   configRepoOf,
   hydrateProject,
   legacyFieldsFromCapabilities,
   normalizeCapabilities,
   normalizeRepositories,
+  optionLabel,
   skillsForCapabilities,
 } from "../domain/project-options.js";
 import type { ProjectRepository, TaskRepository, WorkflowRepository } from "../domain/repos.js";
@@ -18,6 +20,7 @@ import type { AgentGenerator } from "./generator.js";
 import type { SkillRepository } from "../skills/registry.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
 import type { IGitHubService } from "../github/types.js";
+import { parseRepoFullName } from "../github/types.js";
 import type { Permission } from "../types.js";
 import { eventBus, generateCorrelationId } from "../events/bus.js";
 import { live } from "../realtime/live.js";
@@ -165,7 +168,10 @@ export class AgentManager {
       correlationId: generateCorrelationId(),
       metadata: { name: project.name },
     });
-    return project;
+    // Onboarding may enrich capabilities/skills from the repository; return the
+    // refreshed document so the API/UI immediately reflects the inspection.
+    const final = this.deps.projectRepo.findById(project.id)?.data;
+    return final ? hydrateProject(final) : project;
   }
 
   /** Online onboarding: analyze repo, generate agents/skills/workflows/rules. */
@@ -176,21 +182,219 @@ export class AgentManager {
     // In mock mode, seed a starter .ai-engineering repo so the platform can be
     // exercised end-to-end without real GitHub credentials.
     this.ensureMockRepo(project);
-    const agentTypes = agentTypesForProject(project.capabilities);
-    const agents = this.deps.agentGenerator.generate(project, { defaultModelId: project.defaultModelId, tech, agentTypes });
+
+    // Analyse the linked repositories (real or mock): detect stack, ensure
+    // Agent.md, and surface the detected skill/agent hints to onboarding.
+    const detected = await this.inspectRepository(project);
+    const mergedCapabilities = this.mergeDetectedCapabilities(project.capabilities, detected.capabilities);
+    const refreshed = hydrateProject({
+      ...project,
+      capabilities: mergedCapabilities,
+      ...legacyFieldsFromCapabilities(mergedCapabilities),
+    });
+
+    await this.ensureAgentMd(refreshed, detected.files);
+    const agentTypes = agentTypesForProject(refreshed.capabilities);
+    const agents = this.deps.agentGenerator.generate(refreshed, { defaultModelId: refreshed.defaultModelId, tech, agentTypes });
     const seeded = this.deps.skillsRepo.seedBuiltIns();
     // Attach relevant skills to the project settings: skills implied by the
-    // selected capabilities + keyword matches on the description/tech hints.
-    const implied = skillsForCapabilities(project.capabilities);
+    // selected capabilities + detected stack + keyword matches on the text.
+    const implied = skillsForCapabilities(refreshed.capabilities);
     const known = new Set(this.deps.skillsRepo.findMany().map((r) => r.data.slug));
     const relevant = this.deps.skillsRepo
       .findMany()
-      .filter((r) => this.skillsRelevant(r.data.slug, tech, project))
+      .filter((r) => this.skillsRelevant(r.data.slug, tech, refreshed) || detected.skills.has(r.data.slug))
       .map((r) => r.data.slug);
     const skills = [...new Set([...implied.filter((s) => known.has(s)), ...relevant])];
-    this.deps.projectRepo.upsert({ ...project, settings: { ...project.settings, skills } }, { key: project.slug });
-    logger.info(`onboarded project ${projectId}`, { agents: agents.length, agentTypes: agentTypes.length, skills: skills.length });
+    this.deps.projectRepo.upsert({ ...refreshed, settings: { ...refreshed.settings, skills } }, { key: refreshed.slug });
+    logger.info(`onboarded project ${projectId}`, {
+      agents: agents.length,
+      agentTypes: agentTypes.length,
+      skills: skills.length,
+      detected: { languages: detected.capabilities.languages, frameworks: detected.capabilities.frameworks, databases: detected.capabilities.databases },
+    });
     return { agents: agents.length, skills: seeded };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Repository inspection
+   * ------------------------------------------------------------------ */
+
+  /** Inspect linked repositories and return a stack profile + skill slugs. */
+  async inspectRepository(project: Project): Promise<{ capabilities: ProjectCapabilities; files: string[]; skills: Set<string> }> {
+    const files: string[] = [];
+    let fetched = 0;
+    for (const link of project.repositories) {
+      const ref = parseRepoFullName(link.repo);
+      if (!ref) continue;
+      try {
+        const entries = await this.deps.github.listFiles(ref, link.branch);
+        files.push(...entries.map((e) => e.path));
+        fetched += entries.length;
+        if (fetched >= 6000) break;
+      } catch (err) {
+        logger.warn(`inspect repository failed for ${link.repo}`, { err: String(err) });
+      }
+    }
+    const low = files.map((p) => p.toLowerCase());
+    const read = async (paths: string[]): Promise<string[]> => {
+      const out: string[] = [];
+      for (const p of paths.slice(0, 24)) {
+        const ref = parseRepoFullName(project.repositories[0]?.repo ?? project.configRepo);
+        if (!ref) continue;
+        try {
+          const f = await this.deps.github.getFile(ref, p, project.branch);
+          if (f) out.push(f.content);
+        } catch { /* ignore individual misses */ }
+      }
+      return out;
+    };
+
+    // Files that commonly define the stack.
+    const configFiles = low.filter((p) => /^appsettings(\.[^/]+)?\.json$/.test(p) || /\.(csproj|fsproj|vbp)$/.test(p) || /^package\.json$/.test(p) || /^go\.mod$/.test(p) || /^pyproject\.toml$/.test(p) || /^requirements\.txt$/.test(p) || p.endsWith(".sql"));
+    const contents = await read(configFiles);
+    const combined = `${contents.join("\n").toLowerCase()}\n${files.join("\n").toLowerCase()}\n${project.description} ${project.name}`;
+
+    const languages: string[] = [];
+    const frameworks: string[] = [];
+    const databases: string[] = [];
+    const skills = new Set<string>();
+
+    const languageRules: Array<[RegExp, string]> = [
+      [/\.cs$|\.csproj$|\.sln$|\.razor$|\.cshtml$/, "csharp"],
+      [/\.tsx?$/, "typescript"],
+      [/\.jsx?$|package\.json/, "javascript"],
+      [/\.py$/, "python"],
+      [/\.java$/, "java"],
+      [/\.kt$/, "kotlin"],
+      [/\.swift$/, "swift"],
+      [/\.dart$/, "dart"],
+      [/\.go$/, "go"],
+      [/\.rs$/, "rust"],
+      [/\.php$/, "php"],
+      [/\.rb$/, "ruby"],
+      [/\.h$|\.hpp$|\.cpp$|\.c$/, "cpp"],
+      [/\.sql$/, "sql"],
+      [/\.sh$|\.ps1$/, "shell"],
+    ];
+    for (const [re, lang] of languageRules) if (re.test(combined)) languages.push(lang);
+
+    const frameworkRules: Array<[RegExp, string]> = [
+      [/\basp\.net|aspnetcore|mvc\b/, "aspnetcore"],
+      [/\bmudblazor\b/, "mudblazor"],
+      [/\.razor$|\.cshtml$|\bblazor\b/, "blazor"],
+      [/\bdotnet\b|\.csproj|\.sln/, "dotnet"],
+      [/\"react\"|'react'|react-dom/, "react"],
+      [/\bnext\.js|nextjs\b/, "nextjs"],
+      [/\bvue\b|\.vue$/, "vue"],
+      [/\bangular\b/, "angular"],
+      [/\.html$/, "html"],
+      [/\.css$|\.scss$|\.sass$|\.less$/, "css"],
+      [/\bnode\.js|nodejs|npm\b/, "nodejs-express"],
+      [/\bflutter\b|\.dart$/, "flutter"],
+      [/\.tailwind|tailwindcss\b/, "tailwind"],
+    ];
+    for (const [re, fw] of frameworkRules) if (re.test(combined)) frameworks.push(fw);
+
+    const databaseRules: Array<[RegExp, string]> = [
+      [/\bsqlserver\b|microsoft\.data\.sqlclient|system\.data\.sqlclient|server=|user id=.*sql/, "sqlserver"],
+      [/\boracle\b|oracle\.manageddataaccess|system\.data\.oracleclient/, "oracle"],
+      [/\bsqlite\b|microsoft\.data\.sqlite|sqlite3\b/, "sqlite"],
+      [/\bpostgres\b|npgsql|pg_dump\b/, "postgresql"],
+      [/\bmongodb\b|mongodb\.driver|mongoose\b/, "mongodb"],
+      [/\bredis\b|stackexchange\.redis|redis\b/, "redis"],
+      [/\bmysql\b|mariadb\b|microsoft\.data\.mysql\b/, "mysql"],
+    ];
+    for (const [re, db] of databaseRules) if (re.test(combined)) databases.push(db);
+
+    // Map detected values to canonical ids and carry their leaf skill slugs.
+    const cap = normalizeCapabilities({
+      languages,
+      frameworks,
+      databases,
+      platforms: low.some((p) => /\.html$|index\.html|\.razor$|\.jsx?$|\.tsx?$/.test(p)) ? ["web"] : [],
+    });
+    for (const s of skillsForCapabilities(cap)) skills.add(s);
+
+    return { capabilities: cap, files, skills };
+  }
+
+  private mergeDetectedCapabilities(current: ProjectCapabilities, detected: ProjectCapabilities): ProjectCapabilities {
+    const union = (a: string[], b: string[]) => [...new Set([...a, ...b])];
+    // Database is single-select by design; a detected database fills the slot
+    // only when the user has not explicitly chosen one.
+    const databases = current.databases.length ? current.databases : detected.databases;
+    return normalizeCapabilities({
+      ...current,
+      languages: union(current.languages, detected.languages),
+      frameworks: union(current.frameworks, detected.frameworks),
+      databases,
+      platforms: union(current.platforms, detected.platforms),
+    });
+  }
+
+  /** Inspect/ensure the repository Agent.md file (the project's AI brief). */
+  private async ensureAgentMd(project: Project, detectedFiles: string[]): Promise<void> {
+    const cfg = configRepoOf(project.repositories);
+    if (!cfg) return;
+    const ref = parseRepoFullName(cfg.repo);
+    if (!ref) return;
+    const path = "Agent.md";
+    const body = this.buildAgentMd(project, detectedFiles);
+    try {
+      const existing = await this.deps.github.getFile(ref, path, cfg.branch);
+      if (existing && this.agentMdLooksCurrent(existing.content, project.capabilities)) return;
+      const parentSha = existing?.sha ?? undefined;
+      await this.deps.github.commit(ref, cfg.branch, `docs: ensure Agent.md for ${project.name}`, [{ path, content: body }], parentSha);
+      logger.info("Agent.md ensured", { repo: cfg.repo, branch: cfg.branch });
+    } catch (err) {
+      logger.warn("could not create/update Agent.md", { repo: cfg.repo, err: String(err) });
+    }
+  }
+
+  private agentMdLooksCurrent(content: string, _c: ProjectCapabilities): boolean {
+    // CodeVia-generated Agent.md is detected by its heading structure; avoid
+    // rewriting a valid brief on every onboarding/re-onboard.
+    return content.includes("# Project") && content.includes("## Stack") && content.includes("## Repositories");
+  }
+
+  private buildAgentMd(project: Project, files: string[]): string {
+    const c = project.capabilities;
+    const list = (v: string[]) => (v.length ? v.join(", ") : "—");
+    const labelList = (dim: "languages" | "frameworks" | "databases" | "platforms" | "deploymentTargets" | "features" | "integrations", v: string[]) =>
+      v.length ? v.map((x) => optionLabel(dim, x)).join(", ") : "—";
+    return [
+      `# Project`,
+      ``,
+      `> Auto-generated by CodeVia from ${project.configRepo}@${project.branch}.`,
+      ``,
+      `## Purpose`,
+      `**${project.name}** — ${project.description || "AI engineering project"}`,
+      ``,
+      `## Stack`,
+      `- Languages: ${labelList("languages", c.languages)}`,
+      `- Frameworks: ${labelList("frameworks", c.frameworks)}`,
+      `- Database: ${labelList("databases", c.databases)}`,
+      `- Platforms: ${labelList("platforms", c.platforms)}`,
+      `- Deploy: ${labelList("deploymentTargets", c.deploymentTargets)}`,
+      `- Features: ${labelList("features", c.features)}`,
+      `- Integrations: ${labelList("integrations", c.integrations)}`,
+      ``,
+      `## Repositories`,
+      ...project.repositories.map((r) => `- ${r.repo} @ ${r.branch} (${r.role}${r.isConfigRepo ? ", config" : ""})`),
+      ``,
+      `## Skills`,
+      list(project.settings.skills),
+      ``,
+      `## Structure`,
+      `Detected ${files.length} file(s) on branch ${project.branch}.`,
+      ``,
+      `## Rules`,
+      `- Follow existing conventions in this repository.`,
+      `- Never commit secrets or API keys.`,
+      `- Keep changes small and open a pull request for non-trivial work.`,
+      ``,
+    ].join("\n");
   }
 
   /** Seed a mock repository with a starter .ai-engineering structure for demos. */
@@ -203,8 +407,10 @@ export class AgentManager {
       const [owner, ...rest] = link.repo.split("/");
       const name = rest.join("/") || "repo";
       const starter = [{ path: "README.md", content: `# ${project.name}\n\n${project.description}\n` }];
+      starter.push(...this.mockStackFiles(project));
       if (link.isConfigRepo) {
         starter.push(
+          { path: "Agent.md", content: this.buildAgentMd(project, starter.map((f) => f.path)) },
           { path: ".ai-engineering/project.yaml", content: this.projectYaml(project) },
           { path: ".ai-engineering/rules/coding.md", content: "# Coding Rules\n- Follow existing conventions.\n- No secrets in code.\n" },
           { path: ".ai-engineering/rules/git.md", content: "# Git Rules\n- Feature branches, conventional commits, PRs.\n" },
@@ -213,6 +419,30 @@ export class AgentManager {
       mock.seedRepo(owner, name, { files: starter, branch: link.branch, description: project.description });
       logger.debug(`seeded mock repo ${link.repo}`);
     }
+  }
+
+  /** Representative files used by MockGitHubService so repo inspection works offline. */
+  private mockStackFiles(project: Project): Array<{ path: string; content: string }> {
+    const c = project.capabilities;
+    const files: Array<{ path: string; content: string }> = [];
+    const has = (items: string[], v: string) => items.some((x) => x === v || x.includes(v));
+    if (has(c.frameworks, "mudblazor") || has(c.frameworks, "blazor") || has(c.frameworks, "dotnet")) {
+      const mud = has(c.frameworks, "mudblazor") ? `\n    <PackageReference Include="MudBlazor" Version="7.0.0" />` : "";
+      files.push({ path: "src/MyApp/MyApp.csproj", content: `<Project Sdk="Microsoft.NET.Sdk.Web">\n  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n  <ItemGroup>${mud}</ItemGroup>\n</Project>\n` });
+    }
+    if (has(c.databases, "sqlserver") || has(c.databases, "sqlite") || has(c.databases, "oracle") || has(c.databases, "postgresql")) {
+      const db = c.databases[0];
+      const cs = db === "sqlserver" ? "Server=.;Database=app;Trusted_Connection=True" : db === "sqlite" ? "Data Source=app.db" : db === "oracle" ? "User Id=app;Password=****;Data Source=ORCL" : "Host=localhost;Database=app";
+      files.push({ path: "src/MyApp/appsettings.json", content: JSON.stringify({ ConnectionStrings: { Default: cs } }, null, 2) + "\n" });
+    }
+    if (has(c.frameworks, "react") || has(c.frameworks, "nextjs") || has(c.languages, "typescript")) {
+      files.push({ path: "package.json", content: JSON.stringify({ name: project.slug, dependencies: { react: "^18.0.0", "react-dom": "^18.0.0" } }, null, 2) + "\n" });
+    }
+    if (has(c.frameworks, "html") || has(c.frameworks, "css")) {
+      files.push({ path: "index.html", content: `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><h1>${project.name}</h1></body></html>\n` });
+      files.push({ path: "styles.css", content: `body { font-family: sans-serif; }\n` });
+    }
+    return files;
   }
 
   private projectYaml(project: Project): string {

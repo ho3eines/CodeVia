@@ -9,7 +9,9 @@ import type {
   GithubIssue,
   GithubRelease,
   GithubFile,
+  GithubTreeEntry,
   ListRepositoriesOptions,
+  CreateRepositoryOptions,
 } from "./types.js";
 
 interface MockRepo {
@@ -108,6 +110,54 @@ export class MockGitHubService implements IGitHubService {
     let h = 0;
     for (let i = 0; i < input.length; i++) h = (Math.imul(31, h) + input.charCodeAt(i)) | 0;
     return "0000000" + Math.abs(h).toString(16).slice(-7);
+  }
+
+  async createRepository(opts: CreateRepositoryOptions): Promise<GithubRepository> {
+    const owner = opts.owner || "mock-user";
+    const name = opts.name.trim();
+    if (!name || !/^[A-Za-z0-9_.-]+$/.test(name)) throw new Error(`Invalid repository name "${name}"`);
+    const key = `${owner}/${name}`;
+    if (this.repos.has(key)) throw new Error(`Repository already exists: ${key}`);
+    const defaultBranch = opts.defaultBranch || "main";
+    const now = new Date().toISOString();
+    const sha = this.sha("create:" + key);
+    const repo: MockRepo = {
+      ref: { owner, name },
+      branches: new Map([[defaultBranch, sha]]),
+      files: new Map(
+        (opts.autoInit === false ? [] : [{ path: "README.md", content: `# ${name}\n\n${opts.description ?? ""}\n` }]).map((f) => [f.path, f]),
+      ),
+      commits: [{ sha, message: `create ${name}`, author: "mock-user", date: now }],
+      pulls: [],
+      issues: [],
+      releases: [],
+      defaultBranch,
+      description: opts.description,
+      language: undefined,
+      private: !!opts.private,
+    };
+    this.repos.set(key, repo);
+    return {
+      owner,
+      name,
+      fullName: key,
+      private: !!opts.private,
+      defaultBranch,
+      description: opts.description,
+      htmlUrl: `https://github.com/${key}`,
+      language: undefined,
+      updatedAt: now,
+      archived: false,
+      permissions: { admin: true, push: true, pull: true },
+    };
+  }
+
+  async listFiles(ref: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]> {
+    const r = this.repo(ref);
+    const base = path && path !== "." ? (path.endsWith("/") ? path : path + "/") : "";
+    return [...r.files.keys()]
+      .filter((p) => p.startsWith(base))
+      .map((p) => ({ path: p, type: "blob", size: (r.files.get(p)?.content ?? "").length }));
   }
 
   async listRepositories(opts: ListRepositoriesOptions = {}): Promise<GithubRepository[]> {

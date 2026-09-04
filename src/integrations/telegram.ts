@@ -1,4 +1,6 @@
 import { getEnv } from "../config/env.js";
+import { decryptSecret, encryptSecret, maskSecret } from "../auth/encrypted-secrets.js";
+import type { TelegramAccount } from "../domain/telegram.js";
 import { logger } from "../logger.js";
 
 export interface TelegramMessage {
@@ -130,4 +132,74 @@ export function resolveTelegramService(): ITelegramService {
 
 export function createMockTelegram(): MockTelegramService {
   return new MockTelegramService();
+}
+
+/* ------------------------------------------------------------------ *
+ * Per-user Telegram accounts
+ * ------------------------------------------------------------------ */
+
+export interface TelegramGetMe {
+  ok: boolean;
+  username?: string;
+  id?: number;
+  botId?: string;
+  error?: string;
+}
+
+export function getTelegramWebhookUrl(): string {
+  const env = getEnv();
+  const base = env.PUBLIC_WEB_BASE_URL ?? env.WEB_BASE_URL;
+  return `${String(base).replace(/\/$/, "")}/integrations/telegram/webhook`;
+}
+
+export function accountTelegramToken(account: TelegramAccount): string | undefined {
+  return decryptSecret(account.tokenEnc, "telegram-token");
+}
+
+export function accountTelegramService(account: TelegramAccount): ITelegramService {
+  const token = accountTelegramToken(account);
+  return token ? new TelegramBotApiService(token) : new MockTelegramService();
+}
+
+export function encryptTelegramToken(token: string): string {
+  return JSON.stringify(encryptSecret(token, "telegram-token"));
+}
+
+export function maskTelegramToken(token: string | undefined): string {
+  return maskSecret(token);
+}
+
+/** Real connection verification against the Telegram Bot API. */
+export async function testTelegramToken(token: string): Promise<TelegramGetMe> {
+  if (!token) return { ok: false, error: "Token is required" };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${encodeURIComponent(token)}/getMe`, { method: "GET" });
+    const body = (await res.json()) as { ok: boolean; result?: { username?: string; id?: number } };
+    if (body.ok && body.result) {
+      return {
+        ok: true,
+        username: body.result.username,
+        id: body.result.id,
+        botId: String(body.result.id),
+      };
+    }
+    return { ok: false, error: "Telegram rejected the token (invalid bot token?)" };
+  } catch (err) {
+    return { ok: false, error: `Telegram API error: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/** Register the platform webhook for a user bot (real connection). */
+export async function setTelegramWebhook(token: string, url: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${encodeURIComponent(token)}/setWebhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const body = (await res.json()) as { ok: boolean; description?: string };
+    return body.ok ? { ok: true } : { ok: false, error: body.description || "setWebhook failed" };
+  } catch (err) {
+    return { ok: false, error: `setWebhook error: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }

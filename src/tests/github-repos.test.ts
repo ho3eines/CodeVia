@@ -223,4 +223,23 @@ describe("GET /github/repositories", () => {
     expect(repos[0]).toHaveProperty("defaultBranch");
     expect((await mock.getViewer()).login).toBe("mock-user");
   });
+
+  it("creates a repository and lists branches/files for the new repo", async () => {
+    const srv = await boot();
+    const created = await srv.inject({ method: "POST", url: "/github/repositories", payload: { name: "brand-new", description: "New project", private: true } });
+    expect(created.statusCode).toBe(201);
+    const body = created.json();
+    expect(body.repository.fullName).toBe("mock-user/brand-new");
+    expect(body.repository.private).toBe(true);
+    expect(body.repository.defaultBranch).toBe("main");
+
+    const list = (await srv.inject({ method: "GET", url: "/github/repositories?q=brand-new" })).json();
+    expect(list.repositories.map((r: { fullName: string }) => r.fullName)).toContain("mock-user/brand-new");
+
+    const branches = (await srv.inject({ method: "GET", url: "/github/repositories/mock-user/brand-new/branches" })).json();
+    expect(branches.map((b: { name: string }) => b.name)).toContain("main");
+
+    const files = (await srv.inject({ method: "GET", url: "/github/repositories/mock-user/brand-new/files" })).json();
+    expect(files.files.some((f: { path: string }) => f.path === "README.md")).toBe(true);
+  });
 });

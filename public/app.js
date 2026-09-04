@@ -408,7 +408,7 @@
           <td><a href="#/projects/${p.id}"><strong>${esc(p.name)}</strong></a><div class="mono" style="color:var(--text-muted)">${esc(p.slug)}</div></td>
           <td class="mono">${esc(p.configRepo)}</td>
           <td class="mono">${esc(p.branch)}</td>
-          <td>${esc(p.framework || "—")}</td>
+          <td>${esc(((p.capabilities?.frameworks || []).join(", ") || p.framework || "—"))}</td>
           <td>${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
           <td>${timeAgo(p.createdAt)}</td>
           <td><button class="btn btn-ghost" onclick="location.hash='#/projects/${p.id}'">Open</button></td>
@@ -426,8 +426,8 @@
   const CAPABILITY_GROUPS = [
     ["platforms", "Platform(s)", "Web, Mobile, API…"],
     ["languages", "Language(s)", "TypeScript, C#…"],
-    ["frameworks", "Framework(s)", ".NET, React…"],
-    ["databases", "Database(s)", "SQL Server, Postgres…"],
+    ["frameworks", "Framework(s) — multi-select + writeable", ".NET, MudBlazor, HTML, CSS…"],
+    ["databases", "Database (single-select)", "SQL Server, Oracle, SQLite…"],
     ["deploymentTargets", "Deployment target(s)", "Docker, Kubernetes…"],
     ["features", "Features / concerns", "Auth, Payments…"],
     ["integrations", "Integrations", "GitHub Actions, Sentry…"],
@@ -435,13 +435,14 @@
   /* Renders a chip group. `selected` = array of ids; custom values allowed via the add box. */
   function chipGroupHtml(key, label, options, selected = [], opts = {}) {
     const sel = new Set(selected);
+    const single = !!opts.single;
     const norm = options.map((o) => ({ id: o.value ?? o.id, label: o.label, icon: o.icon || "", description: o.description || "" }));
     const known = new Set(norm.map((o) => o.id));
     const extra = [...sel].filter((id) => !known.has(id)).map((id) => ({ id, label: id, icon: "", description: "custom" }));
     const all = [...norm, ...extra];
     const core = new Set(opts.core || []);
-    return `<div class="field" data-chips="${esc(key)}">
-      <label>${esc(label)} <span class="select-count" data-count="${esc(key)}">${sel.size ? sel.size + " selected" : "multi-select"}</span></label>
+    return `<div class="field" data-chips="${esc(key)}" ${single ? 'data-single="1"' : ""}>
+      <label>${esc(label)} <span class="select-count" data-count="${esc(key)}">${single ? (sel.size ? "selected" : "select one") : sel.size ? sel.size + " selected" : "multi-select"}</span></label>
       <div class="chip-group">
         ${all.map((o) => `<span class="chip ${sel.has(o.id) || core.has(o.id) ? "on" : ""} ${core.has(o.id) ? "core" : ""}" data-id="${esc(o.id)}" title="${esc(o.description || (core.has(o.id) ? "core agent — always included" : ""))}">${o.icon ? o.icon + " " : ""}${esc(o.label)}</span>`).join("")}
         ${opts.allowCustom === false ? "" : `<span class="chip-add"><input class="input" data-add="${esc(key)}" placeholder="+ ${esc(opts.placeholder || "other…")}"/></span>`}
@@ -457,11 +458,17 @@
         const c = $(`[data-count="${key}"]`, grp);
         if (c) c.textContent = n ? n + " selected" : "multi-select";
       };
+      const single = grp.dataset.single === "1";
       grp.addEventListener("click", (e) => {
         const chip = e.target.closest(".chip");
         if (!chip || chip.classList.contains("chip-add")) return;
         if (chip.classList.contains("core")) return; // always on
-        chip.classList.toggle("on");
+        if (single && !chip.classList.contains("on")) {
+          $$(".chip.on", grp).forEach((c) => { if (!c.classList.contains("core")) c.classList.remove("on"); });
+          chip.classList.add("on");
+        } else {
+          chip.classList.toggle("on");
+        }
         refreshCount();
       });
       const add = $(`[data-add="${key}"]`, grp);
@@ -478,6 +485,7 @@
           chip.className = "chip on"; chip.dataset.id = id; chip.textContent = raw;
           add.parentElement.before(chip);
         }
+        if (single) $$(".chip.on", grp).forEach((c) => c.dataset.id !== id && !c.classList.contains("core") && c.classList.remove("on"));
         add.value = ""; refreshCount();
       });
     });
@@ -491,6 +499,11 @@
   /* Repo picker state lives on the element (data attributes) + closure. */
   function repoPickerHtml() {
     return `<div class="repo-picker" id="repo-picker">
+      <div class="field"><label>Repository <span class="select-count">pick a connected GitHub repo</span></label>
+        <select class="select mono" id="rp-repo-select">
+          <option value="">Loading connected GitHub repositories…</option>
+        </select>
+      </div>
       <div class="repo-search">
         <input class="input" id="rp-search" placeholder="Search your GitHub repositories…"/>
         <button class="btn" id="rp-refresh" title="Reload from GitHub">↻</button>
@@ -499,18 +512,40 @@
       <div class="field-hint" id="rp-hint"></div>
       <details style="margin-top:6px"><summary style="font-size:11px;color:var(--text-muted);cursor:pointer">Repository not listed? add manually (owner/name)</summary>
         <div class="flex mt"><input class="input mono" id="rp-manual" placeholder="owner/name"/><button class="btn" id="rp-manual-add">Add</button></div></details>
+      <details style="margin-top:6px"><summary style="font-size:11px;color:var(--text-muted);cursor:pointer">Create new repository</summary>
+        <div class="field"><input class="input mono" id="rp-new-name" placeholder="new-repo-name"/></div>
+        <div class="field"><input class="input" id="rp-new-desc" placeholder="Repository description (optional)"/></div>
+        <div class="flex"><label style="font-size:11px;color:var(--text-muted)"><input type="checkbox" id="rp-new-priv"/> Private</label><span class="spacer"></span><button class="btn" id="rp-new-go">Create</button></div>
+      </details>
       <div class="repo-selected" id="rp-selected"></div>
     </div>`;
   }
   /* mount picker; `selected` = [{repo, branch, role, isConfigRepo}] */
   function mountRepoPicker(root, selected = [], onChange = () => {}) {
-    const state = { repos: [], selected: selected.map((r) => ({ ...r })), source: "", hint: "" };
-    const list = $("#rp-list", root), selEl = $("#rp-selected", root), hintEl = $("#rp-hint", root), search = $("#rp-search", root);
+    const state = { repos: [], selected: selected.map((r) => ({ ...r })), branches: {}, source: "", hint: "" };
+    const list = $("#rp-list", root), selEl = $("#rp-selected", root), hintEl = $("#rp-hint", root), search = $("#rp-search", root), repoSelect = $("#rp-repo-select", root);
     const ROLES = ["primary", "backend", "frontend", "mobile", "infrastructure", "docs", "library", "other"];
+    const renderRepoSelect = () => {
+      if (!repoSelect) return;
+      const q = (search.value || "").toLowerCase();
+      const rows = state.repos.filter((r) => !q || r.fullName.toLowerCase().includes(q) || (r.description || "").toLowerCase().includes(q));
+      repoSelect.innerHTML = `<option value="">${state.repos.length ? "Choose a connected GitHub repository…" : "No connected repositories yet — create one below"}</option>` +
+        rows.map((r) => `<option value="${esc(r.fullName)}">${esc(r.fullName)}${r.description ? " — " + esc(r.description.slice(0, 60)) : ""}${r.private ? " [private]" : ""}</option>`).join("");
+    };
+    const fetchBranches = async (full) => {
+      if (state.branches[full] && state.branches[full].length) return;
+      const [owner, ...rest] = full.split("/");
+      const name = rest.join("/");
+      const r = await apiRaw(`/github/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/branches`).catch(() => null);
+      if (r && r.ok && Array.isArray(r.body)) state.branches[full] = r.body.map((b) => b.name || b);
+      else state.branches[full] = [state.selected.find((x) => x.repo === full)?.defaultBranch || "main"];
+      renderSelected();
+    };
     const isSel = (full) => state.selected.some((r) => r.repo.toLowerCase() === full.toLowerCase());
     const renderList = () => {
       const q = (search.value || "").toLowerCase();
       const rows = state.repos.filter((r) => !q || r.fullName.toLowerCase().includes(q) || (r.description || "").toLowerCase().includes(q));
+      renderRepoSelect();
       if (!state.repos.length) {
         list.innerHTML = `<div class="repo-empty">${state.error ? esc(state.error) : "No repositories found for this account."}</div>`;
         return;
@@ -522,22 +557,23 @@
         </div>`).join("") || `<div class="repo-empty">No match for “${esc(q)}”.</div>`;
     };
     const renderSelected = () => {
-      if (!state.selected.length) { selEl.innerHTML = `<div class="field-hint warn">No repository selected yet — pick at least one above.</div>`; onChange(state.selected); return; }
+      if (!state.selected.length) { selEl.innerHTML = `<div class="field-hint warn">No repository selected yet — pick at least one above.</div>`; renderRepoSelect(); onChange(state.selected); return; }
       if (!state.selected.some((r) => r.isConfigRepo)) state.selected[0].isConfigRepo = true;
       selEl.innerHTML = state.selected.map((r, i) => `<div class="repo-sel-row" data-i="${i}">
           <span class="repo-name">${esc(r.repo)}${r.private ? ' <span class="badge badge-warn">private</span>' : ""}</span>
-          <input class="input mono" data-branch value="${esc(r.branch || r.defaultBranch || "main")}" title="branch" style="width:110px"/>
+          <select class="select mono" data-branch title="branch" style="width:120px">${(state.branches[r.repo] || [r.branch || r.defaultBranch || "main"]).map((b) => `<option ${b === (r.branch || r.defaultBranch) ? "selected" : ""}>${esc(b)}</option>`).join("")}</select>
           <select class="select" data-role>${ROLES.map((x) => `<option ${x === (r.role || (i === 0 ? "primary" : "other")) ? "selected" : ""}>${x}</option>`).join("")}</select>
           <label class="cfg" title="Holds the .ai-engineering config folder"><input type="radio" name="rp-cfg" data-cfg ${r.isConfigRepo ? "checked" : ""}/> config</label>
           <button class="btn btn-ghost" data-remove title="Remove">✕</button>
         </div>`).join("");
+      renderRepoSelect();
       onChange(state.selected);
     };
     const toggle = (full, meta = {}) => {
       const idx = state.selected.findIndex((r) => r.repo.toLowerCase() === full.toLowerCase());
       if (idx >= 0) state.selected.splice(idx, 1);
       else state.selected.push({ repo: full, branch: meta.defaultBranch || "main", role: state.selected.length ? "other" : "primary", isConfigRepo: state.selected.length === 0, private: meta.private, defaultBranch: meta.defaultBranch, htmlUrl: meta.htmlUrl });
-      renderList(); renderSelected();
+      renderList(); renderSelected(); fetchBranches(full);
     };
     const load = async () => {
       list.innerHTML = `<div class="repo-empty">Loading repositories…</div>`;
@@ -562,12 +598,35 @@
       const meta = state.repos.find((r) => r.fullName === row.dataset.full) || {};
       toggle(row.dataset.full, meta);
     });
+    if (repoSelect) repoSelect.addEventListener("change", () => {
+      const full = repoSelect.value;
+      if (!full) return;
+      const meta = state.repos.find((r) => r.fullName === full) || {};
+      toggle(full, meta);
+    });
     search.addEventListener("input", renderList);
     $("#rp-refresh", root).onclick = load;
     $("#rp-manual-add", root).onclick = () => {
       const v = $("#rp-manual", root).value.trim();
       if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(v)) { toast("Invalid repository", "Use the owner/name format", "err"); return; }
       if (!isSel(v)) toggle(v); $("#rp-manual", root).value = "";
+    };
+    $("#rp-new-go", root).onclick = async () => {
+      const name = $("#rp-new-name", root).value.trim();
+      if (!name) { toast("Repository name required", "", "err"); return; }
+      const btn = $("#rp-new-go", root); btn.disabled = true;
+      try {
+        const r = await api("/github/repositories", { method: "POST", body: { name, description: $("#rp-new-desc", root).value.trim(), private: $("#rp-new-priv", root).checked, autoInit: true } });
+        const repo = r.repository || r;
+        if (!isSel(repo.fullName || `${repo.owner || "mock-user"}/${repo.name}`)) {
+          toggle(repo.fullName || `${repo.owner || "mock-user"}/${repo.name}`, { defaultBranch: repo.defaultBranch, private: repo.private, htmlUrl: repo.htmlUrl });
+        }
+        state.repos = state.repos.filter((x) => x.fullName !== (repo.fullName || `${repo.owner}/${repo.name}`));
+        state.repos.unshift(repo);
+        renderList();
+        toast("Repository created", repo.fullName || "", "ok");
+      } catch (e) { toast("Create failed", e.message, "err"); }
+      finally { btn.disabled = false; $("#rp-new-name", root).value = ""; }
     };
     selEl.addEventListener("click", (e) => {
       const row = e.target.closest(".repo-sel-row"); if (!row) return;
@@ -591,7 +650,8 @@
     openModal("Create Project", `<div class="repo-empty">Loading options…</div>`);
     let catalog;
     try { catalog = await loadOptionCatalog(); } catch (e) { $("#modal-body").innerHTML = `<div class="error-state"><h4>Could not load options</h4><pre>${esc(e.message)}</pre></div>`; return; }
-    const groups = CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], [], { placeholder: ph })).join("");
+    const singleKeys = new Set(catalog.singleSelectKeys || ["databases"]);
+    const groups = CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], [], { placeholder: ph, single: singleKeys.has(k) })).join("");
     const agentGroup = chipGroupHtml("agentTypes", "Agents to generate", catalog.agentTypes || [], [], {
       core: catalog.coreAgentTypes || [], allowCustom: false,
       hint: "Leave empty to let the platform pick agents from the selected stack. Core agents are always included.",
@@ -651,6 +711,7 @@
           <button class="btn" onclick="projectRun(${JSON.stringify(p.id)})">▶ Run Agent</button>
           <button class="btn" onclick="projectTask(${JSON.stringify(p.id)})">＋ Create Task</button>
           <button class="btn" onclick="projectWorkflow(${JSON.stringify(p.id)})">🔀 Run Workflow</button>
+          <button class="btn" onclick="projectReonboard(${JSON.stringify(p.id)})">🔎 Detect & Agent.md</button>
           <button class="btn" onclick="projectEdit(${JSON.stringify(p.id)})">⚙ Edit</button>
         </div></div>
       <div class="stat-grid">
@@ -671,6 +732,7 @@
           <div class="card-title">Stack & capabilities <a class="sub" href="#" onclick="projectEdit(${JSON.stringify(p.id)});return false">edit</a></div>
           ${capRows}
           <div class="meter-row"><span class="lbl">Agent roster</span><span style="flex:1;display:flex;flex-wrap:wrap;gap:4px">${(caps.agentTypes || []).length ? caps.agentTypes.map((v) => `<span class="badge badge-muted">${esc(capLabel(catalog, "agentTypes", v))}</span>`).join("") : '<span class="badge badge-muted">auto (derived from stack)</span>'}</span></div>
+          <div class="meter-row"><span class="lbl">Detected skills</span><span style="flex:1;display:flex;flex-wrap:wrap;gap:4px">${(p.settings?.skills || []).length ? p.settings.skills.map((v) => `<span class="badge badge-info">${esc(v)}</span>`).join("") : '<span class="badge badge-muted">—</span>'}</span></div>
         </div>
       </div>
       <div class="grid-2 mt">
@@ -759,6 +821,13 @@
     try { await api(`/projects/${id}/repositories/${repo}`, { method: "DELETE" }); toast("Repository unlinked", repo, "ok"); refreshCurrent(); }
     catch (e) { toast("Error", e.message, "err"); }
   };
+  window.projectReonboard = async (id) => {
+    openModal("Detecting project", `<div class="repo-empty">Reading GitHub repo, ensuring Agent.md and detecting skills…</div>`);
+    try {
+      const r = await api(`/projects/${id}/onboard`, { method: "POST", body: {} });
+      closeModal(); toast("Project inspected", `Agents: ${r.agents} · Skills: ${r.skills} — Agent.md ensured`, "ok"); refreshCurrent();
+    } catch (e) { closeModal(); toast("Detection failed", e.message, "err"); }
+  };
   window.projectEdit = async (id) => {
     openModal("Edit project", `<div class="repo-empty">Loading…</div>`);
     const [p, catalog] = await Promise.all([api("/projects/" + id), loadOptionCatalog()]);
@@ -766,7 +835,7 @@
     $("#modal-body").innerHTML = `
       <div class="field"><label>Name</label><input class="input" id="pe-name" value="${esc(p.name)}"/></div>
       <div class="field"><label>Description</label><textarea class="textarea" id="pe-desc">${esc(p.description || "")}</textarea></div>
-      ${CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], caps[k] || [], { placeholder: ph })).join("")}
+      ${CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], caps[k] || [], { placeholder: ph, single: new Set(catalog.singleSelectKeys || ["databases"]).has(k) })).join("")}
       ${chipGroupHtml("agentTypes", "Agents to generate", catalog.agentTypes || [], caps.agentTypes || [], { core: catalog.coreAgentTypes || [], allowCustom: false, hint: "Saving re-runs onboarding: generated system prompts are refreshed with the new stack, agents outside the roster are disabled (never deleted)." })}
       <div class="flex mt"><button class="btn btn-primary" id="pe-save">Save & re-onboard</button><button class="btn" onclick="closeModal()">Cancel</button></div>`;
     bindChipGroups($("#modal-body"));
@@ -895,14 +964,14 @@
   /* PROVIDERS */
   on("/providers", async () => {
     const list = await api("/providers");
-    $("#content").innerHTML = `<div class="overview"><div><h1>Providers</h1><p>Provider-agnostic model providers. Secrets are referenced by env-var name, never stored.</p></div><button class="btn btn-primary" onclick="openProvider()">＋ Add Provider</button></div>
+    $("#content").innerHTML = `<div class="overview"><div><h1>Providers</h1><p>Provider-agnostic model providers. Use an env-var reference or paste the key (stored encrypted).</p></div><button class="btn btn-primary" onclick="openProvider()">＋ Add Provider</button></div>
       <div class="grid-3">${list.map((p) => {
         const ready = p.readiness?.ready !== false;
         return `<div class="card card-body" id="prov-${esc(p.id)}">
         <div class="card-title">${esc(p.name)} ${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</div>
         <div class="meter-row"><span class="lbl">Type</span><span class="val">${esc(p.type)}</span></div>
         <div class="meter-row"><span class="lbl">Format</span><span class="val">${esc(p.apiFormat)}</span></div>
-        <div class="meter-row"><span class="lbl">Secret</span><span class="val mono">${esc(p.secretRef || "none")} ${p.secretRef ? (p.keyPresent ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>') : ""}</span></div>
+        <div class="meter-row"><span class="lbl">Secret</span><span class="val mono">${esc(p.secretRef || "—")} ${p.keyPresent ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}${p.secretValuePresent ? ` <span class="badge badge-info">${esc(p.secretMasked || "stored")}</span>` : ""}</span></div>
         <div class="meter-row"><span class="lbl">Base URL</span><span class="val mono" style="font-size:10px">${esc(p.baseUrl || "—")}</span></div>
         <div class="meter-row"><span class="lbl">Timeout</span><span class="val">${p.timeoutMs}ms</span></div>
         ${ready ? "" : `<div class="field-hint warn">⚠ ${esc(p.readiness.reason)}${p.readiness.hint ? " — " + esc(p.readiness.hint) : ""}</div>`}
@@ -951,7 +1020,8 @@
       <div class="field"><label>Type</label><select class="select" id="pv-type">${types.map((t) => `<option value="${t}" ${t === cur.type ? "selected" : ""}>${esc(meta.presets?.[t]?.label || t)}</option>`).join("")}</select></div>
       <div class="field"><label>Name</label><input class="input" id="pv-name" value="${esc(cur.name || "")}" placeholder="OpenAI (prod)"/></div>
       <div class="field"><label>Base URL</label><input class="input mono" id="pv-base" value="${esc(cur.baseUrl || "")}"/></div>
-      <div class="field"><label>Secret Ref <span class="select-count">name of the env var that holds the API key — never the key itself</span></label><input class="input mono" id="pv-secret" value="${esc(cur.secretRef || "")}" placeholder="OPENAI_API_KEY"/><div class="field-hint" id="pv-secret-hint"></div></div>
+      <div class="field"><label>Secret Ref <span class="select-count">optional env var name, e.g. OPENAI_API_KEY</span></label><input class="input mono" id="pv-secret" value="${esc(cur.secretRef || "")}" placeholder="OPENAI_API_KEY"/><div class="field-hint" id="pv-secret-hint"></div></div>
+      <div class="field"><label>API key <span class="select-count">optional — paste the key here to store it encrypted (outlives env vars)</span></label><input class="input mono" id="pv-value" type="password" placeholder="sk-..." value=""/><div class="field-hint">${cur.secretValuePresent ? `A key is already stored (${esc(cur.secretMasked || "••••")}).` : "If you leave this empty the provider uses the Secret Ref env var above."}</div></div>
       <div class="grid-2">
         <div class="field"><label>Auth</label><select class="select" id="pv-auth">${(meta.authTypes || ["bearer","api-key","none"]).map((a) => `<option ${a === cur.authType ? "selected" : ""}>${a}</option>`).join("")}</select></div>
         <div class="field"><label>API format</label><select class="select" id="pv-format">${(meta.apiFormats || ["openai","anthropic","gemini","ollama","custom"]).map((a) => `<option ${a === cur.apiFormat ? "selected" : ""}>${a}</option>`).join("")}</select></div>
@@ -976,6 +1046,7 @@
     $("#pv-go").onclick = async () => {
       const body = {
         name: $("#pv-name").value.trim(), type: $("#pv-type").value, baseUrl: $("#pv-base").value.trim(), secretRef: $("#pv-secret").value.trim(),
+        secretValue: $("#pv-value").value.trim(),
         authType: $("#pv-auth").value, apiFormat: $("#pv-format").value, timeoutMs: Number($("#pv-timeout").value) || 60000, maxTokensDefault: Number($("#pv-maxtok").value) || 4096,
       };
       try {
@@ -1196,7 +1267,7 @@
     }
     $("#content").innerHTML = `
       <div class="overview"><div><h1>GitHub Integration</h1><p>GitHub is the source of truth for persistent project data</p></div>
-        <button class="btn" onclick="refreshCurrent()">Refresh</button></div>
+        <div class="action-row"><button class="btn btn-primary" onclick="openCreateRepo()">＋ Create repository</button><button class="btn" onclick="refreshCurrent()">Refresh</button></div></div>
       <div class="grid-3">
         <div class="card card-body"><div class="card-title">Connection</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot ${status.connected?'healthy':'warn'}"></span>${status.connected?'Connected':'Mock (dev)'}</div></div>
@@ -1243,26 +1314,91 @@
     const b2 = document.getElementById("gh-diag-btn2"); if (b2) b2.onclick = () => diagHandler("gh-diag2");
   });
 
+  /* Create a new GitHub repository from the UI (real API call). */
+  window.openCreateRepo = async () => {
+    openModal("Create GitHub repository", `
+      <div class="field"><label>Repository name</label><input class="input mono" id="cr-name" placeholder="my-new-project"/></div>
+      <div class="field"><label>Description (optional)</label><input class="input" id="cr-desc" placeholder="What is this project about?"/></div>
+      <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="cr-private"/> Private repository</label></div>
+      <div class="flex"><button class="btn btn-primary" id="cr-go">Create</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#cr-go").onclick = async () => {
+      const name = $("#cr-name").value.trim();
+      if (!name) { toast("Repository name required", "", "err"); $("#cr-name").focus(); return; }
+      const btn = $("#cr-go"); btn.disabled = true;
+      try {
+        const r = await api("/github/repositories", { method: "POST", body: { name, description: $("#cr-desc").value.trim(), private: $("#cr-private").checked } });
+        closeModal(); toast("Repository created", (r.repository || r).fullName, "ok"); refreshCurrent();
+      } catch (e) { toast("Could not create repository", e.message, "err"); btn.disabled = false; }
+    };
+  };
+
   /* TELEGRAM */
   on("/telegram", async () => {
     const status = await api("/integrations/telegram/status");
-    $("#content").innerHTML = `<div class="overview"><div><h1>Telegram Integration</h1><p>Project-aware inline-keyboard bot — commands & natural language</p></div></div>
+    const accounts = status.accounts || [];
+    $("#content").innerHTML = `<div class="overview"><div><h1>Telegram Integration</h1><p>Per-user Telegram bots — each user connects their own token & AccountId and gets a real bot.</p></div>
+        <button class="btn btn-primary" onclick="openTelegramAccount()">＋ Connect a bot</button></div>
       <div class="grid-2">
-        <div class="card card-body"><div class="card-title">Connection</div>
-          <div class="status-grid"><div class="status-item"><span class="status-dot ${status.connected?'healthy':'warn'}"></span>${status.connected?'Connected':'Mock (dev)'}</div></div>
-          <p style="color:var(--text-muted);font-size:12px">Commands: /start /projects /agents /task /run /status /tests /issues /pr /memory /skills</p>
+        <div class="card card-body"><div class="card-title">Platform connection</div>
+          <div class="status-grid"><div class="status-item"><span class="status-dot ${status.globalConnected?'healthy':'warn'}"></span>${status.globalConnected?'Global bot (TELEGRAM_BOT_TOKEN)':'No global bot token — connect your own bot below'}</div></div>
+          <div class="meter-row"><span class="lbl">Webhook URL</span><span class="val mono" style="font-size:10px;word-break:break-all">${esc(status.webhookUrl || "—")}</span></div>
+          <p style="color:var(--text-muted);font-size:11px">After connecting a bot, set its webhook to the URL above (or use “Connect” which attempts it automatically). Commands: /start /projects /agents /task /run /status /tests /issues /pr /memory /skills</p>
         </div>
         <div class="card card-body"><div class="card-title">Preview</div>
           <div class="field"><label>Message</label><input class="input" id="tg-msg" placeholder="/start"/></div>
           <button class="btn btn-primary" id="tg-send">Send</button>
           <div class="card mt"><div class="card-body" id="tg-out" style="background:var(--bg);min-height:80px"></div></div>
         </div>
+      </div>
+      <div class="card card-body mt"><div class="card-title">Your bots (${accounts.length})</div>
+        ${accounts.length ? `<div class="grid-2">${accounts.map((a) => `<div class="card card-body">
+          <div class="card-title">${esc(a.name || a.botUsername || a.botId || a.accountId || "Bot account")} ${a.connected ? '<span class="badge badge-ok">connected</span>' : '<span class="badge badge-err">disconnected</span>'}</div>
+          <div class="meter-row"><span class="lbl">Bot</span><span class="val mono">${esc(a.botUsername || a.botId || "—")}</span></div>
+          <div class="meter-row"><span class="lbl">AccountId</span><span class="val mono">${esc(a.accountId || "—")}</span></div>
+          <div class="meter-row"><span class="lbl">Chat</span><span class="val mono">${esc(a.chatId || "—")}</span></div>
+          <div class="meter-row"><span class="lbl">Token</span><span class="val mono">${esc(a.tokenMasked || "—")}</span></div>
+          <div class="meter-row"><span class="lbl">Webhook</span><span class="val">${a.webhookSet ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
+          ${a.lastError ? `<div class="field-hint err">${esc(a.lastError)}</div>` : ""}
+          <div class="provider-actions">
+            <button class="btn" onclick="telegramConnect('${esc(a.id)}')">↻ Connect</button>
+            <button class="btn btn-ghost" onclick="openTelegramAccount('${esc(a.id)}')">Edit</button>
+            <button class="btn btn-danger" onclick="telegramDelete('${esc(a.id)}')">Delete</button>
+          </div>
+        </div>`).join("")}</div>` : emptyState("📱", "No bot connected", "Enter your Telegram bot token + AccountId to connect a real account for this user.")}
       </div>`;
     $("#tg-send").onclick = async () => {
       const r = await api("/integrations/telegram/command", { method: "POST", body: { text: $("#tg-msg").value } });
       $("#tg-out").innerHTML = `<pre style="white-space:pre-wrap">${esc(JSON.stringify(r, null, 2))}</pre>`;
     };
   });
+  window.openTelegramAccount = async (editId) => {
+    const existing = editId ? (await api("/integrations/telegram/accounts")).find((a) => a.id === editId) : null;
+    openModal(editId ? "Edit Telegram bot" : "Connect Telegram bot", `
+      <div class="field"><label>Bot token <span class="select-count">from @BotFather — stored encrypted</span></label><input class="input mono" id="ta-token" type="password" placeholder="123456:ABC-DEF..." value=""/></div>
+      <div class="field"><label>AccountId <span class="select-count">your Telegram numeric id (e.g. 123456789)</span></label><input class="input mono" id="ta-account" value="${esc(existing?.accountId || "")}" placeholder="123456789"/></div>
+      <div class="field"><label>ChatId <span class="select-count">optional — defaults to AccountId</span></label><input class="input mono" id="ta-chat" value="${esc(existing?.chatId || "")}" placeholder="(optional)"/></div>
+      <div class="field"><label>Label <span class="select-count">optional</span></label><input class="input" id="ta-name" value="${esc(existing?.name || "")}" placeholder="My bot"/></div>
+      <div class="field-hint">Connect checks the token with Telegram’s real <span class="mono">getMe</span> API and registers the platform webhook.</div>
+      <div class="flex"><button class="btn btn-primary" id="ta-go">${editId ? "Save & connect" : "Connect"}</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#ta-go").onclick = async () => {
+      const token = $("#ta-token").value.trim();
+      if (!token && !editId) { toast("Bot token required", "", "err"); return; }
+      const body = { token, accountId: $("#ta-account").value.trim(), chatId: $("#ta-chat").value.trim(), name: $("#ta-name").value.trim() };
+      try {
+        const r = editId ? await api(`/integrations/telegram/accounts/${editId}`, { method: "PATCH", body }) : await api("/integrations/telegram/accounts", { method: "POST", body });
+        closeModal(); toast(editId ? "Bot updated" : "Bot connected", (r.account?.botUsername || r.botUsername || "Telegram bot") + (r.account?.webhookSet ? " · webhook set" : ""), r.account?.connected || r.connected ? "ok" : "warn"); refreshCurrent();
+      } catch (e) { toast("Connection failed", e.message, "err"); }
+    };
+  };
+  window.telegramConnect = async (id) => {
+    try { await api(`/integrations/telegram/accounts/${id}/connect`, { method: "POST" }); toast("Bot connection refreshed", "", "ok"); refreshCurrent(); }
+    catch (e) { toast("Connect failed", e.message, "err"); }
+  };
+  window.telegramDelete = async (id) => {
+    if (!confirm("Delete this Telegram bot account?")) return;
+    try { await api(`/integrations/telegram/accounts/${id}`, { method: "DELETE" }); toast("Bot deleted", "", "ok"); refreshCurrent(); }
+    catch (e) { toast("Delete failed", e.message, "err"); }
+  };
 
   /* SETTINGS */
   on("/settings", async () => {

@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { Model, ModelProvider } from "../../domain/entities.js";
-import { providerReadiness, testProviderConnection } from "../../ai/provider-test.js";
+import { providerReadiness, providerHasSecret, testProviderConnection } from "../../ai/provider-test.js";
+import { decryptSecret, encryptSecret, maskSecret } from "../../auth/encrypted-secrets.js";
 
 const PROVIDER_TYPES: ModelProvider["type"][] = [
   "openai",
@@ -38,9 +39,15 @@ function fail(reply: FastifyReply, status: number, message: string, extra: Recor
   return { error: message, ...extra };
 }
 
-function withStatus(p: ModelProvider): ModelProvider & { readiness: ReturnType<typeof providerReadiness>; keyPresent: boolean } {
+function withStatus(p: ModelProvider): ModelProvider & { readiness: ReturnType<typeof providerReadiness>; keyPresent: boolean; secretValuePresent: boolean; secretMasked: string } {
   const readiness = providerReadiness(p);
-  return { ...p, readiness, keyPresent: !!(p.secretRef && process.env[p.secretRef]) };
+  return {
+    ...p,
+    readiness,
+    keyPresent: providerHasSecret(p),
+    secretValuePresent: !!p.secretValueEnc,
+    secretMasked: p.secretValueEnc ? maskSecret(decryptSecret(p.secretValueEnc, "provider-secret")) : "",
+  };
 }
 
 function numberOr(v: unknown, fallback: number): number {
@@ -147,8 +154,10 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const baseUrl = typeof b.baseUrl === "string" && b.baseUrl.trim() ? b.baseUrl.trim() : preset.baseUrl;
     const secretRef = typeof b.secretRef === "string" && b.secretRef.trim() ? b.secretRef.trim() : preset.secretRef;
     if (secretRef && !/^[A-Z][A-Z0-9_]*$/i.test(secretRef)) {
-      return fail(reply, 400, "secretRef must be an environment variable NAME (e.g. OPENAI_API_KEY), never the key itself");
+      return fail(reply, 400, "secretRef must be an environment variable NAME (e.g. OPENAI_API_KEY); to store an API key directly use the secretValue field");
     }
+    const secretValue = typeof b.secretValue === "string" && b.secretValue.trim() ? b.secretValue.trim() : undefined;
+    if (secretValue && secretValue.length < 6) return fail(reply, 400, "secretValue looks too short to be an API key");
     if (type !== "mock" && !baseUrl) return fail(reply, 400, "baseUrl is required for this provider type");
     if (container.providerRepo.findMany().some((r) => r.data.name.toLowerCase() === name.toLowerCase())) {
       return fail(reply, 409, `A provider named "${name}" already exists`);
@@ -158,6 +167,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       type,
       baseUrl,
       secretRef,
+      secretValueEnc: secretValue ? JSON.stringify(encryptSecret(secretValue, "provider-secret")) : undefined,
       authType,
       apiFormat,
       timeoutMs: numberOr(b.timeoutMs, 60000),
@@ -188,9 +198,17 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (!r) return fail(reply, 404, "provider not found");
     if (typeof b.type === "string" && !PROVIDER_TYPES.includes(b.type as ModelProvider["type"])) return fail(reply, 400, `Unknown provider type "${b.type}"`);
     if (typeof b.secretRef === "string" && b.secretRef && !/^[A-Z][A-Z0-9_]*$/i.test(b.secretRef)) {
-      return fail(reply, 400, "secretRef must be an environment variable NAME, never the key itself");
+      return fail(reply, 400, "secretRef must be an environment variable NAME; use secretValue to store a key directly");
     }
-    const p = { ...r.data, ...b, id, createdAt: r.data.createdAt, updatedAt: new Date().toISOString() } as ModelProvider;
+    const patch = { ...b };
+    if (typeof patch.secretValue === "string") {
+      const v = patch.secretValue.trim();
+      // An empty secretValue on PATCH means “leave the stored key unchanged” —
+      // the edit form does not re-display the secret, so this must never wipe it.
+      if (v) patch.secretValueEnc = JSON.stringify(encryptSecret(v, "provider-secret"));
+    }
+    delete patch.secretValue;
+    const p = { ...r.data, ...patch, id, createdAt: r.data.createdAt, updatedAt: new Date().toISOString() } as ModelProvider;
     container.providerRepo.upsert(p);
     container.providerRegistry.invalidate(id);
     return withStatus(p);
