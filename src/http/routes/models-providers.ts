@@ -1,8 +1,15 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { Model, ModelProvider } from "../../domain/entities.js";
-import { providerReadiness, providerHasSecret, testProviderConnection } from "../../ai/provider-test.js";
+import {
+  providerReadiness,
+  providerHasSecret,
+  testProviderConnection,
+  type ProviderTestResult,
+} from "../../ai/provider-test.js";
+import { detectModelCapabilities, detectModelInfo } from "../../ai/provider-urls.js";
 import { decryptSecret, encryptSecret, maskSecret } from "../../auth/encrypted-secrets.js";
+import { logger } from "../../logger.js";
 
 const PROVIDER_TYPES: ModelProvider["type"][] = [
   "openai",
@@ -24,7 +31,7 @@ export const PROVIDER_PRESETS: Record<
   { baseUrl?: string; secretRef?: string; authType: ModelProvider["authType"]; apiFormat: ModelProvider["apiFormat"]; label: string }
 > = {
   openai: { baseUrl: "https://api.openai.com/v1", secretRef: "OPENAI_API_KEY", authType: "bearer", apiFormat: "openai", label: "OpenAI" },
-  anthropic: { baseUrl: "https://api.anthropic.com/v1", secretRef: "ANTHROPIC_API_KEY", authType: "api-key", apiFormat: "anthropic", label: "Anthropic" },
+  anthropic: { baseUrl: "https://api.anthropic.com", secretRef: "ANTHROPIC_API_KEY", authType: "api-key", apiFormat: "anthropic", label: "Anthropic" },
   gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", secretRef: "GEMINI_API_KEY", authType: "api-key", apiFormat: "gemini", label: "Google Gemini" },
   openrouter: { baseUrl: "https://openrouter.ai/api/v1", secretRef: "OPENROUTER_API_KEY", authType: "bearer", apiFormat: "openai", label: "OpenRouter" },
   "azure-openai": { baseUrl: "https://<resource>.openai.azure.com/openai", secretRef: "AZURE_OPENAI_API_KEY", authType: "api-key", apiFormat: "openai", label: "Azure OpenAI" },
@@ -50,62 +57,52 @@ function withStatus(p: ModelProvider): ModelProvider & { readiness: ReturnType<t
   };
 }
 
-/**
+function numberOr(v: unknown, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
- * Discover and add models from a provider after creation.
- * This fetches the model catalog and adds any new models to the repository.
+/** `true` only when `capabilities` carries at least one of the known boolean keys. */
+function isMeaningfulCapabilities(c: unknown): c is Model["capabilities"] {
+  if (!c || typeof c !== "object") return false;
+  const o = c as Record<string, unknown>;
+  return ["vision", "tools", "structuredOutput", "code", "reasoning", "streaming"].some((k) => k in o);
+}
+
+/**
+ * Discover and add models from a provider after creation. The real model catalog
+ * comes from `testProviderConnection` (a live read-only call) and each model is
+ * stored with its **auto-detected** capabilities — the user never picks them.
  */
 async function discoverAndAddModels(
   providerId: string,
   config: ModelProvider,
-  container: Container
-): Promise<string[]> {
-  // Resolve the provider adapter
-  const provider = container.providerRegistry.resolve(config);
-
-  // Test connection and fetch models
+  container: Container,
+): Promise<{ added: string[]; test: ProviderTestResult }> {
   const testResult = await testProviderConnection(config, { timeoutMs: 15000 });
-
   if (!testResult.ok) {
-    // Connection failed - don't add models
-    return [];
+    // Connection failed — don't add models, but surface the URL/endpoint we tried.
+    return { added: [], test: testResult };
   }
 
-  // Fetch models from the provider
-  let models: ProviderModelInfo[] = [];
-  try {
-    models = await provider.listModels();
-  } catch (err) {
-    logger.warn(`Failed to list models for provider ${providerId}`, { err: String(err) });
-    return [];
-  }
-
-  // Extract model IDs and add to repository
   const existingModels = new Set(
-    container.modelRepo.findMany().map((m) => m.data.modelId)
+    container.modelRepo.findMany().map((m) => m.data.modelId),
   );
 
   const added: string[] = [];
-  for (const modelInfo of models) {
-    const modelId = modelInfo.id.replace(/^models\//, "").trim();
+  for (const info of testResult.modelInfos ?? []) {
+    const modelId = info.id.replace(/^models\//, "").trim();
     if (!modelId || existingModels.has(modelId)) continue;
 
     try {
       container.modelRepo.create({
         providerId,
         modelId,
-        displayName: modelInfo.displayName || modelId,
-        contextWindow: Number(modelInfo.contextWindow) || 128000,
+        displayName: info.displayName || modelId,
+        contextWindow: Number(info.contextWindow) || 128000,
         inputCostPer1k: 0,
         outputCostPer1k: 0,
-        capabilities: {
-          vision: false,
-          tools: true,
-          structuredOutput: false,
-          code: true,
-          reasoning: false,
-          streaming: true,
-        },
+        capabilities: info.capabilities,
         active: true,
         priority: 100,
         fallbackPriority: 100,
@@ -115,17 +112,12 @@ async function discoverAndAddModels(
     } catch (err) {
       logger.warn(
         `Failed to add model ${modelId} for provider ${providerId}`,
-        { err: String(err) }
+        { err: String(err) },
       );
     }
   }
 
-  return added;
-}
-
-function numberOr(v: unknown, fallback: number): number {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+  return { added, test: testResult };
 }
 
 export function registerModelRoutes(app: FastifyInstance, container: Container): void {
@@ -137,31 +129,30 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const b = (req.body ?? {}) as Record<string, unknown>;
     const providerId = String(b.providerId ?? "").trim();
     if (!providerId) return fail(reply, 400, "providerId is required");
-    if (!container.providerRepo.findById(providerId)) return fail(reply, 400, `Unknown provider "${providerId}"`);
+    const prow = container.providerRepo.findById(providerId);
+    if (!prow) return fail(reply, 400, `Unknown provider "${providerId}"`);
     const modelId = String(b.modelId ?? "").trim();
     if (!modelId) return fail(reply, 400, "modelId is required (the provider's model name, e.g. gpt-4o-mini)");
+    // Capabilities are auto-detected when the client does not supply them.
+    const detectedCapabilities = detectModelCapabilities(modelId);
+    const capabilities = isMeaningfulCapabilities(b.capabilities)
+      ? (b.capabilities as Model["capabilities"])
+      : detectedCapabilities;
     const model = container.modelRepo.create({
       providerId,
       modelId,
       displayName: String(b.displayName ?? modelId),
-      contextWindow: numberOr(b.contextWindow, 128000),
+      contextWindow: numberOr(b.contextWindow, detectModelInfo(modelId).contextWindow),
       inputCostPer1k: numberOr(b.inputCostPer1k, 0),
       outputCostPer1k: numberOr(b.outputCostPer1k, 0),
-      capabilities: (b.capabilities as Model["capabilities"]) ?? {
-        vision: false,
-        tools: true,
-        structuredOutput: false,
-        code: true,
-        reasoning: false,
-        streaming: true,
-      },
+      capabilities,
       active: b.active !== false,
       priority: numberOr(b.priority, 100),
       fallbackPriority: numberOr(b.fallbackPriority, 100),
       tags: Array.isArray(b.tags) ? (b.tags as string[]) : [],
     });
     reply.code(201);
-    return model;
+    return { ...model, detectedCapabilities };
   });
 
   app.get("/models/:id", { schema: { tags: ["models"] } }, async (req, reply) => {
@@ -175,6 +166,9 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const b = (req.body ?? {}) as Record<string, unknown>;
     const r = container.modelRepo.findById(id);
     if (!r) return fail(reply, 404, "model not found");
+    if (isMeaningfulCapabilities(b.capabilities)) {
+      // Nothing special — patch propagates capabilities as given.
+    }
     const m = { ...r.data, ...b, id, createdAt: r.data.createdAt, updatedAt: new Date().toISOString() } as Model;
     container.modelRepo.upsert(m);
     return m;
@@ -196,6 +190,54 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const m = { ...r.data, active: false, updatedAt: new Date().toISOString() };
     container.modelRepo.upsert(m);
     return m;
+  });
+
+  // Pre-registration model test: verifies a provider + model (before the model
+  // is saved), surfaces the exact endpoint, confirms the model is in the catalog,
+  // and reports the auto-detected capabilities.
+  app.post("/models/test", { schema: { tags: ["models"] } }, async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const providerId = String(b.providerId ?? "").trim();
+    if (!providerId) return fail(reply, 400, "providerId is required");
+    const prow = container.providerRepo.findById(providerId);
+    if (!prow) return fail(reply, 400, `Unknown provider "${providerId}"`);
+    const modelId = String(b.modelId ?? "").trim();
+    if (!modelId) return fail(reply, 400, "modelId is required");
+    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
+    const info = detectModelInfo(modelId);
+    // `found` is only meaningful when the catalog was actually enumerated.
+    const catalogChecked = Array.isArray(test.models);
+    const found = catalogChecked ? test.models!.includes(info.id) : undefined;
+    return {
+      providerId,
+      modelId: info.id,
+      found,
+      capabilities: info.capabilities,
+      detectedCapabilities: info.capabilities,
+      ...test,
+    };
+  });
+
+  // Live check for a specific model: verifies the provider, surfaces the URL,
+  // confirms the model is in the catalog, and reports its detected capabilities.
+  app.post("/models/:id/test", { schema: { tags: ["models"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const r = container.modelRepo.findById(id);
+    if (!r) return fail(reply, 404, "model not found");
+    const prow = container.providerRepo.findById(r.data.providerId);
+    if (!prow) return fail(reply, 404, `Provider not found for model "${r.data.modelId}"`);
+    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
+    const modelId = r.data.modelId;
+    const catalogChecked = Array.isArray(test.models);
+    const found = catalogChecked ? test.models!.includes(modelId) : undefined;
+    return {
+      modelId,
+      providerId: prow.data.id,
+      found,
+      capabilities: r.data.capabilities,
+      detectedCapabilities: detectModelInfo(modelId).capabilities,
+      ...test,
+    };
   });
 
   app.delete("/models/:id", { schema: { tags: ["models"] } }, async (req, reply) => {
@@ -255,19 +297,28 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     draft.active = b.active === false ? false : readiness.ready;
     const p = container.providerRepo.create(draft);
     reply.code(201);
-    const status = withStatus(p);
+    type ProviderStatus = ReturnType<typeof withStatus> & {
+      discoveredModels?: number;
+      test?: ProviderTestResult;
+      message?: string;
+    };
+    const status: ProviderStatus = withStatus(p);
 
-    // 🤖 Auto-discover and add models from the newly created provider
+    // 🤖 Auto-discover and add models from the newly created provider (real catalog,
+    //    capabilities auto-detected). The live test result is surfaced so the UI can
+    //    show the exact endpoint and the discovered models.
     try {
-      const added = await discoverAndAddModels(p.id, p, container);
+      const { added, test } = await discoverAndAddModels(p.id, p, container);
       if (added.length > 0) {
         logger.info(`Discovered ${added.length} models for new provider ${p.name} (${p.id})`);
       }
-      // Optionally attach discovered model count to the response
       status.discoveredModels = added.length;
+      status.test = test;
       status.message = added.length
         ? `Provider created and ${added.length} model(s) discovered automatically`
-        : "Provider created (no models discovered)";
+        : test.ok
+          ? "Provider created (no models discovered)"
+          : `Provider created — ${test.message}`;
     } catch (err) {
       logger.warn(`Model discovery failed for new provider ${p.id}`, { err: String(err) });
       status.discoveredModels = 0;
@@ -281,6 +332,46 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const p = container.providerRepo.findById(id)?.data;
     return p ? withStatus(p) : fail(reply, 404, "provider not found");
+  });
+
+  // Pre-registration connectivity test — never saves anything. Feeds the
+  // "Test connection" button inside the Add Provider form so users can verify a
+  // provider (and see the endpoint + models) BEFORE committing it.
+  app.post("/providers/test", { schema: { tags: ["providers"] } }, async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const type = String(b.type ?? "openai") as ModelProvider["type"];
+    if (!PROVIDER_TYPES.includes(type)) return fail(reply, 400, `Unknown provider type "${type}"`, { allowed: PROVIDER_TYPES });
+    const preset = PROVIDER_PRESETS[type];
+    const authType = (typeof b.authType === "string" ? b.authType : preset.authType) as ModelProvider["authType"];
+    if (!AUTH_TYPES.includes(authType)) return fail(reply, 400, `Unknown authType "${authType}"`);
+    const apiFormat = (typeof b.apiFormat === "string" ? b.apiFormat : preset.apiFormat) as ModelProvider["apiFormat"];
+    if (!API_FORMATS.includes(apiFormat)) return fail(reply, 400, `Unknown apiFormat "${apiFormat}"`);
+    const baseUrl = typeof b.baseUrl === "string" && b.baseUrl.trim() ? b.baseUrl.trim() : preset.baseUrl;
+    const secretRef = typeof b.secretRef === "string" && b.secretRef.trim() ? b.secretRef.trim() : preset.secretRef;
+    const secretValue = typeof b.secretValue === "string" && b.secretValue.trim() ? b.secretValue.trim() : undefined;
+    const name = String(b.name ?? "").trim() || preset.label;
+    const draft: ModelProvider = {
+      id: "draft",
+      name,
+      type,
+      baseUrl,
+      secretRef,
+      // Encrypt the pasted key just long enough to be read back by the test;
+      // nothing is stored.
+      secretValueEnc: secretValue ? JSON.stringify(encryptSecret(secretValue, "provider-secret")) : undefined,
+      authType,
+      apiFormat,
+      timeoutMs: numberOr(b.timeoutMs, 60000),
+      maxTokensDefault: numberOr(b.maxTokensDefault, 4096),
+      defaultTemperature: numberOr(b.defaultTemperature, 0.3),
+      rateLimitPerMinute: numberOr(b.rateLimitPerMinute, 200),
+      active: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const timeoutMs = Math.min(numberOr(b.timeoutMs, 60000), 15000);
+    const result = await testProviderConnection(draft, { timeoutMs });
+    return { providerId: undefined, ...result };
   });
 
   app.patch("/providers/:id", { schema: { tags: ["providers"] } }, async (req, reply) => {
@@ -332,7 +423,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     return withStatus(p);
   });
 
-  // Live connectivity check (key presence + model catalog call).
+  // Live connectivity check (key presence + model catalog call) for a saved provider.
   app.post("/providers/:id/test", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.providerRepo.findById(id);

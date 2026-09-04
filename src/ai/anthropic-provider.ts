@@ -1,5 +1,6 @@
 import type { ChatRequest, ChatResponse, IModelProvider, ProviderModelInfo } from "./types.js";
 import type { ModelProvider } from "../domain/entities.js";
+import { buildAnthropicChatEndpoint } from "./provider-urls.js";
 import { logger } from "../logger.js";
 
 /** Anthropic Messages API adapter. */
@@ -35,7 +36,6 @@ export class AnthropicProvider implements IModelProvider {
   }
 
   async chat(req: ChatRequest): Promise<ChatResponse> {
-    const baseUrl = this.config.baseUrl ?? "https://api.anthropic.com/v1";
     const key = this.resolveApiKey();
     const system = req.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
     const messages = req.messages
@@ -50,7 +50,7 @@ export class AnthropicProvider implements IModelProvider {
       temperature: req.temperature ?? this.config.defaultTemperature,
     };
 
-    const res = await fetch(`${baseUrl.replace(/\/$/, "")}/messages`, {
+    const res = await fetch(buildAnthropicChatEndpoint(this.config), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

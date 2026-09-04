@@ -133,6 +133,25 @@
     return `<span class="badge badge-${map[s] || "muted"}">${esc(s)}</span>`;
   };
 
+  /* ---------- model capability badges + provider test rendering ---------- */
+  const CAP_NAMES = { vision: "vision", tools: "tools", structuredOutput: "structured", code: "code", reasoning: "reasoning", streaming: "streaming" };
+  function capsBadges(caps) {
+    if (!caps) return "";
+    return Object.keys(CAP_NAMES).filter((k) => caps[k]).map((k) => `<span class="badge badge-muted">${CAP_NAMES[k]}</span>`).join(" ");
+  }
+  // Render a provider/model test result with the requested URL + discovered models.
+  function renderTestResult(r) {
+    if (!r) return "";
+    const url = r.url ? `<div class="test-url mono" style="margin-top:6px;font-size:10px;word-break:break-all">→ ${esc(r.url)}</div>` : "";
+    const infos = r.modelInfos || [];
+    const list = infos.slice(0, 12).map((m) => `<div class="test-model" style="margin-top:3px"><span class="mono">${esc(m.id)}</span> ${capsBadges(m.capabilities)}</div>`).join("");
+    const modelsSection = list ? `<div class="test-models" style="margin-top:6px">${list}${infos.length > 12 ? "…" : ""}</div>` : "";
+    const caps = r.detectedCapabilities || r.capabilities;
+    const capsSection = caps && typeof caps === "object" ? `<div style="margin-top:6px">Capabilities: ${capsBadges(caps)}</div>` : "";
+    const found = typeof r.found === "boolean" ? ` <span class="badge badge-${r.found ? "ok" : "err"}">${r.found ? "found in catalog" : "not in catalog"}</span>` : "";
+    return `<div class="test-result ${r.ok ? "ok" : "err"}">${r.ok ? "✓" : "✗"} ${esc(r.message)}${found}${r.hint ? "<br>" + esc(r.hint) : ""}${modelsSection}${capsSection}${url}</div>`;
+  }
+
   /* ---------- modal ---------- */
   function openModal(title, bodyHtml) {
     $("#modal-title").textContent = title;
@@ -923,29 +942,53 @@
     const provName = (id) => providers.find((p) => p.id === id)?.name || id;
     $("#content").innerHTML = `<div class="overview"><div><h1>Models</h1><p>Model Registry — routing candidates for agents</p></div><button class="btn btn-primary" onclick="openModel()">＋ Add Model</button></div>
       <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Display Name</th><th>Model ID</th><th>Provider</th><th>Context</th><th>Caps</th><th>Active</th><th></th></tr></thead><tbody>
-      ${list.map((m) => `<tr><td><strong>${esc(m.displayName)}</strong></td><td class="mono">${esc(m.modelId)}</td><td>${esc(provName(m.providerId))}</td><td>${Number(m.contextWindow || 0).toLocaleString()}</td><td>${[m.capabilities?.code&&'code',m.capabilities?.reasoning&&'reasoning',m.capabilities?.vision&&'vision',m.capabilities?.tools&&'tools'].filter(Boolean).map((x)=>`<span class="badge badge-muted">${x}</span>`).join(" ")}</td><td>${m.active?'<span class="badge badge-ok">active</span>':'<span class="badge badge-muted">inactive</span>'}</td>
-        <td style="white-space:nowrap;text-align:right"><button class="btn btn-ghost" onclick="modelToggle('${m.id}', ${m.active ? "false" : "true"})">${m.active ? "Deactivate" : "Activate"}</button><button class="btn btn-ghost" onclick="modelDelete('${m.id}')">🗑</button></td></tr>`).join("") || `<tr><td colspan="7">${emptyState("🧠", "No models", "Add a model and attach it to a provider.")}</td></tr>`}
+      ${list.map((m) => `<tr><td><strong>${esc(m.displayName)}</strong></td><td class="mono">${esc(m.modelId)}</td><td>${esc(provName(m.providerId))}</td><td>${Number(m.contextWindow || 0).toLocaleString()}</td><td>${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</td><td>${m.active?'<span class="badge badge-ok">active</span>':'<span class="badge badge-muted">inactive</span>'}</td>
+        <td style="white-space:nowrap;text-align:right"><button class="btn btn-ghost" onclick="modelTest('${m.id}')">Test</button><button class="btn btn-ghost" onclick="modelToggle('${m.id}', ${m.active ? "false" : "true"})">${m.active ? "Deactivate" : "Activate"}</button><button class="btn btn-ghost" onclick="modelDelete('${m.id}')">🗑</button><div id="model-test-${esc(m.id)}"></div></td></tr>`).join("") || `<tr><td colspan="7">${emptyState("🧠", "No models", "Add a model and attach it to a provider.")}</td></tr>`}
       </tbody></table></div></div>`;
   });
   window.openModel = async () => {
     const providers = await api("/providers").catch(() => []);
     openModal("Add Model", `
       <div class="field"><label>Provider</label><select class="select" id="m-prov">${providers.map((p) => `<option value="${esc(p.id)}" ${p.active ? "" : "disabled"}>${esc(p.name)}${p.active ? "" : " (inactive)"}</option>`).join("")}</select></div>
-      <div class="field"><label>Model ID <span class="select-count">provider's model name</span></label><input class="input mono" id="m-id" placeholder="gpt-4o-mini / claude-sonnet-4-5 / gemini-2.5-pro"/></div>
-      <div class="field"><label>Display name</label><input class="input" id="m-name" placeholder="GPT-4o mini"/></div>
+      <div class="field"><label>Model ID <span class="select-count">provider's model name — capabilities are detected automatically</span></label><input class="input mono" id="m-id" placeholder="gpt-4o-mini / claude-sonnet-4-5 / gemini-2.5-pro"/></div>
+      <div class="field"><label>Display name <span class="select-count">optional — auto-filled from Model ID</span></label><input class="input" id="m-name" placeholder="GPT-4o mini"/></div>
       <div class="grid-2"><div class="field"><label>Context window</label><input class="input" id="m-ctx" value="128000"/></div><div class="field"><label>Priority (lower = preferred)</label><input class="input" id="m-prio" value="100"/></div></div>
-      <div class="field"><label>Capabilities</label><div class="chip-group" id="m-caps">${["code","tools","reasoning","vision","structuredOutput","streaming"].map((c) => `<span class="chip ${["code","tools","streaming"].includes(c) ? "on" : ""}" data-id="${c}">${c}</span>`).join("")}</div></div>
-      <div class="flex"><button class="btn btn-primary" id="m-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
-    $("#m-caps").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (c) c.classList.toggle("on"); });
+      <div class="field-hint">Capabilities (vision / tools / reasoning / structured output / code / streaming) are detected automatically from the model. Use <strong>Test</strong> to verify the model & see the exact endpoint.</div>
+      <div class="flex"><button class="btn" id="m-test">Test model</button><button class="btn btn-primary" id="m-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>
+      <div id="m-test-result"></div>`);
+    $("#m-id").addEventListener("input", () => {
+      const id = $("#m-id").value.trim();
+      if (id && !$("#m-name").value.trim()) $("#m-name").placeholder = id;
+    });
+    $("#m-test").onclick = async () => {
+      const el = $("#m-test-result");
+      const modelId = $("#m-id").value.trim();
+      const providerId = $("#m-prov").value;
+      if (!modelId) { toast("Model ID required", "", "err"); return; }
+      if (!providerId) { toast("Provider required", "", "err"); return; }
+      el.innerHTML = `<div class="test-result">Testing…</div>`;
+      try {
+        const r = await api("/models/test", { method: "POST", body: { providerId, modelId } });
+        el.innerHTML = renderTestResult(r);
+        // Surface detected capabilities on the form.
+        const caps = r.detectedCapabilities || r.capabilities;
+        if (caps) {
+          const auto = document.createElement("div");
+          auto.className = "field-hint";
+          auto.innerHTML = `Detected capabilities: ${capsBadges(caps)}`;
+          el.appendChild(auto);
+        }
+        toast(r.ok ? "Model reachable" : "Cannot test yet", r.message, r.ok ? "ok" : "warn");
+      } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
+    };
     $("#m-go").onclick = async () => {
       const modelId = $("#m-id").value.trim();
       if (!modelId) { toast("Model ID required", "", "err"); return; }
-      const on = new Set($$("#m-caps .chip.on").map((c) => c.dataset.id));
       try {
-        await api("/models", { method: "POST", body: {
+        const m = await api("/models", { method: "POST", body: {
           providerId: $("#m-prov").value, modelId, displayName: $("#m-name").value.trim() || modelId,
           contextWindow: Number($("#m-ctx").value) || 128000, priority: Number($("#m-prio").value) || 100,
-          capabilities: { vision: on.has("vision"), tools: on.has("tools"), structuredOutput: on.has("structuredOutput"), code: on.has("code"), reasoning: on.has("reasoning"), streaming: on.has("streaming") },
+          // capabilities omitted => auto-detected by the server
         }});
         closeModal(); toast("Model added", modelId, "ok"); refreshCurrent();
       } catch (e) { toast("Error", e.message, "err"); }
@@ -959,6 +1002,15 @@
     if (!confirm("Delete this model?")) return;
     try { await api(`/models/${id}`, { method: "DELETE" }); toast("Model deleted", "", "ok"); refreshCurrent(); }
     catch (e) { toast("Error", e.message, "err"); }
+  };
+  window.modelTest = async (id) => {
+    const el = document.getElementById("model-test-" + id);
+    if (el) el.innerHTML = `<div class="test-result">Testing…</div>`;
+    try {
+      const r = await api(`/models/${id}/test`, { method: "POST" });
+      if (el) el.innerHTML = renderTestResult(r);
+      toast(r.ok ? "Model provider OK" : "Model test failed", r.message, r.ok ? "ok" : "err");
+    } catch (e) { if (el) el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
   };
 
   /* PROVIDERS */
@@ -1002,8 +1054,7 @@
     if (el) el.innerHTML = `<div class="test-result">Testing…</div>`;
     try {
       const r = await api(`/providers/${id}/test`, { method: "POST" });
-      const models = r.models?.length ? `\nModels: ${r.models.slice(0, 8).join(", ")}${r.models.length > 8 ? "…" : ""}` : "";
-      if (el) el.innerHTML = `<div class="test-result ${r.ok ? "ok" : "err"}">${r.ok ? "✓" : "✗"} ${esc(r.message)}${r.hint ? "\n" + esc(r.hint) : ""}${esc(models)}</div>`;
+      if (el) el.innerHTML = renderTestResult(r);
       toast(r.ok ? "Provider OK" : "Provider test failed", r.message, r.ok ? "ok" : "err");
     } catch (e) { if (el) el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
   };
@@ -1030,7 +1081,8 @@
         <div class="field"><label>Timeout (ms)</label><input class="input" id="pv-timeout" value="${cur.timeoutMs || 60000}"/></div>
         <div class="field"><label>Max tokens default</label><input class="input" id="pv-maxtok" value="${cur.maxTokensDefault || 4096}"/></div>
       </div>
-      <div class="flex"><button class="btn btn-primary" id="pv-go">${editId ? "Save" : "Create"}</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+      <div class="flex"><button class="btn" id="pv-test">Test connection</button><button class="btn btn-primary" id="pv-go">${editId ? "Save" : "Create"}</button><button class="btn" onclick="closeModal()">Cancel</button></div>
+      <div id="pv-test-result"></div>`);
     const applyPreset = () => {
       const pr = meta.presets?.[$("#pv-type").value]; if (!pr) return;
       if (!editId) { $("#pv-base").value = pr.baseUrl || ""; $("#pv-secret").value = pr.secretRef || ""; if (!$("#pv-name").value) $("#pv-name").placeholder = pr.label; }
@@ -1043,6 +1095,25 @@
       if (v && !/^[A-Z][A-Z0-9_]*$/i.test(v)) { h.className = "field-hint err"; h.textContent = "This must be an environment variable NAME like OPENAI_API_KEY (not the key value)."; }
       else { h.className = "field-hint"; h.textContent = v ? `The server reads process.env.${v}` : ""; }
     });
+    // Test connection BEFORE saving. In edit mode we test the live stored
+    // provider; in add mode we test the draft config via the pre-registration
+    // endpoint (which never persists anything).
+    $("#pv-test").onclick = async () => {
+      const el = $("#pv-test-result");
+      const body = {
+        name: $("#pv-name").value.trim(), type: $("#pv-type").value, baseUrl: $("#pv-base").value.trim(), secretRef: $("#pv-secret").value.trim(),
+        secretValue: $("#pv-value").value.trim(),
+        authType: $("#pv-auth").value, apiFormat: $("#pv-format").value, timeoutMs: Number($("#pv-timeout").value) || 60000, maxTokensDefault: Number($("#pv-maxtok").value) || 4096,
+      };
+      el.innerHTML = `<div class="test-result">Testing…</div>`;
+      try {
+        const r = editId
+          ? await api(`/providers/${editId}/test`, { method: "POST" })
+          : await api("/providers/test", { method: "POST", body });
+        el.innerHTML = renderTestResult(r);
+        toast(r.ok ? "Provider connection OK" : "Provider test failed", r.message, r.ok ? "ok" : "err");
+      } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
+    };
     $("#pv-go").onclick = async () => {
       const body = {
         name: $("#pv-name").value.trim(), type: $("#pv-type").value, baseUrl: $("#pv-base").value.trim(), secretRef: $("#pv-secret").value.trim(),
