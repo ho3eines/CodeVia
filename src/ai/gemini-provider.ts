@@ -46,7 +46,9 @@ export class GeminiProvider implements IModelProvider {
       body: JSON.stringify({
         systemInstruction: system ? { parts: [{ text: system }] } : undefined,
         contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: { temperature: req.temperature ?? this.config.defaultTemperature },
+        generationConfig: req.omitTemperature
+          ? {}
+          : { temperature: req.temperature ?? this.config.defaultTemperature },
       }),
       signal: AbortSignal.timeout(this.config.timeoutMs),
     });

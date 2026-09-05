@@ -47,7 +47,7 @@ export class AnthropicProvider implements IModelProvider {
       max_tokens: req.maxTokens ?? this.config.maxTokensDefault,
       system,
       messages,
-      temperature: req.temperature ?? this.config.defaultTemperature,
+      ...(req.omitTemperature ? {} : { temperature: req.temperature ?? this.config.defaultTemperature }),
     };
 
     const res = await fetch(buildAnthropicChatEndpoint(this.config), {

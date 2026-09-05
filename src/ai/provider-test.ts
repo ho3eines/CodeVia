@@ -302,13 +302,29 @@ export async function testProviderConnection(
  * the model catalog): here we verify the model actually answers.
  * ------------------------------------------------------------------ */
 
+/** Per-model overrides applied on top of the provider defaults. */
+export interface ModelTuning {
+  /** Sampling temperature for this model; falls back to 0 (deterministic test). */
+  temperature?: number;
+  /** Max output tokens for this model; falls back to a short test budget. */
+  maxTokens?: number;
+  /** Drop `temperature` from the payload entirely (routes that reject it). */
+  omitTemperature?: boolean;
+}
+
 /** Build the request parts for a single chat message, per API format. */
 function buildChatRequest(
   config: ModelProvider,
   modelId: string,
   message: string,
   apiKey?: string,
+  tuning: ModelTuning = {},
 ): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
+  // A model route may mandate a specific temperature (or reject the field
+  // outright), so both the value and its presence are configurable per model.
+  const temperature = tuning.temperature ?? 0;
+  const maxTokens = tuning.maxTokens ?? 64;
+  const temp = tuning.omitTemperature ? {} : { temperature };
   switch (config.apiFormat) {
     case "anthropic": {
       const headers: Record<string, string> = { "content-type": "application/json", "anthropic-version": "2023-06-01" };
@@ -316,7 +332,7 @@ function buildChatRequest(
       return {
         url: buildAnthropicChatEndpoint(config),
         headers,
-        body: { model: modelId, max_tokens: 64, temperature: 0, messages: [{ role: "user", content: message }] },
+        body: { model: modelId, max_tokens: maxTokens, ...temp, messages: [{ role: "user", content: message }] },
       };
     }
     case "gemini": {
@@ -325,7 +341,7 @@ function buildChatRequest(
         headers: { "content-type": "application/json" },
         body: {
           contents: [{ role: "user", parts: [{ text: message }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 64 },
+          generationConfig: { ...temp, maxOutputTokens: maxTokens },
         },
       };
     }
@@ -333,7 +349,12 @@ function buildChatRequest(
       return {
         url: buildOllamaChatEndpoint(config),
         headers: { "content-type": "application/json" },
-        body: { model: modelId, stream: false, messages: [{ role: "user", content: message }] },
+        body: {
+          model: modelId,
+          stream: false,
+          ...(tuning.omitTemperature ? {} : { options: { temperature } }),
+          messages: [{ role: "user", content: message }],
+        },
       };
     }
     case "openai":
@@ -349,8 +370,8 @@ function buildChatRequest(
         headers,
         body: {
           model: modelId,
-          temperature: 0,
-          max_tokens: 64,
+          ...temp,
+          max_tokens: maxTokens,
           stream: false,
           messages: [{ role: "user", content: message }],
         },
@@ -410,7 +431,7 @@ function extractChatReply(apiFormat: ModelProvider["apiFormat"], payload: unknow
 export async function testModelChat(
   config: ModelProvider,
   modelId: string,
-  opts: { message?: string; timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+  opts: { message?: string; timeoutMs?: number; fetchImpl?: typeof fetch; tuning?: ModelTuning } = {},
 ): Promise<ModelChatTestResult> {
   const message = (opts.message ?? DEFAULT_MODEL_TEST_MESSAGE).trim() || DEFAULT_MODEL_TEST_MESSAGE;
   const apiKey = resolveProviderKey(config);
@@ -424,8 +445,8 @@ export async function testModelChat(
     const res = await mock.chat({
       modelId,
       messages: [{ role: "user", content: message }],
-      temperature: 0,
-      maxTokens: 64,
+      temperature: opts.tuning?.temperature ?? 0,
+      maxTokens: opts.tuning?.maxTokens ?? 64,
     });
     const latencyMs = Date.now() - started;
     return {
@@ -459,7 +480,7 @@ export async function testModelChat(
     };
   }
 
-  const { url, headers, body } = buildChatRequest(config, modelId, message, apiKey);
+  const { url, headers, body } = buildChatRequest(config, modelId, message, apiKey, opts.tuning ?? {});
   const displayUrl = maskUrlSecrets(url);
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = Math.min(opts.timeoutMs ?? 15_000, config.timeoutMs || 15_000);
@@ -501,7 +522,9 @@ export async function testModelChat(
         ? `The API key was rejected by the provider — check that it is valid and has access to "${modelId}".`
         : res.status === 404
           ? `Endpoint or model not found — check the Base URL, API format, and that "${modelId}" exists for this provider.`
-          : undefined;
+          : res.status === 400 && /temperature|top_p|max_tokens|parameter/i.test(String(apiMessage))
+            ? `This model route rejected a request parameter. Open Edit on the model and adjust Temperature / Max tokens (or tick "omit temperature") to match what the route allows.`
+            : undefined;
     return {
       ok: false,
       keyPresent,

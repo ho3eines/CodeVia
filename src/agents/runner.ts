@@ -224,7 +224,11 @@ export class AgentRunner {
             { role: "system", content: agent.systemPrompt },
             { role: "user", content: context },
           ],
-          temperature: 0.3,
+          // A model's own temperature wins over the run default — some routes
+          // only accept one specific value.
+          temperature: model.temperature ?? 0.3,
+          maxTokens: model.maxTokens,
+          omitTemperature: model.omitTemperature === true,
         });
         this.deps.costRepo.create({
           providerId: providerConfig.id,

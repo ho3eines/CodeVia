@@ -69,8 +69,11 @@ export class AiTextService {
         const response = await provider.chat({
           modelId: model.modelId,
           messages: req.messages,
-          temperature: req.temperature ?? 0.2,
-          maxTokens: req.maxTokens,
+          // Per-model tuning takes precedence over the generic default so a
+          // route that mandates a fixed temperature keeps working.
+          temperature: model.temperature ?? req.temperature ?? 0.2,
+          maxTokens: model.maxTokens ?? req.maxTokens,
+          omitTemperature: model.omitTemperature === true,
         });
         this.deps.costRepo.create({
           providerId: providerConfig.id,

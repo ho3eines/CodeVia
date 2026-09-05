@@ -21,6 +21,8 @@ export interface ChatRequest {
   messages: ChatMessage[];
   temperature?: number;
   maxTokens?: number;
+  /** Omit `temperature` from the provider payload (routes that reject the field). */
+  omitTemperature?: boolean;
   tools?: ToolCallSpec[];
   structuredOutput?: Record<string, unknown>;
   jsonMode?: boolean;
