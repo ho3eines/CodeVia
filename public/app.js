@@ -1316,7 +1316,13 @@
         const p = editId ? await api("/providers/" + editId, { method: "PATCH", body }) : await api("/providers", { method: "POST", body });
         closeModal();
         if (p.readiness && p.readiness.ready === false) toast("Provider saved (inactive)", p.readiness.reason + (p.readiness.hint ? " — " + p.readiness.hint : ""), "warn");
-        else toast(editId ? "Provider updated" : "Provider created", p.name + (p.active ? " · active" : ""), "ok");
+        else {
+          // The server auto-adds catalog models missing from the Models section
+          // after both create and edit — surface the result in the toast.
+          let detail = p.name + (p.active ? " · active" : "");
+          if (typeof p.discoveredModels === "number" && p.discoveredModels > 0) detail += ` · ${p.discoveredModels} model(s) added to Models`;
+          toast(editId ? "Provider updated" : "Provider created", detail, "ok");
+        }
         refreshCurrent();
       } catch (e) { toast("Error", e.message, "err"); }
     };

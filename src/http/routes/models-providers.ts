@@ -122,6 +122,54 @@ async function discoverAndAddModels(
   return { added, test: testResult };
 }
 
+type ProviderStatus = ReturnType<typeof withStatus> & {
+  discoveredModels?: number;
+  test?: ProviderTestResult;
+  message?: string;
+};
+
+/**
+ * Best-effort model discovery attached to the create/edit response. After a
+ * provider is created OR edited, every model in the provider's live catalog
+ * that is not yet in the Models section is added automatically (capabilities
+ * auto-detected, no user input required). A failed catalog call never fails
+ * the create/edit itself — it is only surfaced in `status.message` so the UI
+ * can tell the user why no models appeared.
+ */
+async function attachDiscovery(
+  status: ProviderStatus,
+  p: ModelProvider,
+  container: Container,
+  action: "created" | "updated",
+): Promise<void> {
+  const base = `Provider ${action}`;
+  if (p.type === "mock") {
+    status.discoveredModels = 0;
+    status.message = `${base} (mock provider — no live model catalog)`;
+    return;
+  }
+  let added: string[] = [];
+  let test: ProviderTestResult;
+  try {
+    ({ added, test } = await discoverAndAddModels(p.id, p, container));
+  } catch (err) {
+    logger.warn(`Model discovery failed for provider ${p.id} after ${action}`, { err: String(err) });
+    status.discoveredModels = 0;
+    status.message = `${base} (model discovery failed - check logs)`;
+    return;
+  }
+  if (added.length > 0) {
+    logger.info(`Discovered ${added.length} model(s) for provider ${p.name} (${p.id}) after ${action}`);
+  }
+  status.discoveredModels = added.length;
+  status.test = test;
+  status.message = added.length
+    ? `${base} and ${added.length} model(s) added to the Models section`
+    : test.ok
+      ? `${base} — all catalog models are already in the Models section`
+      : `${base} — ${test.message}`;
+}
+
 export function registerModelRoutes(app: FastifyInstance, container: Container): void {
   app.get("/models", { schema: { tags: ["models"] } }, async () => {
     return container.modelRepo.findMany().map((r) => r.data);
@@ -312,34 +360,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     draft.active = b.active === false ? false : readiness.ready;
     const p = container.providerRepo.create(draft);
     reply.code(201);
-    type ProviderStatus = ReturnType<typeof withStatus> & {
-      discoveredModels?: number;
-      test?: ProviderTestResult;
-      message?: string;
-    };
     const status: ProviderStatus = withStatus(p);
 
     // 🤖 Auto-discover and add models from the newly created provider (real catalog,
     //    capabilities auto-detected). The live test result is surfaced so the UI can
     //    show the exact endpoint and the discovered models.
-    try {
-      const { added, test } = await discoverAndAddModels(p.id, p, container);
-      if (added.length > 0) {
-        logger.info(`Discovered ${added.length} models for new provider ${p.name} (${p.id})`);
-      }
-      status.discoveredModels = added.length;
-      status.test = test;
-      status.message = added.length
-        ? `Provider created and ${added.length} model(s) discovered automatically`
-        : test.ok
-          ? "Provider created (no models discovered)"
-          : `Provider created — ${test.message}`;
-    } catch (err) {
-      logger.warn(`Model discovery failed for new provider ${p.id}`, { err: String(err) });
-      status.discoveredModels = 0;
-      status.message = "Provider created (model discovery failed - check logs)";
-    }
-
+    await attachDiscovery(status, p, container, "created");
     return status;
   });
 
@@ -423,7 +449,13 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const p = { ...r.data, ...patch, id, createdAt: r.data.createdAt, updatedAt: new Date().toISOString() } as ModelProvider;
     container.providerRepo.upsert(p);
     container.providerRegistry.invalidate(id);
-    return withStatus(p);
+    // 🤖 Re-run model discovery after the edit (same behavior as on create): any
+    //    model in the provider's live catalog that is missing from the Models
+    //    section is added automatically. Best-effort — a failed catalog call
+    //    never fails the edit itself.
+    const status: ProviderStatus = withStatus(p);
+    await attachDiscovery(status, p, container, "updated");
+    return status;
   });
 
   // Approve / enable a provider — refuses when it cannot work (missing key), unless ?force=true.

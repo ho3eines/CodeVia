@@ -438,6 +438,92 @@ describe("provider create + saved-provider tests", () => {
     expect(captured[0].url).toBe("http://localhost:9999/v1/models");
   });
 
+  it("auto-discovers and adds models after EDITING a provider (catalog unavailable at create time)", async () => {
+    const srv = await boot();
+    // At create time the catalog rejects the key — nothing gets added yet.
+    stubFetch(() => new Response(JSON.stringify({ error: { message: "Invalid API key" } }), { status: 401 }));
+    const created = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Local LLM", type: "openai-compatible", baseUrl: "http://localhost:9999/v1", authType: "bearer", secretValue: "sk-bad-123456" },
+    });
+    expect(created.statusCode).toBe(201);
+    const pid = created.json().id;
+    expect(created.json().discoveredModels).toBe(0);
+
+    // The user fixes the key by EDITING the provider — the models missing from
+    // the Models section must now be added automatically.
+    const captured = stubFetch((url) =>
+      url.endsWith("/models")
+        ? new Response(JSON.stringify({ data: [{ id: "lm-1" }, { id: "lm-2" }] }), { status: 200 })
+        : new Response("{}", { status: 404 }),
+    );
+    const edited = await srv.inject({ method: "PATCH", url: `/providers/${pid}`, payload: { secretValue: "sk-good-123456" } });
+    expect(edited.statusCode).toBe(200);
+    const body = edited.json();
+    expect(body.discoveredModels).toBe(2);
+    expect(body.test.ok).toBe(true);
+    expect(body.message).toMatch(/2 model/);
+    // The models really landed in the Model Registry for THIS provider.
+    const models = (await srv.inject({ method: "GET", url: "/models" })).json();
+    expect(models.map((m: { modelId: string }) => m.modelId)).toEqual(expect.arrayContaining(["lm-1", "lm-2"]));
+    expect(models.filter((m: { providerId: string }) => m.providerId === pid)).toHaveLength(2);
+    // The edit used the NEW key against the catalog endpoint.
+    expect(captured[0].url).toBe("http://localhost:9999/v1/models");
+    expect(captured[0].headers.get("authorization")).toBe("Bearer sk-good-123456");
+  });
+
+  it("model re-discovery after edit is idempotent (no duplicate model rows)", async () => {
+    const srv = await boot();
+    stubFetch((url) =>
+      url.endsWith("/models")
+        ? new Response(JSON.stringify({ data: [{ id: "lm-1" }, { id: "lm-2" }] }), { status: 200 })
+        : new Response("{}", { status: 404 }),
+    );
+    const created = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Idem", type: "openai-compatible", baseUrl: "http://localhost:9998/v1", authType: "none", apiFormat: "openai" },
+    });
+    const pid = created.json().id;
+    expect(created.statusCode).toBe(201);
+    expect(created.json().discoveredModels).toBe(2);
+
+    // Re-saving the provider (e.g. just the name) must not duplicate models.
+    const edited = await srv.inject({ method: "PATCH", url: `/providers/${pid}`, payload: { name: "Idem" } });
+    expect(edited.statusCode).toBe(200);
+    expect(edited.json().discoveredModels).toBe(0);
+    const models = (await srv.inject({ method: "GET", url: "/models" })).json();
+    expect(models.filter((m: { providerId: string }) => m.providerId === pid)).toHaveLength(2);
+  });
+
+  it("a failing catalog call never breaks the provider edit (best-effort discovery)", async () => {
+    const srv = await boot();
+    stubFetch(() => new Response(JSON.stringify({ error: { message: "bad key" } }), { status: 401 }));
+    const created = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Flaky", type: "openai-compatible", baseUrl: "http://localhost:9997/v1", authType: "bearer", secretValue: "sk-x-123456" },
+    });
+    const pid = created.json().id;
+    // Edit while the catalog is still failing: 200, zero models, reason surfaced.
+    const edited = await srv.inject({ method: "PATCH", url: `/providers/${pid}`, payload: { name: "Flaky" } });
+    expect(edited.statusCode).toBe(200);
+    expect(edited.json()).toMatchObject({ name: "Flaky", discoveredModels: 0 });
+    expect(edited.json().test.ok).toBe(false);
+    expect(edited.json().message).toMatch(/401/);
+    // Once the catalog recovers, the NEXT edit picks the models up.
+    stubFetch((url) =>
+      url.endsWith("/models")
+        ? new Response(JSON.stringify({ data: [{ id: "late-1" }] }), { status: 200 })
+        : new Response("{}", { status: 404 }),
+    );
+    const edited2 = await srv.inject({ method: "PATCH", url: `/providers/${pid}`, payload: { name: "Flaky" } });
+    expect(edited2.json().discoveredModels).toBe(1);
+    const models = (await srv.inject({ method: "GET", url: "/models" })).json();
+    expect(models.map((m: { modelId: string }) => m.modelId)).toContain("late-1");
+  });
+
   it("edit-mode draft test reuses the stored key without re-typing it (and never persists)", async () => {
     const srv = await boot();
     stubFetch((url) =>
