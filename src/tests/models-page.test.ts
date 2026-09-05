@@ -245,10 +245,15 @@ describe("models: editing and per-model tuning", () => {
     const providerId = mockProviderId();
     const m = (await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "tuned" } })).json();
 
-    const set = await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 1, maxTokens: 2048 } });
-    expect(set.json()).toMatchObject({ temperature: 1, maxTokens: 2048 });
+    const set = await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 0.7, maxTokens: 2048 } });
+    expect(set.json()).toMatchObject({ temperature: 0.7, maxTokens: 2048 });
 
-    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 5 } })).statusCode).toBe(400);
+    // Temperature is the creativity dial and only spans 0.0 … 1.0.
+    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 1.5 } })).statusCode).toBe(400);
+    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: -0.1 } })).statusCode).toBe(400);
+    // Both ends of the range are valid.
+    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 0 } })).json().temperature).toBe(0);
+    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 1 } })).json().temperature).toBe(1);
     expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { maxTokens: 0 } })).statusCode).toBe(400);
 
     const cleared = await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: null, maxTokens: null } });

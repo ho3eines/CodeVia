@@ -1110,7 +1110,7 @@
   function tuningBadge(m) {
     const bits = [];
     if (m.omitTemperature) bits.push("no temp");
-    else if (typeof m.temperature === "number") bits.push("temp " + m.temperature);
+    else if (typeof m.temperature === "number") bits.push("creativity " + m.temperature);
     if (typeof m.maxTokens === "number") bits.push("max " + m.maxTokens);
     return bits.length ? ` <span class="badge badge-info" title="Per-model overrides">⚙ ${esc(bits.join(" · "))}</span>` : "";
   }
@@ -1131,19 +1131,19 @@
       </div>
       <div class="field"><label>Model ID <span class="select-count">exactly as the provider expects it</span></label><input class="input mono" id="e-mid" value="${esc(m.modelId || "")}"/></div>
 
-      <div class="field"><label>Sampling <span class="select-count">fixes 400 errors from routes that mandate a specific temperature</span></label>
-        <div class="grid-2">
-          <div>
-            <input class="input" id="e-temp" placeholder="provider default" value="${typeof m.temperature === "number" ? m.temperature : ""}"/>
-            <div class="field-hint">Temperature 0–2. Leave empty to use the provider default.</div>
-          </div>
-          <div>
-            <input class="input" id="e-maxtok" placeholder="provider default" value="${typeof m.maxTokens === "number" ? m.maxTokens : ""}"/>
-            <div class="field-hint">Max output tokens. Leave empty for the provider default.</div>
-          </div>
+      <div class="field"><label>Creativity (temperature) <span class="select-count">0.0 = precise &amp; repeatable · 1.0 = most creative</span></label>
+        <div class="temp-row">
+          <input type="range" class="temp-slider" id="e-temp-range" min="0" max="1" step="0.05" value="${typeof m.temperature === "number" ? m.temperature : 0.3}" ${typeof m.temperature === "number" ? "" : "disabled"}/>
+          <input class="input temp-num" id="e-temp" placeholder="default" value="${typeof m.temperature === "number" ? m.temperature : ""}"/>
         </div>
+        <div class="temp-scale"><span>0.0 precise</span><span>0.5 balanced</span><span>1.0 creative</span></div>
+        <div class="field-hint" id="e-temp-desc"></div>
         <label class="cap-toggle" style="margin-top:6px"><input type="checkbox" id="e-omit" ${m.omitTemperature ? "checked" : ""}/> Do not send <span class="mono">temperature</span> at all</label>
-        <div class="field-hint">Tip: if the provider says <em>"Supported values are between 1.0 and 1.0"</em>, set Temperature to <strong>1</strong> (or tick the box above).</div>
+        <div class="field-hint">Leave the box empty to use the provider default. If the provider says <em>"Supported values are between 1.0 and 1.0"</em>, set it to <strong>1</strong> (or tick the box above).</div>
+      </div>
+      <div class="field"><label>Max output tokens</label>
+        <input class="input" id="e-maxtok" placeholder="provider default" value="${typeof m.maxTokens === "number" ? m.maxTokens : ""}"/>
+        <div class="field-hint">Leave empty for the provider default.</div>
       </div>
 
       <div class="grid-2">
@@ -1165,6 +1165,29 @@
       <div class="field"><label>Notes</label><textarea class="textarea" id="e-notes" rows="2" placeholder="e.g. this route only accepts temperature 1.0">${esc(m.notes || "")}</textarea></div>
       <div class="flex"><button class="btn" id="e-test">Test with these settings</button><button class="btn btn-primary" id="e-save">Save changes</button><button class="btn" onclick="closeModal()">Cancel</button></div>
       <div id="e-test-result"></div>`);
+
+    // Slider ⇄ number box stay in sync; the label explains what the value does.
+    const describeTemp = (v) => {
+      if (v === "" || v === null || Number.isNaN(v)) return "Using the provider default creativity.";
+      if (v <= 0.1) return `<strong>${v}</strong> — deterministic: same question, same answer. Best for code &amp; extraction.`;
+      if (v <= 0.4) return `<strong>${v}</strong> — precise, slight variation. Good default for engineering tasks.`;
+      if (v <= 0.7) return `<strong>${v}</strong> — balanced: some creativity, still focused.`;
+      if (v < 1) return `<strong>${v}</strong> — creative and varied.`;
+      return `<strong>${v}</strong> — maximum creativity (and the value some routes require).`;
+    };
+    const syncTemp = (from) => {
+      const num = $("#e-temp");
+      const range = $("#e-temp-range");
+      if (from === "range") num.value = String(range.value);
+      const raw = num.value.trim();
+      const v = raw === "" ? "" : Number(raw);
+      range.disabled = raw === "";
+      if (raw !== "" && !Number.isNaN(v)) range.value = String(Math.min(1, Math.max(0, v)));
+      $("#e-temp-desc").innerHTML = describeTemp(v);
+    };
+    $("#e-temp-range").addEventListener("input", () => syncTemp("range"));
+    $("#e-temp").addEventListener("input", () => syncTemp("num"));
+    syncTemp("num");
 
     // Read the tuning currently typed into the form (empty = clear the override).
     const formTuning = () => {
@@ -1193,8 +1216,8 @@
     };
     $("#e-save").onclick = async () => {
       const tune = formTuning();
-      if (tune.temperature !== null && (Number.isNaN(tune.temperature) || tune.temperature < 0 || tune.temperature > 2)) {
-        toast("Invalid temperature", "Use a number between 0 and 2, or leave it empty.", "err"); return;
+      if (tune.temperature !== null && (Number.isNaN(tune.temperature) || tune.temperature < 0 || tune.temperature > 1)) {
+        toast("Invalid creativity", "Temperature must be between 0.0 and 1.0, or leave it empty.", "err"); return;
       }
       if (tune.maxTokens !== null && (Number.isNaN(tune.maxTokens) || tune.maxTokens < 1)) {
         toast("Invalid max tokens", "Use a positive number, or leave it empty.", "err"); return;

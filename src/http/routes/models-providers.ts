@@ -305,7 +305,9 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       const t = optionalNumber(b.temperature);
       if (t === null) patch.temperature = undefined;
       else if (typeof t === "number") {
-        if (t < 0 || t > 2) return fail(reply, 400, "temperature must be between 0 and 2");
+        // Temperature is the model's creativity dial: 0.0 = deterministic,
+        // 1.0 = most creative.
+        if (t < 0 || t > 1) return fail(reply, 400, "temperature must be between 0.0 and 1.0 (0 = deterministic, 1 = most creative)");
         patch.temperature = t;
       }
     }

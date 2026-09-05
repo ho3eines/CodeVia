@@ -366,3 +366,10 @@ tr.row-selected { background: color-mix(in srgb, var(--primary) 10%, transparent
 .model-group-toggle:hover strong { text-decoration: underline; }
 .linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--text); cursor: pointer; }
 .linkish:hover { text-decoration: underline; }
+
+/* creativity (temperature) slider in the Edit Model form */
+.temp-row { display: flex; align-items: center; gap: 10px; }
+.temp-slider { flex: 1; accent-color: var(--primary); cursor: pointer; }
+.temp-slider:disabled { opacity: .45; cursor: not-allowed; }
+.temp-num { width: 92px; text-align: center; }
+.temp-scale { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 2px; }

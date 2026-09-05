@@ -89,10 +89,12 @@ export interface Model {
   fallbackPriority: number;
   tags: string[];
   /**
-   * Per-model sampling temperature. Overrides the provider default for every
-   * call to THIS model (chat, test and streaming). Some routes only accept a
-   * fixed value — e.g. a model that rejects `0.0` with "Supported values are
-   * between 1.0 and 1.0" needs `temperature: 1` here.
+   * Per-model sampling temperature — the model's **creativity** dial, from
+   * `0.0` (deterministic, repeatable) to `1.0` (most creative/varied).
+   * Overrides the provider default for every call to THIS model (chat, test
+   * and streaming). Some routes only accept a fixed value — e.g. a model that
+   * rejects `0.0` with "Supported values are between 1.0 and 1.0" needs
+   * `temperature: 1` here.
    */
   temperature?: number;
   /** Per-model max output tokens; overrides the provider's `maxTokensDefault`. */
