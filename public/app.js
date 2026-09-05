@@ -1091,12 +1091,13 @@
         ${g.models.map((m) => `<tr class="${modelSelection.has(m.id) ? "row-selected" : ""}" data-model="${esc(m.id)}">
           <td><input type="checkbox" ${modelSelection.has(m.id) ? "checked" : ""} onchange="modelSelectOne('${esc(m.id)}', this.checked)"/></td>
           <td><strong>${esc(m.displayName)}</strong></td>
-          <td class="mono">${esc(m.modelId)}</td>
+          <td class="mono">${esc(m.modelId)}${tuningBadge(m)}</td>
           <td>${Number(m.contextWindow || 0).toLocaleString()}</td>
           <td>${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</td>
           <td>${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
           <td style="white-space:nowrap;text-align:right">
             <button class="btn btn-ghost" onclick="openModelChat('${esc(m.id)}')">💬 Test</button>
+            <button class="btn btn-ghost" onclick="openModelEdit('${esc(m.id)}')">✏️ Edit</button>
             <button class="btn btn-ghost" onclick="modelToggle('${esc(m.id)}', ${m.active ? "false" : "true"})">${m.active ? "Deactivate" : "Activate"}</button>
             <button class="btn btn-ghost" onclick="modelDelete('${esc(m.id)}')">🗑</button>
           </td></tr>`).join("")}
@@ -1104,6 +1105,123 @@
       </div>
     </div>`;
   }
+
+  /** Small badge showing that a model carries per-model overrides. */
+  function tuningBadge(m) {
+    const bits = [];
+    if (m.omitTemperature) bits.push("no temp");
+    else if (typeof m.temperature === "number") bits.push("temp " + m.temperature);
+    if (typeof m.maxTokens === "number") bits.push("max " + m.maxTokens);
+    return bits.length ? ` <span class="badge badge-info" title="Per-model overrides">⚙ ${esc(bits.join(" · "))}</span>` : "";
+  }
+
+  /* ---- Edit model — every field is editable, including the tuning that some
+     provider routes require (e.g. a route that only accepts temperature 1.0). ---- */
+  window.openModelEdit = async (id) => {
+    let m;
+    try { m = await api(`/models/${encodeURIComponent(id)}`); }
+    catch (e) { toast("Error", e.message, "err"); return; }
+    const providers = providersCache.length ? providersCache : await api("/providers").catch(() => []);
+    const caps = m.capabilities || {};
+    const capRow = (key, label) => `<label class="cap-toggle"><input type="checkbox" id="e-cap-${key}" ${caps[key] ? "checked" : ""}/> ${label}</label>`;
+    openModal(`Edit Model — ${m.displayName || m.modelId}`, `
+      <div class="grid-2">
+        <div class="field"><label>Provider</label><select class="select" id="e-prov">${providers.map((p) => `<option value="${esc(p.id)}" ${p.id === m.providerId ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
+        <div class="field"><label>Display name</label><input class="input" id="e-name" value="${esc(m.displayName || "")}"/></div>
+      </div>
+      <div class="field"><label>Model ID <span class="select-count">exactly as the provider expects it</span></label><input class="input mono" id="e-mid" value="${esc(m.modelId || "")}"/></div>
+
+      <div class="field"><label>Sampling <span class="select-count">fixes 400 errors from routes that mandate a specific temperature</span></label>
+        <div class="grid-2">
+          <div>
+            <input class="input" id="e-temp" placeholder="provider default" value="${typeof m.temperature === "number" ? m.temperature : ""}"/>
+            <div class="field-hint">Temperature 0–2. Leave empty to use the provider default.</div>
+          </div>
+          <div>
+            <input class="input" id="e-maxtok" placeholder="provider default" value="${typeof m.maxTokens === "number" ? m.maxTokens : ""}"/>
+            <div class="field-hint">Max output tokens. Leave empty for the provider default.</div>
+          </div>
+        </div>
+        <label class="cap-toggle" style="margin-top:6px"><input type="checkbox" id="e-omit" ${m.omitTemperature ? "checked" : ""}/> Do not send <span class="mono">temperature</span> at all</label>
+        <div class="field-hint">Tip: if the provider says <em>"Supported values are between 1.0 and 1.0"</em>, set Temperature to <strong>1</strong> (or tick the box above).</div>
+      </div>
+
+      <div class="grid-2">
+        <div class="field"><label>Context window</label><input class="input" id="e-ctx" value="${Number(m.contextWindow || 0)}"/></div>
+        <div class="field"><label>Priority (lower = preferred)</label><input class="input" id="e-prio" value="${Number(m.priority || 100)}"/></div>
+      </div>
+      <div class="grid-2">
+        <div class="field"><label>Input cost / 1k</label><input class="input" id="e-cin" value="${Number(m.inputCostPer1k || 0)}"/></div>
+        <div class="field"><label>Output cost / 1k</label><input class="input" id="e-cout" value="${Number(m.outputCostPer1k || 0)}"/></div>
+      </div>
+      <div class="field"><label>Capabilities</label><div class="cap-grid">
+        ${capRow("vision", "vision")}${capRow("tools", "tools")}${capRow("structuredOutput", "structured")}
+        ${capRow("code", "code")}${capRow("reasoning", "reasoning")}${capRow("streaming", "streaming")}
+      </div></div>
+      <div class="grid-2">
+        <div class="field"><label>Tags <span class="select-count">comma separated</span></label><input class="input" id="e-tags" value="${esc((m.tags || []).join(", "))}"/></div>
+        <div class="field"><label>Status</label><select class="select" id="e-active"><option value="true" ${m.active ? "selected" : ""}>active</option><option value="false" ${m.active ? "" : "selected"}>inactive</option></select></div>
+      </div>
+      <div class="field"><label>Notes</label><textarea class="textarea" id="e-notes" rows="2" placeholder="e.g. this route only accepts temperature 1.0">${esc(m.notes || "")}</textarea></div>
+      <div class="flex"><button class="btn" id="e-test">Test with these settings</button><button class="btn btn-primary" id="e-save">Save changes</button><button class="btn" onclick="closeModal()">Cancel</button></div>
+      <div id="e-test-result"></div>`);
+
+    // Read the tuning currently typed into the form (empty = clear the override).
+    const formTuning = () => {
+      const t = $("#e-temp").value.trim();
+      const mt = $("#e-maxtok").value.trim();
+      return {
+        temperature: t === "" ? null : Number(t),
+        maxTokens: mt === "" ? null : Number(mt),
+        omitTemperature: $("#e-omit").checked,
+      };
+    };
+    $("#e-test").onclick = async () => {
+      const el = $("#e-test-result");
+      const tune = formTuning();
+      el.innerHTML = `<div class="test-result">Sending a test message with these settings…</div>`;
+      try {
+        const r = await api(`/models/${encodeURIComponent(id)}/test`, { method: "POST", body: {
+          message: MODEL_TEST_MSG,
+          ...(typeof tune.temperature === "number" && !Number.isNaN(tune.temperature) ? { temperature: tune.temperature } : {}),
+          ...(typeof tune.maxTokens === "number" && !Number.isNaN(tune.maxTokens) ? { maxTokens: tune.maxTokens } : {}),
+          omitTemperature: tune.omitTemperature,
+        }});
+        el.innerHTML = renderTestResult(r);
+        toast(r.ok ? "Model replied" : "Test failed", r.message, r.ok ? "ok" : "err");
+      } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
+    };
+    $("#e-save").onclick = async () => {
+      const tune = formTuning();
+      if (tune.temperature !== null && (Number.isNaN(tune.temperature) || tune.temperature < 0 || tune.temperature > 2)) {
+        toast("Invalid temperature", "Use a number between 0 and 2, or leave it empty.", "err"); return;
+      }
+      if (tune.maxTokens !== null && (Number.isNaN(tune.maxTokens) || tune.maxTokens < 1)) {
+        toast("Invalid max tokens", "Use a positive number, or leave it empty.", "err"); return;
+      }
+      const capsOut = {};
+      for (const k of Object.keys(CAP_NAMES)) capsOut[k] = $("#e-cap-" + k).checked;
+      try {
+        await api(`/models/${encodeURIComponent(id)}`, { method: "PATCH", body: {
+          providerId: $("#e-prov").value,
+          displayName: $("#e-name").value.trim() || undefined,
+          modelId: $("#e-mid").value.trim() || undefined,
+          contextWindow: Number($("#e-ctx").value) || 0,
+          priority: Number($("#e-prio").value) || 100,
+          inputCostPer1k: Number($("#e-cin").value) || 0,
+          outputCostPer1k: Number($("#e-cout").value) || 0,
+          capabilities: capsOut,
+          tags: $("#e-tags").value.split(",").map((t) => t.trim()).filter(Boolean),
+          active: $("#e-active").value === "true",
+          notes: $("#e-notes").value,
+          temperature: tune.temperature,
+          maxTokens: tune.maxTokens,
+          omitTemperature: tune.omitTemperature,
+        }});
+        closeModal(); toast("Model updated", $("#e-mid").value.trim(), "ok"); refreshCurrent();
+      } catch (e) { toast("Error", e.message, "err"); }
+    };
+  };
 
   window.modelGroupToggle = (providerId) => {
     const card = document.querySelector(`.model-group[data-provider="${CSS.escape(providerId)}"]`);

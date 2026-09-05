@@ -204,3 +204,103 @@ describe("model-stream helpers", () => {
     expect(err?.message).toContain("bad key");
   });
 });
+
+describe("models: editing and per-model tuning", () => {
+  it("patches every editable field, including capabilities and tags", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const providerId = mockProviderId();
+    const created = (await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "edit-me" } })).json();
+    const res = await srv.inject({
+      method: "PATCH",
+      url: `/models/${created.id}`,
+      payload: {
+        displayName: "Renamed",
+        modelId: "models/edit-me-2",
+        contextWindow: 32000,
+        priority: 5,
+        inputCostPer1k: 1.5,
+        capabilities: { vision: true },
+        tags: ["free", " fast "],
+        active: false,
+        notes: "route only accepts temperature 1.0",
+      },
+    });
+    expect(res.json()).toMatchObject({
+      displayName: "Renamed",
+      modelId: "edit-me-2",
+      contextWindow: 32000,
+      priority: 5,
+      inputCostPer1k: 1.5,
+      active: false,
+      tags: ["free", "fast"],
+      notes: "route only accepts temperature 1.0",
+    });
+    expect(res.json().capabilities.vision).toBe(true);
+  });
+
+  it("stores, validates and clears the temperature override", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const providerId = mockProviderId();
+    const m = (await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "tuned" } })).json();
+
+    const set = await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 1, maxTokens: 2048 } });
+    expect(set.json()).toMatchObject({ temperature: 1, maxTokens: 2048 });
+
+    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 5 } })).statusCode).toBe(400);
+    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { maxTokens: 0 } })).statusCode).toBe(400);
+
+    const cleared = await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: null, maxTokens: null } });
+    expect(cleared.json().temperature).toBeUndefined();
+    expect(cleared.json().maxTokens).toBeUndefined();
+  });
+
+  it("rejects a rename that collides with another model of the same provider", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const providerId = mockProviderId();
+    const a = (await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "aaa" } })).json();
+    await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "bbb" } });
+    expect((await srv.inject({ method: "PATCH", url: `/models/${a.id}`, payload: { modelId: "bbb" } })).statusCode).toBe(409);
+  });
+
+  it("sends the model's saved temperature to the provider instead of a hardcoded 0", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", (async (_url: string, init?: RequestInit) => {
+      if (init?.body) seen.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 });
+    }) as unknown as typeof fetch);
+    process.env.OPENAI_API_KEY = "sk-test-123";
+    const srv = await boot();
+    const m = (await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "tuned-route", temperature: 1 } })).json();
+    expect(m.temperature).toBe(1);
+    await srv.inject({ method: "POST", url: `/models/${m.id}/test`, payload: { message: "hi" } });
+    const chatBody = seen.find((b) => b.model === "tuned-route")!;
+    expect(chatBody.temperature).toBe(1);
+
+    // With omitTemperature the field must disappear from the payload entirely.
+    await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { omitTemperature: true } });
+    seen.length = 0;
+    await srv.inject({ method: "POST", url: `/models/${m.id}/test`, payload: { message: "hi" } });
+    const second = seen.find((b) => b.model === "tuned-route")!;
+    expect("temperature" in second).toBe(false);
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it("hints at the Edit form when a route rejects the temperature parameter", async () => {
+    vi.stubGlobal("fetch", (async () =>
+      new Response(
+        JSON.stringify({ error: { message: "The value 0.0 for 'temperature' is not supported by this model route. Supported values are between 1.0 and 1.0." } }),
+        { status: 400 },
+      )) as unknown as typeof fetch);
+    process.env.OPENAI_API_KEY = "sk-test-123";
+    const srv = await boot();
+    const m = (await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "picky-route" } })).json();
+    const r = (await srv.inject({ method: "POST", url: `/models/${m.id}/test`, payload: { message: "hi" } })).json();
+    expect(r.ok).toBe(false);
+    expect(r.hint).toMatch(/Edit/);
+    expect(r.hint).toMatch(/Temperature/);
+    delete process.env.OPENAI_API_KEY;
+  });
+});

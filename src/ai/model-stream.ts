@@ -22,6 +22,8 @@ export interface StreamChatOptions {
   messages: ChatMessage[];
   temperature?: number;
   maxTokens?: number;
+  /** Drop `temperature` from the payload entirely (routes that reject it). */
+  omitTemperature?: boolean;
   timeoutMs?: number;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
@@ -44,6 +46,8 @@ export function buildStreamRequest(
 ): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
   const temperature = opts.temperature ?? config.defaultTemperature ?? 0.3;
   const maxTokens = opts.maxTokens ?? config.maxTokensDefault ?? 1024;
+  // Some model routes reject `temperature` outright — the field is then omitted.
+  const temp = opts.omitTemperature ? {} : { temperature };
   const messages = opts.messages;
   switch (config.apiFormat) {
     case "anthropic": {
@@ -61,7 +65,7 @@ export function buildStreamRequest(
           model: modelId,
           stream: true,
           max_tokens: maxTokens,
-          temperature,
+          ...temp,
           ...(system ? { system } : {}),
           messages: messages
             .filter((m) => m.role === "user" || m.role === "assistant")
@@ -79,7 +83,7 @@ export function buildStreamRequest(
             .filter((m) => m.role === "user" || m.role === "assistant")
             .map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
           ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-          generationConfig: { temperature, maxOutputTokens: maxTokens },
+          generationConfig: { ...temp, maxOutputTokens: maxTokens },
         },
       };
     }
@@ -90,7 +94,7 @@ export function buildStreamRequest(
         body: {
           model: modelId,
           stream: true,
-          options: { temperature },
+          ...(opts.omitTemperature ? {} : { options: { temperature } }),
           messages: messages.map((m) => ({ role: m.role, content: m.content })),
         },
       };
@@ -109,7 +113,7 @@ export function buildStreamRequest(
         body: {
           model: modelId,
           stream: true,
-          temperature,
+          ...temp,
           max_tokens: maxTokens,
           messages: messages.map((m) => ({ role: m.role, content: m.content })),
         },

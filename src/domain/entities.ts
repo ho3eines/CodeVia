@@ -88,6 +88,22 @@ export interface Model {
   priority: number;
   fallbackPriority: number;
   tags: string[];
+  /**
+   * Per-model sampling temperature. Overrides the provider default for every
+   * call to THIS model (chat, test and streaming). Some routes only accept a
+   * fixed value — e.g. a model that rejects `0.0` with "Supported values are
+   * between 1.0 and 1.0" needs `temperature: 1` here.
+   */
+  temperature?: number;
+  /** Per-model max output tokens; overrides the provider's `maxTokensDefault`. */
+  maxTokens?: number;
+  /**
+   * Omit the `temperature` field entirely from requests to this model — for
+   * routes that reject the parameter no matter which value is sent.
+   */
+  omitTemperature?: boolean;
+  /** Notes shown on the Models page (why this model is tuned this way). */
+  notes?: string;
   createdAt: ISODate;
   updatedAt: ISODate;
 }

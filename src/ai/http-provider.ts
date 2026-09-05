@@ -66,7 +66,7 @@ export class OpenAICompatibleProvider implements IModelProvider {
         ...(m.name ? { name: m.name } : {}),
         ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
       })),
-      temperature: req.temperature ?? this.config.defaultTemperature,
+      ...(req.omitTemperature ? {} : { temperature: req.temperature ?? this.config.defaultTemperature }),
       max_tokens: req.maxTokens ?? this.config.maxTokensDefault,
       stream: false,
     };

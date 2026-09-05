@@ -8,6 +8,7 @@ import {
   testModelChat,
   DEFAULT_MODEL_TEST_MESSAGE,
   type ProviderTestResult,
+  type ModelTuning,
 } from "../../ai/provider-test.js";
 import { detectModelCapabilities, detectModelInfo } from "../../ai/provider-urls.js";
 import { streamModelChat } from "../../ai/model-stream.js";
@@ -60,6 +61,23 @@ function withStatus(p: ModelProvider): ModelProvider & { readiness: ReturnType<t
     secretValuePresent: !!p.secretValueEnc,
     secretMasked: p.secretValueEnc ? maskSecret(decryptSecret(p.secretValueEnc, "provider-secret")) : "",
   };
+}
+
+/** Per-model overrides (temperature / max tokens) as stored on the model row. */
+function tuningOf(m: Model): ModelTuning {
+  return {
+    temperature: typeof m.temperature === "number" ? m.temperature : undefined,
+    maxTokens: typeof m.maxTokens === "number" ? m.maxTokens : undefined,
+    omitTemperature: m.omitTemperature === true,
+  };
+}
+
+/** Parse an optional numeric field: `undefined` keeps it unset, `null` clears it. */
+function optionalNumber(v: unknown): number | undefined | null {
+  if (v === null || v === "") return null;
+  if (v === undefined) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 function numberOr(v: unknown, fallback: number): number {
@@ -232,6 +250,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       priority: numberOr(b.priority, 100),
       fallbackPriority: numberOr(b.fallbackPriority, 100),
       tags: Array.isArray(b.tags) ? (b.tags as string[]) : [],
+      // Optional per-model tuning — needed by routes that mandate a specific
+      // temperature (or reject the parameter entirely).
+      ...(typeof optionalNumber(b.temperature) === "number" ? { temperature: optionalNumber(b.temperature) as number } : {}),
+      ...(typeof optionalNumber(b.maxTokens) === "number" ? { maxTokens: optionalNumber(b.maxTokens) as number } : {}),
+      ...(b.omitTemperature === true ? { omitTemperature: true } : {}),
+      ...(typeof b.notes === "string" && b.notes.trim() ? { notes: b.notes.trim() } : {}),
     });
     reply.code(201);
     return { ...model, detectedCapabilities };
@@ -248,10 +272,57 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const b = (req.body ?? {}) as Record<string, unknown>;
     const r = container.modelRepo.findById(id);
     if (!r) return fail(reply, 404, "model not found");
-    if (isMeaningfulCapabilities(b.capabilities)) {
-      // Nothing special — patch propagates capabilities as given.
+
+    const patch: Partial<Model> = {};
+    if (typeof b.displayName === "string" && b.displayName.trim()) patch.displayName = b.displayName.trim();
+    if (typeof b.modelId === "string" && b.modelId.trim()) {
+      const modelId = b.modelId.trim().replace(/^models\//, "");
+      const clash = container.modelRepo
+        .findMany()
+        .find((m) => m.data.id !== id && m.data.providerId === (b.providerId ?? r.data.providerId) && m.data.modelId === modelId);
+      if (clash) return fail(reply, 409, `Model "${modelId}" already exists for this provider`);
+      patch.modelId = modelId;
     }
-    const m = { ...r.data, ...b, id, createdAt: r.data.createdAt, updatedAt: new Date().toISOString() } as Model;
+    if (typeof b.providerId === "string" && b.providerId.trim()) {
+      if (!container.providerRepo.findById(b.providerId.trim())) return fail(reply, 400, `Unknown provider "${b.providerId}"`);
+      patch.providerId = b.providerId.trim();
+    }
+    if (b.contextWindow !== undefined) patch.contextWindow = numberOr(b.contextWindow, r.data.contextWindow);
+    if (b.inputCostPer1k !== undefined) patch.inputCostPer1k = numberOr(b.inputCostPer1k, r.data.inputCostPer1k);
+    if (b.outputCostPer1k !== undefined) patch.outputCostPer1k = numberOr(b.outputCostPer1k, r.data.outputCostPer1k);
+    if (b.priority !== undefined) patch.priority = numberOr(b.priority, r.data.priority);
+    if (b.fallbackPriority !== undefined) patch.fallbackPriority = numberOr(b.fallbackPriority, r.data.fallbackPriority);
+    if (b.active !== undefined) patch.active = b.active !== false;
+    if (Array.isArray(b.tags)) patch.tags = (b.tags as unknown[]).map((t) => String(t).trim()).filter(Boolean);
+    if (isMeaningfulCapabilities(b.capabilities)) {
+      patch.capabilities = { ...r.data.capabilities, ...(b.capabilities as Model["capabilities"]) };
+    }
+    if (typeof b.notes === "string") patch.notes = b.notes.trim() || undefined;
+    if (b.omitTemperature !== undefined) patch.omitTemperature = b.omitTemperature === true;
+    // Temperature / max tokens: a number sets the override, null (or "") clears it
+    // and returns the model to the provider default.
+    if (b.temperature !== undefined) {
+      const t = optionalNumber(b.temperature);
+      if (t === null) patch.temperature = undefined;
+      else if (typeof t === "number") {
+        if (t < 0 || t > 2) return fail(reply, 400, "temperature must be between 0 and 2");
+        patch.temperature = t;
+      }
+    }
+    if (b.maxTokens !== undefined) {
+      const mt = optionalNumber(b.maxTokens);
+      if (mt === null) patch.maxTokens = undefined;
+      else if (typeof mt === "number") {
+        if (mt < 1) return fail(reply, 400, "maxTokens must be at least 1");
+        patch.maxTokens = Math.floor(mt);
+      }
+    }
+
+    const m: Model = { ...r.data, ...patch, id, createdAt: r.data.createdAt, updatedAt: new Date().toISOString() };
+    // `undefined` in a patch means "clear it", so drop the keys explicitly.
+    if (b.temperature !== undefined && patch.temperature === undefined) delete m.temperature;
+    if (b.maxTokens !== undefined && patch.maxTokens === undefined) delete m.maxTokens;
+    if (typeof b.notes === "string" && !patch.notes) delete m.notes;
     container.modelRepo.upsert(m);
     return m;
   });
@@ -291,7 +362,15 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const info = detectModelInfo(modelId);
     const message = typeof b.message === "string" ? b.message.trim() : "";
     if (message) {
-      const chat = await testModelChat(prow.data, info.id, { message, timeoutMs: 15000 });
+      const chat = await testModelChat(prow.data, info.id, {
+        message,
+        timeoutMs: 15000,
+        tuning: {
+          temperature: typeof b.temperature === "number" ? b.temperature : undefined,
+          maxTokens: typeof b.maxTokens === "number" ? b.maxTokens : undefined,
+          omitTemperature: b.omitTemperature === true,
+        },
+      });
       return {
         providerId,
         capabilities: info.capabilities,
@@ -326,7 +405,13 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (!prow) return fail(reply, 404, `Provider not found for model "${r.data.modelId}"`);
     const modelId = r.data.modelId;
     const message = typeof b.message === "string" && b.message.trim() ? b.message : DEFAULT_MODEL_TEST_MESSAGE;
-    const chat = await testModelChat(prow.data, modelId, { message, timeoutMs: 15000 });
+    // The model's saved tuning is used, but the caller may override it for a
+    // one-off probe (the Edit form's "Test with these settings" button).
+    const tuning: ModelTuning = { ...tuningOf(r.data) };
+    if (typeof b.temperature === "number") tuning.temperature = b.temperature;
+    if (typeof b.maxTokens === "number") tuning.maxTokens = b.maxTokens;
+    if (b.omitTemperature !== undefined) tuning.omitTemperature = b.omitTemperature === true;
+    const chat = await testModelChat(prow.data, modelId, { message, timeoutMs: 15000, tuning });
     return {
       providerId: prow.data.id,
       capabilities: r.data.capabilities,
@@ -373,8 +458,9 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     try {
       for await (const ev of streamModelChat(prow.data, r.data.modelId, {
         messages,
-        temperature: typeof b.temperature === "number" ? b.temperature : undefined,
-        maxTokens: typeof b.maxTokens === "number" ? b.maxTokens : undefined,
+        temperature: typeof b.temperature === "number" ? b.temperature : r.data.temperature,
+        maxTokens: typeof b.maxTokens === "number" ? b.maxTokens : r.data.maxTokens,
+        omitTemperature: b.omitTemperature === undefined ? r.data.omitTemperature === true : b.omitTemperature === true,
         signal: ctrl.signal,
       })) {
         send(ev);
