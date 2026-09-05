@@ -13,6 +13,9 @@ import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
 import { defaultPlanFor, type PlanStep } from "./plan.js";
 import { generateCorrelationId } from "../events/bus.js";
+import { memoryResolver } from "../memory/index.js";
+import type { IMemoryStore } from "../memory/store.js";
+import { toRepoRef } from "../tools/core-tools.js";
 
 export interface AgentRunnerDeps {
   runRepo: RunRepository;
@@ -26,6 +29,17 @@ export interface AgentRunnerDeps {
   contextEngine: ContextEngine;
   github: IGitHubService;
   requestApproval?: (action: string, detail: Record<string, unknown>) => Promise<boolean>;
+  /** Override memory resolution (tests). Defaults to the project's GitHub/local store. */
+  memoryFor?: (project: Project) => IMemoryStore;
+  /** Cooperative cancellation: polled between steps (POST /tasks/:id/cancel). */
+  isCancelled?: (taskId: string) => boolean;
+}
+
+export class TaskCancelledError extends Error {
+  constructor(taskId: string) {
+    super(`Task ${taskId} was cancelled`);
+    this.name = "TaskCancelledError";
+  }
 }
 
 export interface RunRequest {
@@ -55,6 +69,17 @@ export class BudgetExceededError extends Error {
 
 export class AgentRunner {
   constructor(private readonly deps: AgentRunnerDeps) {}
+
+  private memoryFor(project: Project): IMemoryStore | undefined {
+    try {
+      if (this.deps.memoryFor) return this.deps.memoryFor(project);
+      const repo = project.configRepo ? toRepoRef(project.configRepo) : undefined;
+      return memoryResolver.resolve({ repo, branch: project.branch, localRoot: `./data/memory/${project.id}` });
+    } catch (err) {
+      logger.warn("memory store unavailable for run", { projectId: project.id, err: String(err) });
+      return undefined;
+    }
+  }
 
   private get correlationId(): string {
     return generateCorrelationId();
@@ -135,15 +160,16 @@ export class AgentRunner {
       live.emit({ type: "run.updated", runId: run.id, data: { status: succeeded ? "succeeded" : "failed" } });
       return finalRun;
     } catch (err) {
+      const cancelled = err instanceof TaskCancelledError;
       const failedRun: Run = {
         ...run,
-        status: "failed",
+        status: cancelled ? "cancelled" : "failed",
         error: String(err),
         durationMs: Date.now() - startedAt,
       };
       this.deps.runRepo.upsert(failedRun, { projectId: project.id, parentId: task.id });
       await eventBus.publish("agent.failed", { runId: run.id, agentId: agent.id, projectId: project.id, error: String(err) }, { correlationId, projectId: project.id });
-      live.emit({ type: "run.updated", runId: run.id, data: { status: "failed", error: String(err) } });
+      live.emit({ type: "run.updated", runId: run.id, data: { status: failedRun.status, error: String(err) } });
       throw err;
     }
   }
@@ -242,6 +268,7 @@ export class AgentRunner {
       const step = plan[i];
       // Re-check the (duration) budget before each step; throwing here fails the run.
       checkBudget?.();
+      if (this.deps.isCancelled?.(task.id)) throw new TaskCancelledError(task.id);
       const stepRecord: RunStep = {
         index: i,
         label: step.label,
@@ -281,6 +308,8 @@ export class AgentRunner {
             github: this.deps.github,
             logger,
             correlationId,
+            approved: Boolean(step.requiresApproval),
+            memory: this.memoryFor(project),
             requestApproval: this.deps.requestApproval
               ? (action, detail) => this.deps.requestApproval!(action, { projectId: project.id, taskId: task.id, runId, correlationId, ...detail })
               : undefined,

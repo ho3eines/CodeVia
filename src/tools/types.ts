@@ -13,6 +13,10 @@ export interface ToolContext {
   workspaceRoot?: string;
   /** Requests a human approval for a dangerous operation. */
   requestApproval?: (action: string, detail: Record<string, unknown>) => Promise<boolean>;
+  /** Set by the caller when approval for this invocation was already granted (skip the dangerous-tool gate). */
+  approved?: boolean;
+  /** Memory store for the project (search / append). */
+  memory?: import("../memory/store.js").IMemoryStore;
 }
 
 export interface ToolResult {

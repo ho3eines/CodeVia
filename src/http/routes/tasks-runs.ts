@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { live } from "../../realtime/live.js";
 import type { Container } from "../../app/container.js";
 
 export function registerTaskRoutes(app: FastifyInstance, container: Container): void {
@@ -40,8 +41,14 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     const { id } = req.params as { id: string };
     const t = container.taskRepo.findById(id);
     if (!t) return { error: "task not found" };
+    if (["succeeded", "failed", "cancelled"].includes(t.data.status)) {
+      return { ...t.data, alreadyFinal: true };
+    }
+    // Queued → dropped before the worker picks it up; running → the runner
+    // observes the status between steps and stops cooperatively.
     const updated = { ...t.data, status: "cancelled" as const, updatedAt: new Date().toISOString() };
-    container.taskRepo.upsert(updated, { projectId: updated.projectId });
+    container.taskRepo.upsert(updated, { projectId: updated.projectId, parentId: updated.parentTaskId });
+    live.emit({ type: "task.updated", taskId: id, data: { status: "cancelled" } });
     return updated;
   });
 

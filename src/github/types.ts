@@ -120,6 +120,8 @@ export interface IGitHubService {
   createIssue(repo: GithubRepoRef, title: string, body: string): Promise<GithubIssue>;
   commentOnIssue(repo: GithubRepoRef, number: number, body: string): Promise<void>;
   commentOnPullRequest(repo: GithubRepoRef, number: number, body: string): Promise<void>;
+  /** Merge a pull request (dangerous — always approval-gated by the tool layer). */
+  mergePullRequest(repo: GithubRepoRef, number: number, opts?: { method?: "merge" | "squash" | "rebase"; commitTitle?: string }): Promise<{ merged: boolean; sha?: string; message?: string }>;
 }
 
 /** Verified webhook payload + headers passed to the platform. */

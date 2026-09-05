@@ -1,3 +1,4 @@
+import { AiTextService } from "../ai/text-service.js";
 import { getDb } from "../db/client.js";
 import { getQueue } from "../db/queue.js";
 import { getKv } from "../db/kv.js";
@@ -63,6 +64,14 @@ export class Container {
   readonly skillsRegistry = new SkillRegistry(this.skillRepo);
   readonly providerRegistry: ProviderRegistry = providerRegistry;
   readonly modelRouter: ModelRouter = modelRouter;
+  /** Routed model calls outside agent runs (summaries, PR text, chat). */
+  readonly aiText: AiTextService = new AiTextService({
+    modelRepo: this.modelRepo,
+    providerRepo: this.providerRepo,
+    providerRegistry: this.providerRegistry,
+    modelRouter: this.modelRouter,
+    costRepo: this.costRepo,
+  });
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
   readonly github: IGitHubService = resolveGitHubService();
@@ -112,6 +121,7 @@ export class Container {
       contextEngine: this.contextEngine,
       github: this.github,
       requestApproval: (a, d) => this.approvalChannel(a, d),
+      isCancelled: (taskId) => this.taskRepo.findById(taskId)?.data.status === "cancelled",
     });
     this.workflowEngine = new WorkflowEngine({
       agentRepo: this.agentRepo,

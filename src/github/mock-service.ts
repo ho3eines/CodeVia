@@ -263,4 +263,16 @@ export class MockGitHubService implements IGitHubService {
   async commentOnPullRequest(_ref: GithubRepoRef, _number: number, _body: string): Promise<void> {
     return;
   }
+
+  async mergePullRequest(ref: GithubRepoRef, number: number, opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string } = {}): Promise<{ merged: boolean; sha?: string; message?: string }> {
+    const r = this.repo(ref);
+    const pr = r.pulls.find((p) => p.number === number);
+    if (!pr) return { merged: false, message: `PR #${number} not found` };
+    if (pr.state !== "open") return { merged: false, message: `PR #${number} is ${pr.state}` };
+    const sha = this.sha(`merge-${number}-${Date.now()}`);
+    r.branches.set(pr.base, sha);
+    r.commits.unshift({ sha, message: opts.commitTitle ?? `Merge pull request #${number} (${opts.method ?? "merge"})`, author: "codevia-agent", date: new Date().toISOString() });
+    pr.state = "merged";
+    return { merged: true, sha };
+  }
 }

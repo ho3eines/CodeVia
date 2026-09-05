@@ -101,7 +101,7 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 |--------|------|-------------|
 | GET/POST | `/tasks`, `/tasks/:id` | Task queue |
 | POST | `/tasks/:id/run` | Queue a run |
-| POST | `/tasks/:id/cancel` | Cancel |
+| POST | `/tasks/:id/cancel` | Cancel — queued jobs are dropped, running plans stop between steps; final tasks return `alreadyFinal` |
 | GET | `/runs`, `/runs/:id` | Runs |
 | GET | `/runs/:id/console` | **AI Run Console** (observable steps, results — never chain-of-thought) |
 
@@ -159,8 +159,8 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/POST | `/conversations`, `/conversations/:id` | Conversations |
-| POST | `/conversations/:id/messages` | Add message (auto-summarizes when long) |
-| POST | `/conversations/:id/summarize` | Summarize |
+| POST | `/conversations/:id/messages` | Add message (re-summarizes every 20 messages via the model router) |
+| POST | `/conversations/:id/summarize` | AI summary → `{ summary, method: "ai"|"heuristic", modelId? }` |
 
 ## Settings & Import/Export
 
@@ -170,7 +170,7 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 | GET | `/settings/approval` | Approval policy: `autoApprove`, `timeoutMs`, `pending` |
 | POST | `/settings/approval` | Set the policy (`autoApprove:false` = dangerous steps wait for a human in web/Telegram; `timeoutMs` = how long before an unanswered request expires as rejected) |
 | GET | `/settings/backup` | System backup (config metadata only, no secrets) |
-| POST | `/settings/import` | Import a project config blob |
+| POST | `/settings/import` | Import an export blob. Body extras: `dryRun` (preview plan + conflicts), `mode` = `create` (default, new project, ids remapped) \| `merge` (into `targetProjectId`), `conflict` = `skip` (default) \| `overwrite`. Imports agents, workflows, memory, skills |
 
 ## Approvals (human-in-the-loop)
 

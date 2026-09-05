@@ -1,3 +1,4 @@
+import { registerHardening } from "./hardening.js";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { readdir, readFile } from "node:fs/promises";
@@ -68,6 +69,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   );
 
   await app.register(cors, { origin: true });
+  registerHardening(app);
   await app.register(swagger, {
     openapi: {
       info: {

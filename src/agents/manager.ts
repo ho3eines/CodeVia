@@ -14,6 +14,7 @@ import type { ProjectRepository, TaskRepository, WorkflowRepository } from "../d
 import type { AgentRepository } from "./agent-repo.js";
 import type { RunRepository, CostRepository, AuditRepository, NotificationRepository } from "../observability/repos.js";
 import type { AgentRunner } from "./runner.js";
+import { TaskCancelledError } from "./runner.js";
 import type { WorkflowEngine } from "../workflow/engine.js";
 import type { AgentRouter } from "./router.js";
 import type { AgentGenerator } from "./generator.js";
@@ -556,13 +557,20 @@ export class AgentManager {
         await this.routeAndRun(task, project);
       }
       const prev = this.deps.taskRepo.findById(taskId)?.data!;
+      if (prev.status === "cancelled") throw new TaskCancelledError(taskId);
       const done: Task = { ...prev, status: "succeeded", updatedAt: new Date().toISOString() };
       this.deps.taskRepo.upsert(done, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "succeeded" } });
       return done;
     } catch (err) {
-      logger.error("runTask failed", { taskId, err: String(err) });
       const failed = this.deps.taskRepo.findById(taskId)?.data!;
+      if (err instanceof TaskCancelledError || failed.status === "cancelled") {
+        logger.info("runTask cancelled", { taskId });
+        this.deps.taskRepo.upsert({ ...failed, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
+        live.emit({ type: "task.updated", taskId, data: { status: "cancelled" } });
+        return this.deps.taskRepo.findById(taskId)!.data;
+      }
+      logger.error("runTask failed", { taskId, err: String(err) });
       this.deps.taskRepo.upsert({ ...failed, status: "failed", error: String(err) }, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "failed", error: String(err) } });
       throw err;

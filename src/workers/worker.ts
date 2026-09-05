@@ -80,13 +80,18 @@ export class Worker {
 
   private async handle(job: Job): Promise<void> {
     switch (job.type) {
-      case "agent.run": {
-        const taskId = String(job.payload.taskId);
-        await this.deps.agentManager.runTask(taskId);
-        break;
-      }
+      case "agent.run":
       case "workflow.run": {
         const taskId = String(job.payload.taskId);
+        const current = this.deps.taskRepo.findById(taskId)?.data;
+        if (!current) {
+          this.deps.logger.warn(`job ${job.id}: task ${taskId} no longer exists — dropping`);
+          break;
+        }
+        if (current.status === "cancelled") {
+          this.deps.logger.info(`job ${job.id}: task ${taskId} cancelled before start — skipping`);
+          break;
+        }
         await this.deps.agentManager.runTask(taskId);
         break;
       }
@@ -107,13 +112,68 @@ export class Worker {
         break;
       }
       case "github.op": {
-        // Generic GitHub operation hook; extend for specific ops.
-        void job;
+        await this.handleGithubOp(job);
         break;
       }
       default:
         this.deps.logger.warn(`unknown job type ${job.type}`);
         break;
+    }
+  }
+  /**
+   * Generic GitHub operation executed off the request path (webhook fan-out,
+   * scheduled automation, Telegram quick actions). Payload:
+   *   { op, projectId, ...args }
+   *   op ∈ comment_pr | comment_issue | create_issue | update_pr | create_branch | merge_pr
+   */
+  private async handleGithubOp(job: Job): Promise<void> {
+    const p = job.payload;
+    const op = String(p.op ?? "");
+    const project = p.projectId ? this.deps.projectRepo.findById(String(p.projectId))?.data : undefined;
+    const repoStr = String(p.repo ?? project?.configRepo ?? "");
+    const [owner, name] = repoStr.split("/");
+    if (!owner || !name) throw new Error(`github.op ${op}: repo "owner/name" is required`);
+    const repo = { owner, name };
+    const gh = this.deps.github;
+    switch (op) {
+      case "comment_pr":
+        await gh.commentOnPullRequest(repo, Number(p.number), String(p.body ?? ""));
+        break;
+      case "comment_issue":
+        await gh.commentOnIssue(repo, Number(p.number), String(p.body ?? ""));
+        break;
+      case "create_issue":
+        await gh.createIssue(repo, String(p.title ?? "Untitled"), String(p.body ?? ""));
+        break;
+      case "update_pr":
+        await gh.updatePullRequest(repo, Number(p.number), (p.patch as Partial<{ title: string; body: string; state: string }>) ?? {});
+        break;
+      case "create_branch": {
+        const branches = await gh.listBranches(repo);
+        const from = String(p.from ?? project?.branch ?? "main");
+        const base = branches.find((b) => b.name === from) ?? branches[0];
+        if (!base) throw new Error(`github.op create_branch: base ${from} not found`);
+        await gh.createBranch(repo, String(p.name), base.sha);
+        break;
+      }
+      case "merge_pr": {
+        // Merges are dangerous: only allowed when the job carries an approval id
+        // that was decided "approved" (Telegram/web approval flow).
+        if (!p.approvalId) throw new Error("github.op merge_pr requires approvalId");
+        const res = await gh.mergePullRequest(repo, Number(p.number), { method: (p.method as "merge" | "squash" | "rebase") ?? "squash" });
+        if (!res.merged) throw new Error(`merge_pr #${p.number} failed: ${res.message ?? "unknown"}`);
+        break;
+      }
+      default:
+        throw new Error(`github.op: unsupported op "${op}"`);
+    }
+    if (project && p.notify !== false) {
+      await this.deps.notificationRepo.create({
+        severity: "info",
+        title: `GitHub ${op}`,
+        message: `${repoStr}${p.number ? ` #${p.number}` : ""} — ${op} completed`,
+        projectId: project.id,
+      });
     }
   }
 }

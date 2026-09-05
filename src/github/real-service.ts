@@ -317,6 +317,15 @@ export class RealGitHubService implements IGitHubService {
     };
   }
 
+  async mergePullRequest(repo: GithubRepoRef, number: number, opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string } = {}): Promise<{ merged: boolean; sha?: string; message?: string }> {
+    const res = await this.request(`/repos/${repo.owner}/${repo.name}/pulls/${number}/merge`, {
+      method: "PUT",
+      body: JSON.stringify({ merge_method: opts.method ?? "squash", commit_title: opts.commitTitle }),
+    });
+    const body = (await res.json().catch(() => ({}))) as { merged?: boolean; sha?: string; message?: string };
+    return { merged: Boolean(body.merged), sha: body.sha, message: body.message };
+  }
+
   async updatePullRequest(repo: GithubRepoRef, number: number, patch: Partial<{ title: string; body: string; state: string }>): Promise<GithubPullRequest> {
     const res = await this.json<{ number: number; title: string; state: string }>(
       `/repos/${repo.owner}/${repo.name}/pulls/${number}`,
