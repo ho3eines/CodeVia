@@ -195,9 +195,11 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
       return { ok: false, error: "invalid signature" };
     }
     const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const deliveryId = String(headers["x-github-delivery"] ?? "") || undefined;
     await eventBus.publish(normalizeEvent(event), {
       event,
       body: parsed,
+      deliveryId,
     }, { correlationId: generateCorrelationId(), projectId: (parsed as { repository?: { full_name?: string } })?.repository?.full_name });
     reply.code(202);
     return { ok: true, event };

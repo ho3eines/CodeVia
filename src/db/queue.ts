@@ -45,22 +45,30 @@ export class JobQueue {
 
   /** Claim a batch of pending jobs (oldest first by created_at). */
   claim(limit = 5): Job[] {
-    this.db.run(
-      `UPDATE jobs SET status = 'running', started_at = :started_at, updated_at = :updated_at
-       WHERE id IN (
-         SELECT id FROM jobs
-         WHERE (status = 'pending' OR (status = 'retrying' AND scheduled_at <= :now))
-           AND (scheduled_at IS NULL OR scheduled_at <= :now)
-         ORDER BY created_at ASC
-         LIMIT :limit
-       )`,
-      { started_at: nowIso(), updated_at: nowIso(), now: nowIso(), limit },
-    );
-    const rows = this.db.all(
-      `SELECT * FROM jobs WHERE status = 'running' AND started_at IS NOT NULL ORDER BY started_at ASC LIMIT :limit`,
-      { limit },
-    ) as Record<string, unknown>[];
-    return rows.map((r) => this.mapJob(r));
+    // Select the due jobs first, then flip exactly those ids to running. Only the
+    // freshly-claimed rows are returned — a job that is still running from a
+    // previous poll (e.g. blocked on a human approval) must never be handed out
+    // again, otherwise the worker would start it twice.
+    const now = nowIso();
+    const due = this.db.all(
+      `SELECT id FROM jobs
+       WHERE (status = 'pending' OR (status = 'retrying' AND scheduled_at <= :now))
+         AND (scheduled_at IS NULL OR scheduled_at <= :now)
+       ORDER BY created_at ASC
+       LIMIT :limit`,
+      { now, limit },
+    ) as Array<{ id: string }>;
+    const claimed: Job[] = [];
+    for (const { id } of due) {
+      this.db.run(
+        `UPDATE jobs SET status = 'running', started_at = :started_at, updated_at = :updated_at
+         WHERE id = :id AND status IN ('pending', 'retrying')`,
+        { started_at: now, updated_at: now, id },
+      );
+      const job = this.getById(id);
+      if (job && job.status === "running") claimed.push(job);
+    }
+    return claimed;
   }
 
   update(id: string, patch: Partial<Pick<Job, "status" | "attempts" | "error" | "finishedAt">>): Job | undefined {

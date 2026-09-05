@@ -129,9 +129,23 @@ so the button spinner stops. Errors inside a handler are answered as a visible
 ## 5. Human approvals
 
 Dangerous operations (merge, deploy, migration, breaking changes, costly runs)
-surface an approval in Telegram. The user approves/rejects; the workflow
-continues or stops. The approval channel is wired via `Container.approvalChannel`
-(default auto-approve in dev/sim; override to require a real approval).
+pause the agent/workflow and surface an **approval request**:
+
+1. Turn the policy on: **Settings → Approval policy → untick "Auto-approve"**
+   (or `POST /settings/approval {"autoApprove": false, "timeoutMs": 900000}`).
+2. When an agent reaches a gated step the task becomes `waiting_for_approval`
+   and the bot sends a message with **✅ Approve / ❌ Reject** inline buttons to
+   the project's Telegram chat (`telegramChatId`) and to every paired per-user bot
+   of the project owner.
+3. Tap a button — or use `/approvals` to list pending requests, or
+   `/approve <id>` / `/reject <id>`. Approve → the step runs and the task
+   continues; Reject → the step is skipped and the run stops. Requests that
+   nobody answers within `timeoutMs` **expire** (treated as rejected).
+4. Everything is audited (`approval.requested / granted / rejected / expired`)
+   and visible in the web UI under **Approvals**.
+
+With auto-approve on (the dev/simulation default) requests are granted
+instantly but still recorded for the audit trail.
 
 ---
 

@@ -20,6 +20,17 @@ The platform is built to land each phase as a horizontally-functional baseline, 
 | 14 | Production Testing | ✅ | 24 unit/integration/e2e tests (router, webhook, context, repo, agent e2e) |
 | 15 | Documentation | ✅ | README + full docs (architecture, deployment, env, github, telegram, provider, api, roadmap, troubleshooting) |
 
+## Delivered after the baseline
+
+- **Human-in-the-loop approvals** — `ApprovalService` (policy in KV, persisted requests, web + Telegram ✅/❌ buttons, expiry, audit); tasks show `waiting_for_approval`.
+- **GitHub event automation** — push→QA, PR opened→Code Reviewer, PR sync→QA, issue→Research, release→Release, failed CI→Debugging; delivery-id idempotency.
+- **Prompt versioning** — immutable versions per edit, LCS diff, restore/clone (history never rewritten).
+- **Automatic rules discovery** — README/CONTRIBUTING/CODEOWNERS/.editorconfig/build files/CI → project rules injected by the Context Engine; manual rules preserved.
+- **Budget control at runtime** — tokens / cost / duration / calls per run + agent budget; `BudgetExceededError` fails the run before repository writes.
+- **Dry run / Simulation** — `POST /projects/:id/dry-run` previews agent, plan, writes and approvals.
+- **Logs & Approvals pages** in the UI, `/approvals` + `/logs` Telegram commands.
+- **Queue fix** — `claim()` no longer re-hands out jobs that are still running (previously a run blocked on approval was re-executed every poll).
+
 ## Extension points (next)
 
 - **Visual Workflow Builder UI** — nodes/edges drag-&-drop on top of the existing engine.
@@ -29,6 +40,4 @@ The platform is built to land each phase as a horizontally-functional baseline, 
 - **GitHub App installation-token exchange** for per-install auth.
 - **Deeper repository intelligence** (language/framework detection, change-impact mapping).
 - **Multi-turn agent loops with real providers** (the runner already supports provider-driven planning).
-- **Simulation/Dry Mode UI toggle** for previewing agent plans before writing code.
-- **Budget guardrails at runtime** (already wired) surfaced in the UI.
 - **Observe rate limits / circuit breakers** per provider.

@@ -24,19 +24,17 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
     };
   });
 
+  app.get("/settings/approval", { schema: { tags: ["settings"] } }, async () => {
+    return { ...container.approvals.policy(), pending: container.approvals.pendingCount() };
+  });
+
   app.post("/settings/approval", { schema: { tags: ["settings"] } }, async (req) => {
-    const b = req.body as { autoApprove?: boolean };
-    // Configure the approval channel: auto-approve vs. require human in Telegram/UI.
-    container.approvalChannel = async (action, detail) => {
-      await container.notificationRepo.create({
-        severity: "warning",
-        title: "Approval needed",
-        message: action,
-        projectId: (detail as { projectId?: string }).projectId,
-      });
-      return b.autoApprove !== false;
-    };
-    return { autoApprove: b.autoApprove !== false };
+    const b = (req.body ?? {}) as { autoApprove?: boolean; timeoutMs?: number };
+    // Configure the approval policy: auto-approve vs. require a human in Telegram/UI.
+    const patch: { autoApprove?: boolean; timeoutMs?: number } = {};
+    if (typeof b.autoApprove === "boolean") patch.autoApprove = b.autoApprove;
+    if (typeof b.timeoutMs === "number") patch.timeoutMs = b.timeoutMs;
+    return container.approvals.setPolicy(patch);
   });
 
   // System backup (config metadata only — no secrets).

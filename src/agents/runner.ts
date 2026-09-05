@@ -45,6 +45,14 @@ export interface RunRequest {
  * - Each transition is pushed on the live bus and recorded for observability.
  * - On provider failure it falls back through candidate models (A -> B -> C).
  */
+export class BudgetExceededError extends Error {
+  readonly code = "BUDGET_EXCEEDED";
+  constructor(message: string) {
+    super(`Budget exceeded: ${message}`);
+    this.name = "BudgetExceededError";
+  }
+}
+
 export class AgentRunner {
   constructor(private readonly deps: AgentRunnerDeps) {}
 
@@ -93,10 +101,15 @@ export class AgentRunner {
 
       // 2. Decide the model via the Model Router and invoke it (records cost).
       const modelResult = await this.decideAndCallModel(project, agent, task, contextResult.context, correlationId);
+      // Budget guardrail: a run that already blew its token/cost budget must not
+      // go on to modify the repository. (Duration is checked per step below.)
+      this.assertBudget(project, agent, { ...modelResult, elapsedMs: Date.now() - startedAt, calls: 1 });
       let finalSteps = run.steps;
 
       // 3. Execute the plan.
-      finalSteps = await this.executePlan(run.id, task, agent, project, plan, correlationId);
+      finalSteps = await this.executePlan(run.id, task, agent, project, plan, correlationId, () =>
+        this.assertBudget(project, agent, { ...modelResult, elapsedMs: Date.now() - startedAt, calls: 1 }),
+      );
       const stepStatuses = finalSteps;
 
       const succeeded = stepStatuses.every((s) => s.status === "succeeded");
@@ -133,6 +146,28 @@ export class AgentRunner {
       live.emit({ type: "run.updated", runId: run.id, data: { status: "failed", error: String(err) } });
       throw err;
     }
+  }
+
+  /**
+   * Budget Control — stops the run when project/agent limits are exceeded.
+   * Limits: project.settings.budget (tokens/cost/duration/calls per run) and
+   * agent.tokenBudget. A `0`/missing limit means "unlimited".
+   */
+  private assertBudget(
+    project: Project,
+    agent: Agent,
+    usage: { totalTokens: number; costUsd: number; elapsedMs: number; calls: number },
+  ): void {
+    const b = project.settings?.budget ?? { maxTokensPerRun: 0, maxCallsPerRun: 0, maxCostUsdPerRun: 0, maxDurationMs: 0 };
+    const over = (label: string, actual: number, limit: number | undefined, fmt: (n: number) => string = String) => {
+      if (limit && limit > 0 && actual > limit) throw new BudgetExceededError(`${label} ${fmt(actual)} exceeds budget ${fmt(limit)}`);
+    };
+    over("tokens", usage.totalTokens, b.maxTokensPerRun);
+    over("agent tokens", usage.totalTokens, agent.tokenBudget);
+    over("cost", usage.costUsd, b.maxCostUsdPerRun, (n) => `$${n.toFixed(4)}`);
+    over("duration", usage.elapsedMs, b.maxDurationMs, (n) => `${n}ms`);
+    over("model calls", usage.calls, b.maxCallsPerRun);
+    over("duration", usage.elapsedMs, agent.timeoutMs, (n) => `${n}ms`);
   }
 
   private async decideAndCallModel(
@@ -200,10 +235,13 @@ export class AgentRunner {
     project: Project,
     plan: PlanStep[],
     correlationId: string,
+    checkBudget?: () => void,
   ): Promise<RunStep[]> {
     const steps: RunStep[] = [];
     for (let i = 0; i < plan.length; i++) {
       const step = plan[i];
+      // Re-check the (duration) budget before each step; throwing here fails the run.
+      checkBudget?.();
       const stepRecord: RunStep = {
         index: i,
         label: step.label,
@@ -215,7 +253,15 @@ export class AgentRunner {
       live.emit({ type: "step.updated", runId, data: { index: i, label: step.label, status: "running" } });
 
       if (step.requiresApproval && this.deps.requestApproval) {
-        const approved = await this.deps.requestApproval(step.label, { runId, projectId: project.id });
+        const approved = await this.deps.requestApproval(step.label, {
+          runId,
+          projectId: project.id,
+          taskId: task.id,
+          workflowId: task.workflowId,
+          correlationId,
+          agent: agent.name,
+          tool: step.tool,
+        });
         if (!approved) {
           stepRecord.status = "skipped";
           stepRecord.finishedAt = new Date().toISOString();
@@ -235,7 +281,9 @@ export class AgentRunner {
             github: this.deps.github,
             logger,
             correlationId,
-            requestApproval: this.deps.requestApproval,
+            requestApproval: this.deps.requestApproval
+              ? (action, detail) => this.deps.requestApproval!(action, { projectId: project.id, taskId: task.id, runId, correlationId, ...detail })
+              : undefined,
           },
           step.input ?? { repo: project.configRepo },
         );

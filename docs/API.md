@@ -35,7 +35,10 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | GET | `/projects/:id/agents` / `skills` / `memory` / `workflows` / `tasks` / `runs` / `tests` | Sub-resources |
 | GET | `/projects/:id/issues` / `pull-requests` | Issues / PRs across **all** linked repositories (`?repo=owner/name` to filter); each item carries `repo` |
 | POST | `/projects/:id/ask` | Natural-language AI action → task + queued job (`agentType` optional) |
-| POST | `/projects/:id/onboard` | Re-run onboarding |
+| POST | `/projects/:id/onboard` | Re-run onboarding (re-detects stack **and re-discovers project rules**) |
+| GET | `/projects/:id/rules` | Project rules injected into every agent prompt: `{index, category, discovered, text}` — `discovered` blocks come from README / CONTRIBUTING / CODEOWNERS / `.editorconfig` / `Directory.Build.*` / `*.csproj` / `package.json` / Dockerfile / CI / `.ai-engineering/rules/*.md` |
+| PUT | `/projects/:id/rules` | Replace the **manual** rules (`rules: string[]`); discovered rules are kept unless `keepDiscovered:false` |
+| POST | `/projects/:id/dry-run` | **Simulation / Dry Run** — preview what an agent would do (`title`, `description`, `agentType?`): chosen agent + model, step plan, repository writes, approvals needed, context size, budget. Creates **no** task/run |
 | GET | `/projects/:id/export` | Project export (config + agents + prompts + skills + workflows + rules; no secrets) |
 | GET | `/projects/:id/repositories` | Linked repositories (`repo`, `branch`, `role`, `isConfigRepo`, `private`, `htmlUrl`) |
 | POST | `/projects/:id/repositories` | Link a repository (`repo`, `branch?`, `role?`, `isConfigRepo?`) — idempotent per repo |
@@ -49,9 +52,13 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | GET | `/agents` | List agents |
 | POST | `/agents` | Create agent |
 | GET | `/agents/:id` | Agent detail |
-| PATCH | `/agents/:id` | Update agent (creates a new prompt version) |
+| PATCH | `/agents/:id` | Update agent (a prompt change creates a new immutable prompt version) |
 | POST | `/agents/:id/enable` / `disable` | Toggle |
 | GET | `/agents/:id/history` | Run history |
+| GET | `/agents/:id/prompt-versions` | Prompt version history (`version`, `source`, `note`, `derivedFrom`, `current`) |
+| GET | `/agents/:id/prompt-versions/diff?from=1&to=current` | Line diff between two versions (`to` = number or `current`) with `summary {added, removed, unchanged}` |
+| POST | `/agents/:id/prompt-versions/:version/restore` | Restore a version — history is never rewritten, a new version (`derivedFrom`) is appended |
+| POST | `/agents/:id/prompt-versions/:version/clone` | Clone a version onto `targetAgentId` (default: same agent) |
 | DELETE | `/agents/:id` | Delete |
 
 ## Models & Providers
@@ -160,9 +167,21 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/settings` | Platform settings |
-| POST | `/settings/approval` | Configure approval policy |
+| GET | `/settings/approval` | Approval policy: `autoApprove`, `timeoutMs`, `pending` |
+| POST | `/settings/approval` | Set the policy (`autoApprove:false` = dangerous steps wait for a human in web/Telegram; `timeoutMs` = how long before an unanswered request expires as rejected) |
 | GET | `/settings/backup` | System backup (config metadata only, no secrets) |
 | POST | `/settings/import` | Import a project config blob |
+
+## Approvals (human-in-the-loop)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/approvals` | Approval requests (`?status=pending|approved|rejected|expired`, `?projectId=`) |
+| GET | `/approvals/:id` | One request (`action`, `detail`, `taskId`, `runId`, `workflowId`, `correlationId`, `status`, `decidedBy`, `decisionSource`) |
+| POST | `/approvals/:id/approve` | Approve (`note?`). The blocked agent/workflow step continues; `409` if already decided |
+| POST | `/approvals/:id/reject` | Reject — the gated step is skipped and the run stops |
+
+Pending requests are also pushed to Telegram (project chat + paired per-user bots) with ✅/❌ inline buttons and are listed by `/approvals` in the bot. Live updates arrive on the `notification` socket event with `data.kind = approval.required|approved|rejected|expired`.
 
 ## Observability
 

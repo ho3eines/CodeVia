@@ -124,7 +124,13 @@ export class WorkflowEngine {
           }
           case "approval": {
             if (this.deps.requestApproval) {
-              const approved = await this.deps.requestApproval(String(node.config.message ?? "Approve?"), { workflow: workflow.id });
+              const approved = await this.deps.requestApproval(String(node.config.message ?? `Approve workflow step "${node.name}"?`), {
+                workflowId: workflow.id,
+                projectId: project.id,
+                taskId: task.id,
+                correlationId,
+                node: node.name,
+              });
               if (!approved) {
                 status = "waiting_for_approval";
                 record.status = "skipped";

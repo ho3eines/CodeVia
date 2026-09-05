@@ -223,6 +223,11 @@
     socket.on("task.updated", (ev) => {
       if (ev.taskId && location.hash.startsWith("#/tasks")) refreshCurrent();
     });
+    socket.on("notification", (ev) => {
+      const kind = ev && ev.data && ev.data.kind;
+      if (kind === "approval.required") toast("Approval required", ev.data.action || "", "warn");
+      if (kind && kind.startsWith("approval.") && (location.hash.startsWith("#/approvals") || location.hash.startsWith("#/dashboard"))) refreshCurrent();
+    });
   }
 
   /* ---------- router ---------- */
@@ -235,6 +240,8 @@
         ["#/projects", "📁", "Projects"],
         ["#/runs", "▶️", "Runs"],
         ["#/tasks", "🧩", "Tasks"],
+        ["#/approvals", "🛑", "Approvals"],
+        ["#/logs", "📜", "Logs"],
         ["#/conversations", "💬", "Conversations"],
       ]],
       ["AI", [
@@ -357,6 +364,8 @@
     ["#/workflows", "🔀", "Workflows", "workflow engine"],
     ["#/runs", "▶️", "Runs", "AI run console"],
     ["#/tasks", "🧩", "Tasks", "task queue"],
+    ["#/approvals", "🛑", "Approvals", "approve / reject gated steps"],
+    ["#/logs", "📜", "Logs", "errors, audit, notifications"],
     ["#/memory", "🗂️", "Memory", "GitHub-backed memory"],
     ["#/github", "🐙", "GitHub", "source of truth"],
     ["#/telegram", "📱", "Telegram", "bot interface"],
@@ -417,7 +426,7 @@
         <div class="card stat"><div class="stat-label">Projects</div><div class="stat-value">${d.totalProjects}</div></div>
         <div class="card stat"><div class="stat-label">Active Agents</div><div class="stat-value">${d.activeAgents}</div></div>
         <div class="card stat"><div class="stat-label">Running Tasks</div><div class="stat-value">${d.runningTasks}</div></div>
-        <div class="card stat"><div class="stat-label">Pending Approvals</div><div class="stat-value">${d.pendingApprovals}</div><div class="stat-sub">${d.failedTasks} failed</div></div>
+        <a class="card stat" href="#/approvals" style="text-decoration:none;color:inherit"><div class="stat-label">Pending Approvals</div><div class="stat-value">${d.pendingApprovals}</div><div class="stat-sub">${d.failedTasks} failed</div></a>
       </div>
       <div class="grid-2">
         <div class="card card-body">
@@ -752,6 +761,8 @@
           <button class="btn" onclick="projectRun(${JSON.stringify(p.id)})">▶ Run Agent</button>
           <button class="btn" onclick="projectTask(${JSON.stringify(p.id)})">＋ Create Task</button>
           <button class="btn" onclick="projectWorkflow(${JSON.stringify(p.id)})">🔀 Run Workflow</button>
+          <button class="btn" onclick="projectDryRun(${JSON.stringify(p.id)})">🧪 Dry Run</button>
+          <button class="btn" onclick="projectRules(${JSON.stringify(p.id)})">📏 Rules</button>
           <button class="btn" onclick="projectReonboard(${JSON.stringify(p.id)})">🔎 Detect & Agent.md</button>
           <button class="btn" onclick="projectEdit(${JSON.stringify(p.id)})">⚙ Edit</button>
         </div></div>
@@ -795,6 +806,37 @@
         </tbody></table></div>` : emptyState("▶️", "No runs yet", "Ask the AI or run an agent to see executions here.")}
       </div>`;
   });
+  window.projectDryRun = (id) => {
+    openModal("Dry Run — preview without changing anything", `<div class="field"><label>What should the agent do?</label><textarea class="textarea" id="dry-text" placeholder="Fix the login bug after the last commit"></textarea></div><div class="flex"><button class="btn btn-primary" id="dry-go">Preview plan</button><button class="btn" onclick="closeModal()">Close</button></div><div id="dry-out" class="mt"></div>`);
+    $("#dry-go").onclick = async () => {
+      const text = $("#dry-text").value.trim();
+      if (!text) return;
+      const r = await api(`/projects/${id}/dry-run`, { method: "POST", body: { title: text.slice(0, 80), description: text } });
+      $("#dry-out").innerHTML = `<div class="card card-body"><div class="card-title">${esc(r.agent.name)} <span class="sub">${esc(r.agent.type)} · model ${esc(r.model.primary || "auto")} · ${r.approvalsNeeded} approval(s) needed · context ≈ ${r.context ? r.context.tokens : "?"} tokens</span></div>
+        <div class="steps">${r.plan.map((s) => `<div class="step pending"><div class="step-ico">${s.requiresApproval ? "🛑" : "○"}</div><div><div class="step-label">${s.index + 1}. ${esc(s.label)}</div>${s.tool ? `<div class="step-detail mono">tool: ${esc(s.tool)}</div>` : ""}</div></div>`).join("")}</div>
+        ${r.writes.length ? `<p class="mt"><strong>Would write to the repository via:</strong> ${r.writes.map((w) => `<span class="badge badge-warn">${esc(w.tool)}</span>`).join(" ")}</p>` : `<p class="mt">No repository writes.</p>`}
+        <p style="color:var(--text-muted);font-size:12px">Budget: ${r.budget.maxTokensPerRun} tokens · $${r.budget.maxCostUsdPerRun} · ${r.budget.maxDurationMs}ms per run</p></div>`;
+    };
+  };
+  window.projectRules = async (id) => {
+    const rules = await api(`/projects/${id}/rules`);
+    const manual = rules.filter((r) => !r.discovered);
+    const discovered = rules.filter((r) => r.discovered);
+    openModal("Project Rules — injected into every agent prompt", `
+      <div class="field"><label>Your rules (one block per line; Markdown ok)</label><textarea class="textarea" id="rules-text" style="min-height:160px">${esc(manual.map((r) => r.text).join("\n"))}</textarea></div>
+      <div class="flex"><button class="btn btn-primary" id="rules-save">Save</button><button class="btn" id="rules-rediscover">🔎 Re-discover from repository</button><button class="btn" onclick="closeModal()">Close</button></div>
+      <div class="card-title mt">Discovered automatically <span class="sub">${discovered.length} block(s) from README / CONTRIBUTING / CODEOWNERS / .editorconfig / build files / CI</span></div>
+      ${discovered.length ? discovered.map((r) => `<pre style="white-space:pre-wrap;background:var(--bg);padding:10px;border-radius:8px;border:1px solid var(--border);font-size:12px">${esc(r.text)}</pre>`).join("") : emptyState("📏", "Nothing discovered yet", "Run Detect & Agent.md to scan the repository.")}`);
+    $("#rules-save").onclick = async () => {
+      const lines = $("#rules-text").value.split("\n").map((l) => l.trim()).filter(Boolean);
+      await api(`/projects/${id}/rules`, { method: "PUT", body: { rules: lines } });
+      toast("Rules saved", `${lines.length} rule(s)`, "ok"); closeModal();
+    };
+    $("#rules-rediscover").onclick = async () => {
+      await api(`/projects/${id}/onboard`, { method: "POST", body: {} });
+      toast("Rules re-discovered", "", "ok"); closeModal(); window.projectRules(id);
+    };
+  };
   window.projectAsk = (id) => {
     openModal("Ask AI on Project", `<div class="field"><label>Prompt</label><textarea class="textarea" id="ask-prompt" placeholder="بررسی کن چرا Login بعد از آخرین Commit خراب شده"></textarea></div><div class="flex"><button class="btn btn-primary" id="ask-go">Submit</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
     $("#ask-go").onclick = async () => {
@@ -948,7 +990,27 @@
       await api(`/agents/${id}/${act}`, { method: "POST" });
       toast("Agent updated", a.name, "ok"); refreshCurrent();
     };
+    // Prompt version history (compare / restore / clone)
+    const versions = await api(`/agents/${id}/prompt-versions`).catch(() => []);
+    const panel = document.createElement("div");
+    panel.className = "card card-body mt";
+    panel.innerHTML = `<div class="card-title">Prompt Versions <span class="sub">${versions.length} version(s) — every edit is kept, restore never rewrites history</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Version</th><th>Source</th><th>Note</th><th>Created</th><th></th></tr></thead><tbody>
+      ${versions.slice().reverse().map((v) => `<tr><td class="mono">v${v.version} ${v.current ? '<span class="badge badge-ok">current</span>' : ""}</td><td>${esc(v.source)}${v.derivedFrom ? ` <span class="badge badge-muted">from v${v.derivedFrom}</span>` : ""}</td><td>${esc(v.note || "—")}</td><td>${timeAgo(v.createdAt)}</td>
+        <td style="white-space:nowrap"><button class="btn btn-ghost" onclick="promptDiff('${id}', ${v.version})">Diff vs current</button>${v.current ? "" : `<button class="btn btn-ghost" onclick="promptRestore('${id}', ${v.version})">Restore</button>`}</td></tr>`).join("") || `<tr><td colspan="5">${emptyState("📝", "No versions yet", "Edit the prompt to create v1.")}</td></tr>`}
+      </tbody></table></div>`;
+    $("#content").appendChild(panel);
   });
+  window.promptDiff = async (id, from) => {
+    const d = await api(`/agents/${id}/prompt-versions/diff?from=${from}&to=current`);
+    openModal(`Diff v${d.from} → ${d.to}`, `<p class="mono" style="color:var(--text-muted)">+${d.summary.added} / −${d.summary.removed} / ${d.summary.unchanged} unchanged</p>
+      <pre class="diff" style="max-height:60vh;overflow:auto;background:var(--bg);padding:12px;border-radius:8px;border:1px solid var(--border);font-size:12px">${d.lines.map((l) => `<div class="diff-${l.type}">${l.type === "added" ? "+" : l.type === "removed" ? "−" : " "} ${esc(l.text)}</div>`).join("")}</pre>`);
+  };
+  window.promptRestore = async (id, version) => {
+    if (!confirm(`Restore prompt v${version}? A new version will be created.`)) return;
+    await api(`/agents/${id}/prompt-versions/${version}/restore`, { method: "POST" });
+    toast("Prompt restored", `from v${version}`, "ok"); refreshCurrent();
+  };
   window.editPrompt = async (id) => {
     const a = await api("/agents/" + id);
     openModal("Edit System Prompt", `<div class="field"><label>System Prompt</label><textarea class="textarea" id="prompt-text" style="min-height:220px">${esc(a.systemPrompt)}</textarea></div><div class="field"><label>Save as</label><input class="input" id="prompt-version" value="v${a.version+1}" readonly/></div><button class="btn btn-primary" id="prompt-save">Save (new version)</button>`);
@@ -1410,6 +1472,50 @@
       </div>`;
   });
 
+  /* APPROVALS */
+  on("/approvals", async () => {
+    const [list, policy] = await Promise.all([api("/approvals"), api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 0 }))]);
+    const pending = list.filter((a) => a.status === "pending");
+    const history = list.filter((a) => a.status !== "pending").slice(0, 50);
+    const row = (a) => `<tr><td class="mono">${esc(a.id)}</td><td><strong>${esc(a.action)}</strong>${a.taskId ? `<div class="mono" style="color:var(--text-muted)">task ${esc(a.taskId)}</div>` : ""}</td><td class="mono">${(a.projectId || "—").slice(0, 12)}</td><td>${badge(a.status === "pending" ? "waiting_for_approval" : a.status === "approved" ? "succeeded" : a.status === "rejected" ? "failed" : "cancelled")}</td><td>${esc(a.decidedBy || "—")}<div style="color:var(--text-muted);font-size:11px">${esc(a.decisionSource || "")}</div></td><td>${timeAgo(a.decidedAt || a.requestedAt)}</td>
+      <td style="white-space:nowrap">${a.status === "pending" ? `<button class="btn btn-primary" onclick="decideApproval('${a.id}','approve')">✅ Approve</button> <button class="btn" onclick="decideApproval('${a.id}','reject')">❌ Reject</button>` : ""}</td></tr>`;
+    $("#content").innerHTML = `<div class="overview"><div><h1>Approvals</h1><p>Human-in-the-loop gate for merges, deploys, migrations and other dangerous or costly steps</p></div>
+        <div class="action-row"><span class="pill">${policy.autoApprove ? "⚠️ policy: auto-approve" : "🔒 policy: human approval required"}</span><button class="btn" onclick="location.hash='#/settings'">Policy</button></div></div>
+      <div class="card card-body"><div class="card-title">Pending <span class="sub">${pending.length}</span></div>
+        ${pending.length ? `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Action</th><th>Project</th><th>Status</th><th>By</th><th>When</th><th></th></tr></thead><tbody>${pending.map(row).join("")}</tbody></table></div>` : emptyState("✅", "Nothing waiting", policy.autoApprove ? "Auto-approve is on — switch it off in Settings to gate dangerous steps." : "Agents will pause here (and ping Telegram) when they need a decision.")}
+      </div>
+      <div class="card card-body mt"><div class="card-title">History</div>
+        ${history.length ? `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Action</th><th>Project</th><th>Status</th><th>By</th><th>When</th><th></th></tr></thead><tbody>${history.map(row).join("")}</tbody></table></div>` : emptyState("📭", "No decisions yet", "")}
+      </div>`;
+  });
+  window.decideApproval = async (id, decision) => {
+    try {
+      await api(`/approvals/${id}/${decision}`, { method: "POST", body: {} });
+      toast(decision === "approve" ? "Approved" : "Rejected", id, decision === "approve" ? "ok" : "warn");
+    } catch (e) { toast("Failed", e.message, "err"); }
+    refreshCurrent();
+  };
+
+  /* LOGS */
+  on("/logs", async () => {
+    const [runs, audit, notes] = await Promise.all([api("/runs"), api("/audit").catch(() => []), api("/notifications").catch(() => [])]);
+    const failed = runs.filter((r) => r.status === "failed" || r.error);
+    $("#content").innerHTML = `<div class="overview"><div><h1>Logs</h1><p>Run outcomes, audit trail and notifications — traceable by correlation id</p></div></div>
+      <div class="grid-2">
+        <div class="card card-body"><div class="card-title">Run errors <span class="sub">${failed.length}</span></div>
+          ${failed.length ? failed.slice(0, 30).map((r) => `<div class="list-row"><span>❌</span><div><strong>${esc(r.agentType)}</strong> <span class="mono" style="color:var(--text-muted)">${esc((r.correlationId || "").slice(0, 16))}</span><div style="font-size:12px;white-space:pre-wrap">${esc(r.error || (r.steps || []).filter((s) => s.status === "failed").map((s) => s.label + (s.detail ? ": " + s.detail : "")).join("; ") || "step failed")}</div></div><span class="spacer"></span><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></div>`).join("") : emptyState("🎉", "No errors", "All runs completed without errors.")}
+        </div>
+        <div class="card card-body"><div class="card-title">Notifications <span class="sub">${notes.length}</span></div>
+          ${notes.length ? notes.slice(0, 30).map((n) => `<div class="list-row"><span>${n.severity === "error" ? "🔴" : n.severity === "warning" ? "🟠" : n.severity === "success" ? "🟢" : "🔵"}</span><div><strong>${esc(n.title)}</strong><div style="font-size:12px">${esc(n.message)}</div></div><span class="spacer"></span><span style="color:var(--text-muted);font-size:11px">${timeAgo(n.createdAt)}</span></div>`).join("") : emptyState("🔔", "No notifications", "")}
+        </div>
+      </div>
+      <div class="card card-body mt"><div class="card-title">Audit log <span class="sub">${audit.length}</span></div>
+        <div class="table-wrap"><table><thead><tr><th>When</th><th>Action</th><th>Result</th><th>Source</th><th>Project</th><th>Correlation</th></tr></thead><tbody>
+        ${audit.slice(0, 100).map((a) => `<tr><td>${timeAgo(a.createdAt)}</td><td><strong>${esc(a.action)}</strong></td><td>${badge(a.result === "success" ? "succeeded" : a.result === "denied" || a.result === "failure" ? "failed" : "pending")}</td><td>${esc(a.source)}</td><td class="mono">${(a.projectId || "—").slice(0, 12)}</td><td class="mono">${esc((a.correlationId || "").slice(0, 16))}</td></tr>`).join("") || `<tr><td colspan="6">${emptyState("📭", "No audit entries", "")}</td></tr>`}
+        </tbody></table></div>
+      </div>`;
+  });
+
   /* CONVERSATIONS */
   on("/conversations", async () => {
     const list = await api("/conversations");
@@ -1814,6 +1920,7 @@
   /* SETTINGS */
   on("/settings", async () => {
     const s = await api("/settings");
+    const policy = await api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 900000, pending: 0 }));
     $("#content").innerHTML = `<div class="overview"><div><h1>Settings</h1><p>Import / Export / Backup — secrets are never exported</p></div></div>
       <div class="grid-2">
         <div class="card card-body"><div class="card-title">Platform</div>
@@ -1821,6 +1928,11 @@
           <div class="meter-row"><span class="lbl">Simulation</span><span class="val">${s.simulationMode}</span></div>
           <div class="meter-row"><span class="lbl">GitHub</span><span class="val">${s.githubConnected}</span></div>
           <div class="meter-row"><span class="lbl">Telegram</span><span class="val">${s.telegramConnected}</span></div>
+          <div class="card-title mt">Approval policy</div>
+          <label class="flex" style="gap:8px;align-items:center"><input type="checkbox" id="pol-auto" ${policy.autoApprove ? "checked" : ""}/> Auto-approve dangerous steps (dev / simulation)</label>
+          <div class="field mt"><label>Wait for a human up to (minutes)</label><input class="input" id="pol-timeout" type="number" min="1" value="${Math.round((policy.timeoutMs || 900000) / 60000)}"/></div>
+          <div class="flex"><button class="btn btn-primary" id="pol-save">Save policy</button><a class="btn" href="#/approvals">🛑 Approvals (${policy.pending || 0} pending)</a></div>
+          <p style="color:var(--text-muted);font-size:12px">وقتی Auto-approve خاموش باشد، مرحله‌های خطرناک (Merge، Deploy، Migration…) متوقف می‌شوند و در وب و تلگرام دکمه Approve/Reject می‌گیرید.</p>
         </div>
         <div class="card card-body"><div class="card-title">Backup & Import/Export</div>
           <div class="flex"><button class="btn" onclick="downloadBackup()">⬇ System Backup</button><button class="btn" id="restore-btn">⬆ Restore Backup</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
@@ -1831,6 +1943,10 @@
       </div>
       <div id="tg-settings"></div>`;
     renderTelegramSettings();
+    $("#pol-save").onclick = async () => {
+      const next = await api("/settings/approval", { method: "POST", body: { autoApprove: $("#pol-auto").checked, timeoutMs: Math.max(1, Number($("#pol-timeout").value || 15)) * 60000 } });
+      toast("Approval policy saved", next.autoApprove ? "auto-approve" : "human approval required", "ok");
+    };
     const restoreBtn = $("#restore-btn");
     const restoreFile = $("#restore-file");
     if (restoreBtn && restoreFile) {
