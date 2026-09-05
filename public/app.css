@@ -314,3 +314,8 @@ code, pre { font-family: var(--mono); }
 .model-chat-box .textarea { width: 100%; font-size: 11px; }
 [dir="rtl"] .repo-row .repo-meta { margin-left: 0; margin-right: auto; }
 @media (max-width: 760px) { .repo-sel-row { grid-template-columns: 1fr 1fr; } }
+
+/* diff viewer (prompt versions) */
+.diff-added { background: rgba(22,163,74,0.14); color: var(--ok, #16a34a); }
+.diff-removed { background: rgba(220,38,38,0.14); color: var(--err, #dc2626); text-decoration: line-through; }
+.diff-same { color: var(--text-muted); }

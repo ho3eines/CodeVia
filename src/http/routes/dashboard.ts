@@ -7,12 +7,11 @@ export function registerDashboardRoutes(app: FastifyInstance, container: Contain
     const agents = container.agentRepo.findMany();
     const runs = container.runRepo.findMany();
     const tasks = container.taskRepo.findMany();
-    const notifications = container.notificationRepo.findMany();
     const costs = container.costRepo.findMany();
     const queueStats = container.queue.stats();
 
     const runningRuns = runs.filter((r) => r.data.status === "running");
-    const pendingApprovals = notifications.filter((n) => n.data.title.toLowerCase().includes("approval"));
+    const pendingApprovals = container.approvals.list({ status: "pending" });
 
     return {
       totalProjects: projects.length,

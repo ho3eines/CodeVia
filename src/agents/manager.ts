@@ -14,6 +14,7 @@ import type { ProjectRepository, TaskRepository, WorkflowRepository } from "../d
 import type { AgentRepository } from "./agent-repo.js";
 import type { RunRepository, CostRepository, AuditRepository, NotificationRepository } from "../observability/repos.js";
 import type { AgentRunner } from "./runner.js";
+import { TaskCancelledError } from "./runner.js";
 import type { WorkflowEngine } from "../workflow/engine.js";
 import type { AgentRouter } from "./router.js";
 import type { AgentGenerator } from "./generator.js";
@@ -26,6 +27,10 @@ import { eventBus, generateCorrelationId } from "../events/bus.js";
 import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
 import { randomUUID } from "node:crypto";
+import { discoverProjectRules, rulesToStrings } from "./rules-discovery.js";
+
+/** Marker prefix for rules produced by automatic discovery (re-generated on re-onboard). */
+export const DISCOVERED_RULE_TAG = "<!-- discovered -->";
 
 const ALL_PERMISSIONS: Permission[] = [
   "project.read", "project.write", "agent.read", "agent.write", "workflow.read", "workflow.write",
@@ -211,11 +216,18 @@ export class AgentManager {
       .filter((r) => this.skillsRelevant(r.data.slug, tech, refreshed) || detected.skills.has(r.data.slug))
       .map((r) => r.data.slug);
     const skills = [...new Set([...implied.filter((s) => known.has(s)), ...relevant])];
-    this.deps.projectRepo.upsert({ ...refreshed, settings: { ...refreshed.settings, skills } }, { key: refreshed.slug });
+    // Automatic rules discovery: README/CONTRIBUTING/CODEOWNERS/.editorconfig/
+    // build files → project rules injected into every agent prompt. User-authored
+    // rules (anything not tagged as discovered) are preserved.
+    const discovered = rulesToStrings(await discoverProjectRules(this.deps.github, refreshed, detected.files)).map((r) => `${DISCOVERED_RULE_TAG}\n${r}`);
+    const manual = refreshed.settings.rules.filter((r) => !r.startsWith(DISCOVERED_RULE_TAG));
+    const rules = [...manual, ...discovered];
+    this.deps.projectRepo.upsert({ ...refreshed, settings: { ...refreshed.settings, skills, rules } }, { key: refreshed.slug });
     logger.info(`onboarded project ${projectId}`, {
       agents: agents.length,
       agentTypes: agentTypes.length,
       skills: skills.length,
+      rules: discovered.length,
       detected: { languages: detected.capabilities.languages, frameworks: detected.capabilities.frameworks, databases: detected.capabilities.databases },
     });
     return { agents: agents.length, skills: seeded };
@@ -545,13 +557,20 @@ export class AgentManager {
         await this.routeAndRun(task, project);
       }
       const prev = this.deps.taskRepo.findById(taskId)?.data!;
+      if (prev.status === "cancelled") throw new TaskCancelledError(taskId);
       const done: Task = { ...prev, status: "succeeded", updatedAt: new Date().toISOString() };
       this.deps.taskRepo.upsert(done, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "succeeded" } });
       return done;
     } catch (err) {
-      logger.error("runTask failed", { taskId, err: String(err) });
       const failed = this.deps.taskRepo.findById(taskId)?.data!;
+      if (err instanceof TaskCancelledError || failed.status === "cancelled") {
+        logger.info("runTask cancelled", { taskId });
+        this.deps.taskRepo.upsert({ ...failed, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
+        live.emit({ type: "task.updated", taskId, data: { status: "cancelled" } });
+        return this.deps.taskRepo.findById(taskId)!.data;
+      }
+      logger.error("runTask failed", { taskId, err: String(err) });
       this.deps.taskRepo.upsert({ ...failed, status: "failed", error: String(err) }, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "failed", error: String(err) } });
       throw err;

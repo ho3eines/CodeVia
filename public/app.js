@@ -223,6 +223,11 @@
     socket.on("task.updated", (ev) => {
       if (ev.taskId && location.hash.startsWith("#/tasks")) refreshCurrent();
     });
+    socket.on("notification", (ev) => {
+      const kind = ev && ev.data && ev.data.kind;
+      if (kind === "approval.required") toast("Approval required", ev.data.action || "", "warn");
+      if (kind && kind.startsWith("approval.") && (location.hash.startsWith("#/approvals") || location.hash.startsWith("#/dashboard"))) refreshCurrent();
+    });
   }
 
   /* ---------- router ---------- */
@@ -235,6 +240,8 @@
         ["#/projects", "📁", "Projects"],
         ["#/runs", "▶️", "Runs"],
         ["#/tasks", "🧩", "Tasks"],
+        ["#/approvals", "🛑", "Approvals"],
+        ["#/logs", "📜", "Logs"],
         ["#/conversations", "💬", "Conversations"],
       ]],
       ["AI", [
@@ -357,6 +364,8 @@
     ["#/workflows", "🔀", "Workflows", "workflow engine"],
     ["#/runs", "▶️", "Runs", "AI run console"],
     ["#/tasks", "🧩", "Tasks", "task queue"],
+    ["#/approvals", "🛑", "Approvals", "approve / reject gated steps"],
+    ["#/logs", "📜", "Logs", "errors, audit, notifications"],
     ["#/memory", "🗂️", "Memory", "GitHub-backed memory"],
     ["#/github", "🐙", "GitHub", "source of truth"],
     ["#/telegram", "📱", "Telegram", "bot interface"],
@@ -417,7 +426,7 @@
         <div class="card stat"><div class="stat-label">Projects</div><div class="stat-value">${d.totalProjects}</div></div>
         <div class="card stat"><div class="stat-label">Active Agents</div><div class="stat-value">${d.activeAgents}</div></div>
         <div class="card stat"><div class="stat-label">Running Tasks</div><div class="stat-value">${d.runningTasks}</div></div>
-        <div class="card stat"><div class="stat-label">Pending Approvals</div><div class="stat-value">${d.pendingApprovals}</div><div class="stat-sub">${d.failedTasks} failed</div></div>
+        <a class="card stat" href="#/approvals" style="text-decoration:none;color:inherit"><div class="stat-label">Pending Approvals</div><div class="stat-value">${d.pendingApprovals}</div><div class="stat-sub">${d.failedTasks} failed</div></a>
       </div>
       <div class="grid-2">
         <div class="card card-body">
@@ -752,6 +761,8 @@
           <button class="btn" onclick="projectRun(${JSON.stringify(p.id)})">▶ Run Agent</button>
           <button class="btn" onclick="projectTask(${JSON.stringify(p.id)})">＋ Create Task</button>
           <button class="btn" onclick="projectWorkflow(${JSON.stringify(p.id)})">🔀 Run Workflow</button>
+          <button class="btn" onclick="projectDryRun(${JSON.stringify(p.id)})">🧪 Dry Run</button>
+          <button class="btn" onclick="projectRules(${JSON.stringify(p.id)})">📏 Rules</button>
           <button class="btn" onclick="projectReonboard(${JSON.stringify(p.id)})">🔎 Detect & Agent.md</button>
           <button class="btn" onclick="projectEdit(${JSON.stringify(p.id)})">⚙ Edit</button>
         </div></div>
@@ -795,6 +806,37 @@
         </tbody></table></div>` : emptyState("▶️", "No runs yet", "Ask the AI or run an agent to see executions here.")}
       </div>`;
   });
+  window.projectDryRun = (id) => {
+    openModal("Dry Run — preview without changing anything", `<div class="field"><label>What should the agent do?</label><textarea class="textarea" id="dry-text" placeholder="Fix the login bug after the last commit"></textarea></div><div class="flex"><button class="btn btn-primary" id="dry-go">Preview plan</button><button class="btn" onclick="closeModal()">Close</button></div><div id="dry-out" class="mt"></div>`);
+    $("#dry-go").onclick = async () => {
+      const text = $("#dry-text").value.trim();
+      if (!text) return;
+      const r = await api(`/projects/${id}/dry-run`, { method: "POST", body: { title: text.slice(0, 80), description: text } });
+      $("#dry-out").innerHTML = `<div class="card card-body"><div class="card-title">${esc(r.agent.name)} <span class="sub">${esc(r.agent.type)} · model ${esc(r.model.primary || "auto")} · ${r.approvalsNeeded} approval(s) needed · context ≈ ${r.context ? r.context.tokens : "?"} tokens</span></div>
+        <div class="steps">${r.plan.map((s) => `<div class="step pending"><div class="step-ico">${s.requiresApproval ? "🛑" : "○"}</div><div><div class="step-label">${s.index + 1}. ${esc(s.label)}</div>${s.tool ? `<div class="step-detail mono">tool: ${esc(s.tool)}</div>` : ""}</div></div>`).join("")}</div>
+        ${r.writes.length ? `<p class="mt"><strong>Would write to the repository via:</strong> ${r.writes.map((w) => `<span class="badge badge-warn">${esc(w.tool)}</span>`).join(" ")}</p>` : `<p class="mt">No repository writes.</p>`}
+        <p style="color:var(--text-muted);font-size:12px">Budget: ${r.budget.maxTokensPerRun} tokens · $${r.budget.maxCostUsdPerRun} · ${r.budget.maxDurationMs}ms per run</p></div>`;
+    };
+  };
+  window.projectRules = async (id) => {
+    const rules = await api(`/projects/${id}/rules`);
+    const manual = rules.filter((r) => !r.discovered);
+    const discovered = rules.filter((r) => r.discovered);
+    openModal("Project Rules — injected into every agent prompt", `
+      <div class="field"><label>Your rules (one block per line; Markdown ok)</label><textarea class="textarea" id="rules-text" style="min-height:160px">${esc(manual.map((r) => r.text).join("\n"))}</textarea></div>
+      <div class="flex"><button class="btn btn-primary" id="rules-save">Save</button><button class="btn" id="rules-rediscover">🔎 Re-discover from repository</button><button class="btn" onclick="closeModal()">Close</button></div>
+      <div class="card-title mt">Discovered automatically <span class="sub">${discovered.length} block(s) from README / CONTRIBUTING / CODEOWNERS / .editorconfig / build files / CI</span></div>
+      ${discovered.length ? discovered.map((r) => `<pre style="white-space:pre-wrap;background:var(--bg);padding:10px;border-radius:8px;border:1px solid var(--border);font-size:12px">${esc(r.text)}</pre>`).join("") : emptyState("📏", "Nothing discovered yet", "Run Detect & Agent.md to scan the repository.")}`);
+    $("#rules-save").onclick = async () => {
+      const lines = $("#rules-text").value.split("\n").map((l) => l.trim()).filter(Boolean);
+      await api(`/projects/${id}/rules`, { method: "PUT", body: { rules: lines } });
+      toast("Rules saved", `${lines.length} rule(s)`, "ok"); closeModal();
+    };
+    $("#rules-rediscover").onclick = async () => {
+      await api(`/projects/${id}/onboard`, { method: "POST", body: {} });
+      toast("Rules re-discovered", "", "ok"); closeModal(); window.projectRules(id);
+    };
+  };
   window.projectAsk = (id) => {
     openModal("Ask AI on Project", `<div class="field"><label>Prompt</label><textarea class="textarea" id="ask-prompt" placeholder="بررسی کن چرا Login بعد از آخرین Commit خراب شده"></textarea></div><div class="flex"><button class="btn btn-primary" id="ask-go">Submit</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
     $("#ask-go").onclick = async () => {
@@ -948,7 +990,27 @@
       await api(`/agents/${id}/${act}`, { method: "POST" });
       toast("Agent updated", a.name, "ok"); refreshCurrent();
     };
+    // Prompt version history (compare / restore / clone)
+    const versions = await api(`/agents/${id}/prompt-versions`).catch(() => []);
+    const panel = document.createElement("div");
+    panel.className = "card card-body mt";
+    panel.innerHTML = `<div class="card-title">Prompt Versions <span class="sub">${versions.length} version(s) — every edit is kept, restore never rewrites history</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Version</th><th>Source</th><th>Note</th><th>Created</th><th></th></tr></thead><tbody>
+      ${versions.slice().reverse().map((v) => `<tr><td class="mono">v${v.version} ${v.current ? '<span class="badge badge-ok">current</span>' : ""}</td><td>${esc(v.source)}${v.derivedFrom ? ` <span class="badge badge-muted">from v${v.derivedFrom}</span>` : ""}</td><td>${esc(v.note || "—")}</td><td>${timeAgo(v.createdAt)}</td>
+        <td style="white-space:nowrap"><button class="btn btn-ghost" onclick="promptDiff('${id}', ${v.version})">Diff vs current</button>${v.current ? "" : `<button class="btn btn-ghost" onclick="promptRestore('${id}', ${v.version})">Restore</button>`}</td></tr>`).join("") || `<tr><td colspan="5">${emptyState("📝", "No versions yet", "Edit the prompt to create v1.")}</td></tr>`}
+      </tbody></table></div>`;
+    $("#content").appendChild(panel);
   });
+  window.promptDiff = async (id, from) => {
+    const d = await api(`/agents/${id}/prompt-versions/diff?from=${from}&to=current`);
+    openModal(`Diff v${d.from} → ${d.to}`, `<p class="mono" style="color:var(--text-muted)">+${d.summary.added} / −${d.summary.removed} / ${d.summary.unchanged} unchanged</p>
+      <pre class="diff" style="max-height:60vh;overflow:auto;background:var(--bg);padding:12px;border-radius:8px;border:1px solid var(--border);font-size:12px">${d.lines.map((l) => `<div class="diff-${l.type}">${l.type === "added" ? "+" : l.type === "removed" ? "−" : " "} ${esc(l.text)}</div>`).join("")}</pre>`);
+  };
+  window.promptRestore = async (id, version) => {
+    if (!confirm(`Restore prompt v${version}? A new version will be created.`)) return;
+    await api(`/agents/${id}/prompt-versions/${version}/restore`, { method: "POST" });
+    toast("Prompt restored", `from v${version}`, "ok"); refreshCurrent();
+  };
   window.editPrompt = async (id) => {
     const a = await api("/agents/" + id);
     openModal("Edit System Prompt", `<div class="field"><label>System Prompt</label><textarea class="textarea" id="prompt-text" style="min-height:220px">${esc(a.systemPrompt)}</textarea></div><div class="field"><label>Save as</label><input class="input" id="prompt-version" value="v${a.version+1}" readonly/></div><button class="btn btn-primary" id="prompt-save">Save (new version)</button>`);
@@ -1365,11 +1427,134 @@
       try {
         const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "workflow";
         const w = await api("/workflows", { method: "POST", body: { name, slug, projectId, description: $("#wf-desc").value,
-          nodes: [{ id: "start", type: "agent", label: "Orchestrate", agentType: "orchestrator" }], edges: [] } });
+          nodes: [{ id: "start", type: "agent", name: "Orchestrate", config: { agentType: "orchestrator" }, retries: 0 }], edges: [] } });
         closeModal(); toast("Workflow created", w.name, "ok"); location.hash = "#/workflows/" + w.id;
       } catch (e) { toast("Error", e.message, "err"); }
     };
   };
+
+  /* WORKFLOW DETAIL / BUILDER */
+  const WF_NODE_TYPES = ["agent", "tool", "condition", "approval", "parallel", "trigger", "webhook", "telegram"];
+  const WF_AGENT_TYPES = ["orchestrator","business-analyst","research","system-architect","backend-developer","frontend-developer","uiux","database","devops","qa","security","code-review","documentation","debugging","refactoring","performance","release"];
+  let wfDraft = null;
+  function wfNodeConfigHelp(type) {
+    return { agent: "agentType (e.g. backend-developer), prompt", tool: "tool (name), input {…}", condition: "expression (JS-like, e.g. outputs.qa.ok === true)", approval: "message", parallel: "branches [node ids]", trigger: "event", webhook: "url", telegram: "chatId, text" }[type] || "";
+  }
+  function wfRenderGraph(w) {
+    const nodes = w.nodes || [], edges = w.edges || [];
+    // Simple layered layout: topological depth → column.
+    const depth = {}; const incoming = {};
+    nodes.forEach((n) => { depth[n.id] = 0; incoming[n.id] = 0; });
+    edges.forEach((e) => { if (incoming[e.to] != null) incoming[e.to]++; });
+    let changed = true, guard = 0;
+    while (changed && guard++ < 50) { changed = false; edges.forEach((e) => { if (depth[e.from] != null && depth[e.to] != null && depth[e.to] < depth[e.from] + 1) { depth[e.to] = depth[e.from] + 1; changed = true; } }); }
+    const cols = {}; nodes.forEach((n) => { (cols[depth[n.id]] = cols[depth[n.id]] || []).push(n); });
+    const colW = 190, rowH = 78, pad = 20;
+    const pos = {}; Object.keys(cols).forEach((d) => cols[d].forEach((n, i) => { pos[n.id] = { x: pad + d * colW, y: pad + i * rowH }; }));
+    const width = pad * 2 + (Object.keys(cols).length || 1) * colW, height = pad * 2 + Math.max(1, ...Object.values(cols).map((c) => c.length)) * rowH;
+    const color = { agent: "#6366f1", tool: "#0ea5e9", condition: "#f59e0b", approval: "#ef4444", parallel: "#10b981", trigger: "#8b5cf6", webhook: "#64748b", telegram: "#22c55e" };
+    const lines = edges.map((e) => { const a = pos[e.from], b = pos[e.to]; if (!a || !b) return ""; const x1 = a.x + 150, y1 = a.y + 24, x2 = b.x, y2 = b.y + 24; const mx = (x1 + x2) / 2; return `<path d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}" fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#wf-arrow)"/>${e.condition ? `<text x="${mx}" y="${(y1 + y2) / 2 - 4}" font-size="9" fill="#f59e0b" text-anchor="middle">${esc(e.condition).slice(0, 18)}</text>` : ""}`; }).join("");
+    const boxes = nodes.map((n, i) => { const p = pos[n.id]; return `<g class="wf-node" data-i="${i}" style="cursor:pointer" onclick="wfSelect(${i})"><rect x="${p.x}" y="${p.y}" width="150" height="48" rx="8" fill="var(--panel,#fff)" stroke="${color[n.type] || "#999"}" stroke-width="2"/><text x="${p.x + 10}" y="${p.y + 19}" font-size="11" font-weight="600" fill="currentColor">${esc(String(n.name || n.id)).slice(0, 20)}</text><text x="${p.x + 10}" y="${p.y + 36}" font-size="10" fill="${color[n.type] || "#999"}">${esc(n.type)}${n.retries ? ` · ×${n.retries}` : ""}</text></g>`; }).join("");
+    return `<svg width="${width}" height="${height}" style="max-width:100%;overflow:visible"><defs><marker id="wf-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#94a3b8"/></marker></defs>${lines}${boxes}</svg>`;
+  }
+  function wfRender() {
+    const w = wfDraft;
+    const nodes = w.nodes || [], edges = w.edges || [];
+    const sel = window.__wfSel ?? -1;
+    const node = nodes[sel];
+    $("#wf-graph").innerHTML = nodes.length ? wfRenderGraph(w) : emptyState("🧩", "No nodes yet", "Add a node to start building the workflow.");
+    $("#wf-nodes").innerHTML = nodes.map((n, i) => `<div class="step ${i === sel ? "running" : ""}" style="cursor:pointer" onclick="wfSelect(${i})"><div class="step-ico">${i + 1}</div><div><div class="step-label">${esc(n.name || n.id)} <span class="badge badge-muted">${esc(n.type)}</span></div><div class="step-detail mono">${esc(n.id)}${n.retries ? ` · retries ${n.retries}` : ""}</div></div></div>`).join("") || '<div class="muted">—</div>';
+    $("#wf-edges").innerHTML = edges.map((e, i) => `<div class="flex" style="gap:6px;align-items:center;margin-bottom:6px"><span class="mono">${esc(e.from)} → ${esc(e.to)}</span>${e.condition ? `<span class="badge badge-warn">${esc(e.condition)}</span>` : ""}<button class="btn btn-ghost" onclick="wfRemoveEdge(${i})">✕</button></div>`).join("") || '<div class="muted">No edges</div>';
+    const opts = nodes.map((n) => `<option value="${esc(n.id)}">${esc(n.name || n.id)}</option>`).join("");
+    $("#wf-edge-from").innerHTML = opts; $("#wf-edge-to").innerHTML = opts;
+    $("#wf-node-editor").innerHTML = node ? `
+      <div class="field"><label>ID</label><input class="input mono" id="wfn-id" value="${esc(node.id)}"/></div>
+      <div class="field"><label>Name</label><input class="input" id="wfn-name" value="${esc(node.name || "")}"/></div>
+      <div class="field"><label>Type</label><select class="select" id="wfn-type">${WF_NODE_TYPES.map((t) => `<option ${t === node.type ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+      ${node.type === "agent" ? `<div class="field"><label>Agent type</label><select class="select" id="wfn-agent">${WF_AGENT_TYPES.map((t) => `<option ${t === (node.config || {}).agentType ? "selected" : ""}>${t}</option>`).join("")}</select></div>` : ""}
+      <div class="field"><label>Retries</label><input class="input" type="number" min="0" max="5" id="wfn-retries" value="${node.retries || 0}"/></div>
+      <div class="field"><label>Config (JSON) <span class="muted">${esc(wfNodeConfigHelp(node.type))}</span></label><textarea class="textarea mono" id="wfn-config">${esc(JSON.stringify(node.config || {}, null, 2))}</textarea></div>
+      <div class="flex"><button class="btn btn-primary" onclick="wfApplyNode()">Apply</button><button class="btn" onclick="wfRemoveNode()">Remove node</button></div>` : '<div class="muted">Select a node to edit it.</div>';
+    $("#wf-json").value = JSON.stringify({ nodes, edges }, null, 2);
+  }
+  window.wfSelect = (i) => { window.__wfSel = i; wfRender(); };
+  window.wfAddNode = () => {
+    const type = $("#wf-new-type").value; const n = (wfDraft.nodes || []).length + 1;
+    const id = `${type}-${n}`;
+    const config = type === "agent" ? { agentType: "backend-developer" } : type === "tool" ? { tool: "run_tests", input: {} } : type === "condition" ? { expression: "true" } : type === "approval" ? { message: "Approve this step?" } : {};
+    wfDraft.nodes = [...(wfDraft.nodes || []), { id, type, name: id, config, retries: 0 }];
+    // Auto-link from the previous node for a linear default.
+    if (wfDraft.nodes.length > 1) wfDraft.edges = [...(wfDraft.edges || []), { from: wfDraft.nodes[wfDraft.nodes.length - 2].id, to: id }];
+    window.__wfSel = wfDraft.nodes.length - 1; wfRender();
+  };
+  window.wfApplyNode = () => {
+    const i = window.__wfSel; const node = wfDraft.nodes[i]; if (!node) return;
+    let config; try { config = JSON.parse($("#wfn-config").value || "{}"); } catch (e) { toast("Invalid config JSON", e.message, "err"); return; }
+    const oldId = node.id, newId = $("#wfn-id").value.trim() || oldId;
+    if (newId !== oldId && wfDraft.nodes.some((n, j) => j !== i && n.id === newId)) { toast("Duplicate node id", newId, "err"); return; }
+    const agentSel = $("#wfn-agent"); if (agentSel) config.agentType = agentSel.value;
+    wfDraft.nodes[i] = { ...node, id: newId, name: $("#wfn-name").value.trim() || newId, type: $("#wfn-type").value, retries: Number($("#wfn-retries").value || 0), config };
+    if (newId !== oldId) wfDraft.edges = (wfDraft.edges || []).map((e) => ({ ...e, from: e.from === oldId ? newId : e.from, to: e.to === oldId ? newId : e.to }));
+    wfRender();
+  };
+  window.wfRemoveNode = () => {
+    const i = window.__wfSel; const node = wfDraft.nodes[i]; if (!node) return;
+    wfDraft.nodes.splice(i, 1); wfDraft.edges = (wfDraft.edges || []).filter((e) => e.from !== node.id && e.to !== node.id);
+    window.__wfSel = -1; wfRender();
+  };
+  window.wfAddEdge = () => {
+    const from = $("#wf-edge-from").value, to = $("#wf-edge-to").value, condition = $("#wf-edge-cond").value.trim();
+    if (!from || !to || from === to) { toast("Pick two different nodes", "", "err"); return; }
+    if ((wfDraft.edges || []).some((e) => e.from === from && e.to === to)) { toast("Edge exists", "", "err"); return; }
+    wfDraft.edges = [...(wfDraft.edges || []), condition ? { from, to, condition } : { from, to }]; $("#wf-edge-cond").value = ""; wfRender();
+  };
+  window.wfRemoveEdge = (i) => { wfDraft.edges.splice(i, 1); wfRender(); };
+  window.wfApplyJson = () => {
+    try { const j = JSON.parse($("#wf-json").value); if (!Array.isArray(j.nodes) || !Array.isArray(j.edges)) throw new Error("expected {nodes:[], edges:[]}"); wfDraft.nodes = j.nodes; wfDraft.edges = j.edges; window.__wfSel = -1; wfRender(); toast("JSON applied", "Remember to save", "ok"); }
+    catch (e) { toast("Invalid JSON", e.message, "err"); }
+  };
+  window.wfSave = async () => {
+    const ids = new Set(); for (const n of wfDraft.nodes || []) { if (ids.has(n.id)) { toast("Duplicate node id", n.id, "err"); return; } ids.add(n.id); }
+    for (const e of wfDraft.edges || []) if (!ids.has(e.from) || !ids.has(e.to)) { toast("Edge references unknown node", `${e.from} → ${e.to}`, "err"); return; }
+    try {
+      const w = await api(`/workflows/${wfDraft.id}`, { method: "PATCH", body: { name: $("#wf-title").value.trim() || wfDraft.name, description: $("#wf-description").value, nodes: wfDraft.nodes, edges: wfDraft.edges, enabled: $("#wf-enabled").checked } });
+      wfDraft = w; toast("Workflow saved", `v${w.version}`, "ok"); refreshCurrent();
+    } catch (e) { toast("Save failed", e.message, "err"); }
+  };
+  window.wfRun = async () => {
+    try { const r = await api(`/workflows/${wfDraft.id}/run`, { method: "POST", body: { title: `Run ${wfDraft.name}` } }); toast("Workflow queued", (r.task && r.task.id || "").slice(0, 8), "ok"); setTimeout(refreshCurrent, 1200); }
+    catch (e) { toast("Run failed", e.message, "err"); }
+  };
+  window.wfDelete = async () => {
+    if (!confirm(`Delete workflow "${wfDraft.name}"?`)) return;
+    await api(`/workflows/${wfDraft.id}`, { method: "DELETE" }); toast("Workflow deleted", "", "ok"); location.hash = "#/workflows";
+  };
+  on("/workflows/:id", async (rest) => {
+    const id = rest[0];
+    const w = await api(`/workflows/${id}`);
+    if (!w || w.error) { $("#content").innerHTML = emptyState("🔍", "Workflow not found", id); return; }
+    wfDraft = JSON.parse(JSON.stringify(w)); window.__wfSel = -1;
+    const [tasks, runs] = await Promise.all([api("/tasks").catch(() => []), api("/runs").catch(() => [])]);
+    const myTasks = tasks.filter((t) => t.workflowId === id).slice(0, 8);
+    const taskIds = new Set(myTasks.map((t) => t.id));
+    const myRuns = runs.filter((r) => taskIds.has(r.taskId)).slice(0, 8);
+    $("#content").innerHTML = `
+      <div class="overview"><div><a href="#/workflows" class="muted">← Workflows</a><h1><input class="input" id="wf-title" value="${esc(w.name)}" style="font-size:20px;font-weight:700;min-width:320px"/></h1><p class="mono">${esc(w.slug)} · v${w.version} · project ${esc((w.projectId || "").slice(0, 12))}</p></div>
+        <div class="action-row"><label class="flex" style="gap:6px;align-items:center"><input type="checkbox" id="wf-enabled" ${w.enabled ? "checked" : ""}/> enabled</label><button class="btn" onclick="wfRun()">▶ Run</button><button class="btn btn-primary" onclick="wfSave()">Save</button><button class="btn btn-ghost" onclick="wfDelete()">Delete</button></div></div>
+      <div class="card card-body"><div class="field"><label>Description</label><textarea class="textarea" id="wf-description">${esc(w.description || "")}</textarea></div></div>
+      <div class="card card-body"><div class="card-title">Graph</div><div id="wf-graph" style="overflow:auto"></div></div>
+      <div class="grid-2">
+        <div class="card card-body"><div class="card-title flex" style="justify-content:space-between">Nodes <span class="flex" style="gap:6px"><select class="select" id="wf-new-type">${WF_NODE_TYPES.map((t) => `<option>${t}</option>`).join("")}</select><button class="btn" onclick="wfAddNode()">＋ Add node</button></span></div><div class="steps" id="wf-nodes"></div>
+          <div class="card-title mt">Edges</div><div id="wf-edges"></div>
+          <div class="flex" style="gap:6px;align-items:center;flex-wrap:wrap"><select class="select" id="wf-edge-from"></select><span>→</span><select class="select" id="wf-edge-to"></select><input class="input" id="wf-edge-cond" placeholder="condition (optional)" style="max-width:200px"/><button class="btn" onclick="wfAddEdge()">Link</button></div></div>
+        <div class="card card-body"><div class="card-title">Node editor</div><div id="wf-node-editor"></div></div>
+      </div>
+      <div class="card card-body"><div class="card-title">JSON (nodes + edges)</div><textarea class="textarea mono" id="wf-json" style="min-height:180px"></textarea><div class="flex mt"><button class="btn" onclick="wfApplyJson()">Apply JSON</button></div></div>
+      <div class="card card-body"><div class="card-title">Recent executions</div><div class="table-wrap"><table><thead><tr><th>Task</th><th>Status</th><th>Created</th><th>Runs</th></tr></thead><tbody>
+        ${myTasks.map((t) => `<tr><td><strong>${esc(t.title)}</strong></td><td>${badge(t.status)}</td><td>${timeAgo(t.createdAt)}</td><td>${myRuns.filter((r) => r.taskId === t.id).map((r) => `<a class="btn btn-ghost" href="#/runs/${r.id}/console">${esc(r.agentType)} ${badge(r.status)}</a>`).join(" ") || "—"}</td></tr>`).join("") || '<tr><td colspan="4" class="muted">No executions yet</td></tr>'}
+      </tbody></table></div></div>`;
+    wfRender();
+  });
 
   /* TASKS */
   on("/tasks", async () => {
@@ -1407,6 +1592,50 @@
           <div><div class="step-label">${s.index+1}. ${esc(s.label)}</div>${s.detail?`<div class="step-detail">${esc(s.detail)}</div>`:""}${s.tool?`<div class="step-detail mono">tool: ${esc(s.tool)}</div>`:""}</div>
         </div>`).join("") || "No steps yet"}</div>
         ${c.error ? `<div class="error-state mt"><h4>Error</h4><pre>${esc(c.error)}</pre></div>` : ""}
+      </div>`;
+  });
+
+  /* APPROVALS */
+  on("/approvals", async () => {
+    const [list, policy] = await Promise.all([api("/approvals"), api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 0 }))]);
+    const pending = list.filter((a) => a.status === "pending");
+    const history = list.filter((a) => a.status !== "pending").slice(0, 50);
+    const row = (a) => `<tr><td class="mono">${esc(a.id)}</td><td><strong>${esc(a.action)}</strong>${a.taskId ? `<div class="mono" style="color:var(--text-muted)">task ${esc(a.taskId)}</div>` : ""}</td><td class="mono">${(a.projectId || "—").slice(0, 12)}</td><td>${badge(a.status === "pending" ? "waiting_for_approval" : a.status === "approved" ? "succeeded" : a.status === "rejected" ? "failed" : "cancelled")}</td><td>${esc(a.decidedBy || "—")}<div style="color:var(--text-muted);font-size:11px">${esc(a.decisionSource || "")}</div></td><td>${timeAgo(a.decidedAt || a.requestedAt)}</td>
+      <td style="white-space:nowrap">${a.status === "pending" ? `<button class="btn btn-primary" onclick="decideApproval('${a.id}','approve')">✅ Approve</button> <button class="btn" onclick="decideApproval('${a.id}','reject')">❌ Reject</button>` : ""}</td></tr>`;
+    $("#content").innerHTML = `<div class="overview"><div><h1>Approvals</h1><p>Human-in-the-loop gate for merges, deploys, migrations and other dangerous or costly steps</p></div>
+        <div class="action-row"><span class="pill">${policy.autoApprove ? "⚠️ policy: auto-approve" : "🔒 policy: human approval required"}</span><button class="btn" onclick="location.hash='#/settings'">Policy</button></div></div>
+      <div class="card card-body"><div class="card-title">Pending <span class="sub">${pending.length}</span></div>
+        ${pending.length ? `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Action</th><th>Project</th><th>Status</th><th>By</th><th>When</th><th></th></tr></thead><tbody>${pending.map(row).join("")}</tbody></table></div>` : emptyState("✅", "Nothing waiting", policy.autoApprove ? "Auto-approve is on — switch it off in Settings to gate dangerous steps." : "Agents will pause here (and ping Telegram) when they need a decision.")}
+      </div>
+      <div class="card card-body mt"><div class="card-title">History</div>
+        ${history.length ? `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Action</th><th>Project</th><th>Status</th><th>By</th><th>When</th><th></th></tr></thead><tbody>${history.map(row).join("")}</tbody></table></div>` : emptyState("📭", "No decisions yet", "")}
+      </div>`;
+  });
+  window.decideApproval = async (id, decision) => {
+    try {
+      await api(`/approvals/${id}/${decision}`, { method: "POST", body: {} });
+      toast(decision === "approve" ? "Approved" : "Rejected", id, decision === "approve" ? "ok" : "warn");
+    } catch (e) { toast("Failed", e.message, "err"); }
+    refreshCurrent();
+  };
+
+  /* LOGS */
+  on("/logs", async () => {
+    const [runs, audit, notes] = await Promise.all([api("/runs"), api("/audit").catch(() => []), api("/notifications").catch(() => [])]);
+    const failed = runs.filter((r) => r.status === "failed" || r.error);
+    $("#content").innerHTML = `<div class="overview"><div><h1>Logs</h1><p>Run outcomes, audit trail and notifications — traceable by correlation id</p></div></div>
+      <div class="grid-2">
+        <div class="card card-body"><div class="card-title">Run errors <span class="sub">${failed.length}</span></div>
+          ${failed.length ? failed.slice(0, 30).map((r) => `<div class="list-row"><span>❌</span><div><strong>${esc(r.agentType)}</strong> <span class="mono" style="color:var(--text-muted)">${esc((r.correlationId || "").slice(0, 16))}</span><div style="font-size:12px;white-space:pre-wrap">${esc(r.error || (r.steps || []).filter((s) => s.status === "failed").map((s) => s.label + (s.detail ? ": " + s.detail : "")).join("; ") || "step failed")}</div></div><span class="spacer"></span><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></div>`).join("") : emptyState("🎉", "No errors", "All runs completed without errors.")}
+        </div>
+        <div class="card card-body"><div class="card-title">Notifications <span class="sub">${notes.length}</span></div>
+          ${notes.length ? notes.slice(0, 30).map((n) => `<div class="list-row"><span>${n.severity === "error" ? "🔴" : n.severity === "warning" ? "🟠" : n.severity === "success" ? "🟢" : "🔵"}</span><div><strong>${esc(n.title)}</strong><div style="font-size:12px">${esc(n.message)}</div></div><span class="spacer"></span><span style="color:var(--text-muted);font-size:11px">${timeAgo(n.createdAt)}</span></div>`).join("") : emptyState("🔔", "No notifications", "")}
+        </div>
+      </div>
+      <div class="card card-body mt"><div class="card-title">Audit log <span class="sub">${audit.length}</span></div>
+        <div class="table-wrap"><table><thead><tr><th>When</th><th>Action</th><th>Result</th><th>Source</th><th>Project</th><th>Correlation</th></tr></thead><tbody>
+        ${audit.slice(0, 100).map((a) => `<tr><td>${timeAgo(a.createdAt)}</td><td><strong>${esc(a.action)}</strong></td><td>${badge(a.result === "success" ? "succeeded" : a.result === "denied" || a.result === "failure" ? "failed" : "pending")}</td><td>${esc(a.source)}</td><td class="mono">${(a.projectId || "—").slice(0, 12)}</td><td class="mono">${esc((a.correlationId || "").slice(0, 16))}</td></tr>`).join("") || `<tr><td colspan="6">${emptyState("📭", "No audit entries", "")}</td></tr>`}
+        </tbody></table></div>
       </div>`;
   });
 
@@ -1814,6 +2043,7 @@
   /* SETTINGS */
   on("/settings", async () => {
     const s = await api("/settings");
+    const policy = await api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 900000, pending: 0 }));
     $("#content").innerHTML = `<div class="overview"><div><h1>Settings</h1><p>Import / Export / Backup — secrets are never exported</p></div></div>
       <div class="grid-2">
         <div class="card card-body"><div class="card-title">Platform</div>
@@ -1821,6 +2051,11 @@
           <div class="meter-row"><span class="lbl">Simulation</span><span class="val">${s.simulationMode}</span></div>
           <div class="meter-row"><span class="lbl">GitHub</span><span class="val">${s.githubConnected}</span></div>
           <div class="meter-row"><span class="lbl">Telegram</span><span class="val">${s.telegramConnected}</span></div>
+          <div class="card-title mt">Approval policy</div>
+          <label class="flex" style="gap:8px;align-items:center"><input type="checkbox" id="pol-auto" ${policy.autoApprove ? "checked" : ""}/> Auto-approve dangerous steps (dev / simulation)</label>
+          <div class="field mt"><label>Wait for a human up to (minutes)</label><input class="input" id="pol-timeout" type="number" min="1" value="${Math.round((policy.timeoutMs || 900000) / 60000)}"/></div>
+          <div class="flex"><button class="btn btn-primary" id="pol-save">Save policy</button><a class="btn" href="#/approvals">🛑 Approvals (${policy.pending || 0} pending)</a></div>
+          <p style="color:var(--text-muted);font-size:12px">وقتی Auto-approve خاموش باشد، مرحله‌های خطرناک (Merge، Deploy، Migration…) متوقف می‌شوند و در وب و تلگرام دکمه Approve/Reject می‌گیرید.</p>
         </div>
         <div class="card card-body"><div class="card-title">Backup & Import/Export</div>
           <div class="flex"><button class="btn" onclick="downloadBackup()">⬇ System Backup</button><button class="btn" id="restore-btn">⬆ Restore Backup</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
@@ -1831,6 +2066,10 @@
       </div>
       <div id="tg-settings"></div>`;
     renderTelegramSettings();
+    $("#pol-save").onclick = async () => {
+      const next = await api("/settings/approval", { method: "POST", body: { autoApprove: $("#pol-auto").checked, timeoutMs: Math.max(1, Number($("#pol-timeout").value || 15)) * 60000 } });
+      toast("Approval policy saved", next.autoApprove ? "auto-approve" : "human approval required", "ok");
+    };
     const restoreBtn = $("#restore-btn");
     const restoreFile = $("#restore-file");
     if (restoreBtn && restoreFile) {

@@ -70,6 +70,10 @@ const EnvSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().default(8080),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
+  /** API rate limit per client IP per minute (0 disables). Webhooks/health are exempt. */
+  RATE_LIMIT_PER_MINUTE: z.coerce.number().default(600),
+  /** Add security headers (HSTS only when behind TLS / in production). */
+  SECURITY_HEADERS: z.enum(["true", "false"]).default("true"),
 
   // Database (runtime state / cache / index — NOT the source of truth for projects)
   DATABASE_PATH: z.string().default("./data/codevia.db"),

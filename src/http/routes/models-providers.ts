@@ -10,6 +10,7 @@ import {
   type ProviderTestResult,
 } from "../../ai/provider-test.js";
 import { detectModelCapabilities, detectModelInfo } from "../../ai/provider-urls.js";
+import { knownModelInfos } from "../../ai/known-models.js";
 import { decryptSecret, encryptSecret, maskSecret } from "../../auth/encrypted-secrets.js";
 import { logger } from "../../logger.js";
 
@@ -72,27 +73,38 @@ function isMeaningfulCapabilities(c: unknown): c is Model["capabilities"] {
 }
 
 /**
- * Discover and add models from a provider after creation. The real model catalog
- * comes from `testProviderConnection` (a live read-only call) and each model is
- * stored with its **auto-detected** capabilities — the user never picks them.
+ * Discover and add models from a provider after creation. The primary source is
+ * the provider's **live** model catalog (`testProviderConnection`, a read-only
+ * call) and each model is stored with its **auto-detected** capabilities — the
+ * user never picks them.
+ *
+ * When the live catalog is unavailable (no key yet, no outbound network, a 4xx/5xx,
+ * or an empty catalog) we fall back to the built-in known-model catalog for that
+ * provider type (see `knownModelInfos`). This guarantees the Models section is
+ * populated after a provider is added/edited even in offline / air-gapped setups,
+ * instead of staying empty. A failed live call never fails the create/edit itself.
  */
 async function discoverAndAddModels(
   providerId: string,
   config: ModelProvider,
   container: Container,
-): Promise<{ added: string[]; test: ProviderTestResult }> {
+): Promise<{ added: string[]; test: ProviderTestResult; fromKnownCatalog: boolean }> {
   const testResult = await testProviderConnection(config, { timeoutMs: 15000 });
-  if (!testResult.ok) {
-    // Connection failed — don't add models, but surface the URL/endpoint we tried.
-    return { added: [], test: testResult };
-  }
 
+  // Candidate models: prefer the live catalog when it actually returned some,
+  // otherwise fall back to the known catalog for this provider type.
+  const liveInfos = testResult.ok ? (testResult.modelInfos ?? []) : [];
+  const useKnownCatalog = liveInfos.length === 0;
+  const candidates = useKnownCatalog ? knownModelInfos(config.type) : liveInfos;
+
+  // De-duplicate against models ALREADY in the Models section for THIS provider
+  // (a model id can legitimately exist for more than one provider).
   const existingModels = new Set(
-    container.modelRepo.findMany().map((m) => m.data.modelId),
+    container.modelRepo.findMany().filter((m) => m.data.providerId === providerId).map((m) => m.data.modelId),
   );
 
   const added: string[] = [];
-  for (const info of testResult.modelInfos ?? []) {
+  for (const info of candidates) {
     const modelId = info.id.replace(/^models\//, "").trim();
     if (!modelId || existingModels.has(modelId)) continue;
 
@@ -111,6 +123,7 @@ async function discoverAndAddModels(
         tags: [],
       });
       added.push(modelId);
+      existingModels.add(modelId);
     } catch (err) {
       logger.warn(
         `Failed to add model ${modelId} for provider ${providerId}`,
@@ -119,7 +132,7 @@ async function discoverAndAddModels(
     }
   }
 
-  return { added, test: testResult };
+  return { added, test: testResult, fromKnownCatalog: useKnownCatalog && added.length > 0 };
 }
 
 type ProviderStatus = ReturnType<typeof withStatus> & {
@@ -150,8 +163,9 @@ async function attachDiscovery(
   }
   let added: string[] = [];
   let test: ProviderTestResult;
+  let fromKnownCatalog = false;
   try {
-    ({ added, test } = await discoverAndAddModels(p.id, p, container));
+    ({ added, test, fromKnownCatalog } = await discoverAndAddModels(p.id, p, container));
   } catch (err) {
     logger.warn(`Model discovery failed for provider ${p.id} after ${action}`, { err: String(err) });
     status.discoveredModels = 0;
@@ -159,12 +173,16 @@ async function attachDiscovery(
     return;
   }
   if (added.length > 0) {
-    logger.info(`Discovered ${added.length} model(s) for provider ${p.name} (${p.id}) after ${action}`);
+    logger.info(`Discovered ${added.length} model(s) for provider ${p.name} (${p.id}) after ${action}`, {
+      fromKnownCatalog,
+    });
   }
   status.discoveredModels = added.length;
   status.test = test;
   status.message = added.length
-    ? `${base} and ${added.length} model(s) added to the Models section`
+    ? fromKnownCatalog
+      ? `${base} and ${added.length} model(s) added to the Models section from the built-in catalog (live catalog unavailable)`
+      : `${base} and ${added.length} model(s) added to the Models section`
     : test.ok
       ? `${base} — all catalog models are already in the Models section`
       : `${base} — ${test.message}`;

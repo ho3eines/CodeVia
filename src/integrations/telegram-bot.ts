@@ -10,6 +10,7 @@ import type { JobQueue } from "../db/queue.js";
 import type { Project } from "../domain/entities.js";
 import type { Logger } from "../logger.js";
 import type { TelegramRuntimeStatus } from "./telegram-runtime.js";
+import type { ApprovalService } from "../approvals/service.js";
 import { eventBus } from "../events/bus.js";
 
 export interface TelegramBotDeps {
@@ -26,6 +27,8 @@ export interface TelegramBotDeps {
   skillRepo?: SkillRepository;
   memoryRepo?: MemoryRepository;
   queue?: JobQueue;
+  /** Human-in-the-loop approvals (Approve / Reject inline buttons). */
+  approvals?: ApprovalService;
   logger: Logger;
   /** Live "how am I receiving messages" report, surfaced by /ping and /start. */
   runtimeStatus?: () => TelegramRuntimeStatus | undefined;
@@ -227,6 +230,13 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     if (cmd === "/stop" || cmd === "/cancel") return this.cancelPendingView(chatId);
     if (cmd === "/run") return this.runCommand(chatId, args);
     if (cmd === "/task") return this.taskCommand(chatId, args);
+    if (cmd === "/approvals" || cmd === "/approve" || cmd === "/reject") {
+      if ((cmd === "/approve" || cmd === "/reject") && args) {
+        return this.decideApproval(t, cmd === "/approve" ? "approve" : "reject", args.split(/\s+/)[0]!);
+      }
+      return this.approvalsView(chatId);
+    }
+    if (cmd === "/logs") return this.globalSection(chatId, "logs");
 
     // Anything else — Persian included — is a natural-language request.
     return this.handleNaturalLanguage(chatId, raw);
@@ -246,6 +256,9 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     const arg = rest.join(":");
 
     switch (action) {
+      case "approve":
+      case "reject":
+        return this.decideApproval({ chatId, updateId: 0 }, action, arg);
       case "project":
         return this.selectProject(chatId, arg);
       case "menu":
@@ -281,7 +294,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       "Pick a section below, or just type a request and I'll run it as a task on your active project.",
       "Example: *\"بررسی کن چرا Login بعد از آخرین کامیت خراب شده\"*",
       "",
-      "Commands: /projects /agents /models /skills /tasks /runs /status /tests /memory /github /issues /pr /task /run /settings /status /ping /help",
+      "Commands: /projects /agents /models /skills /tasks /runs /status /tests /memory /github /issues /pr /task /run /approvals /logs /settings /ping /help",
     ];
     if (status && status.enabled && status.transport === "off" && status.mode !== "off") {
       lines.push("", `⚠️ I'm not receiving messages right now — ${status.fixes[0] ?? "check /ping"}`);
@@ -346,6 +359,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       [{ text: "📼 Runs", callback_data: "menu:runs" }, { text: "📊 Status", callback_data: "menu:status" }],
       [{ text: "🧪 Tests", callback_data: "menu:tests" }, { text: "🧠 Memory", callback_data: "menu:memory" }],
       [{ text: "📦 GitHub", callback_data: "menu:github" }, { text: "🎛 Dashboard", callback_data: "menu:dashboard" }],
+      [{ text: "🛑 Approvals", callback_data: "menu:approvals" }, { text: "📜 Logs", callback_data: "menu:logs" }],
       [{ text: "🆘 Help", callback_data: "menu:help" }, { text: "🏓 Self-check", callback_data: "menu:ping" }],
     ];
   }
@@ -361,6 +375,8 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
         "• *Status / Tests / Tasks / Runs* — project health and history.",
         "• *Memory* — architecture/decisions/lessons for the project.",
         "• *GitHub* — linked repos, branches, opened issues & PRs.",
+        "• *Approvals* (`/approvals`) — approve or reject gated actions (merge, deploy…) with one tap.",
+        "• *Logs* (`/logs`) — the latest run outcomes and errors.",
         "• *Self-check* (`/ping`) — how the bot receives messages + what to fix.",
         "• *Id* (`/id`) — your Telegram user/chat id, i.e. the “AccountId” the web UI asks for.",
         ...(this.deps.access ? ["• *Link* (`/pair CODE`) — binds this chat to a bot created in Settings."] : []),
@@ -482,6 +498,10 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
         return this.projectScoped(chatId, section);
       case "ping":
         return this.pingView();
+      case "approvals":
+        return this.approvalsView(chatId);
+      case "logs":
+        return this.logsView(chatId);
       case "settings":
         return this.settingsView(chatId);
       default:
@@ -634,6 +654,84 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       ? [`🛠 *Tasks — ${p.name}*`, "", ...tasks.map((t) => `${t.status === "succeeded" ? "✅" : t.status === "failed" ? "❌" : "🔄"} ${t.title.slice(0, 60)}`)].join("\n")
       : `🛠 *Tasks — ${p.name}*\n\nNo tasks yet.`;
     return { text, keyboard: this.projectKeyboard(p) };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Approvals (human-in-the-loop)
+   * ------------------------------------------------------------------ */
+
+  private approvalsView(chatId: string): View {
+    const svc = this.deps.approvals;
+    if (!svc) return { text: "🛑 Approvals are not available in this context.", keyboard: this.homeKeyboard() };
+    const owned = new Set(this.ownedProjects().map((p) => p.id));
+    const active = this.activeProject(chatId);
+    const pending = svc
+      .list({ status: "pending" })
+      .filter((a) => !a.projectId || owned.has(a.projectId))
+      .filter((a) => !active || !a.projectId || a.projectId === active.id)
+      .slice(0, 6);
+    if (pending.length === 0) {
+      return {
+        text: `🛑 *Approvals*\n\nNothing is waiting for you${active ? ` in *${active.name}*` : ""}. ✅`,
+        keyboard: this.homeKeyboard(),
+      };
+    }
+    const lines = [`🛑 *Pending approvals* (${pending.length})`, ""];
+    const rows: InlineKeyboard = [];
+    for (const a of pending) {
+      const project = a.projectId ? this.deps.projectRepo.findById(a.projectId)?.data : undefined;
+      lines.push(`• \`${a.id}\` — ${a.action}${project ? ` _(${project.name})_` : ""}`);
+      rows.push([
+        { text: `✅ ${a.id}`, callback_data: `approve:${a.id}` },
+        { text: `❌ ${a.id}`, callback_data: `reject:${a.id}` },
+      ]);
+    }
+    rows.push([{ text: "🔄 Refresh", callback_data: "menu:approvals" }, { text: "🏠 Home", callback_data: "menu:home" }]);
+    return { text: lines.join("\n"), keyboard: rows };
+  }
+
+  private decideApproval(t: TelegramUpdate, decision: "approve" | "reject", id: string): View {
+    const svc = this.deps.approvals;
+    if (!svc) return { text: "🛑 Approvals are not available in this context.", keyboard: this.homeKeyboard() };
+    const existing = svc.get(id);
+    if (!existing) return { text: `🤷 Approval \`${id}\` not found.`, keyboard: this.homeKeyboard() };
+    if (existing.projectId && !this.ownedProject(existing.projectId)) {
+      return { text: "🔒 That approval belongs to a project you cannot access.", keyboard: this.homeKeyboard() };
+    }
+    try {
+      const result = svc.decide(id, decision, { user: t.userId ? `telegram:${t.userId}` : `telegram:${t.chatId}`, source: "telegram" });
+      const ok = result.status === "approved";
+      return {
+        text: `${ok ? "✅ Approved" : "❌ Rejected"} — *${result.action}*\n\`${result.id}\`${ok ? "\n\nThe agent will continue." : "\n\nThe gated step was skipped."}`,
+        keyboard: this.adHocKeyboard([[{ text: "🛑 Approvals", callback_data: "menu:approvals" }, { text: "🏠 Home", callback_data: "menu:home" }]]),
+      };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return { text: `⚠️ Could not ${decision}: ${detail}`, keyboard: this.homeKeyboard() };
+    }
+  }
+
+  /** Latest run outcomes (status + error) — the Telegram twin of the Logs page. */
+  private logsView(chatId: string): View {
+    const active = this.activeProject(chatId);
+    const owned = new Set(this.ownedProjects().map((p) => p.id));
+    const runs = this.deps.runRepo
+      .findMany(active ? { projectId: active.id } : {})
+      .map((r) => r.data)
+      .filter((r) => owned.has(r.projectId))
+      .slice(0, 10);
+    if (runs.length === 0) {
+      return { text: `📜 *Logs*\n\nNo runs recorded${active ? ` for *${active.name}*` : ""} yet.`, keyboard: this.homeKeyboard() };
+    }
+    const icon = (s: string) => (s === "succeeded" ? "✅" : s === "failed" ? "❌" : s === "waiting_for_approval" ? "🛑" : "⏳");
+    const lines = [`📜 *Logs${active ? ` — ${active.name}` : ""}*`, ""];
+    for (const r of runs) {
+      const failed = r.steps.find((s) => s.status === "failed");
+      lines.push(`${icon(r.status)} ${r.agentType} · ${r.status} · ${r.durationMs}ms · \`${r.correlationId.slice(0, 12)}\``);
+      if (r.error) lines.push(`   ↳ ${r.error.slice(0, 120)}`);
+      else if (failed) lines.push(`   ↳ step failed: ${failed.label}`);
+    }
+    return { text: lines.join("\n"), keyboard: this.adHocKeyboard([[{ text: "🔄 Refresh", callback_data: "menu:logs" }, { text: "🏠 Home", callback_data: "menu:home" }]]) };
   }
 
   private runsView(p: Project): View {

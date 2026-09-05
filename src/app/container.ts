@@ -1,3 +1,4 @@
+import { AiTextService } from "../ai/text-service.js";
 import { getDb } from "../db/client.js";
 import { getQueue } from "../db/queue.js";
 import { getKv } from "../db/kv.js";
@@ -29,6 +30,10 @@ import { logger } from "../logger.js";
 import type { IGitHubService } from "../github/types.js";
 import { BackupService } from "../backup/service.js";
 import { BackupScheduler } from "../backup/scheduler.js";
+import { ApprovalService, getApprovalRepo, type ApprovalRequest } from "../approvals/service.js";
+import { accountTelegramService } from "../integrations/telegram.js";
+import { GithubAutomation } from "../github/automation.js";
+import { getPromptVersionRepo } from "../prompts/versions.js";
 
 /**
  * Composition root — constructs and wires the whole runtime. Every service/domain
@@ -59,6 +64,14 @@ export class Container {
   readonly skillsRegistry = new SkillRegistry(this.skillRepo);
   readonly providerRegistry: ProviderRegistry = providerRegistry;
   readonly modelRouter: ModelRouter = modelRouter;
+  /** Routed model calls outside agent runs (summaries, PR text, chat). */
+  readonly aiText: AiTextService = new AiTextService({
+    modelRepo: this.modelRepo,
+    providerRepo: this.providerRepo,
+    providerRegistry: this.providerRegistry,
+    modelRouter: this.modelRouter,
+    costRepo: this.costRepo,
+  });
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
   readonly github: IGitHubService = resolveGitHubService();
@@ -66,17 +79,25 @@ export class Container {
   readonly memoryResolver: MemoryResolver = memoryResolver;
   readonly agentRouter = new AgentRouter();
 
-  /** Request human approval. In production wired to Telegram; in sim auto-approve/notify. */
-  approvalChannel: (action: string, detail: Record<string, unknown>) => Promise<boolean> = async (action, detail) => {
-    logger.info(`approval requested (auto-granted in dev/sim): ${action}`, detail);
-    await this.notificationRepo.create({
-      severity: "warning",
-      title: "Approval requested",
-      message: action,
-      projectId: (detail as { projectId?: string }).projectId,
-    });
-    return true;
-  };
+  readonly approvalRepo = getApprovalRepo();
+  readonly promptVersionRepo = getPromptVersionRepo();
+  /**
+   * Human-in-the-loop approvals. Policy (auto vs. wait-for-human) lives in the
+   * KV store; pending requests are surfaced in the web UI and pushed to the
+   * project's Telegram chat with Approve / Reject buttons.
+   */
+  readonly approvals: ApprovalService = new ApprovalService({
+    repo: this.approvalRepo,
+    kv: this.kv,
+    notificationRepo: this.notificationRepo,
+    auditRepo: this.auditRepo,
+    taskRepo: this.taskRepo,
+    notify: (req) => this.notifyApprovalViaTelegram(req),
+  });
+
+  /** Request human approval — routed through the ApprovalService. */
+  approvalChannel: (action: string, detail: Record<string, unknown>) => Promise<boolean> = (action, detail) =>
+    this.approvals.request(action, detail);
 
   readonly agentRunner: AgentRunner;
   readonly workflowEngine: WorkflowEngine;
@@ -84,6 +105,8 @@ export class Container {
   readonly worker: Worker;
   readonly backupService: BackupService;
   readonly backupScheduler: BackupScheduler;
+  /** GitHub webhook → agent task routing (push→QA, PR→review, issue→research…). */
+  readonly githubAutomation: GithubAutomation;
 
   constructor() {
     this.agentRunner = new AgentRunner({
@@ -98,6 +121,7 @@ export class Container {
       contextEngine: this.contextEngine,
       github: this.github,
       requestApproval: (a, d) => this.approvalChannel(a, d),
+      isCancelled: (taskId) => this.taskRepo.findById(taskId)?.data.status === "cancelled",
     });
     this.workflowEngine = new WorkflowEngine({
       agentRepo: this.agentRepo,
@@ -146,11 +170,67 @@ export class Container {
       providerRegistry: this.providerRegistry,
       logger: logger.child({ component: "backup" }),
     });
+    this.githubAutomation = new GithubAutomation({
+      projectRepo: this.projectRepo,
+      agentRepo: this.agentRepo,
+      agentManager: this.agentManager,
+      queue: this.queue,
+      kv: this.kv,
+      auditRepo: this.auditRepo,
+    });
+    this.githubAutomation.start();
     this.backupScheduler = new BackupScheduler({
       kv: this.kv,
       backup: this.backupService,
       logger: logger.child({ component: "backup-scheduler" }),
     });
+  }
+
+  /**
+   * Push a pending approval to Telegram: the project's configured chat via the
+   * operator bot, plus the paired chat of every per-user bot owned by the
+   * project owner. Buttons carry `approve:<id>` / `reject:<id>` callbacks.
+   */
+  private async notifyApprovalViaTelegram(req: ApprovalRequest): Promise<void> {
+    const project = req.projectId ? this.projectRepo.findById(req.projectId)?.data : undefined;
+    const text = [
+      "🛑 *Approval required*",
+      "",
+      `*${req.action}*`,
+      project ? `📁 Project: ${project.name}` : undefined,
+      req.taskId ? `🧩 Task: \`${req.taskId}\`` : undefined,
+      `🆔 \`${req.id}\``,
+      req.expiresAt ? `⏳ Expires: ${req.expiresAt}` : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const inlineKeyboard = [
+      [
+        { text: "✅ Approve", callback_data: `approve:${req.id}` },
+        { text: "❌ Reject", callback_data: `reject:${req.id}` },
+      ],
+    ];
+    const targets: Array<{ chatId: string; send: (msg: { chatId: string; text: string; inlineKeyboard: typeof inlineKeyboard }) => Promise<boolean> }> = [];
+    if (project?.telegramChatId) {
+      targets.push({ chatId: project.telegramChatId, send: (m) => this.telegram.sendButtons(m) });
+    }
+    for (const rec of this.telegramAccountRepo.findMany()) {
+      const acc = rec.data;
+      if (!acc.connected || !acc.chatId) continue;
+      if (project?.ownerId && acc.userId && acc.userId !== project.ownerId) continue;
+      const svc = accountTelegramService(acc);
+      targets.push({ chatId: acc.chatId, send: (m) => svc.sendButtons(m) });
+    }
+    const seen = new Set<string>();
+    for (const t of targets) {
+      if (seen.has(t.chatId)) continue;
+      seen.add(t.chatId);
+      try {
+        await t.send({ chatId: t.chatId, text, inlineKeyboard });
+      } catch (err) {
+        logger.warn("approval telegram push failed", { chatId: t.chatId, err: String(err) });
+      }
+    }
   }
 
   async ensureSeed(): Promise<void> {
@@ -219,6 +299,7 @@ export class Container {
       skillRepo: this.skillRepo,
       memoryRepo: this.memoryRepo,
       queue: this.queue,
+      approvals: this.approvals,
       logger: logger.child({ component: "telegram-bot" }),
       runtimeStatus: () => this.telegramRuntime?.status(),
     });

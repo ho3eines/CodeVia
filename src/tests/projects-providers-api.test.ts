@@ -4,6 +4,7 @@ import { getEnvFresh } from "../config/env.js";
 import { Container } from "../app/container.js";
 import { buildServer } from "../http/app.js";
 import { testProviderConnection, providerReadiness } from "../ai/provider-test.js";
+import { knownModelInfos } from "../ai/known-models.js";
 import type { ModelProvider } from "../domain/entities.js";
 import { freshDb } from "./test-helpers.js";
 
@@ -298,7 +299,9 @@ describe("providers API — approval flow", () => {
     expect(blocked.statusCode).toBe(409);
     const deleted = await srv.inject({ method: "DELETE", url: "/providers/provider-openai?cascade=true" });
     expect(deleted.statusCode).toBe(200);
-    expect(deleted.json().deletedModels).toBe(1);
+    // The manual gpt-test model PLUS the known OpenAI catalog models that were
+    // auto-discovered on the PATCH above (built-in catalog, since no key is set).
+    expect(deleted.json().deletedModels).toBe(knownModelInfos("openai").length + 1);
     expect((await srv.inject({ method: "GET", url: `/models/${model.id}` })).statusCode).toBe(404);
     expect((await srv.inject({ method: "DELETE", url: "/providers/provider-mock" })).statusCode).toBe(400);
   });

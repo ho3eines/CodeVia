@@ -594,6 +594,61 @@ describe("provider create + saved-provider tests", () => {
     expect(body.test.message).toContain("https://llm.example/v1/models");
   });
 
+  it("falls back to the built-in catalog so models still land in the Models section when the live catalog is unavailable", async () => {
+    const srv = await boot();
+    // No key + no network: the live catalog call cannot happen, but an OpenAI
+    // provider still has well-known models that MUST appear in the Models section.
+    stubNoNetwork();
+    const r = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Offline OpenAI", type: "openai", baseUrl: "https://api.openai.com/v1", authType: "bearer" },
+    });
+    expect(r.statusCode).toBe(201);
+    const body = r.json();
+    expect(body.active).toBe(false);
+    // The known OpenAI models were added even though the live catalog failed.
+    expect(body.discoveredModels).toBeGreaterThan(0);
+    expect(body.message).toMatch(/built-in catalog/);
+    // They really landed in the Model Registry for this provider.
+    const models = (await srv.inject({ method: "GET", url: "/models" })).json();
+    const mine = models.filter((m: { providerId: string }) => m.providerId === body.id);
+    expect(mine.length).toBe(body.discoveredModels);
+    expect(mine.map((m: { modelId: string }) => m.modelId)).toEqual(expect.arrayContaining(["gpt-4o", "gpt-4o-mini"]));
+
+    // Re-saving the provider must NOT duplicate the known models.
+    const reSaved = await srv.inject({ method: "PATCH", url: `/providers/${body.id}`, payload: { name: "Offline OpenAI" } });
+    expect(reSaved.json().discoveredModels).toBe(0);
+    const after = (await srv.inject({ method: "GET", url: "/models" })).json();
+    expect(after.filter((m: { providerId: string }) => m.providerId === body.id)).toHaveLength(mine.length);
+  });
+
+  it("does not duplicate known models once the live catalog later succeeds", async () => {
+    const srv = await boot();
+    // First save: live catalog unavailable → known OpenAI models are added.
+    stubNoNetwork();
+    const created = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Mixed OpenAI", type: "openai", baseUrl: "https://api.openai.com/v1", authType: "none", secretValue: "sk-123456" },
+    });
+    const pid = created.json().id;
+    const knownCount = created.json().discoveredModels;
+    expect(knownCount).toBeGreaterThan(0);
+
+    // Later the live catalog works and returns gpt-4o (already added via fallback).
+    stubFetch((url) =>
+      url.endsWith("/models")
+        ? new Response(JSON.stringify({ data: [{ id: "gpt-4o" }, { id: "gpt-4.1" }] }), { status: 200 })
+        : new Response("{}", { status: 404 }),
+    );
+    const edited = await srv.inject({ method: "PATCH", url: `/providers/${pid}`, payload: { name: "Mixed OpenAI" } });
+    // Only the models NOT yet present (here: nothing new, gpt-4o + gpt-4.1 already seeded) — idempotent.
+    expect(edited.json().discoveredModels).toBe(0);
+    const models = (await srv.inject({ method: "GET", url: "/models" })).json();
+    expect(models.filter((m: { providerId: string }) => m.providerId === pid).length).toBe(knownCount);
+  });
+
   it("returns both catalogUrl and chatUrl from the providers/test draft endpoint", async () => {
     const srv = await boot();
     const r = await srv.inject({

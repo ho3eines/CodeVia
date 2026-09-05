@@ -1,3 +1,4 @@
+import { registerHardening } from "./hardening.js";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { readdir, readFile } from "node:fs/promises";
@@ -28,6 +29,7 @@ import { registerSearchRoutes } from "./routes/search.js";
 import { registerObservabilityRoutes } from "./routes/observability.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerBackupRoutes } from "./routes/backup.js";
+import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { authMiddleware } from "./auth.js";
 import { getEnv } from "../config/env.js";
@@ -67,6 +69,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   );
 
   await app.register(cors, { origin: true });
+  registerHardening(app);
   await app.register(swagger, {
     openapi: {
       info: {
@@ -163,6 +166,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     registerObservabilityRoutes(app, container);
     registerAdminRoutes(app, container);
     registerBackupRoutes(app, container);
+    registerApprovalRoutes(app, container);
   });
 
   // Global auth guard for everything not whitelisted. Public/unauthenticated

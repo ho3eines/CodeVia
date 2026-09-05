@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Container } from "../../app/container.js";
-import type { Project, ProjectGithubConnection, ProjectRepositoryLink } from "../../domain/entities.js";
+import type { AgentType, Project, ProjectGithubConnection, ProjectRepositoryLink } from "../../domain/entities.js";
 import { skillsForCapabilities } from "../../domain/project-options.js";
 import {
   configRepoOf,
@@ -15,6 +15,8 @@ import { parseRepoFullName } from "../../github/types.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
 import { resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken } from "../../auth/github-tokens.js";
+import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
+import { defaultPlanFor } from "../../agents/plan.js";
 
 function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
   reply.code(status);
@@ -300,6 +302,70 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const body = (req.body ?? {}) as Record<string, unknown>;
     if (!load(id)) return fail(reply, 404, "project not found");
     return container.agentManager.onboardProject(id, Array.isArray(body.tech) ? (body.tech as string[]) : []);
+  });
+
+  // ---- Project rules (discovered + manual) ----
+  app.get("/projects/:id/rules", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    return p.settings.rules.map((text, index) => {
+      const discovered = text.startsWith(DISCOVERED_RULE_TAG);
+      const body = discovered ? text.slice(DISCOVERED_RULE_TAG.length).trim() : text;
+      const category = /^##\s*([\w-]+)\s+rules/i.exec(body)?.[1]?.toLowerCase() ?? "custom";
+      return { index, category, discovered, text: body };
+    });
+  });
+
+  app.put("/projects/:id/rules", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const body = (req.body ?? {}) as { rules?: string[]; keepDiscovered?: boolean };
+    const manual = Array.isArray(body.rules) ? body.rules.map((r) => String(r).trim()).filter(Boolean) : [];
+    const discovered = body.keepDiscovered === false ? [] : p.settings.rules.filter((r) => r.startsWith(DISCOVERED_RULE_TAG));
+    const next = save({ ...p, settings: { ...p.settings, rules: [...manual, ...discovered] } });
+    container.auditRepo.record({ action: "project.rules.updated", projectId: id, result: "success", source: "web", correlationId: `rules-${id}-${Date.now()}`, metadata: { manual: manual.length, discovered: discovered.length } });
+    return { rules: next.settings.rules.length, manual: manual.length, discovered: discovered.length };
+  });
+
+  // ---- Dry run / Simulation: preview what an agent would do, without running it ----
+  app.post("/projects/:id/dry-run", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const body = (req.body ?? {}) as { title?: string; description?: string; agentType?: string };
+    const text = `${body.title ?? ""} ${body.description ?? ""}`.trim();
+    const agentType = (body.agentType as AgentType | undefined) ?? container.agentRouter.route(text);
+    const agent = container.agentRepo.byType(id, agentType);
+    if (!agent) return fail(reply, 404, `no agent of type ${agentType} in this project`);
+    const now = new Date().toISOString();
+    const task = {
+      id: "dry-run",
+      projectId: id,
+      title: body.title ?? text.slice(0, 80) ?? "Dry run",
+      description: body.description ?? "",
+      status: "created" as const,
+      agentType,
+      correlationId: "dry-run",
+      input: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+    const plan = defaultPlanFor(agent, task);
+    const context = await container.contextEngine.build({ project: p, agent, task, skills: container.skillsRegistry, github: container.github }).catch(() => undefined);
+    const tools = plan.filter((s) => s.tool).map((s) => container.toolRegistry.get(s.tool!)).filter(Boolean);
+    return {
+      simulation: true,
+      agent: { id: agent.id, name: agent.name, type: agent.type },
+      model: { primary: agent.models.primary || null, fallbacks: agent.models.fallbacks },
+      plan: plan.map((s, i) => ({ index: i, label: s.label, tool: s.tool ?? null, requiresApproval: Boolean(s.requiresApproval) || Boolean(s.tool && container.toolRegistry.get(s.tool)?.dangerous) })),
+      writes: plan.filter((s) => s.tool && container.toolRegistry.get(s.tool)?.dangerous).map((s) => ({ step: s.label, tool: s.tool })),
+      approvalsNeeded: plan.filter((s) => s.requiresApproval || (s.tool && container.toolRegistry.get(s.tool)?.dangerous)).length,
+      context: context ? { tokens: context.tokens, sources: context.sources.map((c) => c.label) } : null,
+      tools: tools.map((t) => ({ name: t!.name, dangerous: t!.dangerous, permissions: t!.permissions })),
+      budget: p.settings.budget,
+    };
   });
 
   // ---- Repositories (multi-repo) ----

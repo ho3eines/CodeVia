@@ -49,7 +49,7 @@ export class LocalFileMemoryStore implements IMemoryStore {
   }
 
   async search(query: string, opts: { types?: MemoryType[] } = {}): Promise<MemoryEntry[]> {
-    const types = opts.types ?? (Object.keys([
+    const types: MemoryType[] = opts.types ?? [
       "architecture",
       "business",
       "technical",
@@ -58,7 +58,7 @@ export class LocalFileMemoryStore implements IMemoryStore {
       "knowledge",
       "lesson",
       "conversation",
-    ]) as MemoryType[]);
+    ];
     const results: MemoryEntry[] = [];
     for (const type of types) {
       const dir = this.dirForType(type);

@@ -14,6 +14,8 @@ Copy `.env.example` to `.env` and set the values you need.
 | `HOST` | `0.0.0.0` | Bind address (must stay `0.0.0.0` for container deployments) |
 | `PORT` | `8080` | HTTP port |
 | `LOG_LEVEL` | `info` | `trace` \| `debug` \| `info` \| `warn` \| `error` \| `fatal` |
+| `RATE_LIMIT_PER_MINUTE` | `600` | Per-IP API rate limit (0 disables). Health, webhooks, docs and static assets are exempt |
+| `SECURITY_HEADERS` | `true` | Adds `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, HSTS (prod + https) |
 | `DATABASE_PATH` | `./data/codevia.db` | Runtime SQLite path. In Docker/Railway set it inside the volume (`/app/data/codevia.db`); the entrypoint prepares that directory and the app pre-checks it is writable at boot |
 
 ---
