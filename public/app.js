@@ -1077,8 +1077,8 @@
         <label class="model-check" title="Select every model of this provider">
           <input type="checkbox" ${allSelected ? "checked" : ""} onchange="modelSelectProvider('${esc(g.providerId)}', this.checked)"/>
         </label>
-        <button class="model-group-toggle" onclick="modelGroupToggle('${esc(g.providerId)}')">
-          <span class="chev">▾</span>
+        <button class="chev-btn" title="Collapse / expand this group" onclick="modelGroupToggle('${esc(g.providerId)}')"><span class="chev">▾</span></button>
+        <button class="model-group-toggle" title="Open this provider group" onclick="openModelGroup('${esc(g.providerId)}')">
           <strong>${esc(g.name)}</strong>
           <span class="badge badge-muted">${g.models.length} model(s)</span>
           <span class="badge badge-${g.active ? "ok" : "muted"}">${g.active} active</span>
@@ -1297,12 +1297,49 @@
   };
 
   /* ---- Groups modal ---- */
+  /**
+   * Group modal for ONE provider — opened by clicking the provider name on the
+   * Models page. Lists that provider's models with per-row selection and the
+   * bulk actions scoped to the group.
+   */
+  window.openModelGroup = (providerId) => {
+    const g = groupModelsByProvider(modelsCache).find((x) => x.providerId === providerId);
+    if (!g) { toast("Group not found", "", "err"); return; }
+    openModal(`🗂 ${g.name}`, `<div class="group-modal">
+      <div class="group-row">
+        <div>
+          <div class="field-hint mono">${esc(g.providerId)}</div>
+          <div style="margin-top:4px"><span class="badge badge-muted">${g.models.length} model(s)</span> <span class="badge badge-${g.active ? "ok" : "muted"}">${g.active} active</span></div>
+        </div>
+        <div class="flex">
+          <button class="btn btn-ghost" onclick="modelGroupSelect('${esc(g.providerId)}')">Select all</button>
+          <button class="btn btn-ghost" onclick="modelGroupJump('${esc(g.providerId)}')">Go to group</button>
+          <button class="btn btn-ghost" onclick="openModelGroups()">All groups</button>
+        </div>
+      </div>
+      <div class="table-wrap" style="max-height:46vh;overflow:auto"><table><thead><tr>
+        <th style="width:34px"></th><th>Model</th><th>Caps</th><th>Active</th><th></th>
+      </tr></thead><tbody>
+      ${g.models.map((m) => `<tr>
+        <td><input type="checkbox" ${modelSelection.has(m.id) ? "checked" : ""} onchange="modelSelectOne('${esc(m.id)}', this.checked)"/></td>
+        <td><strong>${esc(m.displayName)}</strong><div class="mono field-hint">${esc(m.modelId)}${tuningBadge(m)}</div></td>
+        <td>${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</td>
+        <td>${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
+        <td style="white-space:nowrap;text-align:right">
+          <button class="btn btn-ghost" onclick="openModelChat('${esc(m.id)}')">💬</button>
+          <button class="btn btn-ghost" onclick="openModelEdit('${esc(m.id)}')">✏️</button>
+        </td></tr>`).join("") || `<tr><td colspan="5">${emptyState("🧠", "No models", "This provider has no models yet.")}</td></tr>`}
+      </tbody></table></div>
+      <div class="flex mt" style="justify-content:flex-end"><button class="btn" onclick="closeModal()">Close</button></div>
+    </div>`);
+  };
+
   window.openModelGroups = () => {
     const groups = groupModelsByProvider(modelsCache);
     openModal("Model Groups by Provider", `<div class="group-modal">
       ${groups.map((g) => `<div class="group-row">
         <div>
-          <strong>${esc(g.name)}</strong>
+          <button class="linkish" onclick="openModelGroup('${esc(g.providerId)}')"><strong>${esc(g.name)}</strong></button>
           <div class="field-hint mono">${esc(g.providerId)}</div>
         </div>
         <div class="flex">
