@@ -27,6 +27,7 @@ import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerSearchRoutes } from "./routes/search.js";
 import { registerObservabilityRoutes } from "./routes/observability.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { registerBackupRoutes } from "./routes/backup.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { authMiddleware } from "./auth.js";
 import { getEnv } from "../config/env.js";
@@ -161,6 +162,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     registerSearchRoutes(app, container);
     registerObservabilityRoutes(app, container);
     registerAdminRoutes(app, container);
+    registerBackupRoutes(app, container);
   });
 
   // Global auth guard for everything not whitelisted. Public/unauthenticated

@@ -1817,10 +1817,10 @@
           <div class="meter-row"><span class="lbl">Telegram</span><span class="val">${s.telegramConnected}</span></div>
         </div>
         <div class="card card-body"><div class="card-title">Backup & Import/Export</div>
-          <div class="flex"><button class="btn" onclick="downloadBackup()">⬇ System Backup</button><button class="btn" id="restore-btn">⬆ Restore Backup</button><button class="btn" onclick="refreshCurrent()">Refresh</button></div>
+          <div class="flex"><button class="btn" onclick="downloadBackup()">⬇ System Backup</button><button class="btn" id="restore-btn">⬆ Restore Backup</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
           <input type="file" id="restore-file" accept="application/json,.json" style="display:none"/>
-          <p style="color:var(--text-muted);font-size:12px">Secrets are stored as references (e.g. OPENAI_API_KEY) and are never included in exports.</p>
-          <p style="color:var(--text-muted);font-size:11px">💡 بکاپ شامل تنظیمات GitHub Login (بدون secrets) است. در Railway، قبل از Redeploy بکاپ بگیرید و بعد از دیپلی (که دیتابیس موقت پاک می‌شود) Restore کنید تا تنظیمات برگردند — یا Volume را طبق راهنمای Admin متصل کنید تا دیگر نیازی به این نباشد.</p>
+          <p style="color:var(--text-muted);font-size:12px">این فایل فقط تنظیمات GitHub Login را نگه می‌دارد. بکاپ کامل و زمان‌بندی‌شده (پروژه‌ها، مدل‌ها، پرووایدرها، ایجنت‌ها، کاربران و…) در <strong>Admin → System Backup</strong> است — با کلیدهای رمزنگاری‌شده (هرگز plaintext).</p>
+          <p style="color:var(--text-muted);font-size:11px">💡 در Railway، قبل از Redeploy از Admin یک بکاپ کامل بگیرید و بعد از دیپلی (که دیتابیس موقت پاک می‌شود) Restore کنید تا همه‌چیز برگردد — یا Volume را طبق راهنمای Admin متصل کنید.</p>
         </div>
       </div>
       <div id="tg-settings"></div>`;
@@ -1859,6 +1859,7 @@
     const usage = await api("/admin/usage");
     const adm = await api("/admin/settings").catch((e) => ({ _forbidden: e.message }));
     const users = await api("/admin/users").catch(() => null);
+    const bak = await api("/admin/backup").catch(() => null);
     const diag = adm.github?.diagnostics || {};
     // Ephemeral-storage warning: when the DB is on container-local storage the
     // admin GitHub settings (and users/data) are wiped on every deploy — the
@@ -1881,6 +1882,50 @@
         <pre id="env-recipe" style="background:#fff;border:1px solid #fde68a;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;direction:ltr;margin:6px 0">${esc(recipe)}</pre>
         <div class="flex" style="gap:8px"><button class="btn" id="env-copy-btn">📋 Copy Variables</button></div>
       </div>` : "";
+    const bakS = bak?.settings || {};
+    const bakEff = bak?.effective || {};
+    const lastBadge = !bakS.lastRunStatus ? '<span class="badge badge-muted">never</span>'
+      : bakS.lastRunStatus === "success" ? '<span class="badge badge-ok">success</span>'
+      : bakS.lastRunStatus === "failed" ? '<span class="badge badge-err">failed</span>'
+      : '<span class="badge badge-warn">running</span>';
+    const bakCard = bak ? `<div class="card card-body mt" id="bak-config">
+        <div class="card-title">🛡️ System Backup <span class="sub">ادمین فقط — پشتیبان کامل Railway به GitHub</span></div>
+        <p style="font-size:11px;color:var(--text-muted);margin:6px 0">هر دور، کل دیتابیس (پروژه‌ها، مدل‌ها، پرووایدرها، ایجنت‌ها، اسکیل‌ها، ورک‌فلوها، تسک‌ها/ران‌ها، کانورسیشن‌ها، مموری، کاربران، تلگرام، تنظیمات و…) را به‌صورت فایل JSON داخل ریپازیتوری GitHub دلخواه push می‌کند. کلیدهای رمزنگاری‌شده مثل قبل stored می‌مانند و هرگز plaintext نمی‌شوند.</p>
+        ${bak.github?.kind !== "real" ? `<div class="field-hint warn">⚠ ${esc(bak.github?.hint || "GitHub is not connected — backups will not reach a real repository.")}</div>` : ""}
+        <div class="grid-2">
+          <div>
+            <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="bak-enabled" ${bakS.enabled ? "checked" : ""}/> Enable scheduled backup</label></div>
+            <div class="field"><label>GitHub repository (owner/name)</label><input class="input mono" id="bak-repo" placeholder="your-org/codevia-backups" value="${esc(bakS.repo || "")}"/></div>
+            <div class="field"><label>Branch</label><input class="input mono" id="bak-branch" value="${esc(bakS.branch || "main")}"/></div>
+            <div class="field"><label>Path in repo</label><input class="input mono" id="bak-path" value="${esc(bakS.path || ".codevia/backups")}"/></div>
+          </div>
+          <div>
+            <div class="field"><label>Schedule preset</label><select class="select" id="bak-preset">
+              <option value="">custom (cron below)</option>
+              <option value="* * * * *">Every minute</option>
+              <option value="*/5 * * * *">Every 5 minutes</option>
+              <option value="0 * * * *">Every hour</option>
+              <option value="0 0 * * *">Every day at 00:00</option>
+              <option value="0 */12 * * *">Every 12 hours</option>
+              <option value="0 0 * * 0">Weekly (Sunday)</option>
+            </select></div>
+            <div class="field"><label>Cron (minute hour day month weekday)</label><input class="input mono" id="bak-schedule" value="${esc(bakS.schedule || bakEff.schedule || "0 * * * *")}"/><div class="field-hint">مثال ساعتی: <span class="mono">0 * * * *</span> · روزانه ساعت ۰۳:۳۰ صبح: <span class="mono">30 3 * * *</span></div></div>
+            <div class="field"><label>Keep listed snapshots</label><input class="input" id="bak-retain" type="number" min="1" max="500" value="${esc(String(bakS.retain || bakEff.retain || 30))}"/></div>
+            <div class="meter-row"><span class="lbl">Next run</span><span class="val mono">${esc(bak.schedule?.nextRunAt || "—")}</span></div>
+            <div class="meter-row"><span class="lbl">Last run</span><span class="val">${lastBadge} ${esc(bakS.lastRunAt || "")}</span></div>
+            ${bakS.lastRunError ? `<div class="field-hint err">${esc(bakS.lastRunError)}</div>` : ""}
+          </div>
+        </div>
+        <div class="flex mt" style="flex-wrap:wrap;gap:8px">
+          <button class="btn btn-primary" id="bak-save">Save settings</button>
+          <button class="btn" id="bak-run">▶ Run backup now</button>
+          <button class="btn" id="bak-list">📋 List backups</button>
+          <button class="btn" id="bak-export">⬇ Export JSON</button>
+          <button class="btn btn-danger" id="bak-restore">↺ Restore latest</button>
+        </div>
+        <p style="font-size:11px;color:var(--text-muted);margin-top:8px">💡 برای بازیابی بعد از هر دیپلی Railway: یک سرویس تازه با همان <span class="mono">GITHUB_TOKEN</span> وصل کنید، در همین صفحه Save و Restore کنید. تنظیمات فقط توسط Owner/Admin دیده و تغییر می‌کند.</p>
+        <div id="bak-result" style="margin-top:10px"></div>
+      </div>` : `<div class="card card-body mt"><div class="card-title">System Backup</div><p style="color:var(--text-muted);font-size:12px">Admin backup settings are unavailable — the API returned no config.</p></div>`;
     const stepsHtml = adm.github?.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);margin:8px 0 0 18px;text-align:left">${adm.github.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
     const mismatchWarn = diag.callbackUrlMismatchRisk ? `<p style="color:var(--warn, #d97706);font-size:11px">⚠️ Callback URL mismatch risk — check GitHub OAuth App settings.</p>` : "";
     $("#content").innerHTML = `<div class="overview"><div><h1>Admin</h1><p>System health & usage</p></div></div>
@@ -1905,6 +1950,7 @@
           <div class="meter-row"><span class="lbl">Cost</span><span class="val">${money(usage.costs.costUsd)}</span></div>
         </div>
       </div>
+      ${bakCard}
       <div class="grid-2 mt">
         <div class="card card-body"><div class="card-title">GitHub Login ${adm.github ? (adm.github.configured ? '<span class="badge badge-ok">configured ✓</span>' : '<span class="badge badge-warn">not configured ✗</span>') : ''}</div>
           ${adm._forbidden ? `<p style="color:var(--text-muted);font-size:12px">Login settings are visible to owners/admins only (${esc(adm._forbidden)}).</p>` : `
@@ -2005,6 +2051,92 @@
       } catch (_) {
         toast("Copy failed", "Select and copy the text manually.", "err");
       }
+    };
+    // ---- System Backup admin controls ----
+    const bakResult = (html) => {
+      const el = document.getElementById("bak-result");
+      if (el) el.innerHTML = html || "";
+    };
+    const bakPreset = document.getElementById("bak-preset");
+    if (bakPreset) bakPreset.onchange = () => {
+      if (bakPreset.value) {
+        const s = document.getElementById("bak-schedule");
+        if (s) s.value = bakPreset.value;
+      }
+    };
+    const bakSave = document.getElementById("bak-save");
+    if (bakSave) bakSave.onclick = async () => {
+      const btn = bakSave; btn.disabled = true; btn.textContent = "Saving…";
+      try {
+        const r = await api("/admin/backup", { method: "PUT", body: {
+          enabled: document.getElementById("bak-enabled").checked,
+          repo: document.getElementById("bak-repo").value.trim(),
+          branch: document.getElementById("bak-branch").value.trim() || "main",
+          path: document.getElementById("bak-path").value.trim(),
+          schedule: document.getElementById("bak-schedule").value.trim(),
+          retain: Number(document.getElementById("bak-retain").value) || 30,
+        }});
+        toast("Backup settings saved", r.effective?.repo ? "Scheduled and ready." : "Backup repository not set yet.", "ok");
+        bakResult(`<div class="field-hint ok">✓ ${esc(r.effective?.repo || "Configured")} · branch ${esc(r.effective?.branch || "")} · cron ${esc(r.effective?.schedule || "")}</div>`);
+        setTimeout(refreshCurrent, 800);
+      } catch (e) {
+        bakResult(`<div class="field-hint err">${esc(e.message)}</div>`);
+        toast("Save failed", e.message, "err");
+      } finally { btn.disabled = false; btn.textContent = "Save settings"; }
+    };
+    const bakRun = document.getElementById("bak-run");
+    if (bakRun) bakRun.onclick = async () => {
+      const btn = bakRun; btn.disabled = true; btn.textContent = "Backing up…";
+      bakResult(`<div class="field-hint">Backing up to GitHub…</div>`);
+      try {
+        const r = await api("/admin/backup/run", { method: "POST", body: {} });
+        if (r.ok) {
+          bakResult(`<div class="field-hint ok">✓ Backup pushed · commit ${esc(r.commit || "")} · ${esc(r.files || 0)} files · ${esc(String(r.bytes || 0))} bytes\n${r.warning ? esc(r.warning) : ""}</div>`);
+          toast("Backup complete", r.commit || "", "ok");
+        } else {
+          bakResult(`<div class="field-hint err">${esc(r.error || r.warning || "Backup failed")}</div>`);
+          toast("Backup failed", r.error || r.warning || "", "err");
+        }
+      } catch (e) { bakResult(`<div class="field-hint err">${esc(e.message)}</div>`); toast("Backup failed", e.message, "err"); }
+      finally { btn.disabled = false; btn.textContent = "▶ Run backup now"; }
+    };
+    const bakList = document.getElementById("bak-list");
+    if (bakList) bakList.onclick = async () => {
+      const btn = bakList; btn.disabled = true; btn.textContent = "Loading…";
+      try {
+        const r = await api("/admin/backup/list");
+        const rows = (r.backups || []).map((b) => `<tr><td>${b.latest ? '<span class="badge badge-ok">latest</span>' : ""} <span class="mono">${esc(b.id)}</span></td><td class="mono">${esc(b.createdAt)}</td><td>${b.records}</td><td>${b.jobs}</td><td>${b.kv}</td><td><button class="btn btn-ghost" data-backup-snapshot="${esc(b.id)}">Restore</button></td></tr>`).join("");
+        bakResult(rows ? `<div class="table-wrap"><table><thead><tr><th>Snapshot</th><th>Created</th><th>Records</th><th>Jobs</th><th>KV</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="field-hint">No backups found in ${esc(r.configured ? "the configured repository" : "a configured repository")}.</div>`);
+        document.querySelectorAll("[data-backup-snapshot]").forEach((b) => b.onclick = async () => {
+          const id = b.dataset.backupSnapshot;
+          if (!confirm(`Restore snapshot ${id}? This replaces the full runtime state.`)) return;
+          try {
+            const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, replace: true } });
+            if (res.ok) { toast("Backup restored", `${res.records} records restored`, "ok"); refreshCurrent(); }
+            else toast("Restore failed", res.error || "", "err");
+          } catch (e) { toast("Restore failed", e.message, "err"); }
+        });
+      } catch (e) { bakResult(`<div class="field-hint err">${esc(e.message)}</div>`); toast("List failed", e.message, "err"); }
+      finally { btn.disabled = false; btn.textContent = "📋 List backups"; }
+    };
+    const bakExport = document.getElementById("bak-export");
+    if (bakExport) bakExport.onclick = async () => {
+      try {
+        const b = await api("/admin/backup/export");
+        const blob = new Blob([JSON.stringify(b, null, 2)], { type: "application/json" });
+        const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "codevia-full-backup.json"; a.click();
+      } catch (e) { toast("Export failed", e.message, "err"); }
+    };
+    const bakRestore = document.getElementById("bak-restore");
+    if (bakRestore) bakRestore.onclick = async () => {
+      if (!confirm("Restore the latest backup from GitHub? This replaces the full runtime database.")) return;
+      const btn = bakRestore; btn.disabled = true; btn.textContent = "Restoring…";
+      try {
+        const res = await api("/admin/backup/restore", { method: "POST", body: { replace: true } });
+        if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok"); refreshCurrent(); }
+        else toast("Restore failed", res.error || "", "err");
+      } catch (e) { toast("Restore failed", e.message, "err"); }
+      finally { btn.disabled = false; btn.textContent = "↺ Restore latest"; }
     };
   });
 

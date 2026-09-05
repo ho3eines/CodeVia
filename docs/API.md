@@ -193,6 +193,12 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 | PUT | `/admin/settings/github` | Update GitHub login settings: `clientId`, `callbackUrl`, `scope`, `requireAuth` — empty string clears back to env/default (owner/admin only) |
 | GET | `/admin/users` | List login users (owner/admin only) |
 | PATCH | `/admin/users/:id/role` | Change a user's role; refuses to demote the last owner (owner/admin only) |
+| GET | `/admin/backup` | Admin System Backup config + status + GitHub/storage readiness (owner/admin only) |
+| PUT | `/admin/backup` | Save backup config: `enabled`, `repo` (`owner/name`), `branch`, `path`, `schedule` (cron), `retain` (owner/admin only) |
+| POST | `/admin/backup/run` | Push a full runtime snapshot to the configured GitHub repo now (owner/admin only) |
+| GET | `/admin/backup/list` | List committed snapshots in the configured repository (`?limit=`) |
+| GET | `/admin/backup/export` | Download the current full runtime snapshot as JSON |
+| POST | `/admin/backup/restore` | Restore from GitHub (`{snapshot?, replace?}`) or from a full snapshot body (`{snapshotData, replace?}`). Replaces the runtime DB by default |
 
 ---
 
