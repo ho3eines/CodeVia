@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { getEnvFresh } from "../config/env.js";
 import { Container } from "../app/container.js";
@@ -11,6 +11,17 @@ import { freshDb } from "./test-helpers.js";
  * Multi-select / multi-repo project creation and the provider approval
  * flow (activate / deactivate / test / delete) that the UI relies on.
  * ------------------------------------------------------------------ */
+
+/**
+ * Stub the global fetch with an empty model catalog so provider create/edit
+ * auto-discovery stays fast + deterministic (no real network in these tests).
+ */
+function stubEmptyCatalog(): void {
+  vi.stubGlobal(
+    "fetch",
+    (async () => new Response(JSON.stringify({ data: [] }), { status: 200 })) as typeof fetch,
+  );
+}
 
 let cleanup: (() => void) | undefined;
 let app: FastifyInstance | undefined;
@@ -35,6 +46,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   if (app) {
     await app.close();
     app = undefined;
@@ -218,6 +230,8 @@ describe("providers API — approval flow", () => {
 
   it("creates providers from presets, validates secretRef and prevents duplicates", async () => {
     const srv = await boot();
+    // Create/edit auto-discovery would otherwise hit the network; keep it hermetic.
+    stubEmptyCatalog();
     const presets = (await srv.inject({ method: "GET", url: "/providers/presets" })).json();
     expect(presets.types).toContain("ollama");
     const created = await srv.inject({ method: "POST", url: "/providers", payload: { name: "Local Ollama", type: "ollama" } });
