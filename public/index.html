@@ -69,6 +69,20 @@
     </div>
   </div>
 
+  <!-- Streaming model chat modal -->
+  <div class="modal-backdrop" id="chat-modal-backdrop" hidden>
+    <div class="modal chat-modal" id="chat-modal">
+      <div class="modal-head">
+        <div>
+          <h3 id="chat-modal-title"></h3>
+          <div class="mono" id="chat-modal-sub" style="font-size:11px;color:var(--text-muted)"></div>
+        </div>
+        <button class="icon-btn" id="chat-modal-close">×</button>
+      </div>
+      <div class="modal-body" id="chat-modal-body"></div>
+    </div>
+  </div>
+
   <script src="/socket.io/socket.io.js"></script>
   <script src="/app.js"></script>
 </body>

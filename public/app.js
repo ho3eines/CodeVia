@@ -388,7 +388,7 @@
   function closePalette() { $("#palette-backdrop").hidden = true; paletteIdx = -1; }
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
-    if (e.key === "Escape") { closePalette(); closeModal(); }
+    if (e.key === "Escape") { closePalette(); closeModal(); window.closeModelChat?.(); }
     if (!$("#palette-backdrop").hidden) {
       const inp = $("#palette-input");
       if (e.key === "ArrowDown") { e.preventDefault(); paletteIdx = Math.min(paletteIdx + 1, paletteItems.length - 1); renderPalette(); }
@@ -400,6 +400,8 @@
   $("#palette-backdrop")?.addEventListener("click", (e) => { if (e.target.id === "palette-backdrop") closePalette(); });
   $("#modal-close")?.addEventListener("click", closeModal);
   $("#modal-backdrop")?.addEventListener("click", (e) => { if (e.target.id === "modal-backdrop") closeModal(); });
+  $("#chat-modal-close")?.addEventListener("click", () => window.closeModelChat?.());
+  $("#chat-modal-backdrop")?.addEventListener("click", (e) => { if (e.target.id === "chat-modal-backdrop") window.closeModelChat?.(); });
 
   /* ---------- theme ---------- */
   $("#theme-toggle")?.addEventListener("click", () => {
@@ -1020,69 +1022,288 @@
     };
   };
 
-  /* MODELS */
+  /* MODELS — grouped by provider, multi-select, streaming chat modal */
+  // Selected model ids (survives re-renders of the Models page).
+  const modelSelection = new Set();
+  // Which provider groups are currently expanded inside the "Groups" modal.
+  let modelsCache = [];
+  let providersCache = [];
+
+  function providerNameOf(id) {
+    return providersCache.find((p) => p.id === id)?.name || id || "Unknown provider";
+  }
+  // Group the flat model list into { providerId, name, models[] }, provider name ASC.
+  function groupModelsByProvider(list) {
+    const byProvider = new Map();
+    for (const m of list) {
+      const key = m.providerId || "__none__";
+      if (!byProvider.has(key)) byProvider.set(key, []);
+      byProvider.get(key).push(m);
+    }
+    return [...byProvider.entries()]
+      .map(([providerId, models]) => ({
+        providerId,
+        name: providerNameOf(providerId),
+        models: models.slice().sort((a, b) => String(a.modelId).localeCompare(String(b.modelId))),
+        active: models.filter((m) => m.active).length,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   on("/models", async () => {
     const [list, providers] = await Promise.all([api("/models"), api("/providers").catch(() => [])]);
-    const provName = (id) => providers.find((p) => p.id === id)?.name || id;
-    $("#content").innerHTML = `<div class="overview"><div><h1>Models</h1><p>Model Registry — routing candidates for agents</p></div><button class="btn btn-primary" onclick="openModel()">＋ Add Model</button></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Display Name</th><th>Model ID</th><th>Provider</th><th>Context</th><th>Caps</th><th>Active</th><th></th></tr></thead><tbody>
-      ${list.map((m) => `<tr><td><strong>${esc(m.displayName)}</strong></td><td class="mono">${esc(m.modelId)}</td><td>${esc(provName(m.providerId))}</td><td>${Number(m.contextWindow || 0).toLocaleString()}</td><td>${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</td><td>${m.active?'<span class="badge badge-ok">active</span>':'<span class="badge badge-muted">inactive</span>'}</td>
-        <td style="white-space:nowrap;text-align:right"><button class="btn btn-ghost" onclick="modelTest('${m.id}')">Test</button><button class="btn btn-ghost" onclick="modelToggle('${m.id}', ${m.active ? "false" : "true"})">${m.active ? "Deactivate" : "Activate"}</button><button class="btn btn-ghost" onclick="modelDelete('${m.id}')">🗑</button><div id="model-test-${esc(m.id)}"></div></td></tr>`).join("") || `<tr><td colspan="7">${emptyState("🧠", "No models", "Add a model and attach it to a provider.")}</td></tr>`}
-      </tbody></table></div></div>`;
+    modelsCache = list;
+    providersCache = providers;
+    // Drop selections pointing at models that no longer exist.
+    for (const id of [...modelSelection]) if (!list.some((m) => m.id === id)) modelSelection.delete(id);
+    const groups = groupModelsByProvider(list);
+    $("#content").innerHTML = `<div class="overview">
+        <div><h1>Models</h1><p>Model Registry — grouped by provider · ${list.length} model(s) in ${groups.length} group(s)</p></div>
+        <div class="flex">
+          <button class="btn" onclick="openModelGroups()">🗂 Groups</button>
+          <button class="btn btn-primary" onclick="openModel()">＋ Add Model</button>
+        </div>
+      </div>
+      <div id="model-bulkbar"></div>
+      <div id="model-groups">${groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState("🧠", "No models", "Add a model and attach it to a provider.")}</div>`}</div>`;
+    renderBulkBar();
   });
+
+  /** One collapsible provider card holding its models. */
+  function renderProviderGroup(g) {
+    const allSelected = g.models.length > 0 && g.models.every((m) => modelSelection.has(m.id));
+    return `<div class="card model-group" data-provider="${esc(g.providerId)}">
+      <div class="model-group-head">
+        <label class="model-check" title="Select every model of this provider">
+          <input type="checkbox" ${allSelected ? "checked" : ""} onchange="modelSelectProvider('${esc(g.providerId)}', this.checked)"/>
+        </label>
+        <button class="model-group-toggle" onclick="modelGroupToggle('${esc(g.providerId)}')">
+          <span class="chev">▾</span>
+          <strong>${esc(g.name)}</strong>
+          <span class="badge badge-muted">${g.models.length} model(s)</span>
+          <span class="badge badge-${g.active ? "ok" : "muted"}">${g.active} active</span>
+        </button>
+      </div>
+      <div class="model-group-body">
+        <div class="table-wrap"><table><thead><tr>
+          <th style="width:34px"></th><th>Display Name</th><th>Model ID</th><th>Context</th><th>Caps</th><th>Active</th><th></th>
+        </tr></thead><tbody>
+        ${g.models.map((m) => `<tr class="${modelSelection.has(m.id) ? "row-selected" : ""}" data-model="${esc(m.id)}">
+          <td><input type="checkbox" ${modelSelection.has(m.id) ? "checked" : ""} onchange="modelSelectOne('${esc(m.id)}', this.checked)"/></td>
+          <td><strong>${esc(m.displayName)}</strong></td>
+          <td class="mono">${esc(m.modelId)}</td>
+          <td>${Number(m.contextWindow || 0).toLocaleString()}</td>
+          <td>${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</td>
+          <td>${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
+          <td style="white-space:nowrap;text-align:right">
+            <button class="btn btn-ghost" onclick="openModelChat('${esc(m.id)}')">💬 Test</button>
+            <button class="btn btn-ghost" onclick="modelToggle('${esc(m.id)}', ${m.active ? "false" : "true"})">${m.active ? "Deactivate" : "Activate"}</button>
+            <button class="btn btn-ghost" onclick="modelDelete('${esc(m.id)}')">🗑</button>
+          </td></tr>`).join("")}
+        </tbody></table></div>
+      </div>
+    </div>`;
+  }
+
+  window.modelGroupToggle = (providerId) => {
+    const card = document.querySelector(`.model-group[data-provider="${CSS.escape(providerId)}"]`);
+    if (card) card.classList.toggle("collapsed");
+  };
+
+  /* ---- multi-select ---- */
+  window.modelSelectOne = (id, checked) => {
+    if (checked) modelSelection.add(id); else modelSelection.delete(id);
+    const row = document.querySelector(`tr[data-model="${CSS.escape(id)}"]`);
+    if (row) row.classList.toggle("row-selected", checked);
+    syncGroupCheckboxes();
+    renderBulkBar();
+  };
+  window.modelSelectProvider = (providerId, checked) => {
+    for (const m of modelsCache.filter((x) => (x.providerId || "__none__") === providerId)) {
+      if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
+      const box = document.querySelector(`tr[data-model="${CSS.escape(m.id)}"] input[type=checkbox]`);
+      if (box) box.checked = checked;
+      const row = document.querySelector(`tr[data-model="${CSS.escape(m.id)}"]`);
+      if (row) row.classList.toggle("row-selected", checked);
+    }
+    renderBulkBar();
+  };
+  window.modelSelectAll = (checked) => {
+    for (const m of modelsCache) {
+      if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
+    }
+    refreshCurrent();
+  };
+  window.modelSelectionClear = () => { modelSelection.clear(); refreshCurrent(); };
+
+  function syncGroupCheckboxes() {
+    for (const card of $$(".model-group")) {
+      const pid = card.dataset.provider;
+      const models = modelsCache.filter((m) => (m.providerId || "__none__") === pid);
+      const box = card.querySelector(".model-check input");
+      if (!box) continue;
+      const selected = models.filter((m) => modelSelection.has(m.id)).length;
+      box.checked = models.length > 0 && selected === models.length;
+      box.indeterminate = selected > 0 && selected < models.length;
+    }
+  }
+
+  /** Sticky action bar shown while at least one model is selected. */
+  function renderBulkBar() {
+    const el = $("#model-bulkbar");
+    if (!el) return;
+    const n = modelSelection.size;
+    if (!n) { el.innerHTML = ""; return; }
+    el.innerHTML = `<div class="bulk-bar">
+      <span><strong>${n}</strong> model(s) selected</span>
+      <div class="flex">
+        <button class="btn" onclick="modelSelectAll(true)">Select all (${modelsCache.length})</button>
+        <button class="btn" onclick="modelBulk('activate')">✓ Activate</button>
+        <button class="btn" onclick="modelBulk('deactivate')">⏸ Deactivate</button>
+        <button class="btn btn-danger" onclick="modelBulk('delete')">🗑 Delete selected</button>
+        <button class="btn btn-ghost" onclick="modelSelectionClear()">Clear</button>
+      </div>
+    </div>`;
+  }
+
+  window.modelBulk = async (action) => {
+    const ids = [...modelSelection];
+    if (!ids.length) return;
+    if (action === "delete" && !confirm(`Delete ${ids.length} selected model(s) from the system?`)) return;
+    try {
+      const r = await api("/models/bulk", { method: "POST", body: { action, ids } });
+      modelSelection.clear();
+      toast(`${r.affected} model(s) ${action === "delete" ? "deleted" : action + "d"}`, "", "ok");
+      refreshCurrent();
+    } catch (e) { toast("Error", e.message, "err"); }
+  };
+
+  /* ---- Groups modal ---- */
+  window.openModelGroups = () => {
+    const groups = groupModelsByProvider(modelsCache);
+    openModal("Model Groups by Provider", `<div class="group-modal">
+      ${groups.map((g) => `<div class="group-row">
+        <div>
+          <strong>${esc(g.name)}</strong>
+          <div class="field-hint mono">${esc(g.providerId)}</div>
+        </div>
+        <div class="flex">
+          <span class="badge badge-muted">${g.models.length} model(s)</span>
+          <span class="badge badge-${g.active ? "ok" : "muted"}">${g.active} active</span>
+          <button class="btn btn-ghost" onclick="modelGroupSelect('${esc(g.providerId)}')">Select all</button>
+          <button class="btn btn-ghost" onclick="modelGroupJump('${esc(g.providerId)}')">Go to group</button>
+        </div>
+      </div>`).join("") || emptyState("🗂", "No groups", "Add a provider and its models first.")}
+      <div class="flex mt" style="justify-content:flex-end"><button class="btn" onclick="closeModal()">Close</button></div>
+    </div>`);
+  };
+  window.modelGroupSelect = (providerId) => {
+    modelSelection.clear();
+    for (const m of modelsCache.filter((x) => (x.providerId || "__none__") === providerId)) modelSelection.add(m.id);
+    closeModal();
+    refreshCurrent();
+  };
+  window.modelGroupJump = (providerId) => {
+    closeModal();
+    const card = document.querySelector(`.model-group[data-provider="${CSS.escape(providerId)}"]`);
+    if (card) {
+      card.classList.remove("collapsed");
+      card.scrollIntoView({ behavior: "smooth", block: "start" });
+      card.classList.add("flash");
+      setTimeout(() => card.classList.remove("flash"), 1200);
+    }
+  };
+
+  /* ---- Add model (catalog dropdown OR manual model id) ---- */
   window.openModel = async () => {
     const providers = await api("/providers").catch(() => []);
     openModal("Add Model", `
       <div class="field"><label>Provider</label><select class="select" id="m-prov">${providers.map((p) => `<option value="${esc(p.id)}" ${p.active ? "" : "disabled"}>${esc(p.name)}${p.active ? "" : " (inactive)"}</option>`).join("")}</select></div>
-      <div class="field"><label>Model <span class="select-count">pick from the provider's live catalog — capabilities are detected automatically</span></label>
+      <div class="field">
+        <label>Model source</label>
+        <div class="seg">
+          <button type="button" class="seg-btn active" id="m-mode-catalog">📚 From catalog</button>
+          <button type="button" class="seg-btn" id="m-mode-manual">✍️ Manual Model ID</button>
+        </div>
+        <div class="field-hint">Some free / preview models are not listed by the provider — use <strong>Manual Model ID</strong> to type any model id by hand.</div>
+      </div>
+      <div class="field" id="m-catalog-field"><label>Model <span class="select-count">pick from the provider's live catalog — capabilities are detected automatically</span></label>
         <div style="display:flex;gap:6px;align-items:center">
           <select class="select" id="m-id" style="flex:1"></select>
           <button class="btn" id="m-refresh" type="button" title="Re-fetch the catalog from the provider">↻</button>
         </div>
         <div class="field-hint" id="m-catalog-hint">Loading catalog…</div>
       </div>
+      <div class="field" id="m-manual-field" hidden><label>Model ID <span class="select-count">exactly as the provider expects it</span></label>
+        <input class="input mono" id="m-id-manual" placeholder="e.g. meta-llama/llama-3.3-70b-instruct:free"/>
+        <div class="field-hint">Not validated against the catalog — anything you type is saved as-is (a leading <span class="mono">models/</span> is stripped).</div>
+      </div>
       <div class="field"><label>Display name <span class="select-count">optional — auto-filled from the model</span></label><input class="input" id="m-name" placeholder=""/></div>
       <div class="grid-2"><div class="field"><label>Context window</label><input class="input" id="m-ctx" value="128000"/></div><div class="field"><label>Priority (lower = preferred)</label><input class="input" id="m-prio" value="100"/></div></div>
       <div id="m-caps-preview" class="field-hint" style="margin-top:-4px">Capabilities (vision / tools / reasoning / structured output / code / streaming) are detected automatically from the model id. Use <strong>Test</strong> to verify the model &amp; see the exact endpoint.</div>
       <div class="flex"><button class="btn" id="m-test">Test model</button><button class="btn btn-primary" id="m-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>
       <div id="m-test-result"></div>`);
-    // --- Catalog loading: fetch live models from the provider, populate dropdown. ---
+
+    let mode = "catalog";
     let lastCatalog = [];
     let lastInfo = null;
+    // Read the model id from whichever input is active.
+    const currentModelId = () => {
+      const el = mode === "manual" ? document.getElementById("m-id-manual") : document.getElementById("m-id");
+      return (el?.value || "").trim().replace(/^models\//, "");
+    };
+    const setMode = (next) => {
+      mode = next;
+      $("#m-mode-catalog").classList.toggle("active", next === "catalog");
+      $("#m-mode-manual").classList.toggle("active", next === "manual");
+      $("#m-catalog-field").hidden = next !== "catalog";
+      $("#m-manual-field").hidden = next !== "manual";
+      renderCapsPreview();
+    };
     const renderCapsPreview = () => {
       const el = document.getElementById("m-caps-preview");
-      const id = $("#m-id").value.trim();
-      if (!id) { el.innerHTML = "Pick a model to see its auto-detected capabilities."; return; }
-      const detected = lastInfo?.capabilities || (window.__modelDetected?.() ?? null);
-      if (detected) el.innerHTML = `Detected capabilities: ${capsBadges(detected)}`;
-      else el.innerHTML = "Capabilities will be auto-detected when the model is saved.";
+      const id = currentModelId();
+      if (!id) { el.innerHTML = "Pick or type a model id to see its auto-detected capabilities."; return; }
+      const detected = lastInfo && lastInfo.id === id ? lastInfo.capabilities : null;
+      el.innerHTML = detected ? `Detected capabilities: ${capsBadges(detected)}` : "Capabilities will be auto-detected when the model is saved.";
     };
-    window.__modelDetected = () => lastInfo?.capabilities;
+    // Fetch metadata (context window + capabilities) for the currently typed/picked id.
+    let detectTimer = null;
+    const detectSelected = () => {
+      const id = currentModelId();
+      if (!id) { renderCapsPreview(); return; }
+      clearTimeout(detectTimer);
+      detectTimer = setTimeout(() => {
+        api("/models/test", { method: "POST", body: { providerId: $("#m-prov").value, modelId: id } })
+          .then((r) => {
+            lastInfo = { id, contextWindow: r.contextWindow || 128000, capabilities: r.detectedCapabilities || r.capabilities };
+            $("#m-ctx").value = lastInfo.contextWindow;
+            if (!$("#m-name").value.trim()) $("#m-name").placeholder = id;
+            renderCapsPreview();
+          })
+          .catch(() => renderCapsPreview());
+      }, 350);
+    };
+    // Turn the catalog <select> into a free-text input when no catalog is available.
+    const fallbackToManual = (reason) => {
+      setMode("manual");
+      $("#m-catalog-hint").innerHTML = reason;
+    };
     const loadCatalog = async (providerId) => {
       const hint = $("#m-catalog-hint");
       const sel = $("#m-id");
+      if (!sel) return;
       sel.innerHTML = `<option value="">Loading…</option>`;
       hint.textContent = "Loading catalog from provider…";
       try {
         const r = await api(`/providers/${encodeURIComponent(providerId)}/models`);
         lastCatalog = r.models || [];
-        if (!r.ok) {
+        if (!r.ok || !lastCatalog.length) {
           sel.innerHTML = `<option value="">— catalog unavailable —</option>`;
-          hint.innerHTML = `⚠ ${esc(r.message || "Cannot list models")} — you can still type a model id manually below.`;
-          // allow free-text fallback
-          sel.outerHTML = `<input class="input mono" id="m-id" placeholder="gpt-4o / claude-sonnet-4-5 / ..." style="flex:1"/>`;
-          document.getElementById("m-id").addEventListener("input", renderCapsPreview);
-          return;
-        }
-        if (!lastCatalog.length) {
-          sel.innerHTML = `<option value="">— provider returned no models —</option>`;
-          hint.textContent = "The provider did not return a model list — you can type the model id manually.";
-          sel.outerHTML = `<input class="input mono" id="m-id" placeholder="gpt-4o / claude-sonnet-4-5 / ..." style="flex:1"/>`;
-          document.getElementById("m-id").addEventListener("input", renderCapsPreview);
+          fallbackToManual(`⚠ ${esc(r.message || "The provider returned no models")} — switched to manual entry.`);
           return;
         }
         sel.innerHTML = lastCatalog.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
-        // Auto-pick the first and update the display-name placeholder + cap preview.
         const first = lastCatalog[0];
         sel.value = first;
         lastInfo = (r.modelInfos || []).find((m) => m.id === first) || null;
@@ -1092,115 +1313,213 @@
         renderCapsPreview();
       } catch (e) {
         sel.innerHTML = `<option value="">— error —</option>`;
-        hint.innerHTML = `⚠ ${esc(e.message)}`;
-        sel.outerHTML = `<input class="input mono" id="m-id" placeholder="gpt-4o / claude-sonnet-4-5 / ..." style="flex:1"/>`;
-        document.getElementById("m-id").addEventListener("input", renderCapsPreview);
+        fallbackToManual(`⚠ ${esc(e.message)} — switched to manual entry.`);
       }
     };
-    // Initial load — use the first selectable provider.
+
+    $("#m-mode-catalog").onclick = () => setMode("catalog");
+    $("#m-mode-manual").onclick = () => setMode("manual");
+    $("#m-id-manual").addEventListener("input", detectSelected);
+    $("#m-id").addEventListener("change", detectSelected);
+    $("#m-refresh").onclick = () => loadCatalog($("#m-prov").value);
+    $("#m-prov").addEventListener("change", () => { if (mode === "catalog") loadCatalog($("#m-prov").value); });
+
     const initial = providers.find((p) => p.active) || providers[0];
     if (initial) {
       $("#m-prov").value = initial.id;
       await loadCatalog(initial.id);
+    } else {
+      fallbackToManual("No provider available yet — add a provider first.");
     }
-    $("#m-prov").addEventListener("change", () => loadCatalog($("#m-prov").value));
-    $("#m-refresh").onclick = () => loadCatalog($("#m-prov").value);
-    // When the user picks a different model, refresh the auto-derived fields.
-    const onPick = () => {
-      const id = $("#m-id").value.trim();
-      if (!id) { renderCapsPreview(); return; }
-      // If the dropdown is currently a <select>, find the matching modelInfo.
-      const sel = $("#m-id");
-      if (sel.tagName === "SELECT") {
-        const inf = (lastCatalog.length ? null : null); // noop, we keep lastInfo from lastCatalog
-        // Try to find the info in the current select's data (we don't have it stored, so re-fetch is needed)
-      }
-      // Always (re)fetch this single model via /models/test to refresh detected capabilities.
-      api("/models/test", { method: "POST", body: { providerId: $("#m-prov").value, modelId: id } })
-        .then((r) => {
-          lastInfo = { id, contextWindow: r.contextWindow || 128000, capabilities: r.detectedCapabilities || r.capabilities };
-          $("#m-ctx").value = lastInfo.contextWindow;
-          if (!$("#m-name").value.trim()) $("#m-name").placeholder = id;
-          renderCapsPreview();
-        })
-        .catch(() => renderCapsPreview());
-    };
-    $("#m-id").addEventListener("change", onPick);
-    // Sends ONE real message to the provider + model (before saving) and shows
-    // the exact chat URL plus the model's reply.
+
     $("#m-test").onclick = async () => {
       const el = $("#m-test-result");
-      const modelId = $("#m-id").value.trim();
+      const modelId = currentModelId();
       const providerId = $("#m-prov").value;
-      if (!modelId) { toast("Model required", "", "err"); return; }
+      if (!modelId) { toast("Model required", "Pick a model or type a Model ID", "err"); return; }
       if (!providerId) { toast("Provider required", "", "err"); return; }
       el.innerHTML = `<div class="test-result">Sending test message to ${esc(modelId)}…</div>`;
       try {
         const r = await api("/models/test", { method: "POST", body: { providerId, modelId, message: MODEL_TEST_MSG } });
         el.innerHTML = renderTestResult(r);
-        // Surface detected capabilities on the form.
-        const caps = r.detectedCapabilities || r.capabilities;
-        if (caps) {
-          const auto = document.createElement("div");
-          auto.className = "field-hint";
-          auto.innerHTML = `Detected capabilities: ${capsBadges(caps)}`;
-          el.appendChild(auto);
-        }
         toast(r.ok ? "Model replied" : "Cannot test yet", r.message, r.ok ? "ok" : "warn");
       } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
     };
     $("#m-go").onclick = async () => {
-      const modelId = $("#m-id").value.trim();
-      if (!modelId) { toast("Model required", "", "err"); return; }
+      const modelId = currentModelId();
+      if (!modelId) { toast("Model required", "Pick a model or type a Model ID", "err"); return; }
       try {
-        const m = await api("/models", { method: "POST", body: {
+        const saved = await api("/models", { method: "POST", body: {
           providerId: $("#m-prov").value, modelId, displayName: $("#m-name").value.trim() || modelId,
           contextWindow: Number($("#m-ctx").value) || 128000, priority: Number($("#m-prio").value) || 100,
           // capabilities omitted => auto-detected by the server
         }});
-        closeModal(); toast("Model added", modelId, "ok"); refreshCurrent();
+        closeModal();
+        if (saved && saved.duplicate) toast("Already registered", saved.message || modelId, "warn");
+        else toast("Model added", modelId, "ok");
+        refreshCurrent();
       } catch (e) { toast("Error", e.message, "err"); }
     };
   };
+
   window.modelToggle = async (id, active) => {
     try { await api(`/models/${id}/${active ? "activate" : "deactivate"}`, { method: "POST" }); toast(active ? "Model activated" : "Model deactivated", "", "ok"); refreshCurrent(); }
     catch (e) { toast("Error", e.message, "err"); }
   };
   window.modelDelete = async (id) => {
     if (!confirm("Delete this model?")) return;
-    try { await api(`/models/${id}`, { method: "DELETE" }); toast("Model deleted", "", "ok"); refreshCurrent(); }
+    try { await api(`/models/${id}`, { method: "DELETE" }); modelSelection.delete(id); toast("Model deleted", "", "ok"); refreshCurrent(); }
     catch (e) { toast("Error", e.message, "err"); }
   };
   // Default test message (mirrors the server default) — short, cheap, verifiable.
   const MODEL_TEST_MSG = "This is a connectivity test from CodeVia. Reply with exactly: OK";
-  // A follow-up box so users can send ANY message to the model and read the reply.
-  function modelChatBox(id, preset = "") {
-    return `<div class="model-chat-box">
-      <textarea class="textarea" id="model-chat-msg-${id}" rows="2" placeholder="Type any message to send to this model…">${esc(preset)}</textarea>
-      <div class="flex" style="justify-content:flex-end"><button class="btn" onclick="modelSend('${id}')">✉ Send message</button></div>
-    </div>`;
+
+  /* ---- Streaming chat modal (ChatGPT-style) ---- */
+  // Conversation history per model id, so reopening the modal keeps the thread.
+  const modelChats = new Map();
+  let chatAbort = null;
+
+  window.openModelChat = (id) => {
+    const m = modelsCache.find((x) => x.id === id) || {};
+    const history = modelChats.get(id) || [];
+    const box = $("#chat-modal-backdrop");
+    $("#chat-modal-title").textContent = `💬 ${m.displayName || m.modelId || "Model"}`;
+    $("#chat-modal-sub").textContent = `${providerNameOf(m.providerId)} · ${m.modelId || ""}`;
+    $("#chat-modal-body").innerHTML = `
+      <div class="chat-thread" id="chat-thread"></div>
+      <div class="chat-meta" id="chat-meta"></div>
+      <div class="chat-composer">
+        <textarea class="textarea" id="chat-input" rows="2" placeholder="Send a natural message… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <div class="flex" style="justify-content:space-between;align-items:center">
+          <span class="field-hint">Replies stream in token by token.</span>
+          <div class="flex">
+            <button class="btn btn-ghost" id="chat-clear">Clear</button>
+            <button class="btn" id="chat-stop" hidden>■ Stop</button>
+            <button class="btn btn-primary" id="chat-send">Send ➤</button>
+          </div>
+        </div>
+      </div>`;
+    box.hidden = false;
+    box.dataset.modelId = id;
+    renderChatThread(history);
+    $("#chat-send").onclick = () => sendChatMessage(id);
+    $("#chat-clear").onclick = () => { modelChats.set(id, []); renderChatThread([]); $("#chat-meta").textContent = ""; };
+    $("#chat-stop").onclick = () => { if (chatAbort) chatAbort.abort(); };
+    const input = $("#chat-input");
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChatMessage(id); }
+    });
+    setTimeout(() => input.focus(), 30);
+  };
+  window.closeModelChat = () => {
+    if (chatAbort) chatAbort.abort();
+    const box = $("#chat-modal-backdrop");
+    if (box) box.hidden = true;
+  };
+
+  function renderChatThread(history) {
+    const thread = $("#chat-thread");
+    if (!thread) return;
+    thread.innerHTML = history.length
+      ? history.map((m) => chatBubble(m.role, m.content)).join("")
+      : `<div class="chat-empty">Ask this model anything — the answer streams in like a normal chat.</div>`;
+    thread.scrollTop = thread.scrollHeight;
   }
-  window.modelTest = async (id) => {
-    const el = document.getElementById("model-test-" + id);
-    if (el) el.innerHTML = `<div class="test-result">Sending test message…</div>`;
+  function chatBubble(role, content, id = "") {
+    return `<div class="chat-msg ${role}"${id ? ` id="${id}"` : ""}><div class="chat-role">${role === "user" ? "You" : "Model"}</div><div class="chat-text">${esc(content)}</div></div>`;
+  }
+
+  /**
+   * POST the conversation to /models/:id/stream and consume the SSE frames,
+   * appending each `delta` to the assistant bubble as it arrives.
+   */
+  async function sendChatMessage(id) {
+    const input = $("#chat-input");
+    const text = (input?.value || "").trim();
+    if (!text) { toast("Empty message", "Type something to send.", "err"); return; }
+    const history = modelChats.get(id) || [];
+    history.push({ role: "user", content: text });
+    modelChats.set(id, history);
+    input.value = "";
+    renderChatThread(history);
+
+    const thread = $("#chat-thread");
+    const bubbleId = "chat-live-" + Date.now();
+    thread.insertAdjacentHTML("beforeend", chatBubble("assistant", "", bubbleId));
+    const liveEl = document.getElementById(bubbleId);
+    const textEl = liveEl.querySelector(".chat-text");
+    textEl.innerHTML = `<span class="chat-cursor">▍</span>`;
+    thread.scrollTop = thread.scrollHeight;
+
+    $("#chat-send").disabled = true;
+    $("#chat-stop").hidden = false;
+    chatAbort = new AbortController();
+    let acc = "";
     try {
-      const r = await api(`/models/${id}/test`, { method: "POST", body: {} });
-      if (el) el.innerHTML = renderTestResult(r) + modelChatBox(id);
-      toast(r.ok ? "Model replied" : "Model test failed", r.message, r.ok ? "ok" : "err");
-    } catch (e) { if (el) el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
-  };
-  window.modelSend = async (id) => {
-    const ta = document.getElementById("model-chat-msg-" + id);
-    const message = ta ? ta.value.trim() : "";
-    if (!message) { toast("Empty message", "Type a message to send to the model first.", "err"); return; }
-    const el = document.getElementById("model-test-" + id);
-    if (el) el.innerHTML = `<div class="test-result">Sending your message…</div>`;
-    try {
-      const r = await api(`/models/${id}/test`, { method: "POST", body: { message } });
-      if (el) el.innerHTML = renderTestResult(r) + modelChatBox(id, message);
-      toast(r.ok ? "Model replied" : "Model test failed", r.message, r.ok ? "ok" : "err");
-    } catch (e) { if (el) el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>` + modelChatBox(id, message); toast("Error", e.message, "err"); }
-  };
+      const res = await fetch(`/models/${encodeURIComponent(id)}/stream`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ messages: history }),
+        signal: chatAbort.signal,
+      });
+      if (!res.ok || !res.body) {
+        let msg = res.statusText;
+        try { const b = await res.json(); msg = b.message || b.error || msg; } catch (_) {}
+        throw new Error(msg);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(5).trim()); } catch (_) { continue; }
+          if (ev.type === "meta") {
+            $("#chat-meta").innerHTML = `→ <span class="mono">${esc(ev.url)}</span>`;
+          } else if (ev.type === "delta") {
+            acc += ev.text;
+            textEl.innerHTML = `${esc(acc)}<span class="chat-cursor">▍</span>`;
+            thread.scrollTop = thread.scrollHeight;
+          } else if (ev.type === "done") {
+            acc = ev.text || acc;
+            textEl.textContent = acc || "(empty reply)";
+            $("#chat-meta").innerHTML += ` · ${ev.latencyMs}ms${ev.status ? " · HTTP " + ev.status : ""}`;
+          } else if (ev.type === "error") {
+            liveEl.classList.add("err");
+            textEl.textContent = ev.message + (ev.hint ? "\n" + ev.hint : "");
+            acc = "";
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name === "AbortError") {
+        textEl.textContent = acc ? acc + " …(stopped)" : "(stopped)";
+      } else {
+        liveEl.classList.add("err");
+        textEl.textContent = "✗ " + e.message;
+        acc = "";
+      }
+    } finally {
+      $("#chat-send").disabled = false;
+      $("#chat-stop").hidden = true;
+      chatAbort = null;
+      // Persist a successful reply into the thread history for multi-turn context.
+      if (acc) {
+        history.push({ role: "assistant", content: acc });
+        modelChats.set(id, history);
+      }
+      const cursor = textEl.querySelector(".chat-cursor");
+      if (cursor) cursor.remove();
+    }
+  }
 
   /* PROVIDERS */
   on("/providers", async () => {

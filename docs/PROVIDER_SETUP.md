@@ -82,6 +82,8 @@ The platform is **provider-agnostic**. Agents depend on the `IModelProvider` int
      the built-in mock provider cannot be deleted).
 
 3. Register Models in the **Model Registry** (`Settings → Models` or `POST /models`). Capabilities are **auto-detected** from the model id (vision / tools / reasoning / structured output / code / streaming) — you do not tick them manually. Use **Test** on the Models page (`POST /models/:id/test`) or the **Add Model** form (`POST /models/test`) to verify a model: these send **one real chat message** to the model and show the exact chat endpoint, the HTTP status/latency, and the text the model replied with. Pass `{"message": "..."}` to send your own message instead of the default test prompt.
+
+   On the **Models** page models are grouped into collapsible cards per provider (the **Groups** button opens a modal summarising every group, with *Select all* / *Go to group* shortcuts). Tick model rows — or a whole provider — to multi-select, then activate, deactivate or delete them in bulk. **💬 Test** opens a chat modal where you can send natural, multi-turn messages and watch the reply **stream in token by token** (`POST /models/:id/stream`, Server-Sent Events). In **Add Model**, switch to **✍️ Manual Model ID** to register a model that the provider's catalog does not list — many free/preview models are only reachable this way.
    ```json
    { "providerId": "provider-openai", "modelId": "gpt-4o", "displayName": "GPT-4o" }
    ```

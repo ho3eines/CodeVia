@@ -10,6 +10,8 @@ import {
   type ProviderTestResult,
 } from "../../ai/provider-test.js";
 import { detectModelCapabilities, detectModelInfo } from "../../ai/provider-urls.js";
+import { streamModelChat } from "../../ai/model-stream.js";
+import type { ChatMessage } from "../../ai/types.js";
 import { knownModelInfos } from "../../ai/known-models.js";
 import { decryptSecret, encryptSecret, maskSecret } from "../../auth/encrypted-secrets.js";
 import { logger } from "../../logger.js";
@@ -199,8 +201,20 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (!providerId) return fail(reply, 400, "providerId is required");
     const prow = container.providerRepo.findById(providerId);
     if (!prow) return fail(reply, 400, `Unknown provider "${providerId}"`);
-    const modelId = String(b.modelId ?? "").trim();
+    // `modelId` may be typed by hand — many free/preview models are missing from
+    // a provider's catalog, so manual entry is a first-class path here. The id is
+    // normalized (a pasted `models/gemini-…` prefix is stripped) but never
+    // validated against the catalog.
+    const modelId = String(b.modelId ?? "").trim().replace(/^models\//, "");
     if (!modelId) return fail(reply, 400, "modelId is required (the provider's model name, e.g. gpt-4o-mini)");
+    const duplicate = container.modelRepo
+      .findMany()
+      .find((m) => m.data.providerId === providerId && m.data.modelId === modelId);
+    // Idempotent: re-adding an existing model returns it instead of creating a
+    // second row (the UI shows a "already in the registry" notice).
+    if (duplicate) {
+      return { ...duplicate.data, duplicate: true, message: `Model "${modelId}" is already in the registry for this provider` };
+    }
     // Capabilities are auto-detected when the client does not supply them.
     const detectedCapabilities = detectModelCapabilities(modelId);
     const capabilities = isMeaningfulCapabilities(b.capabilities)
@@ -319,6 +333,91 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       detectedCapabilities: detectModelInfo(modelId).capabilities,
       ...chat,
     };
+  });
+
+  /**
+   * Streaming chat with a saved model — Server-Sent Events, one `delta` frame
+   * per token chunk so the UI can type the answer out like ChatGPT.
+   * Frames: `meta` (endpoint) → `delta`* → `done` | `error`.
+   */
+  app.post("/models/:id/stream", { schema: { tags: ["models"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const r = container.modelRepo.findById(id);
+    if (!r) return fail(reply, 404, "model not found");
+    const prow = container.providerRepo.findById(r.data.providerId);
+    if (!prow) return fail(reply, 404, `Provider not found for model "${r.data.modelId}"`);
+
+    // Accept either a single `message` or a full `messages` history so the
+    // modal can hold a real multi-turn conversation.
+    const history = Array.isArray(b.messages)
+      ? (b.messages as Array<Record<string, unknown>>)
+          .map((m) => ({ role: String(m.role ?? "user") as ChatMessage["role"], content: String(m.content ?? "") }))
+          .filter((m) => m.content.trim() && ["system", "user", "assistant"].includes(m.role))
+      : [];
+    const single = typeof b.message === "string" ? b.message.trim() : "";
+    const messages: ChatMessage[] = history.length ? history : single ? [{ role: "user", content: single }] : [];
+    if (!messages.length) return fail(reply, 400, "message (or messages[]) is required");
+
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    const send = (event: unknown): void => {
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+    const ctrl = new AbortController();
+    reply.raw.on("close", () => ctrl.abort());
+    try {
+      for await (const ev of streamModelChat(prow.data, r.data.modelId, {
+        messages,
+        temperature: typeof b.temperature === "number" ? b.temperature : undefined,
+        maxTokens: typeof b.maxTokens === "number" ? b.maxTokens : undefined,
+        signal: ctrl.signal,
+      })) {
+        send(ev);
+      }
+    } catch (err) {
+      send({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      reply.raw.end();
+    }
+    return reply;
+  });
+
+  /**
+   * Bulk operations for the Models page multi-select: delete / activate /
+   * deactivate many models in one call.
+   */
+  app.post("/models/bulk", { schema: { tags: ["models"] } }, async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const action = String(b.action ?? "delete");
+    if (!["delete", "activate", "deactivate"].includes(action)) {
+      return fail(reply, 400, `Unknown action "${action}"`, { allowed: ["delete", "activate", "deactivate"] });
+    }
+    const ids = Array.isArray(b.ids) ? (b.ids as unknown[]).map((v) => String(v)).filter(Boolean) : [];
+    if (!ids.length) return fail(reply, 400, "ids[] is required");
+    const affected: string[] = [];
+    const missing: string[] = [];
+    for (const id of ids) {
+      const row = container.modelRepo.findById(id);
+      if (!row) {
+        missing.push(id);
+        continue;
+      }
+      if (action === "delete") container.modelRepo.deleteById(id);
+      else {
+        container.modelRepo.upsert({
+          ...row.data,
+          active: action === "activate",
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      affected.push(id);
+    }
+    return { ok: true, action, affected: affected.length, ids: affected, missing };
   });
 
   app.delete("/models/:id", { schema: { tags: ["models"] } }, async (req, reply) => {

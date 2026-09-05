@@ -310,8 +310,6 @@ code, pre { font-family: var(--mono); }
 .test-response { margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface, rgba(255,255,255,0.03)); overflow: hidden; }
 .test-response-label { padding: 5px 8px; font-size: 10px; color: var(--text-muted); border-bottom: 1px solid var(--border); white-space: normal; }
 .test-response-text { margin: 0; padding: 8px; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
-.model-chat-box { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; white-space: normal; }
-.model-chat-box .textarea { width: 100%; font-size: 11px; }
 [dir="rtl"] .repo-row .repo-meta { margin-left: 0; margin-right: auto; }
 @media (max-width: 760px) { .repo-sel-row { grid-template-columns: 1fr 1fr; } }
 
@@ -319,3 +317,41 @@ code, pre { font-family: var(--mono); }
 .diff-added { background: rgba(22,163,74,0.14); color: var(--ok, #16a34a); }
 .diff-removed { background: rgba(220,38,38,0.14); color: var(--err, #dc2626); text-decoration: line-through; }
 .diff-same { color: var(--text-muted); }
+
+/* ---------- Models page: provider groups + multi-select ---------- */
+.model-group { margin-bottom: 14px; overflow: hidden; }
+.model-group-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.model-group-head .model-check { display: flex; align-items: center; }
+.model-group-head input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--primary); }
+.model-group-toggle { flex: 1; display: flex; align-items: center; gap: 10px; background: none; border: 0; cursor: pointer; color: var(--text); font: inherit; text-align: left; padding: 0; }
+.model-group-toggle .chev { transition: transform .18s ease; color: var(--text-muted); }
+.model-group.collapsed .chev { transform: rotate(-90deg); }
+.model-group.collapsed .model-group-body { display: none; }
+.model-group.collapsed .model-group-head { border-bottom: 0; }
+.model-group.flash { outline: 2px solid var(--primary); outline-offset: 2px; }
+.model-group-body table td input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; accent-color: var(--primary); }
+tr.row-selected { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+.bulk-bar { position: sticky; top: 8px; z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; margin-bottom: 12px; border-radius: 12px; border: 1px solid var(--primary); background: var(--bg-elev); box-shadow: var(--shadow); }
+.group-modal .group-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.group-modal .group-row:last-of-type { border-bottom: 0; }
+
+/* segmented control (catalog vs manual model id) */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.seg-btn { padding: 7px 12px; background: var(--bg); border: 0; cursor: pointer; font: inherit; font-size: 12px; color: var(--text-muted); }
+.seg-btn.active { background: var(--primary); color: #fff; }
+
+/* ---------- Streaming chat modal ---------- */
+.chat-modal { width: min(760px, 96vw); display: flex; flex-direction: column; }
+.chat-modal .modal-body { display: flex; flex-direction: column; gap: 10px; max-height: 74vh; }
+.chat-thread { flex: 1; min-height: 240px; max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px; }
+.chat-empty { color: var(--text-muted); font-size: 13px; text-align: center; margin: auto; padding: 30px 10px; }
+.chat-msg { max-width: 86%; padding: 9px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--bg); white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.6; }
+.chat-msg.user { align-self: flex-end; background: var(--primary); border-color: var(--primary); color: #fff; }
+.chat-msg.assistant { align-self: flex-start; }
+.chat-msg.err { border-color: rgba(220,38,38,0.5); color: var(--err); }
+.chat-role { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; opacity: .7; margin-bottom: 3px; }
+.chat-cursor { animation: chat-blink 1s steps(2, start) infinite; }
+@keyframes chat-blink { to { visibility: hidden; } }
+.chat-meta { font-size: 11px; color: var(--text-muted); word-break: break-all; }
+.chat-composer { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; }
