@@ -128,6 +128,43 @@
   function emptyState(emoji, title, text) {
     return `<div class="empty"><div class="empty-emoji">${emoji}</div><h3>${esc(title)}</h3><p>${esc(text || "")}</p></div>`;
   }
+  function searchBlob(value) {
+    if (value == null) return "";
+    if (["string", "number", "boolean"].includes(typeof value)) return String(value);
+    if (Array.isArray(value)) return value.map(searchBlob).join(" ");
+    if (typeof value === "object") return Object.entries(value).map(([k, v]) => `${k} ${searchBlob(v)}`).join(" ");
+    return "";
+  }
+  function matchesQuery(item, query, extra = "") {
+    const terms = String(query || "").toLowerCase().trim().split(/\s+/).filter(Boolean);
+    if (!terms.length) return true;
+    const haystack = `${searchBlob(item)} ${extra}`.toLowerCase();
+    return terms.every((t) => haystack.includes(t));
+  }
+  function searchPanelHtml(id, placeholder, hint = "Search supports multiple words and matches IDs, names, status, tags and related metadata.") {
+    return `<div class="card card-body search-card">
+      <div class="search-row">
+        <div class="search-box"><span class="search-icon">⌕</span><input class="input" id="${esc(id)}" placeholder="${esc(placeholder)}" autocomplete="off"/></div>
+        <button class="btn btn-ghost" id="${esc(id)}-clear" disabled>Clear</button>
+      </div>
+      <div class="field-hint" id="${esc(id)}-summary">${esc(hint)}</div>
+    </div>`;
+  }
+  function bindSearchPanel(id, items, render, targetSelector, noun, opts = {}) {
+    const input = $("#" + id), clear = $("#" + id + "-clear"), summary = $("#" + id + "-summary"), target = $(targetSelector);
+    if (!input || !target) return;
+    const emptyHtml = opts.emptyHtml || (() => emptyState("🔎", `No matching ${noun}s`, "Try a different search term or clear the filter."));
+    const update = () => {
+      const q = input.value || "";
+      const filtered = items.filter((item) => matchesQuery(item, q, opts.extraText ? opts.extraText(item) : ""));
+      target.innerHTML = filtered.length ? render(filtered) : emptyHtml(q);
+      if (summary) summary.textContent = q.trim() ? `Showing ${filtered.length} of ${items.length} ${noun}(s) for “${q.trim()}”.` : `Showing all ${items.length} ${noun}(s).`;
+      if (clear) clear.disabled = !q.trim();
+    };
+    input.addEventListener("input", update);
+    if (clear) clear.onclick = () => { input.value = ""; update(); input.focus(); };
+    update();
+  }
   const badge = (s) => {
     const map = { succeeded: "ok", running: "info", pending: "muted", failed: "err", waiting_for_approval: "warn", dead: "err", cancelled: "muted" };
     return `<span class="badge badge-${map[s] || "muted"}">${esc(s)}</span>`;
@@ -454,19 +491,24 @@
     $("#content").innerHTML = `
       <div class="overview"><div><h1>Projects</h1><p>Multi-project AI engineering workspaces</p></div>
         <button class="btn btn-primary" onclick="openProjectModal()">＋ Create Project</button></div>
+      ${searchPanelHtml("project-search", "Search projects by name, repo, branch, framework or status…")}
       ${list.length ? `<div class="card card-body"><div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Repo</th><th>Branch</th><th>Framework</th><th>Status</th><th>Created</th><th></th></tr></thead>
-        <tbody>${list.map((p) => `<tr>
-          <td><a href="#/projects/${p.id}"><strong>${esc(p.name)}</strong></a><div class="mono" style="color:var(--text-muted)">${esc(p.slug)}</div></td>
-          <td class="mono">${esc(p.configRepo)}</td>
-          <td class="mono">${esc(p.branch)}</td>
-          <td>${esc(((p.capabilities?.frameworks || []).join(", ") || p.framework || "—"))}</td>
-          <td>${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
-          <td>${timeAgo(p.createdAt)}</td>
-          <td><button class="btn btn-ghost" onclick="location.hash='#/projects/${p.id}'">Open</button></td>
-        </tr>`).join("")}</tbody></table></div></div>` :
+        <tbody id="project-tbody"></tbody></table></div></div>` :
         `<div class="card card-body">${emptyState("📁", "No projects yet", "Create your first project and the platform will auto-generate agents, skills, and a workflow.")}</div>`}`;
+    bindSearchPanel("project-search", list, projectRows, "#project-tbody", "project", { emptyHtml: () => `<tr><td colspan="7">${emptyState("🔎", "No matching projects", "Try searching by repo, branch, framework or status.")}</td></tr>` });
   });
+  function projectRows(list) {
+    return list.map((p) => `<tr>
+      <td><a href="#/projects/${p.id}"><strong>${esc(p.name)}</strong></a><div class="mono" style="color:var(--text-muted)">${esc(p.slug)}</div></td>
+      <td class="mono">${esc(p.configRepo)}</td>
+      <td class="mono">${esc(p.branch)}</td>
+      <td>${esc(((p.capabilities?.frameworks || []).join(", ") || p.framework || "—"))}</td>
+      <td>${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
+      <td>${timeAgo(p.createdAt)}</td>
+      <td><button class="btn btn-ghost" onclick="location.hash='#/projects/${p.id}'">Open</button></td>
+    </tr>`).join("");
+  }
 
   /* ---------- multi-select chips + repo picker (shared by project forms) ---------- */
   let optionCatalogCache = null;
@@ -936,14 +978,11 @@
   on("/agents", async () => {
     const list = await api("/agents");
     $("#content").innerHTML = `
-      <div class="overview"><div><h1>Agents</h1><p>Agent registry — search, categorize, enable/disable</p></div>
-        <input class="input" style="max-width:280px" id="agent-filter" placeholder="Filter agents…"/></div>
+      <div class="overview"><div><h1>Agents</h1><p>Agent registry — search, categorize, enable/disable</p></div></div>
+      ${searchPanelHtml("agent-search", "Search agents by name, type, role, model, project, skill or permission…")}
       <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Type</th><th>Name</th><th>Role</th><th>Model</th><th>Status</th><th>Project</th></tr></thead>
-      <tbody id="agent-tbody">${agentRows(list)}</tbody></table></div></div>`;
-    $("#agent-filter").addEventListener("input", (e) => {
-      const q = e.target.value.toLowerCase();
-      $("#agent-tbody").innerHTML = agentRows(list.filter((a) => (a.name + a.type + a.role).toLowerCase().includes(q)));
-    });
+      <tbody id="agent-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("agent-search", list, agentRows, "#agent-tbody", "agent", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching agents", "Try searching by type, role, model, skill or status.")}</td></tr>` });
   });
   function agentRows(list) {
     if (!list.length) return `<tr><td colspan="6">${emptyState("🤖", "No agents", "Create a project to auto-generate an agent roster.")}</td></tr>`;
@@ -1797,11 +1836,10 @@
       }
       return { catalog, chat };
     };
-    $("#content").innerHTML = `<div class="overview"><div><h1>Providers</h1><p>Provider-agnostic model providers. Use an env-var reference or paste the key (stored encrypted).</p></div><button class="btn btn-primary" onclick="openProvider()">＋ Add Provider</button></div>
-      <div class="grid-3">${list.map((p) => {
-        const ready = p.readiness?.ready !== false;
-        const u = urlHints(p);
-        return `<div class="card card-body" id="prov-${esc(p.id)}">
+    const providerCards = (items) => items.map((p) => {
+      const ready = p.readiness?.ready !== false;
+      const u = urlHints(p);
+      return `<div class="card card-body" id="prov-${esc(p.id)}">
         <div class="card-title">${esc(p.name)} ${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</div>
         <div class="meter-row"><span class="lbl">Type</span><span class="val">${esc(p.type)}</span></div>
         <div class="meter-row"><span class="lbl">Format</span><span class="val">${esc(p.apiFormat)}</span></div>
@@ -1818,7 +1856,15 @@
           ${p.type === "mock" ? "" : `<button class="btn btn-danger" onclick="providerDelete('${p.id}')">Delete</button>`}
         </div>
         <div id="prov-test-${esc(p.id)}"></div>
-      </div>`; }).join("")}</div>`;
+      </div>`;
+    }).join("");
+    $("#content").innerHTML = `<div class="overview"><div><h1>Providers</h1><p>Provider-agnostic model providers. Use an env-var reference or paste the key (stored encrypted).</p></div><button class="btn btn-primary" onclick="openProvider()">＋ Add Provider</button></div>
+      ${searchPanelHtml("provider-search", "Search providers by name, type, format, URL, secret or status…")}
+      <div class="grid-3" id="provider-grid"></div>`;
+    bindSearchPanel("provider-search", list, providerCards, "#provider-grid", "provider", {
+      extraText: (p) => { const u = urlHints(p); return `${p.active ? "active" : "inactive"} ${p.keyPresent ? "key set ready" : "missing key"} ${u.catalog} ${u.chat}`; },
+      emptyHtml: () => emptyState("🔎", "No matching providers", "Try searching by provider type, API format, URL, secret reference or status."),
+    });
   });
   window.providerToggle = async (id, active, force = false) => {
     try {
@@ -1961,11 +2007,10 @@
   /* SKILLS */
   on("/skills", async () => {
     const list = await api("/skills");
-    $("#content").innerHTML = `<div class="overview"><div><h1>Skills</h1><p>Skill Marketplace</p></div><input class="input" style="max-width:260px" id="skill-filter" placeholder="Search skills…"/></div><div class="grid-3" id="skill-grid">${skillCards(list)}</div>`;
-    $("#skill-filter").addEventListener("input", (e) => {
-      const q = e.target.value.toLowerCase();
-      $("#skill-grid").innerHTML = skillCards(list.filter((s) => (s.name+s.description+s.category).toLowerCase().includes(q)));
-    });
+    $("#content").innerHTML = `<div class="overview"><div><h1>Skills</h1><p>Skill Marketplace</p></div></div>
+      ${searchPanelHtml("skill-search", "Search skills by name, description, category, version or compatible agent…")}
+      <div class="grid-3" id="skill-grid"></div>`;
+    bindSearchPanel("skill-search", list, skillCards, "#skill-grid", "skill", { emptyHtml: () => emptyState("🔎", "No matching skills", "Try searching by category, version or compatible agent type.") });
   });
   function skillCards(list) {
     if (!list.length) return emptyState("🛠️", "No skills", "Skills are attachable capabilities injected into agents.");
@@ -1981,10 +2026,13 @@
   on("/workflows", async () => {
     const list = await api("/workflows");
     $("#content").innerHTML = `<div class="overview"><div><h1>Workflows</h1><p>Workflow Engine — agent, tool, condition, approval, parallel nodes</p></div><button class="btn btn-primary" onclick="openWorkflow()">＋ New Workflow</button></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Slug</th><th>Nodes</th><th>Version</th><th>Enabled</th><th>Project</th></tr></thead><tbody>
-      ${list.map((w) => `<tr><td><a href="#/workflows/${w.id}"><strong>${esc(w.name)}</strong></a></td><td class="mono">${esc(w.slug)}</td><td>${w.nodes.length}</td><td>v${w.version}</td><td>${w.enabled?'<span class="badge badge-ok">enabled</span>':'<span class="badge badge-muted">disabled</span>'}</td><td class="mono">${(w.projectId||"—").slice(0,12)}</td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("workflow-search", "Search workflows by name, slug, node type, project or status…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Slug</th><th>Nodes</th><th>Version</th><th>Enabled</th><th>Project</th></tr></thead><tbody id="workflow-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("workflow-search", list, workflowRows, "#workflow-tbody", "workflow", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching workflows", "Try searching by node type, slug, project or status.")}</td></tr>` });
   });
+  function workflowRows(list) {
+    return list.map((w) => `<tr><td><a href="#/workflows/${w.id}"><strong>${esc(w.name)}</strong></a></td><td class="mono">${esc(w.slug)}</td><td>${w.nodes.length}</td><td>v${w.version}</td><td>${w.enabled?'<span class="badge badge-ok">enabled</span>':'<span class="badge badge-muted">disabled</span>'}</td><td class="mono">${(w.projectId||"—").slice(0,12)}</td></tr>`).join("");
+  }
   window.openWorkflow = async () => {
     const projects = await api("/projects").catch(() => []);
     openModal("New Workflow", `<div class="field"><label>Name</label><input class="input" id="wf-name"/></div><div class="field"><label>Project</label><select class="select" id="wf-project">${projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("") || '<option value="">(no projects yet)</option>'}</select></div><div class="field"><label>Description</label><textarea class="textarea" id="wf-desc"></textarea></div><div class="flex"><button class="btn btn-primary" id="wf-go">Create</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
@@ -2128,20 +2176,26 @@
   on("/tasks", async () => {
     const list = await api("/tasks");
     $("#content").innerHTML = `<div class="overview"><div><h1>Tasks</h1><p>Task queue & execution</p></div></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Status</th><th>Agent</th><th>Project</th><th>Created</th><th></th></tr></thead><tbody>
-      ${list.map((t) => `<tr><td><strong>${esc(t.title)}</strong></td><td>${badge(t.status)}</td><td>${esc(t.agentType||"—")}</td><td class="mono">${(t.projectId||"—").slice(0,12)}</td><td>${timeAgo(t.createdAt)}</td><td><button class="btn btn-ghost" onclick="runTask('${t.id}')">Run</button></td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("task-search", "Search tasks by title, status, agent, project or workflow…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Status</th><th>Agent</th><th>Project</th><th>Created</th><th></th></tr></thead><tbody id="task-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("task-search", list, taskRows, "#task-tbody", "task", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching tasks", "Try searching by title, agent, project, workflow or status.")}</td></tr>` });
   });
+  function taskRows(list) {
+    return list.map((t) => `<tr><td><strong>${esc(t.title)}</strong></td><td>${badge(t.status)}</td><td>${esc(t.agentType||"—")}</td><td class="mono">${(t.projectId||"—").slice(0,12)}</td><td>${timeAgo(t.createdAt)}</td><td><button class="btn btn-ghost" onclick="runTask('${t.id}')">Run</button></td></tr>`).join("");
+  }
   window.runTask = async (id) => { await api(`/tasks/${id}/run`, { method: "POST" }); toast("Task queued", id.slice(0,8), "ok"); refreshCurrent(); };
 
   /* RUNS */
   on("/runs", async () => {
     const list = await api("/runs");
     $("#content").innerHTML = `<div class="overview"><div><h1>AI Run Console</h1><p>Observable agent executions (status, steps, results — never chain-of-thought)</p></div></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th><th></th></tr></thead><tbody>
-      ${list.map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("run-search", "Search runs by id, agent, status, model, task, project or correlation id…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th><th></th></tr></thead><tbody id="run-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("run-search", list, runRows, "#run-tbody", "run", { emptyHtml: () => `<tr><td colspan="7">${emptyState("🔎", "No matching runs", "Try searching by run id, agent, model, status or correlation id.")}</td></tr>` });
   });
+  function runRows(list) {
+    return list.map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("");
+  }
   on("/runs/:id/console", async (rest) => {
     const id = rest[0];
     const c = await api(`/runs/${id}/console`);
@@ -2166,19 +2220,27 @@
   /* APPROVALS */
   on("/approvals", async () => {
     const [list, policy] = await Promise.all([api("/approvals"), api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 0 }))]);
-    const pending = list.filter((a) => a.status === "pending");
-    const history = list.filter((a) => a.status !== "pending").slice(0, 50);
-    const row = (a) => `<tr><td class="mono">${esc(a.id)}</td><td><strong>${esc(a.action)}</strong>${a.taskId ? `<div class="mono" style="color:var(--text-muted)">task ${esc(a.taskId)}</div>` : ""}</td><td class="mono">${(a.projectId || "—").slice(0, 12)}</td><td>${badge(a.status === "pending" ? "waiting_for_approval" : a.status === "approved" ? "succeeded" : a.status === "rejected" ? "failed" : "cancelled")}</td><td>${esc(a.decidedBy || "—")}<div style="color:var(--text-muted);font-size:11px">${esc(a.decisionSource || "")}</div></td><td>${timeAgo(a.decidedAt || a.requestedAt)}</td>
-      <td style="white-space:nowrap">${a.status === "pending" ? `<button class="btn btn-primary" onclick="decideApproval('${a.id}','approve')">✅ Approve</button> <button class="btn" onclick="decideApproval('${a.id}','reject')">❌ Reject</button>` : ""}</td></tr>`;
-    $("#content").innerHTML = `<div class="overview"><div><h1>Approvals</h1><p>Human-in-the-loop gate for merges, deploys, migrations and other dangerous or costly steps</p></div>
-        <div class="action-row"><span class="pill">${policy.autoApprove ? "⚠️ policy: auto-approve" : "🔒 policy: human approval required"}</span><button class="btn" onclick="location.hash='#/settings'">Policy</button></div></div>
-      <div class="card card-body"><div class="card-title">Pending <span class="sub">${pending.length}</span></div>
+    const row = approvalRow;
+    const renderApprovalLists = (items) => {
+      const pending = items.filter((a) => a.status === "pending");
+      const history = items.filter((a) => a.status !== "pending").slice(0, 50);
+      return `<div class="card card-body"><div class="card-title">Pending <span class="sub">${pending.length}</span></div>
         ${pending.length ? `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Action</th><th>Project</th><th>Status</th><th>By</th><th>When</th><th></th></tr></thead><tbody>${pending.map(row).join("")}</tbody></table></div>` : emptyState("✅", "Nothing waiting", policy.autoApprove ? "Auto-approve is on — switch it off in Settings to gate dangerous steps." : "Agents will pause here (and ping Telegram) when they need a decision.")}
       </div>
       <div class="card card-body mt"><div class="card-title">History</div>
         ${history.length ? `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Action</th><th>Project</th><th>Status</th><th>By</th><th>When</th><th></th></tr></thead><tbody>${history.map(row).join("")}</tbody></table></div>` : emptyState("📭", "No decisions yet", "")}
       </div>`;
+    };
+    $("#content").innerHTML = `<div class="overview"><div><h1>Approvals</h1><p>Human-in-the-loop gate for merges, deploys, migrations and other dangerous or costly steps</p></div>
+        <div class="action-row"><span class="pill">${policy.autoApprove ? "⚠️ policy: auto-approve" : "🔒 policy: human approval required"}</span><button class="btn" onclick="location.hash='#/settings'">Policy</button></div></div>
+      ${searchPanelHtml("approval-search", "Search approvals by id, action, task, project, status, decision source or approver…")}
+      <div id="approval-lists"></div>`;
+    bindSearchPanel("approval-search", list, renderApprovalLists, "#approval-lists", "approval", { emptyHtml: () => emptyState("🔎", "No matching approvals", "Try searching by action, task, project, status or approver.") });
   });
+  function approvalRow(a) {
+    return `<tr><td class="mono">${esc(a.id)}</td><td><strong>${esc(a.action)}</strong>${a.taskId ? `<div class="mono" style="color:var(--text-muted)">task ${esc(a.taskId)}</div>` : ""}</td><td class="mono">${(a.projectId || "—").slice(0, 12)}</td><td>${badge(a.status === "pending" ? "waiting_for_approval" : a.status === "approved" ? "succeeded" : a.status === "rejected" ? "failed" : "cancelled")}</td><td>${esc(a.decidedBy || "—")}<div style="color:var(--text-muted);font-size:11px">${esc(a.decisionSource || "")}</div></td><td>${timeAgo(a.decidedAt || a.requestedAt)}</td>
+      <td style="white-space:nowrap">${a.status === "pending" ? `<button class="btn btn-primary" onclick="decideApproval('${a.id}','approve')">✅ Approve</button> <button class="btn" onclick="decideApproval('${a.id}','reject')">❌ Reject</button>` : ""}</td></tr>`;
+  }
   window.decideApproval = async (id, decision) => {
     try {
       await api(`/approvals/${id}/${decision}`, { method: "POST", body: {} });
@@ -2211,20 +2273,26 @@
   on("/conversations", async () => {
     const list = await api("/conversations");
     $("#content").innerHTML = `<div class="overview"><div><h1>Conversations</h1><p>Project-aware conversations with auto-summarization</p></div></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Project</th><th>Source</th><th>Messages</th><th>Updated</th></tr></thead><tbody>
-      ${list.map((c) => `<tr><td><a href="#/conversations/${c.id}"><strong>${esc(c.title)}</strong></a></td><td class="mono">${(c.projectId||"—").slice(0,12)}</td><td>${esc(c.source)}</td><td>${c.messages.length}</td><td>${timeAgo(c.updatedAt)}</td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("conversation-search", "Search conversations by title, project, source, message text or updated time…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Project</th><th>Source</th><th>Messages</th><th>Updated</th></tr></thead><tbody id="conversation-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("conversation-search", list, conversationRows, "#conversation-tbody", "conversation", { emptyHtml: () => `<tr><td colspan="5">${emptyState("🔎", "No matching conversations", "Try searching by title, project, source or message content.")}</td></tr>` });
   });
+  function conversationRows(list) {
+    return list.map((c) => `<tr><td><a href="#/conversations/${c.id}"><strong>${esc(c.title)}</strong></a></td><td class="mono">${(c.projectId||"—").slice(0,12)}</td><td>${esc(c.source)}</td><td>${c.messages.length}</td><td>${timeAgo(c.updatedAt)}</td></tr>`).join("");
+  }
 
   /* MEMORY */
   on("/memory", async () => {
     const list = await api("/memory");
     $("#content").innerHTML = `<div class="overview"><div><h1>Memory</h1><p>GitHub-backed multi-level memory (project, agent, task, decisions, bugs, knowledge)</p></div>
       <button class="btn btn-primary" onclick="addMemory()">＋ Add Entry</button></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Type</th><th>Scope</th><th>Key</th><th>Project</th><th>Tags</th></tr></thead><tbody>
-      ${list.map((m) => `<tr><td><span class="badge badge-info">${esc(m.type)}</span></td><td>${esc(m.scope)}</td><td>${esc(m.key)}</td><td class="mono">${(m.projectId||"—").slice(0,12)}</td><td>${(m.tags||[]).map(t=>`<span class="badge badge-muted">${esc(t)}</span>`).join(" ")}</td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("memory-search", "Search memory by type, scope, key, project, tag or content…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Type</th><th>Scope</th><th>Key</th><th>Project</th><th>Tags</th></tr></thead><tbody id="memory-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("memory-search", list, memoryRows, "#memory-tbody", "memory entry", { emptyHtml: () => `<tr><td colspan="5">${emptyState("🔎", "No matching memory entries", "Try searching by type, key, tag, project or content.")}</td></tr>` });
   });
+  function memoryRows(list) {
+    return list.map((m) => `<tr><td><span class="badge badge-info">${esc(m.type)}</span></td><td>${esc(m.scope)}</td><td>${esc(m.key)}</td><td class="mono">${(m.projectId||"—").slice(0,12)}</td><td>${(m.tags||[]).map(t=>`<span class="badge badge-muted">${esc(t)}</span>`).join(" ")}</td></tr>`).join("");
+  }
   window.addMemory = async () => {
     const projects = await api("/projects").catch(() => []);
     openModal("Add Memory Entry", `<div class="field"><label>Project</label><select class="select" id="mm-project"><option value="">(global)</option>${projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></div><div class="field"><label>Type</label><select class="select" id="mm-type">${["architecture","business","technical","decision","bug","knowledge","lesson","conversation"].map(t=>`<option ${t === "knowledge" ? "selected" : ""}>${t}</option>`).join("")}</select></div><div class="field"><label>Key</label><input class="input" id="mm-key" placeholder="auth.session-strategy"/></div><div class="field"><label>Content</label><textarea class="textarea" id="mm-content"></textarea></div><div class="field"><label>Tags (comma separated)</label><input class="input" id="mm-tags"/></div><div class="flex"><button class="btn btn-primary" id="mm-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
