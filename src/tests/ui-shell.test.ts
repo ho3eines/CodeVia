@@ -342,3 +342,45 @@ describe("test verdict dialog", () => {
     expect((win.document.querySelector("#pv-name") as El).getAttribute("value")).toBe("My provider");
   }, 30000);
 });
+
+describe("link styling", () => {
+  it("covers every anchor-based control with an explicit no-underline rule", async () => {
+    // NOTE: getComputedStyle is useless here — jsdom does not apply the user
+    // agent stylesheet that actually draws the underline, so it reports "none"
+    // even when the rule is missing. The real guarantee is that each control
+    // class an anchor can carry is named in the reset, so assert that directly.
+    const { win, go } = await boot();
+    await go("#/dashboard");
+
+    const css = readFileSync(resolve(process.cwd(), "public", "app.css"), "utf8");
+    // Only the base (non-:hover) reset counts: a rule that fires solely on
+    // hover would still ship an underlined control at rest.
+    const region = css.slice(css.indexOf("a { color: var(--primary)"), css.indexOf("hr {"));
+    const resetBlock = region
+      .split("}")
+      .filter((rule) => rule.includes("text-decoration") && !rule.includes(":hover"))
+      .join("}");
+
+    const anchors = [...win.document.querySelectorAll("a[class]")] as El[];
+    expect(anchors.length, "expected anchor-based controls to audit").toBeGreaterThan(3);
+    for (const el of anchors) {
+      const classes = (el.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
+      // A styled anchor is a control; at least one of its classes (or an
+      // ancestor-scoped selector) must appear in the no-underline reset.
+      const covered = classes.some((c) => resetBlock.includes(`a.${c}`) || resetBlock.includes(`.${c} a`));
+      expect(covered, `<a class="${classes.join(" ")}"> is not covered by the underline reset`).toBe(true);
+    }
+  }, 30000);
+
+  it("keeps the stylesheet free of per-component underline workarounds", () => {
+    // The rule belongs in one place; scattered inline overrides mean a new
+    // anchor-based component silently ships underlined.
+    const js = readFileSync(resolve(process.cwd(), "public", "app.js"), "utf8");
+    expect(js).not.toContain("text-decoration:none");
+
+    const css = readFileSync(resolve(process.cwd(), "public", "app.css"), "utf8");
+    // Base anchors opt out of decoration, and hover opts back in for prose.
+    expect(css).toMatch(/\na \{[^}]*text-decoration:\s*none/);
+    expect(css).toMatch(/\na:hover \{[^}]*text-decoration:\s*underline/);
+  });
+});

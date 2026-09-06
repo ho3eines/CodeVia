@@ -534,7 +534,29 @@ pre { background: var(--glass); border: 1px solid var(--stroke); border-radius: 
 .mb { margin-bottom: 12px; }
 .flex { display: flex; align-items: center; gap: 8px; }
 .spacer { flex: 1; }
-a { color: var(--primary); }
+/* Links.
+   Anchors are frequently used as controls (.btn, .quick-btn, tiles, cards).
+   Those must never show link underlines, so decoration is opted into by real
+   prose links rather than reset on every component that borrows an anchor. */
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+/* Components built on an anchor stay undecorated in every state. */
+a.btn, a.quick-btn, a.admin-tile, a.card, a.stat, a.nav-link, a.chip, a.filter-chip,
+a.preset-tile, a.tab, a.seg-btn, a.list-row, a.repo-row, a.model-card, a.provider-card,
+a.pill, a.badge, a.icon-btn, a.cmd-btn, a.user-chip, a.theme-opt, a.activity-item,
+.nav a, .palette-list a, .quick-grid a, .admin-tile-grid a, .stat-grid a,
+.card-title a, .modal-actions a, .action-row a, .provider-actions a,
+.model-card-actions a, .verdict-actions a, .sidebar-footer a {
+  text-decoration: none;
+}
+a.btn:hover, a.quick-btn:hover, a.admin-tile:hover, a.card:hover, a.stat:hover,
+a.preset-tile:hover, a.list-row:hover, a.model-card:hover, a.provider-card:hover,
+a.cmd-btn:hover, a.user-chip:hover, a.activity-item:hover,
+.nav a:hover, .quick-grid a:hover, .admin-tile-grid a:hover, .stat-grid a:hover,
+.action-row a:hover, .provider-actions a:hover, .model-card-actions a:hover,
+.verdict-actions a:hover, .sidebar-footer a:hover {
+  text-decoration: none;
+}
 hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
 .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: var(--text-muted); margin: 24px 0 13px; display: flex; align-items: center; gap: 11px; }
 .section-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--stroke), transparent); }
@@ -699,8 +721,6 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
 .temp-scale { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); margin-top: 2px; }
 
 /* ---------- 26. Providers page ---------- */
-.provider-stats .stat-sub a { color: var(--primary); text-decoration: none; }
-.provider-stats .stat-sub a:hover { text-decoration: underline; }
 .provider-alert {
   display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
   margin-bottom: 14px; border-color: color-mix(in srgb, var(--err) 40%, transparent);

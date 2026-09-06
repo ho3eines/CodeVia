@@ -799,7 +799,7 @@
         ${statCard("Projects", d.totalProjects, `${d.activeAgents} active agents`, "📁", "")}
         ${statCard("Runs", d.totalRuns, `${successRate}% success rate`, "▶️", sparkline(trend.map((t) => t.value)))}
         ${statCard("Running now", d.runningTasks, `${q.pending || 0} queued · ${d.failedTasks} failed`, "⚡", "")}
-        <a class="card stat" href="#/approvals" style="text-decoration:none;color:inherit">
+        <a class="card stat" href="#/approvals" style="color:inherit">
           <span class="stat-icon">🛑</span>
           <div class="stat-label">Approvals</div>
           <div class="stat-value">${d.pendingApprovals}</div>
@@ -3232,7 +3232,7 @@
           <p style="color:var(--text-muted);font-size:12px">Sign in with your GitHub account. The first user to log in becomes <strong>owner</strong>.</p>
           <p style="color:var(--text-muted);font-size:11px" class="mono">Callback: ${esc(oauthStatus.redirectUri||"")}</p>
           ${mismatchWarn}
-          <a class="btn btn-primary" href="/auth/github/login" style="text-decoration:none">🐙 Login with GitHub</a>
+          <a class="btn btn-primary" href="/auth/github/login">🐙 Login with GitHub</a>
           <button class="btn" id="gh-diag-btn" style="margin-left:6px">Diagnose</button>
           <div id="gh-diag" style="margin-top:8px;font-size:11px;color:var(--text-muted)"></div></div>`;
     } else {
@@ -3668,7 +3668,7 @@
           const diagEl = document.getElementById("adm-gh-result");
           if (diagEl) {
             if (res.effective?.configured) {
-              diagEl.innerHTML = `<div class="notice ok"><strong style="color:var(--ok)">✓ Saved and configured</strong><p style="font-size:11px;margin:6px 0 0">Callback: <span class="mono">${esc(res.effective.redirectUri||"")}</span></p><p style="font-size:11px;margin:4px 0 0">اگر Client Secret یا AUTH_SECRET هنوز missing است، آنها را در env تنظیم و Redeploy کنید.</p><a class="btn btn-primary" href="/auth/github/login" style="margin-top:8px;text-decoration:none">Test login now</a></div>`;
+              diagEl.innerHTML = `<div class="notice ok"><strong style="color:var(--ok)">✓ Saved and configured</strong><p style="font-size:11px;margin:6px 0 0">Callback: <span class="mono">${esc(res.effective.redirectUri||"")}</span></p><p style="font-size:11px;margin:4px 0 0">اگر Client Secret یا AUTH_SECRET هنوز missing است، آنها را در env تنظیم و Redeploy کنید.</p><a class="btn btn-primary" href="/auth/github/login" style="margin-top:8px">Test login now</a></div>`;
             } else {
               diagEl.innerHTML = `<div class="notice err"><strong style="color:var(--err)">Saved but still not configured</strong><p style="font-size:11px;margin:6px 0 0">${esc(res.effective?.setupHint||"")}</p>${res.effective?.setupSteps ? `<ol style="font-size:11px;margin:6px 0 0 16px">${res.effective.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}</div>`;
             }
@@ -3687,7 +3687,7 @@
         const r = await apiRaw("/auth/github/login?format=json");
         if (el) {
           if (r.ok) {
-            el.innerHTML = `<div class="notice ok"><strong style="color:var(--ok)">✓ Ready — GitHub login URL works</strong><p style="font-size:11px;margin:6px 0 0;word-break:break-all" class="mono">${esc(r.body?.url||"")}</p><a class="btn btn-primary" href="${esc(r.body?.url||"/auth/github/login")}" style="margin-top:8px;text-decoration:none">Go to GitHub login</a></div>`;
+            el.innerHTML = `<div class="notice ok"><strong style="color:var(--ok)">✓ Ready — GitHub login URL works</strong><p style="font-size:11px;margin:6px 0 0;word-break:break-all" class="mono">${esc(r.body?.url||"")}</p><a class="btn btn-primary" href="${esc(r.body?.url||"/auth/github/login")}" style="margin-top:8px">Go to GitHub login</a></div>`;
           } else {
             const b = r.body || {};
             el.innerHTML = `<div class="notice err"><strong style="color:var(--err)">${esc(b.error||"Not configured")}</strong><p style="font-size:11px;margin:6px 0 0">${esc(b.hint||"")}</p>${b.setupSteps ? `<ol style="font-size:11px;margin:6px 0 0 16px">${b.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}${b.diagnostics ? `<pre style="margin-top:6px;font-size:10px;white-space:pre-wrap;background:var(--glass);padding:6px;border-radius:6px">${esc(JSON.stringify(b.diagnostics,null,2))}</pre>` : ""}</div>`;
