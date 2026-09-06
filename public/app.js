@@ -211,13 +211,167 @@
     return `<div class="test-result ${r.ok ? "ok" : "err"}">${r.ok ? "✓" : "✗"} ${esc(r.message)}${found}${r.hint ? "<br>" + esc(r.hint) : ""}${responseSection}${modelsSection}${capsSection}${urlsSection}</div>`;
   }
 
-  /* ---------- modal ---------- */
-  function openModal(title, bodyHtml) {
+  /* ---------- modal ----------
+     Modals are the primary surface for detail + configuration in this UI: the
+     pages stay as compact overviews and everything deep opens in glass. */
+  function openModal(title, bodyHtml, opts = {}) {
     $("#modal-title").textContent = title;
     $("#modal-body").innerHTML = bodyHtml;
+    $("#modal").classList.toggle("modal-wide", !!opts.wide);
     $("#modal-backdrop").hidden = false;
   }
-  function closeModal() { $("#modal-backdrop").hidden = true; }
+  function closeModal() { $("#modal-backdrop").hidden = true; $("#modal").classList.remove("modal-wide"); }
+  window.openModal = openModal;
+  window.closeModal = closeModal;
+
+  /* ---------- tabs ----------
+     Pure-CSS-ish tab strip: `tabsHtml` renders the buttons + panels and
+     `switchTab` flips the active classes without a re-render. */
+  function tabsHtml(groupId, tabs) {
+    const strip = tabs.map((t, i) =>
+      `<button class="tab ${i === 0 ? "active" : ""}" data-tab-btn="${esc(groupId)}:${esc(t.id)}" onclick="switchTab('${esc(groupId)}','${esc(t.id)}')">
+        ${esc(t.label)}${t.badge != null ? `<span class="tab-badge">${esc(String(t.badge))}</span>` : ""}
+      </button>`).join("");
+    const panels = tabs.map((t, i) =>
+      `<div class="tab-panel" data-tab-panel="${esc(groupId)}:${esc(t.id)}" ${i === 0 ? "" : "hidden"}>${t.html}</div>`).join("");
+    return `<div class="tabs" role="tablist">${strip}</div>${panels}`;
+  }
+  window.switchTab = (groupId, tabId) => {
+    $$(`[data-tab-btn^="${groupId}:"]`).forEach((b) => b.classList.toggle("active", b.dataset.tabBtn === `${groupId}:${tabId}`));
+    $$(`[data-tab-panel^="${groupId}:"]`).forEach((p) => { p.hidden = p.dataset.tabPanel !== `${groupId}:${tabId}`; });
+  };
+
+  /* ---------- SVG chart kit ----------
+     Small dependency-free chart helpers. Everything is plain SVG styled by
+     app.css (.cv-chart) so charts inherit the theme and animate on render. */
+  const CHART_COLORS = ["#7c6cff", "#22d3ee", "#e879f9", "#34d399", "#fbbf24", "#fb7185", "#5b8cff", "#a3e635"];
+  const chartColor = (i) => CHART_COLORS[i % CHART_COLORS.length];
+
+  /** Smooth area+line chart over a numeric series. */
+  function lineChart(values, opts = {}) {
+    const w = opts.width || 520, h = opts.height || 170, pad = { l: 34, r: 10, t: 12, b: 22 };
+    const data = (values || []).map((v) => Number(v) || 0);
+    if (data.length < 2) return `<div class="empty" style="padding:28px"><p>Not enough data to plot yet.</p></div>`;
+    const max = Math.max(...data, 1), min = Math.min(...data, 0);
+    const span = max - min || 1;
+    const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+    const x = (i) => pad.l + (i / (data.length - 1)) * iw;
+    const y = (v) => pad.t + ih - ((v - min) / span) * ih;
+    const line = data.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    const area = `${line} L${x(data.length - 1).toFixed(1)},${(pad.t + ih).toFixed(1)} L${pad.l},${(pad.t + ih).toFixed(1)} Z`;
+    const gid = "g" + Math.random().toString(36).slice(2, 8);
+    const ticks = [0, 0.5, 1].map((f) => {
+      const yy = pad.t + ih * f;
+      return `<line class="grid-line" x1="${pad.l}" y1="${yy.toFixed(1)}" x2="${w - pad.r}" y2="${yy.toFixed(1)}"/>
+              <text class="axis-label" x="4" y="${(yy + 3).toFixed(1)}">${Math.round(max - span * f)}</text>`;
+    }).join("");
+    const dots = data.map((v, i) => `<circle class="dot" cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3" stroke="${opts.color || CHART_COLORS[0]}"><title>${esc(String(opts.labels?.[i] ?? i))}: ${v}</title></circle>`).join("");
+    const labels = (opts.labels || []).map((l, i) =>
+      i % Math.ceil(data.length / 6) === 0 ? `<text class="axis-label" text-anchor="middle" x="${x(i).toFixed(1)}" y="${h - 6}">${esc(String(l))}</text>` : "").join("");
+    return `<svg class="cv-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img">
+      <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${opts.color || CHART_COLORS[0]}" stop-opacity="0.42"/>
+        <stop offset="100%" stop-color="${opts.color || CHART_COLORS[0]}" stop-opacity="0"/>
+      </linearGradient></defs>
+      ${ticks}
+      <path class="area-path" d="${area}" fill="url(#${gid})"/>
+      <path class="line-path" d="${line}" stroke="${opts.color || CHART_COLORS[0]}"/>
+      ${dots}${labels}
+    </svg>`;
+  }
+
+  /** Vertical bar chart from [{label, value}]. */
+  function barChart(items, opts = {}) {
+    const rows = (items || []).filter(Boolean);
+    if (!rows.length) return `<div class="empty" style="padding:28px"><p>Nothing to chart yet.</p></div>`;
+    const w = opts.width || 520, h = opts.height || 170, pad = { l: 30, r: 8, t: 12, b: 26 };
+    const max = Math.max(...rows.map((r) => Number(r.value) || 0), 1);
+    const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+    const bw = Math.min(46, (iw / rows.length) * 0.62);
+    const step = iw / rows.length;
+    const bars = rows.map((r, i) => {
+      const v = Number(r.value) || 0;
+      const bh = Math.max(2, (v / max) * ih);
+      const bx = pad.l + step * i + (step - bw) / 2;
+      const by = pad.t + ih - bh;
+      return `<rect class="bar-rect" x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="6"
+                fill="${r.color || chartColor(i)}" style="animation-delay:${i * 60}ms"><title>${esc(r.label)}: ${v}</title></rect>
+        <text class="axis-label" text-anchor="middle" x="${(bx + bw / 2).toFixed(1)}" y="${h - 8}">${esc(String(r.label).slice(0, 9))}</text>
+        <text class="axis-label" text-anchor="middle" x="${(bx + bw / 2).toFixed(1)}" y="${(by - 4).toFixed(1)}" style="font-weight:700">${v}</text>`;
+    }).join("");
+    const grid = [0, 0.5, 1].map((f) => `<line class="grid-line" x1="${pad.l}" y1="${(pad.t + ih * f).toFixed(1)}" x2="${w - pad.r}" y2="${(pad.t + ih * f).toFixed(1)}"/>`).join("");
+    return `<svg class="cv-chart" viewBox="0 0 ${w} ${h}" role="img">${grid}${bars}</svg>`;
+  }
+
+  /** Donut / progress ring. `segments` = [{label, value, color}]. */
+  function donutChart(segments, opts = {}) {
+    const rows = (segments || []).filter((s) => Number(s.value) > 0);
+    const size = opts.size || 168, stroke = opts.stroke || 16, r = (size - stroke) / 2, c = 2 * Math.PI * r;
+    const total = rows.reduce((s, x) => s + Number(x.value), 0);
+    if (!total) {
+      return `<div class="donut-wrap"><svg class="cv-chart" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+        <circle class="ring-track" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"/>
+        <text x="50%" y="52%" text-anchor="middle" class="axis-label">no data</text></svg></div>`;
+    }
+    let offset = 0;
+    const arcs = rows.map((s, i) => {
+      const frac = Number(s.value) / total;
+      const dash = `${(frac * c).toFixed(2)} ${(c - frac * c).toFixed(2)}`;
+      const el = `<circle class="ring-value" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke="${s.color || chartColor(i)}"
+        stroke-width="${stroke}" stroke-dasharray="${dash}" stroke-dashoffset="${(-offset * c).toFixed(2)}" style="animation-delay:${i * 90}ms">
+        <title>${esc(s.label)}: ${s.value}</title></circle>`;
+      offset += frac;
+      return el;
+    }).join("");
+    const legend = opts.legend === false ? "" : `<div class="chart-legend">${rows.map((s, i) =>
+      `<span class="key"><i style="background:${s.color || chartColor(i)}"></i>${esc(s.label)} <strong style="color:var(--text)">${s.value}</strong></span>`).join("")}</div>`;
+    return `<div class="donut-wrap"><svg class="cv-chart" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img">
+        <circle class="ring-track" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"/>
+        ${arcs}
+        <text x="50%" y="48%" text-anchor="middle" style="fill:var(--text);font-size:26px;font-weight:800;font-family:var(--font)">${esc(String(opts.centerValue ?? total))}</text>
+        <text x="50%" y="62%" text-anchor="middle" class="axis-label">${esc(opts.centerLabel || "total")}</text>
+      </svg>${legend}</div>`;
+  }
+
+  /** Single-value progress ring (health score, percentages). */
+  function gaugeRing(percent, opts = {}) {
+    const p = Math.max(0, Math.min(100, Number(percent) || 0));
+    const size = opts.size || 130, stroke = opts.stroke || 12, r = (size - stroke) / 2, c = 2 * Math.PI * r;
+    const color = opts.color || (p >= 80 ? "#34d399" : p >= 50 ? "#fbbf24" : "#fb7185");
+    return `<svg class="cv-chart" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" style="flex:0 0 auto">
+      <circle class="ring-track" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"/>
+      <circle class="ring-value" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke="${color}" stroke-width="${stroke}"
+        stroke-dasharray="${((p / 100) * c).toFixed(2)} ${c.toFixed(2)}"/>
+      <text x="50%" y="47%" text-anchor="middle" style="fill:var(--text);font-size:27px;font-weight:800;font-family:var(--font)">${Math.round(p)}<tspan style="font-size:14px">%</tspan></text>
+      <text x="50%" y="63%" text-anchor="middle" class="axis-label">${esc(opts.label || "healthy")}</text>
+    </svg>`;
+  }
+
+  /** Tiny inline sparkline for stat cards. */
+  function sparkline(values, color = CHART_COLORS[0]) {
+    const data = (values || []).map((v) => Number(v) || 0);
+    if (data.length < 2) return "";
+    const w = 120, h = 34, max = Math.max(...data, 1), min = Math.min(...data, 0), span = max - min || 1;
+    const pts = data.map((v, i) => `${((i / (data.length - 1)) * w).toFixed(1)},${(h - ((v - min) / span) * (h - 4) - 2).toFixed(1)}`);
+    return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts.join(" ")}"
+      fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/></svg>`;
+  }
+
+  /** Group timestamped rows into N buckets for trend charts. */
+  function bucketByDay(rows, days = 7, dateKey = "createdAt") {
+    const out = [];
+    const now = new Date();
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(now); d.setDate(now.getDate() - i); d.setHours(0, 0, 0, 0);
+      const next = new Date(d); next.setDate(d.getDate() + 1);
+      const n = (rows || []).filter((r) => {
+        const t = new Date(r?.[dateKey] || r?.createdAt || 0).getTime();
+        return t >= d.getTime() && t < next.getTime();
+      }).length;
+      out.push({ label: d.toLocaleDateString(undefined, { weekday: "short" }), value: n });
+    }
+    return out;
+  }
 
   /* ---------- realtime ---------- */
   let socket = null;
@@ -440,49 +594,179 @@
   $("#chat-modal-close")?.addEventListener("click", () => window.closeModelChat?.());
   $("#chat-modal-backdrop")?.addEventListener("click", (e) => { if (e.target.id === "chat-modal-backdrop") window.closeModelChat?.(); });
 
-  /* ---------- theme ---------- */
+  /* ---------- theme + direction ----------
+     Dark is the default; the choice is persisted and applied pre-paint by the
+     inline script in index.html so there is never a flash of the wrong theme. */
+  function currentTheme() { return document.documentElement.getAttribute("data-theme") || "dark"; }
+  function paintThemeButton() {
+    const btn = $("#theme-toggle");
+    if (btn) btn.innerHTML = currentTheme() === "dark" ? "☀️ Light mode" : "🌙 Dark mode";
+    const d = $("#dir-toggle");
+    if (d) d.innerHTML = (document.documentElement.getAttribute("dir") === "rtl") ? "⇄ LTR" : "⇄ RTL";
+  }
   $("#theme-toggle")?.addEventListener("click", () => {
-    const cur = document.documentElement.getAttribute("data-theme") || "light";
-    const next = cur === "dark" ? "light" : "dark";
+    const next = currentTheme() === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", next);
     localStorage.setItem("cv-theme", next);
+    paintThemeButton();
+    toast(next === "dark" ? "Dark mode" : "Light mode", "Theme saved for next visit", "");
   });
-  const savedTheme = localStorage.getItem("cv-theme");
-  if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
+  $("#dir-toggle")?.addEventListener("click", () => {
+    const next = (document.documentElement.getAttribute("dir") === "rtl") ? "ltr" : "rtl";
+    document.documentElement.setAttribute("dir", next);
+    localStorage.setItem("cv-dir", next);
+    paintThemeButton();
+  });
+  if (!localStorage.getItem("cv-theme")) document.documentElement.setAttribute("data-theme", "dark");
+  paintThemeButton();
+
+  /* Mobile sidebar */
+  $("#menu-toggle")?.addEventListener("click", () => $("#sidebar")?.classList.toggle("open"));
+  $("#nav")?.addEventListener("click", (e) => { if (e.target.closest("a")) $("#sidebar")?.classList.remove("open"); });
 
   /* ---------- Views ---------- */
 
   /* DASHBOARD */
   on("/dashboard", async () => {
-    const d = await api("/dashboard");
+    // The dashboard aggregates a few endpoints; each is optional so a partial
+    // outage degrades one widget instead of blanking the whole page.
+    const [d, runsRaw, usage, providers] = await Promise.all([
+      api("/dashboard"),
+      api("/runs").catch(() => []),
+      api("/admin/usage").catch(() => null),
+      api("/providers").catch(() => []),
+    ]);
+    const runs = Array.isArray(runsRaw) ? runsRaw : (runsRaw?.items || []);
+    const q = d.queue || {};
+
+    // ---- derived series ----
+    const trend = bucketByDay(runs, 7);
+    const statusCounts = runs.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});
+    const statusSegments = [
+      { label: "succeeded", value: statusCounts.succeeded || 0, color: "#34d399" },
+      { label: "running", value: statusCounts.running || 0, color: "#60a5fa" },
+      { label: "pending", value: statusCounts.pending || 0, color: "#8990b5" },
+      { label: "failed", value: statusCounts.failed || 0, color: "#fb7185" },
+    ];
+    const done = (statusCounts.succeeded || 0);
+    const attempted = done + (statusCounts.failed || 0);
+    const successRate = attempted ? Math.round((done / attempted) * 100) : 100;
+    const agentCounts = Object.entries(runs.reduce((acc, r) => { acc[r.agentType] = (acc[r.agentType] || 0) + 1; return acc; }, {}))
+      .sort((a, b) => b[1] - a[1]).slice(0, 6).map(([label, value]) => ({ label, value }));
+    const readyProviders = providers.filter((p) => p.readiness?.ready !== false && p.active).length;
+
+    const statCard = (label, value, sub, icon, spark) => `<div class="card stat">
+      <span class="stat-icon">${icon}</span>
+      <div class="stat-label">${esc(label)}</div>
+      <div class="stat-value">${esc(String(value))}</div>
+      <div class="stat-sub">${sub}</div>
+      ${spark || ""}
+    </div>`;
+
     $("#content").innerHTML = `
-      <div class="overview"><div><h1>Dashboard</h1><p>AI Engineering Organization overview</p></div>
+      <div class="overview">
+        <div><h1>Dashboard</h1><p>Live overview of your AI engineering organization — runs, agents, spend and system health.</p></div>
         <div class="action-row">
+          <button class="btn" onclick="openDashboardDetails()">📈 Analytics</button>
           <button class="btn btn-primary" onclick="location.hash='#/projects'">＋ New Project</button>
-          <button class="btn" onclick="location.hash='#/runs'">View Runs</button>
-        </div></div>
-      <div class="stat-grid">
-        <div class="card stat"><div class="stat-label">Projects</div><div class="stat-value">${d.totalProjects}</div></div>
-        <div class="card stat"><div class="stat-label">Active Agents</div><div class="stat-value">${d.activeAgents}</div></div>
-        <div class="card stat"><div class="stat-label">Running Tasks</div><div class="stat-value">${d.runningTasks}</div></div>
-        <a class="card stat" href="#/approvals" style="text-decoration:none;color:inherit"><div class="stat-label">Pending Approvals</div><div class="stat-value">${d.pendingApprovals}</div><div class="stat-sub">${d.failedTasks} failed</div></a>
+        </div>
       </div>
+
+      <div class="stat-grid">
+        ${statCard("Projects", d.totalProjects, `${d.activeAgents} active agents`, "📁", "")}
+        ${statCard("Runs", d.totalRuns, `${successRate}% success rate`, "▶️", sparkline(trend.map((t) => t.value)))}
+        ${statCard("Running now", d.runningTasks, `${q.pending || 0} queued · ${d.failedTasks} failed`, "⚡", "")}
+        <a class="card stat" href="#/approvals" style="text-decoration:none;color:inherit">
+          <span class="stat-icon">🛑</span>
+          <div class="stat-label">Approvals</div>
+          <div class="stat-value">${d.pendingApprovals}</div>
+          <div class="stat-sub">${d.pendingApprovals ? "waiting for your review" : "nothing to review"}</div>
+        </a>
+      </div>
+
       <div class="grid-2">
         <div class="card card-body">
-          <div class="card-title">Model Usage <span class="sub">${d.modelUsage.calls} calls · ${d.modelUsage.tokens.toLocaleString()} tokens</span></div>
-          <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
-            <div class="card stat"><div class="stat-label">Cost</div><div class="stat-value">${money(d.modelUsage.costUsd)}</div></div>
-            <div class="card stat"><div class="stat-label">Total Runs</div><div class="stat-value">${d.totalRuns}</div></div>
-          </div>
-          <div class="card-title mt">Queue</div>
-          <div class="meter-row"><span class="lbl">pending</span><div class="bar"><span style="width:${(d.queue.pending||0) * 20}%"></span></div><span class="val">${d.queue.pending||0}</span></div>
-          <div class="meter-row"><span class="lbl">running</span><div class="bar"><span style="width:${(d.queue.running||0) * 20}%"></span></div><span class="val">${d.queue.running||0}</span></div>
+          <div class="card-title">Run activity <span class="sub">last 7 days · ${trend.reduce((s, t) => s + t.value, 0)} runs</span></div>
+          ${lineChart(trend.map((t) => t.value), { labels: trend.map((t) => t.label), color: "#7c6cff" })}
         </div>
         <div class="card card-body">
-          <div class="card-title">Recent Activity</div>
-          ${d.recentActivity.length ? `<div class="steps">${d.recentActivity.map((r) => `<div class="step"><div class="step-ico">${r.status === "succeeded" ? "✓" : r.status === "failed" ? "✗" : "▶"}</div><div><div class="step-label">${esc(r.agentType)}</div><div class="step-detail">${timeAgo(r.createdAt)} · ${esc(r.status)}</div></div></div>`).join("")}</div>` : emptyState("📭", "No activity yet", "Run a task or a workflow to see agent activity.")}
+          <div class="card-title">Run outcomes</div>
+          ${donutChart(statusSegments, { centerValue: runs.length, centerLabel: "total runs" })}
+        </div>
+      </div>
+
+      <div class="grid-2 mt">
+        <div class="card card-body">
+          <div class="card-title">Busiest agents <span class="sub">runs per agent type</span></div>
+          ${barChart(agentCounts)}
+        </div>
+        <div class="card card-body">
+          <div class="card-title">Recent activity <span class="sub">${d.recentActivity.length} events</span></div>
+          ${d.recentActivity.length ? `<div class="activity-feed">${d.recentActivity.map((r) => {
+            const color = r.status === "succeeded" ? "var(--ok)" : r.status === "failed" ? "var(--err)" : r.status === "running" ? "var(--info)" : "var(--text-muted)";
+            return `<div class="activity-item">
+              <span class="activity-dot" style="background:${color};box-shadow:0 0 10px ${color}"></span>
+              <div class="activity-body"><strong>${esc(r.agentType)}</strong><span>${timeAgo(r.createdAt)} · ${esc(r.status)}${r.durationMs ? ` · ${Math.round(r.durationMs / 1000)}s` : ""}</span></div>
+              <button class="btn btn-ghost" onclick="location.hash='#/runs/${esc(r.runId)}/console'">Open</button>
+            </div>`;
+          }).join("")}</div>` : emptyState("📭", "No activity yet", "Run a task or a workflow to see agent activity here.")}
+        </div>
+      </div>
+
+      <div class="grid-2 mt">
+        <div class="card card-body">
+          <div class="card-title">Queue &amp; spend</div>
+          <div class="kpi-row">
+            <div class="kpi"><b>${q.pending || 0}</b><span>pending</span></div>
+            <div class="kpi"><b>${q.running || 0}</b><span>running</span></div>
+            <div class="kpi"><b>${d.modelUsage.calls}</b><span>calls</span></div>
+            <div class="kpi"><b>${(d.modelUsage.tokens / 1000).toFixed(1)}k</b><span>tokens</span></div>
+            <div class="kpi"><b>${money(d.modelUsage.costUsd)}</b><span>cost</span></div>
+          </div>
+          <div class="meter-row mt"><span class="lbl">Providers ready</span><div class="bar"><span style="width:${providers.length ? (readyProviders / providers.length) * 100 : 0}%"></span></div><span class="val">${readyProviders}/${providers.length}</span></div>
+          <div class="meter-row"><span class="lbl">Success rate</span><div class="bar"><span style="width:${successRate}%"></span></div><span class="val">${successRate}%</span></div>
+        </div>
+        <div class="card card-body">
+          <div class="card-title">Quick actions</div>
+          <div class="quick-grid">
+            <a class="quick-btn" href="#/projects"><span class="q-ico">📁</span>Projects</a>
+            <a class="quick-btn" href="#/models"><span class="q-ico">🧠</span>Models</a>
+            <a class="quick-btn" href="#/providers"><span class="q-ico">🔌</span>Providers</a>
+            <a class="quick-btn" href="#/runs"><span class="q-ico">▶️</span>Runs</a>
+            <a class="quick-btn" href="#/approvals"><span class="q-ico">🛑</span>Approvals</a>
+            <a class="quick-btn" href="#/admin"><span class="q-ico">🛡️</span>Admin</a>
+          </div>
         </div>
       </div>`;
+
+    // Deeper analytics live in a modal so the page itself stays uncluttered.
+    window.openDashboardDetails = () => {
+      openModal("📈 Analytics", tabsHtml("dashx", [
+        { id: "trend", label: "Trends", html: `
+          <div class="card card-body"><div class="card-title">Runs per day <span class="sub">7 days</span></div>${lineChart(trend.map((t) => t.value), { labels: trend.map((t) => t.label), width: 640 })}</div>
+          <div class="card card-body mt"><div class="card-title">Runs by agent</div>${barChart(agentCounts, { width: 640 })}</div>` },
+        { id: "outcomes", label: "Outcomes", badge: runs.length, html: `
+          <div class="card card-body">${donutChart(statusSegments, { centerValue: `${successRate}%`, centerLabel: "success" })}</div>
+          <div class="card card-body mt"><div class="card-title">Breakdown</div>
+            ${statusSegments.map((s) => `<div class="meter-row"><span class="lbl">${esc(s.label)}</span><div class="bar"><span style="width:${runs.length ? (s.value / runs.length) * 100 : 0}%;background:${s.color}"></span></div><span class="val">${s.value}</span></div>`).join("")}
+          </div>` },
+        { id: "usage", label: "Usage", html: usage ? `
+          <div class="card card-body"><div class="card-title">Platform totals</div>
+            <div class="kpi-row">
+              <div class="kpi"><b>${usage.projects}</b><span>projects</span></div>
+              <div class="kpi"><b>${usage.agents}</b><span>agents</span></div>
+              <div class="kpi"><b>${usage.models}</b><span>models</span></div>
+              <div class="kpi"><b>${usage.skills}</b><span>skills</span></div>
+              <div class="kpi"><b>${usage.tasks}</b><span>tasks</span></div>
+              <div class="kpi"><b>${usage.runs}</b><span>runs</span></div>
+            </div>
+            <div class="card-title mt">Model spend</div>
+            <div class="meter-row"><span class="lbl">Calls</span><span class="val">${usage.costs.calls}</span></div>
+            <div class="meter-row"><span class="lbl">Tokens</span><span class="val">${usage.costs.tokens.toLocaleString()}</span></div>
+            <div class="meter-row"><span class="lbl">Cost</span><span class="val">${money(usage.costs.costUsd)}</span></div>
+          </div>` : `<div class="card card-body">${emptyState("🔒", "Usage unavailable", "The usage endpoint is restricted or offline.")}</div>` },
+      ]), { wide: true });
+    };
   });
 
   /* PROJECTS */
@@ -870,7 +1154,7 @@
       <div class="field"><label>Your rules (one block per line; Markdown ok)</label><textarea class="textarea" id="rules-text" style="min-height:160px">${esc(manual.map((r) => r.text).join("\n"))}</textarea></div>
       <div class="flex"><button class="btn btn-primary" id="rules-save">Save</button><button class="btn" id="rules-rediscover">🔎 Re-discover from repository</button><button class="btn" onclick="closeModal()">Close</button></div>
       <div class="card-title mt">Discovered automatically <span class="sub">${discovered.length} block(s) from README / CONTRIBUTING / CODEOWNERS / .editorconfig / build files / CI</span></div>
-      ${discovered.length ? discovered.map((r) => `<pre style="white-space:pre-wrap;background:var(--bg);padding:10px;border-radius:8px;border:1px solid var(--border);font-size:12px">${esc(r.text)}</pre>`).join("") : emptyState("📏", "Nothing discovered yet", "Run Detect & Agent.md to scan the repository.")}`);
+      ${discovered.length ? discovered.map((r) => `<pre style="white-space:pre-wrap;background:var(--glass);padding:10px;border-radius:8px;border:1px solid var(--border);font-size:12px">${esc(r.text)}</pre>`).join("") : emptyState("📏", "Nothing discovered yet", "Run Detect & Agent.md to scan the repository.")}`);
     $("#rules-save").onclick = async () => {
       const lines = $("#rules-text").value.split("\n").map((l) => l.trim()).filter(Boolean);
       await api(`/projects/${id}/rules`, { method: "PUT", body: { rules: lines } });
@@ -1009,7 +1293,7 @@
           <div class="card-title">Description</div>
           <p>${esc(a.description)}</p>
           <div class="card-title">System Prompt</div>
-          <pre style="white-space:pre-wrap;background:var(--bg);padding:12px;border-radius:8px;border:1px solid var(--border)">${esc(a.systemPrompt)}</pre>
+          <pre style="white-space:pre-wrap;background:var(--glass);padding:12px;border-radius:8px;border:1px solid var(--border)">${esc(a.systemPrompt)}</pre>
         </div>
         <div class="card card-body">
           <div class="card-title">Configuration</div>
@@ -1045,7 +1329,7 @@
   window.promptDiff = async (id, from) => {
     const d = await api(`/agents/${id}/prompt-versions/diff?from=${from}&to=current`);
     openModal(`Diff v${d.from} → ${d.to}`, `<p class="mono" style="color:var(--text-muted)">+${d.summary.added} / −${d.summary.removed} / ${d.summary.unchanged} unchanged</p>
-      <pre class="diff" style="max-height:60vh;overflow:auto;background:var(--bg);padding:12px;border-radius:8px;border:1px solid var(--border);font-size:12px">${d.lines.map((l) => `<div class="diff-${l.type}">${l.type === "added" ? "+" : l.type === "removed" ? "−" : " "} ${esc(l.text)}</div>`).join("")}</pre>`);
+      <pre class="diff" style="max-height:60vh;overflow:auto;background:var(--glass);padding:12px;border-radius:8px;border:1px solid var(--border);font-size:12px">${d.lines.map((l) => `<div class="diff-${l.type}">${l.type === "added" ? "+" : l.type === "removed" ? "−" : " "} ${esc(l.text)}</div>`).join("")}</pre>`);
   };
   window.promptRestore = async (id, version) => {
     if (!confirm(`Restore prompt v${version}? A new version will be created.`)) return;
@@ -2835,7 +3119,7 @@
       loginCard = `<div class="card card-body"><div class="card-title">GitHub Login — Not configured</div>
           <div class="status-grid"><div class="status-item"><span class="status-dot warn"></span>Not configured</div></div>
           ${oauthStatus.setupHint ? `<p style="color:var(--warn, #d97706);font-size:12px">${esc(oauthStatus.setupHint)}</p>` : `<p style="color:var(--text-muted);font-size:12px">Set <span class="mono">GITHUB_CLIENT_ID</span> + <span class="mono">GITHUB_CLIENT_SECRET</span> and restart — see <span class="mono">docs/GITHUB_SETUP.md</span>.</p>`}
-          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;margin:8px 0;text-align:left">
+          <div style="background:var(--glass);border:1px solid var(--border);border-radius:8px;padding:10px;margin:8px 0;text-align:left">
             <div class="meter-row"><span class="lbl">Client ID</span><span class="val">${diag.clientIdMissing ? '<span class="badge badge-err">missing</span>' : '<span class="badge badge-ok">set</span>'}</span></div>
             <div class="meter-row"><span class="lbl">Client Secret</span><span class="val">${diag.clientSecretMissing ? '<span class="badge badge-err">missing (env)</span>' : '<span class="badge badge-ok">set (env)</span>'}</span></div>
             <div class="meter-row"><span class="lbl">Session Secret</span><span class="val">${oauthStatus.secrets?.authSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
@@ -2885,7 +3169,7 @@
         el.innerHTML = `<span style="color:var(--success, #16a34a)">✓ Login URL ready — redirect to GitHub works. <a href="${esc(r.body?.url||"/auth/github/login")}">Test now</a></span>`;
       } else {
         const b = r.body || {};
-        el.innerHTML = `<div style="color:var(--error, #dc2626);border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg);text-align:left">`+
+        el.innerHTML = `<div style="color:var(--error, #dc2626);border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--glass);text-align:left">`+
           `<strong>${esc(b.error||"Not configured")}</strong><br/>${esc(b.hint||"")}`+
           (b.setupSteps ? `<ol style="margin:6px 0 0 16px;font-size:11px">${b.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "")+
           (b.diagnostics ? `<pre style="margin-top:6px;font-size:10px;white-space:pre-wrap">${esc(JSON.stringify(b.diagnostics,null,2))}</pre>` : "")+
@@ -2956,7 +3240,7 @@
         <div class="card card-body"><div class="card-title">Preview (no bot needed)</div>
           <div class="field"><label>Message</label><input class="input" id="tg-msg" placeholder="/start" value="/start"/></div>
           <button class="btn btn-primary" id="tg-send">Show reply</button>
-          <div class="card mt" id="tg-out" style="background:var(--bg);min-height:80px"></div>
+          <div class="card mt" id="tg-out" style="background:var(--glass);min-height:80px"></div>
         </div>
       </div>
       <div class="card card-body mt"><div class="card-title">Your bots (${accounts.length})</div>
@@ -3202,15 +3486,6 @@
       "AUTH_SECRET=<keep the SAME random 32+ chars you already set>",
       "REQUIRE_AUTH=" + (adm.github?.requireAuth ? "true" : "false"),
     ].join("\n");
-    const storageWarnHtml = st.warning ? `
-      <div class="card card-body" style="border:1px solid #f59e0b;background:#fffbeb">
-        <div class="card-title" style="color:#92400e">⚠️ ذخیره‌سازی موقت — تنظیمات بعد از هر Redeploy پاک می‌شوند</div>
-        <p style="font-size:12px;color:#92400e;margin:4px 0">دیتابیس روی فایل‌سیستم موقت کانتینر است (<span class="mono">${esc(st.dir || h.database.path)}</span>). در Railway هر Redeploy یک کانتینر تازه می‌سازد و همه‌چیز — تنظیمات GitHub Login، کاربران و داده‌ها — پاک می‌شود. به همین دلیل هر بار باید تنظیمات را دوباره وارد کنید.</p>
-        <p style="font-size:12px;color:#92400e;margin:8px 0 4px"><strong>راه‌حل دائمی (فقط یک‌بار):</strong> در Railway → سرویس CodeVia → Settings → <strong>Storage</strong> → <strong>Add Volume</strong> → Mount Path را بگذارید <span class="mono">${esc(st.dir || "/app/data")}</span> → سپس یک Redeploy. از این به بعد تنظیمات و داده‌ها بین دیپلی‌ها ماندگار می‌شود.</p>
-        <p style="font-size:12px;color:#92400e;margin:8px 0 4px"><strong>یا</strong> همین مقادیر را یک‌بار در <strong>Railway → Variables</strong> ثبت کنید تا تنظیمات لاگین بدون Volume هم دائمی باشد (env ارجحیت بالاتر از پنل Admin دارد):</p>
-        <pre id="env-recipe" style="background:#fff;border:1px solid #fde68a;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;direction:ltr;margin:6px 0">${esc(recipe)}</pre>
-        <div class="flex" style="gap:8px"><button class="btn" id="env-copy-btn">📋 Copy Variables</button></div>
-      </div>` : "";
     const bakS = bak?.settings || {};
     const bakEff = bak?.effective || {};
     const lastBadge = !bakS.lastRunStatus ? '<span class="badge badge-muted">never</span>'
@@ -3257,33 +3532,283 @@
       </div>` : `<div class="card card-body mt"><div class="card-title">System Backup</div><p style="color:var(--text-muted);font-size:12px">Admin backup settings are unavailable — the API returned no config.</p></div>`;
     const stepsHtml = adm.github?.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);margin:8px 0 0 18px;text-align:left">${adm.github.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
     const mismatchWarn = diag.callbackUrlMismatchRisk ? `<p style="color:var(--warn, #d97706);font-size:11px">⚠️ Callback URL mismatch risk — check GitHub OAuth App settings.</p>` : "";
-    $("#content").innerHTML = `<div class="overview"><div><h1>Admin</h1><p>System health & usage</p></div></div>
+    /** Bind the GitHub-login modal controls (save / test / diagnose). */
+    function wireAdminGithub() {
+      const ghSave = document.getElementById("adm-gh-save");
+      if (ghSave) ghSave.onclick = async () => {
+        const btn = ghSave; btn.disabled = true; btn.textContent = "Saving…";
+        try {
+          const res = await api("/admin/settings/github", { method: "PUT", body: {
+            clientId: document.getElementById("adm-gh-client").value,
+            callbackUrl: document.getElementById("adm-gh-callback").value,
+            scope: document.getElementById("adm-gh-scope").value,
+            requireAuth: document.getElementById("adm-gh-require").checked,
+          }});
+          toast("GitHub login settings saved", res.effective?.configured ? "✓ Configured — now set env secrets if missing and redeploy" : (res.effective?.setupHint || ""), res.effective?.configured ? "ok" : "warn");
+          const diagEl = document.getElementById("adm-gh-result");
+          if (diagEl) {
+            if (res.effective?.configured) {
+              diagEl.innerHTML = `<div class="notice ok"><strong style="color:var(--ok)">✓ Saved and configured</strong><p style="font-size:11px;margin:6px 0 0">Callback: <span class="mono">${esc(res.effective.redirectUri||"")}</span></p><p style="font-size:11px;margin:4px 0 0">اگر Client Secret یا AUTH_SECRET هنوز missing است، آنها را در env تنظیم و Redeploy کنید.</p><a class="btn btn-primary" href="/auth/github/login" style="margin-top:8px;text-decoration:none">Test login now</a></div>`;
+            } else {
+              diagEl.innerHTML = `<div class="notice err"><strong style="color:var(--err)">Saved but still not configured</strong><p style="font-size:11px;margin:6px 0 0">${esc(res.effective?.setupHint||"")}</p>${res.effective?.setupSteps ? `<ol style="font-size:11px;margin:6px 0 0 16px">${res.effective.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}</div>`;
+            }
+          }
+          setTimeout(refreshCurrent, 1500);
+        } catch (e) {
+          const diagEl = document.getElementById("adm-gh-result");
+          if (diagEl) diagEl.innerHTML = `<div class="notice err">${esc(e.message||"Save failed")}${e.body?.setupSteps ? `<ol style="margin:6px 0 0 16px">${e.body.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}</div>`;
+          toast("Save failed", e.message, "err");
+        } finally { btn.disabled = false; btn.textContent = "Save"; }
+      };
+      const testBtn = document.getElementById("adm-gh-test");
+      if (testBtn) testBtn.onclick = async () => {
+        const el = document.getElementById("adm-gh-result");
+        if (el) el.innerHTML = "Testing…";
+        const r = await apiRaw("/auth/github/login?format=json");
+        if (el) {
+          if (r.ok) {
+            el.innerHTML = `<div class="notice ok"><strong style="color:var(--ok)">✓ Ready — GitHub login URL works</strong><p style="font-size:11px;margin:6px 0 0;word-break:break-all" class="mono">${esc(r.body?.url||"")}</p><a class="btn btn-primary" href="${esc(r.body?.url||"/auth/github/login")}" style="margin-top:8px;text-decoration:none">Go to GitHub login</a></div>`;
+          } else {
+            const b = r.body || {};
+            el.innerHTML = `<div class="notice err"><strong style="color:var(--err)">${esc(b.error||"Not configured")}</strong><p style="font-size:11px;margin:6px 0 0">${esc(b.hint||"")}</p>${b.setupSteps ? `<ol style="font-size:11px;margin:6px 0 0 16px">${b.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}${b.diagnostics ? `<pre style="margin-top:6px;font-size:10px;white-space:pre-wrap;background:var(--glass);padding:6px;border-radius:6px">${esc(JSON.stringify(b.diagnostics,null,2))}</pre>` : ""}</div>`;
+          }
+        }
+      };
+      const diagBtn = document.getElementById("adm-gh-diag");
+      if (diagBtn) diagBtn.onclick = async () => {
+        const el = document.getElementById("adm-gh-result");
+        if (!el) return;
+        el.innerHTML = "Loading diagnostics…";
+        const s = await api("/auth/github/status").catch(()=>null);
+        const a = await api("/admin/settings").catch(()=>null);
+        if (el) el.innerHTML = `<pre style="white-space:pre-wrap;font-size:11px;background:var(--glass);padding:10px;border-radius:8px;border:1px solid var(--border)">${esc(JSON.stringify({ status:s, admin:a?.github }, null, 2))}</pre>`;
+      };
+    }
+    /** Bind the per-user role save buttons in the Users modal. */
+    function wireAdminUsers() {
+      $$("[data-save-role]").forEach((btn) => btn.addEventListener("click", async () => {
+        const id = btn.dataset.saveRole;
+        const role = document.querySelector(`[data-role-for="${id}"]`).value;
+        try {
+          await api(`/admin/users/${id}/role`, { method: "PATCH", body: { role } });
+          toast("Role updated", role, "ok"); refreshCurrent();
+        } catch (e) { toast("Update failed", e.message, "err"); }
+      }));
+    }
+    /** Bind the "copy env variables" button in the Storage modal. */
+    function wireAdminEnvCopy() {
+      const envCopy = document.getElementById("env-copy-btn");
+      if (envCopy) envCopy.onclick = async () => {
+        const txt = document.getElementById("env-recipe")?.textContent || "";
+        try {
+          await navigator.clipboard.writeText(txt);
+          toast("Copied", "Paste the variables into Railway → Variables.", "ok");
+        } catch (_) {
+          toast("Copy failed", "Select and copy the text manually.", "err");
+        }
+      };
+      // ---- System Backup admin controls ----
+    }
+    /** Bind every control in the Backup & restore modal. */
+    function wireAdminBackup() {
+      const bakResult = (html) => {
+        const el = document.getElementById("bak-result");
+        if (el) el.innerHTML = html || "";
+      };
+      const bakPreset = document.getElementById("bak-preset");
+      if (bakPreset) bakPreset.onchange = () => {
+        if (bakPreset.value) {
+          const s = document.getElementById("bak-schedule");
+          if (s) s.value = bakPreset.value;
+        }
+      };
+      const bakSave = document.getElementById("bak-save");
+      if (bakSave) bakSave.onclick = async () => {
+        const btn = bakSave; btn.disabled = true; btn.textContent = "Saving…";
+        try {
+          const r = await api("/admin/backup", { method: "PUT", body: {
+            enabled: document.getElementById("bak-enabled").checked,
+            repo: document.getElementById("bak-repo").value.trim(),
+            branch: document.getElementById("bak-branch").value.trim() || "main",
+            path: document.getElementById("bak-path").value.trim(),
+            schedule: document.getElementById("bak-schedule").value.trim(),
+            retain: Number(document.getElementById("bak-retain").value) || 30,
+          }});
+          toast("Backup settings saved", r.effective?.repo ? "Scheduled and ready." : "Backup repository not set yet.", "ok");
+          bakResult(`<div class="field-hint ok">✓ ${esc(r.effective?.repo || "Configured")} · branch ${esc(r.effective?.branch || "")} · cron ${esc(r.effective?.schedule || "")}</div>`);
+          setTimeout(refreshCurrent, 800);
+        } catch (e) {
+          bakResult(`<div class="field-hint err">${esc(e.message)}</div>`);
+          toast("Save failed", e.message, "err");
+        } finally { btn.disabled = false; btn.textContent = "Save settings"; }
+      };
+      const bakRun = document.getElementById("bak-run");
+      if (bakRun) bakRun.onclick = async () => {
+        const btn = bakRun; btn.disabled = true; btn.textContent = "Backing up…";
+        bakResult(`<div class="field-hint">Backing up to GitHub…</div>`);
+        try {
+          const r = await api("/admin/backup/run", { method: "POST", body: {} });
+          if (r.ok) {
+            bakResult(`<div class="field-hint ok">✓ Backup pushed · commit ${esc(r.commit || "")} · ${esc(r.files || 0)} files · ${esc(String(r.bytes || 0))} bytes\n${r.warning ? esc(r.warning) : ""}</div>`);
+            toast("Backup complete", r.commit || "", "ok");
+          } else {
+            bakResult(`<div class="field-hint err">${esc(r.error || r.warning || "Backup failed")}</div>`);
+            toast("Backup failed", r.error || r.warning || "", "err");
+          }
+        } catch (e) { bakResult(`<div class="field-hint err">${esc(e.message)}</div>`); toast("Backup failed", e.message, "err"); }
+        finally { btn.disabled = false; btn.textContent = "▶ Run backup now"; }
+      };
+      const bakList = document.getElementById("bak-list");
+      if (bakList) bakList.onclick = async () => {
+        const btn = bakList; btn.disabled = true; btn.textContent = "Loading…";
+        try {
+          const r = await api("/admin/backup/list");
+          const rows = (r.backups || []).map((b) => `<tr><td>${b.latest ? '<span class="badge badge-ok">latest</span>' : ""} <span class="mono">${esc(b.id)}</span></td><td class="mono">${esc(b.createdAt)}</td><td>${b.records}</td><td>${b.jobs}</td><td>${b.kv}</td><td><button class="btn btn-ghost" data-backup-snapshot="${esc(b.id)}">Restore</button></td></tr>`).join("");
+          bakResult(rows ? `<div class="table-wrap"><table><thead><tr><th>Snapshot</th><th>Created</th><th>Records</th><th>Jobs</th><th>KV</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="field-hint">No backups found in ${esc(r.configured ? "the configured repository" : "a configured repository")}.</div>`);
+          document.querySelectorAll("[data-backup-snapshot]").forEach((b) => b.onclick = async () => {
+            const id = b.dataset.backupSnapshot;
+            if (!confirm(`Restore snapshot ${id}? This replaces the full runtime state.`)) return;
+            try {
+              const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, replace: true } });
+              if (res.ok) { toast("Backup restored", `${res.records} records restored`, "ok"); refreshCurrent(); }
+              else toast("Restore failed", res.error || "", "err");
+            } catch (e) { toast("Restore failed", e.message, "err"); }
+          });
+        } catch (e) { bakResult(`<div class="field-hint err">${esc(e.message)}</div>`); toast("List failed", e.message, "err"); }
+        finally { btn.disabled = false; btn.textContent = "📋 List backups"; }
+      };
+      const bakExport = document.getElementById("bak-export");
+      if (bakExport) bakExport.onclick = async () => {
+        try {
+          const b = await api("/admin/backup/export");
+          const blob = new Blob([JSON.stringify(b, null, 2)], { type: "application/json" });
+          const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "codevia-full-backup.json"; a.click();
+        } catch (e) { toast("Export failed", e.message, "err"); }
+      };
+      const bakRestore = document.getElementById("bak-restore");
+      if (bakRestore) bakRestore.onclick = async () => {
+        if (!confirm("Restore the latest backup from GitHub? This replaces the full runtime database.")) return;
+        const btn = bakRestore; btn.disabled = true; btn.textContent = "Restoring…";
+        try {
+          const res = await api("/admin/backup/restore", { method: "POST", body: { replace: true } });
+          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok"); refreshCurrent(); }
+          else toast("Restore failed", res.error || "", "err");
+        } catch (e) { toast("Restore failed", e.message, "err"); }
+        finally { btn.disabled = false; btn.textContent = "↺ Restore latest"; }
+      };
+    }
+
+    // ---- derived health signals for the admin console ----
+    const comps = [
+      { key: "API", ok: true, detail: h.api.status },
+      { key: "Database", ok: h.database.status === "healthy", detail: h.database.status },
+      { key: "Queue", ok: h.queue.status !== "down", detail: h.queue.status },
+      { key: "GitHub", ok: h.github.status === "connected", detail: h.github.status },
+      { key: "Telegram", ok: h.telegram.status === "connected", detail: h.telegram.status },
+      { key: "Storage", ok: !st.warning, detail: st.warning ? "ephemeral" : "persistent" },
+    ];
+    const healthScore = Math.round((comps.filter((c) => c.ok).length / comps.length) * 100);
+    const queueSegments = Object.entries(h.queue)
+      .filter(([k, v]) => typeof v === "number")
+      .map(([label, value], i) => ({ label, value, color: ["#60a5fa", "#34d399", "#fbbf24", "#fb7185", "#8990b5"][i % 5] }));
+    const adminTile = (id, icon, title, desc, foot) => `<button class="admin-tile" onclick="adminOpen('${id}')">
+      <span class="tile-ico">${icon}</span><strong>${esc(title)}</strong><p>${esc(desc)}</p><div class="tile-foot">${foot || ""}</div></button>`;
+
+    $("#content").innerHTML = `<div class="overview">
+        <div><h1>Admin Console</h1><p>System health, usage, access control and disaster recovery — everything operational in one place.</p></div>
+        <div class="action-row">
+          <button class="btn" onclick="refreshCurrent()">↻ Refresh</button>
+          <button class="btn btn-primary" onclick="adminOpen('backup')">🛡️ Backup &amp; restore</button>
+        </div>
+      </div>
+
+      <div class="admin-hero">
+        <div class="card card-body">
+          <div class="card-title">System health <span class="sub">${comps.filter((c) => c.ok).length}/${comps.length} components healthy</span></div>
+          <div class="health-ring-row">
+            ${gaugeRing(healthScore, { label: healthScore === 100 ? "all good" : "degraded" })}
+            <div class="health-ring-info">
+              <div class="status-grid">
+                ${comps.map((c) => `<div class="status-item"><span class="status-dot ${c.ok ? "healthy" : "warn"}"></span>${esc(c.key)}<div class="mono" style="font-size:10px;color:var(--text-muted)">${esc(String(c.detail))}</div></div>`).join("")}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="card card-body">
+          <div class="card-title">Queue depth</div>
+          ${donutChart(queueSegments, { centerValue: queueSegments.reduce((s, x) => s + x.value, 0), centerLabel: "jobs", size: 150 })}
+        </div>
+      </div>
+
+      ${st.warning ? `<div class="notice warn">
+        <h4>⚠️ Ephemeral storage — settings are wiped on every redeploy</h4>
+        <p>The database lives on the container filesystem (<span class="mono">${esc(st.dir || h.database.path)}</span>). Attach a persistent volume, or store the variables below in your host's environment.</p>
+        <div class="flex mt"><button class="btn" onclick="adminOpen('storage')">Show the fix</button></div>
+      </div>` : ""}
+
+      <div class="section-title">Platform totals</div>
       <div class="stat-grid">
-        <div class="card stat"><div class="stat-label">API</div><div class="stat-value" style="font-size:18px">${h.api.status}</div></div>
-        <div class="card stat"><div class="stat-label">Database</div><div class="stat-value" style="font-size:18px">${h.database.status}</div></div>
-        <div class="card stat"><div class="stat-label">Queue</div><div class="stat-value" style="font-size:18px">${h.queue.status}</div></div>
-        <div class="card stat"><div class="stat-label">Providers</div><div class="stat-value" style="font-size:18px">${h.providers.length}</div></div>
+        <div class="card stat"><span class="stat-icon">📁</span><div class="stat-label">Projects</div><div class="stat-value">${usage.projects}</div><div class="stat-sub">${usage.agents} agents</div></div>
+        <div class="card stat"><span class="stat-icon">🧠</span><div class="stat-label">Models</div><div class="stat-value">${usage.models}</div><div class="stat-sub">${h.providers.length} providers</div></div>
+        <div class="card stat"><span class="stat-icon">▶️</span><div class="stat-label">Runs</div><div class="stat-value">${usage.runs}</div><div class="stat-sub">${usage.tasks} tasks</div></div>
+        <div class="card stat"><span class="stat-icon">💰</span><div class="stat-label">Spend</div><div class="stat-value">${money(usage.costs.costUsd)}</div><div class="stat-sub">${usage.costs.calls} calls · ${(usage.costs.tokens / 1000).toFixed(1)}k tokens</div></div>
       </div>
-      ${storageWarnHtml}
-      <div class="grid-2">
-        <div class="card card-body"><div class="card-title">Component Health</div>
-          <div class="status-grid"><div class="status-item"><span class="status-dot ${h.database.status==='healthy'?'healthy':'down'}"></span>Database</div><div class="status-item"><span class="status-dot ${h.github.status==='connected'?'healthy':'warn'}"></span>GitHub</div><div class="status-item"><span class="status-dot ${h.telegram.status==='connected'?'healthy':'warn'}"></span>Telegram</div><div class="status-item"><span class="status-dot healthy"></span>API</div></div>
-          <div class="card-title mt">Queue</div>
-          <div class="status-grid">${Object.entries(h.queue).map(([k,v])=>`<div class="status-item"><div style="font-size:22px;font-weight:800">${v}</div><div class="mono" style="color:var(--text-muted)">${esc(k)}</div></div>`).join("")}</div>
-        </div>
-        <div class="card card-body"><div class="card-title">Usage</div>
-          <div class="meter-row"><span class="lbl">Projects</span><span class="val">${usage.projects}</span></div>
-          <div class="meter-row"><span class="lbl">Agents</span><span class="val">${usage.agents}</span></div>
-          <div class="meter-row"><span class="lbl">Tasks</span><span class="val">${usage.tasks}</span></div>
-          <div class="meter-row"><span class="lbl">Runs</span><span class="val">${usage.runs}</span></div>
-          <div class="meter-row"><span class="lbl">Cost</span><span class="val">${money(usage.costs.costUsd)}</span></div>
-        </div>
-      </div>
-      ${bakCard}
-      <div class="grid-2 mt">
+
+      <div class="section-title">Administration</div>
+      <div class="admin-tile-grid">
+        ${adminTile("health", "💚", "Health & diagnostics", "Component status, queue breakdown and raw health payload.", `<span class="badge badge-${healthScore === 100 ? "ok" : "warn"}">${healthScore}% healthy</span>`)}
+        ${adminTile("usage", "📊", "Usage & cost", "Token spend, call volume and platform inventory.", `<span class="badge badge-muted">${money(usage.costs.costUsd)}</span>`)}
+        ${adminTile("auth", "🔐", "GitHub login", "OAuth client, callback URL, scopes and the strict-auth switch.", adm.github ? (adm.github.configured ? '<span class="badge badge-ok">configured</span>' : '<span class="badge badge-err">not configured</span>') : '<span class="badge badge-muted">restricted</span>')}
+        ${adminTile("users", "👥", "Users & roles", "Grant owner, admin, developer, reviewer or viewer access.", users ? `<span class="badge badge-muted">${users.length} user(s)</span>` : '<span class="badge badge-muted">restricted</span>')}
+        ${adminTile("backup", "🛡️", "Backup & restore", "Scheduled GitHub snapshots of the whole runtime state.", bak ? (bakS.enabled ? '<span class="badge badge-ok">scheduled</span>' : '<span class="badge badge-muted">off</span>') : '<span class="badge badge-muted">unavailable</span>')}
+        ${adminTile("storage", "💾", "Storage", "Where the database lives and how to make it durable.", st.warning ? '<span class="badge badge-warn">ephemeral</span>' : '<span class="badge badge-ok">persistent</span>')}
+      </div>`;
+
+    /* Every admin area opens in a modal so the console stays a clean overview.
+       The inner markup keeps the original element ids, so the handlers wired
+       further below bind exactly as before. */
+    window.adminOpen = (which) => {
+      if (which === "health") {
+        openModal("💚 Health & diagnostics", tabsHtml("admh", [
+          { id: "comp", label: "Components", html: `<div class="card card-body"><div class="status-grid">
+              ${comps.map((c) => `<div class="status-item"><span class="status-dot ${c.ok ? "healthy" : "warn"}"></span>${esc(c.key)}<div class="mono" style="font-size:10px;color:var(--text-muted)">${esc(String(c.detail))}</div></div>`).join("")}
+            </div></div>` },
+          { id: "queue", label: "Queue", html: `<div class="card card-body">${donutChart(queueSegments, { centerLabel: "jobs" })}
+            ${Object.entries(h.queue).map(([k, v]) => `<div class="meter-row"><span class="lbl">${esc(k)}</span><span class="val">${esc(String(v))}</span></div>`).join("")}</div>` },
+          { id: "raw", label: "Raw", html: `<pre style="max-height:50vh;overflow:auto">${esc(JSON.stringify(h, null, 2))}</pre>` },
+        ]), { wide: true });
+        return;
+      }
+      if (which === "usage") {
+        openModal("📊 Usage & cost", `<div class="card card-body">
+            <div class="kpi-row">
+              <div class="kpi"><b>${usage.projects}</b><span>projects</span></div>
+              <div class="kpi"><b>${usage.agents}</b><span>agents</span></div>
+              <div class="kpi"><b>${usage.models}</b><span>models</span></div>
+              <div class="kpi"><b>${usage.skills}</b><span>skills</span></div>
+              <div class="kpi"><b>${usage.tasks}</b><span>tasks</span></div>
+              <div class="kpi"><b>${usage.runs}</b><span>runs</span></div>
+            </div>
+          </div>
+          <div class="card card-body mt"><div class="card-title">Inventory</div>
+            ${barChart([
+              { label: "projects", value: usage.projects }, { label: "agents", value: usage.agents },
+              { label: "models", value: usage.models }, { label: "skills", value: usage.skills },
+              { label: "tasks", value: usage.tasks }, { label: "runs", value: usage.runs },
+            ], { width: 620 })}
+          </div>
+          <div class="card card-body mt"><div class="card-title">Model spend</div>
+            <div class="meter-row"><span class="lbl">Calls</span><span class="val">${usage.costs.calls}</span></div>
+            <div class="meter-row"><span class="lbl">Tokens</span><span class="val">${usage.costs.tokens.toLocaleString()}</span></div>
+            <div class="meter-row"><span class="lbl">Cost</span><span class="val">${money(usage.costs.costUsd)}</span></div>
+          </div>`, { wide: true });
+        return;
+      }
+      if (which === "auth") {
+        openModal("🔐 GitHub login", `<div class="admin-modal-body">
         <div class="card card-body"><div class="card-title">GitHub Login ${adm.github ? (adm.github.configured ? '<span class="badge badge-ok">configured ✓</span>' : '<span class="badge badge-warn">not configured ✗</span>') : ''}</div>
           ${adm._forbidden ? `<p style="color:var(--text-muted);font-size:12px">Login settings are visible to owners/admins only (${esc(adm._forbidden)}).</p>` : `
-          ${adm.github?.configured ? `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px;margin-bottom:12px"><strong style="color:#16a34a">✓ GitHub login is configured</strong><p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Callback: <span class="mono">${esc(adm.github.redirectUri||"")}</span></p></div>` : `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;margin-bottom:12px"><strong style="color:#dc2626">✗ GitHub login not ready</strong>${adm.github?.setupHint ? `<p style="font-size:12px;color:#991b1b;margin:6px 0 0">${esc(adm.github.setupHint)}</p>` : ""}${stepsHtml}${mismatchWarn}</div>`}
+          ${adm.github?.configured ? `<div class="notice ok"><strong style="color:var(--ok)">✓ GitHub login is configured</strong><p style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Callback: <span class="mono">${esc(adm.github.redirectUri||"")}</span></p></div>` : `<div class="notice err"><strong style="color:var(--err)">✗ GitHub login not ready</strong>${adm.github?.setupHint ? `<p style="font-size:12px;color:var(--err);margin:6px 0 0">${esc(adm.github.setupHint)}</p>` : ""}${stepsHtml}${mismatchWarn}</div>`}
           <div class="field"><label>OAuth Client ID ${adm.github?.clientIdSource === "env" ? '<span class="badge badge-muted">env</span>' : adm.github?.clientIdSource === "admin" ? '<span class="badge badge-info">admin</span>' : ""}</label>
             <input class="input mono" id="adm-gh-client" placeholder="Iv1.… / Ov23.…" value="${esc(adm.github?.stored?.clientId || "")}" ${adm.github?.envOverrides?.clientId ? "disabled" : ""}/>
             ${adm.github?.envOverrides?.clientId ? `<p style="color:var(--text-muted);font-size:11px">Set via GITHUB_CLIENT_ID env — effective: <span class="mono">${esc(adm.github.clientId || "")}</span></p>` : adm.github?.clientId ? `<p style="color:var(--text-muted);font-size:11px">Effective: <span class="mono">${esc(adm.github.clientId)}</span> <span class="badge badge-muted">${esc(adm.github.clientIdSource||"")}</span></p>` : `<p style="color:var(--warn, #d97706);font-size:11px">⚠️ خالی است — Client ID را از GitHub OAuth App کپی کنید (مثال: Ov23liXXXXXXXX)</p>`}</div>
@@ -3294,18 +3819,24 @@
             <input class="input mono" id="adm-gh-scope" value="${esc(adm.github?.stored?.scope || adm.github?.scope || "")}" placeholder="repo read:user user:email"/></div>
           <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="adm-gh-require" ${adm.github?.requireAuth ? "checked" : ""}/> Require GitHub login for API ${adm.github?.requireAuthSource === "env" ? '<span class="badge badge-muted">env</span>' : '<span class="badge badge-info">admin</span>'}</label>
             <p style="color:var(--text-muted);font-size:11px">اگر روشن باشد، همه APIها بدون لاگین 401 می‌دهند. فقط وقتی لاگین سالم شد روشن کنید.</p></div>
-          <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;margin:10px 0">
+          <div style="background:var(--glass);border:1px solid var(--border);border-radius:8px;padding:10px;margin:10px 0">
             <div class="meter-row"><span class="lbl">Client ID</span><span class="val">${adm.github?.clientId ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing</span>'}</span></div>
             <div class="meter-row"><span class="lbl">Client Secret</span><span class="val">${adm.github?.clientSecretConfigured ? '<span class="badge badge-ok">set (env)</span>' : '<span class="badge badge-err">missing — set GITHUB_CLIENT_SECRET in env</span>'}</span></div>
             <div class="meter-row"><span class="lbl">Session Secret</span><span class="val">${adm.github?.secrets?.authSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-err">missing — set AUTH_SECRET</span>'}</span></div>
             <div class="meter-row"><span class="lbl">GitHub Token</span><span class="val">${adm.github?.secrets?.githubToken ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set (optional)</span>'}</span></div>
             <div class="meter-row"><span class="lbl">Webhook Secret</span><span class="val">${adm.github?.secrets?.githubWebhookSecret ? '<span class="badge badge-ok">set</span>' : '<span class="badge badge-muted">not set</span>'}</span></div>
           </div>
-          ${adm.github && !adm.github.configured ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px;margin:8px 0"><p style="font-size:12px;margin:0"><strong>چرا بعد از ذخیره هنوز خطا می‌دهد؟</strong></p><p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">ذخیره Client ID فقط نیمی از کار است. باید <span class="mono">GITHUB_CLIENT_SECRET</span> و <span class="mono">AUTH_SECRET</span> را هم در محیط (Railway Variables یا .env) تنظیم کنید و سرویس را <strong>Redeploy / Restart</strong> کنید. این مقادیر هرگز در دیتابیس ذخیره نمی‌شوند و فقط از env خوانده می‌شوند.</p><p style="font-size:11px;margin:6px 0 0"><strong>Railway:</strong> Service → Variables → New Variable → GITHUB_CLIENT_SECRET=… , AUTH_SECRET=… (مثال: <span class="mono">openssl rand -hex 32</span>) → Redeploy</p><p style="font-size:11px;margin:6px 0 0"><strong>Local:</strong> در <span class="mono">.env</span> اضافه کنید سپس <span class="mono">docker compose up --build</span> یا <span class="mono">npm run dev</span></p></div>` : ""}
+          ${adm.github && !adm.github.configured ? `<div class="notice warn"><p style="font-size:12px;margin:0"><strong>چرا بعد از ذخیره هنوز خطا می‌دهد؟</strong></p><p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">ذخیره Client ID فقط نیمی از کار است. باید <span class="mono">GITHUB_CLIENT_SECRET</span> و <span class="mono">AUTH_SECRET</span> را هم در محیط (Railway Variables یا .env) تنظیم کنید و سرویس را <strong>Redeploy / Restart</strong> کنید. این مقادیر هرگز در دیتابیس ذخیره نمی‌شوند و فقط از env خوانده می‌شوند.</p><p style="font-size:11px;margin:6px 0 0"><strong>Railway:</strong> Service → Variables → New Variable → GITHUB_CLIENT_SECRET=… , AUTH_SECRET=… (مثال: <span class="mono">openssl rand -hex 32</span>) → Redeploy</p><p style="font-size:11px;margin:6px 0 0"><strong>Local:</strong> در <span class="mono">.env</span> اضافه کنید سپس <span class="mono">docker compose up --build</span> یا <span class="mono">npm run dev</span></p></div>` : ""}
           <p style="color:var(--text-muted);font-size:11px">Secrets live in environment variables only and are never stored here. Empty fields follow env/defaults.</p>
           <div class="flex mt" style="gap:8px;flex-wrap:wrap"><button class="btn btn-primary" id="adm-gh-save">Save</button><button class="btn" id="adm-gh-test">Test login</button><button class="btn btn-ghost" id="adm-gh-diag">Diagnose</button></div>
           <div id="adm-gh-result" style="margin-top:10px"></div>`}
         </div>
+        </div>`, { wide: true });
+        wireAdminGithub();
+        return;
+      }
+      if (which === "users") {
+        openModal("👥 Users & roles", `
         <div class="card card-body"><div class="card-title">Users ${users ? `(${users.length})` : ""}</div>
           ${users ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th></th></tr></thead><tbody>
             ${users.map((u) => `<tr><td>${u.avatarUrl ? `<img src="${esc(u.avatarUrl)}" alt="" style="width:20px;height:20px;border-radius:50%;vertical-align:-5px;margin-right:6px"/>` : ""}<strong>${esc(u.name)}</strong><div class="mono" style="color:var(--text-muted);font-size:11px">${esc(u.email || "")} · ${esc(u.externalId)}</div></td>
@@ -3313,159 +3844,26 @@
             <td><button class="btn btn-ghost" data-save-role="${u.id}">Save</button></td></tr>`).join("")}
           </tbody></table></div>` : `<p style="color:var(--text-muted);font-size:12px">User management is visible to owners/admins only.</p>`}
         </div>
-      </div>`;
-    const ghSave = document.getElementById("adm-gh-save");
-    if (ghSave) ghSave.onclick = async () => {
-      const btn = ghSave; btn.disabled = true; btn.textContent = "Saving…";
-      try {
-        const res = await api("/admin/settings/github", { method: "PUT", body: {
-          clientId: document.getElementById("adm-gh-client").value,
-          callbackUrl: document.getElementById("adm-gh-callback").value,
-          scope: document.getElementById("adm-gh-scope").value,
-          requireAuth: document.getElementById("adm-gh-require").checked,
-        }});
-        toast("GitHub login settings saved", res.effective?.configured ? "✓ Configured — now set env secrets if missing and redeploy" : (res.effective?.setupHint || ""), res.effective?.configured ? "ok" : "warn");
-        const diagEl = document.getElementById("adm-gh-result");
-        if (diagEl) {
-          if (res.effective?.configured) {
-            diagEl.innerHTML = `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px"><strong style="color:#16a34a">✓ Saved and configured</strong><p style="font-size:11px;margin:6px 0 0">Callback: <span class="mono">${esc(res.effective.redirectUri||"")}</span></p><p style="font-size:11px;margin:4px 0 0">اگر Client Secret یا AUTH_SECRET هنوز missing است، آنها را در env تنظیم و Redeploy کنید.</p><a class="btn btn-primary" href="/auth/github/login" style="margin-top:8px;text-decoration:none">Test login now</a></div>`;
-          } else {
-            diagEl.innerHTML = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px"><strong style="color:#dc2626">Saved but still not configured</strong><p style="font-size:11px;margin:6px 0 0">${esc(res.effective?.setupHint||"")}</p>${res.effective?.setupSteps ? `<ol style="font-size:11px;margin:6px 0 0 16px">${res.effective.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}</div>`;
-          }
-        }
-        setTimeout(refreshCurrent, 1500);
-      } catch (e) {
-        const diagEl = document.getElementById("adm-gh-result");
-        if (diagEl) diagEl.innerHTML = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;color:#991b1b;font-size:12px">${esc(e.message||"Save failed")}${e.body?.setupSteps ? `<ol style="margin:6px 0 0 16px">${e.body.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}</div>`;
-        toast("Save failed", e.message, "err");
-      } finally { btn.disabled = false; btn.textContent = "Save"; }
-    };
-    const testBtn = document.getElementById("adm-gh-test");
-    if (testBtn) testBtn.onclick = async () => {
-      const el = document.getElementById("adm-gh-result");
-      if (el) el.innerHTML = "Testing…";
-      const r = await apiRaw("/auth/github/login?format=json");
-      if (el) {
-        if (r.ok) {
-          el.innerHTML = `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px"><strong style="color:#16a34a">✓ Ready — GitHub login URL works</strong><p style="font-size:11px;margin:6px 0 0;word-break:break-all" class="mono">${esc(r.body?.url||"")}</p><a class="btn btn-primary" href="${esc(r.body?.url||"/auth/github/login")}" style="margin-top:8px;text-decoration:none">Go to GitHub login</a></div>`;
-        } else {
-          const b = r.body || {};
-          el.innerHTML = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;text-align:left"><strong style="color:#dc2626">${esc(b.error||"Not configured")}</strong><p style="font-size:11px;margin:6px 0 0">${esc(b.hint||"")}</p>${b.setupSteps ? `<ol style="font-size:11px;margin:6px 0 0 16px">${b.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : ""}${b.diagnostics ? `<pre style="margin-top:6px;font-size:10px;white-space:pre-wrap;background:var(--bg);padding:6px;border-radius:6px">${esc(JSON.stringify(b.diagnostics,null,2))}</pre>` : ""}</div>`;
-        }
+        `, { wide: true });
+        wireAdminUsers();
+        return;
       }
-    };
-    const diagBtn = document.getElementById("adm-gh-diag");
-    if (diagBtn) diagBtn.onclick = async () => {
-      const el = document.getElementById("adm-gh-result");
-      if (!el) return;
-      el.innerHTML = "Loading diagnostics…";
-      const s = await api("/auth/github/status").catch(()=>null);
-      const a = await api("/admin/settings").catch(()=>null);
-      if (el) el.innerHTML = `<pre style="white-space:pre-wrap;font-size:11px;background:var(--bg);padding:10px;border-radius:8px;border:1px solid var(--border)">${esc(JSON.stringify({ status:s, admin:a?.github }, null, 2))}</pre>`;
-    };
-    $$("[data-save-role]").forEach((btn) => btn.addEventListener("click", async () => {
-      const id = btn.dataset.saveRole;
-      const role = document.querySelector(`[data-role-for="${id}"]`).value;
-      try {
-        await api(`/admin/users/${id}/role`, { method: "PATCH", body: { role } });
-        toast("Role updated", role, "ok"); refreshCurrent();
-      } catch (e) { toast("Update failed", e.message, "err"); }
-    }));
-    const envCopy = document.getElementById("env-copy-btn");
-    if (envCopy) envCopy.onclick = async () => {
-      const txt = document.getElementById("env-recipe")?.textContent || "";
-      try {
-        await navigator.clipboard.writeText(txt);
-        toast("Copied", "Paste the variables into Railway → Variables.", "ok");
-      } catch (_) {
-        toast("Copy failed", "Select and copy the text manually.", "err");
+      if (which === "storage") {
+        openModal("💾 Storage", `
+          <div class="notice ${st.warning ? "warn" : "ok"}">
+            <h4>${st.warning ? "⚠️ Ephemeral storage" : "✓ Persistent storage"}</h4>
+            <p>Database path: <span class="mono">${esc(st.dir || h.database.path || "")}</span></p>
+            ${st.warning ? `<p>Every redeploy starts a fresh container, so GitHub login settings, users and data are lost. Attach a volume mounted at <span class="mono">${esc(st.dir || "/app/data")}</span>, or set these variables in your host environment:</p>
+            <pre id="env-recipe">${esc(recipe)}</pre>
+            <div class="flex"><button class="btn" id="env-copy-btn">📋 Copy variables</button></div>` : `<p>Data survives restarts and redeploys.</p>`}
+          </div>`, { wide: true });
+        wireAdminEnvCopy();
+        return;
       }
-    };
-    // ---- System Backup admin controls ----
-    const bakResult = (html) => {
-      const el = document.getElementById("bak-result");
-      if (el) el.innerHTML = html || "";
-    };
-    const bakPreset = document.getElementById("bak-preset");
-    if (bakPreset) bakPreset.onchange = () => {
-      if (bakPreset.value) {
-        const s = document.getElementById("bak-schedule");
-        if (s) s.value = bakPreset.value;
+      if (which === "backup") {
+        openModal("🛡️ Backup & restore", bakCard, { wide: true });
+        wireAdminBackup();
       }
-    };
-    const bakSave = document.getElementById("bak-save");
-    if (bakSave) bakSave.onclick = async () => {
-      const btn = bakSave; btn.disabled = true; btn.textContent = "Saving…";
-      try {
-        const r = await api("/admin/backup", { method: "PUT", body: {
-          enabled: document.getElementById("bak-enabled").checked,
-          repo: document.getElementById("bak-repo").value.trim(),
-          branch: document.getElementById("bak-branch").value.trim() || "main",
-          path: document.getElementById("bak-path").value.trim(),
-          schedule: document.getElementById("bak-schedule").value.trim(),
-          retain: Number(document.getElementById("bak-retain").value) || 30,
-        }});
-        toast("Backup settings saved", r.effective?.repo ? "Scheduled and ready." : "Backup repository not set yet.", "ok");
-        bakResult(`<div class="field-hint ok">✓ ${esc(r.effective?.repo || "Configured")} · branch ${esc(r.effective?.branch || "")} · cron ${esc(r.effective?.schedule || "")}</div>`);
-        setTimeout(refreshCurrent, 800);
-      } catch (e) {
-        bakResult(`<div class="field-hint err">${esc(e.message)}</div>`);
-        toast("Save failed", e.message, "err");
-      } finally { btn.disabled = false; btn.textContent = "Save settings"; }
-    };
-    const bakRun = document.getElementById("bak-run");
-    if (bakRun) bakRun.onclick = async () => {
-      const btn = bakRun; btn.disabled = true; btn.textContent = "Backing up…";
-      bakResult(`<div class="field-hint">Backing up to GitHub…</div>`);
-      try {
-        const r = await api("/admin/backup/run", { method: "POST", body: {} });
-        if (r.ok) {
-          bakResult(`<div class="field-hint ok">✓ Backup pushed · commit ${esc(r.commit || "")} · ${esc(r.files || 0)} files · ${esc(String(r.bytes || 0))} bytes\n${r.warning ? esc(r.warning) : ""}</div>`);
-          toast("Backup complete", r.commit || "", "ok");
-        } else {
-          bakResult(`<div class="field-hint err">${esc(r.error || r.warning || "Backup failed")}</div>`);
-          toast("Backup failed", r.error || r.warning || "", "err");
-        }
-      } catch (e) { bakResult(`<div class="field-hint err">${esc(e.message)}</div>`); toast("Backup failed", e.message, "err"); }
-      finally { btn.disabled = false; btn.textContent = "▶ Run backup now"; }
-    };
-    const bakList = document.getElementById("bak-list");
-    if (bakList) bakList.onclick = async () => {
-      const btn = bakList; btn.disabled = true; btn.textContent = "Loading…";
-      try {
-        const r = await api("/admin/backup/list");
-        const rows = (r.backups || []).map((b) => `<tr><td>${b.latest ? '<span class="badge badge-ok">latest</span>' : ""} <span class="mono">${esc(b.id)}</span></td><td class="mono">${esc(b.createdAt)}</td><td>${b.records}</td><td>${b.jobs}</td><td>${b.kv}</td><td><button class="btn btn-ghost" data-backup-snapshot="${esc(b.id)}">Restore</button></td></tr>`).join("");
-        bakResult(rows ? `<div class="table-wrap"><table><thead><tr><th>Snapshot</th><th>Created</th><th>Records</th><th>Jobs</th><th>KV</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="field-hint">No backups found in ${esc(r.configured ? "the configured repository" : "a configured repository")}.</div>`);
-        document.querySelectorAll("[data-backup-snapshot]").forEach((b) => b.onclick = async () => {
-          const id = b.dataset.backupSnapshot;
-          if (!confirm(`Restore snapshot ${id}? This replaces the full runtime state.`)) return;
-          try {
-            const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, replace: true } });
-            if (res.ok) { toast("Backup restored", `${res.records} records restored`, "ok"); refreshCurrent(); }
-            else toast("Restore failed", res.error || "", "err");
-          } catch (e) { toast("Restore failed", e.message, "err"); }
-        });
-      } catch (e) { bakResult(`<div class="field-hint err">${esc(e.message)}</div>`); toast("List failed", e.message, "err"); }
-      finally { btn.disabled = false; btn.textContent = "📋 List backups"; }
-    };
-    const bakExport = document.getElementById("bak-export");
-    if (bakExport) bakExport.onclick = async () => {
-      try {
-        const b = await api("/admin/backup/export");
-        const blob = new Blob([JSON.stringify(b, null, 2)], { type: "application/json" });
-        const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "codevia-full-backup.json"; a.click();
-      } catch (e) { toast("Export failed", e.message, "err"); }
-    };
-    const bakRestore = document.getElementById("bak-restore");
-    if (bakRestore) bakRestore.onclick = async () => {
-      if (!confirm("Restore the latest backup from GitHub? This replaces the full runtime database.")) return;
-      const btn = bakRestore; btn.disabled = true; btn.textContent = "Restoring…";
-      try {
-        const res = await api("/admin/backup/restore", { method: "POST", body: { replace: true } });
-        if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok"); refreshCurrent(); }
-        else toast("Restore failed", res.error || "", "err");
-      } catch (e) { toast("Restore failed", e.message, "err"); }
-      finally { btn.disabled = false; btn.textContent = "↺ Restore latest"; }
     };
   });
 
