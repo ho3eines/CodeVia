@@ -128,6 +128,43 @@
   function emptyState(emoji, title, text) {
     return `<div class="empty"><div class="empty-emoji">${emoji}</div><h3>${esc(title)}</h3><p>${esc(text || "")}</p></div>`;
   }
+  function searchBlob(value) {
+    if (value == null) return "";
+    if (["string", "number", "boolean"].includes(typeof value)) return String(value);
+    if (Array.isArray(value)) return value.map(searchBlob).join(" ");
+    if (typeof value === "object") return Object.entries(value).map(([k, v]) => `${k} ${searchBlob(v)}`).join(" ");
+    return "";
+  }
+  function matchesQuery(item, query, extra = "") {
+    const terms = String(query || "").toLowerCase().trim().split(/\s+/).filter(Boolean);
+    if (!terms.length) return true;
+    const haystack = `${searchBlob(item)} ${extra}`.toLowerCase();
+    return terms.every((t) => haystack.includes(t));
+  }
+  function searchPanelHtml(id, placeholder, hint = "Search supports multiple words and matches IDs, names, status, tags and related metadata.") {
+    return `<div class="card card-body search-card">
+      <div class="search-row">
+        <div class="search-box"><span class="search-icon">⌕</span><input class="input" id="${esc(id)}" placeholder="${esc(placeholder)}" autocomplete="off"/></div>
+        <button class="btn btn-ghost" id="${esc(id)}-clear" disabled>Clear</button>
+      </div>
+      <div class="field-hint" id="${esc(id)}-summary">${esc(hint)}</div>
+    </div>`;
+  }
+  function bindSearchPanel(id, items, render, targetSelector, noun, opts = {}) {
+    const input = $("#" + id), clear = $("#" + id + "-clear"), summary = $("#" + id + "-summary"), target = $(targetSelector);
+    if (!input || !target) return;
+    const emptyHtml = opts.emptyHtml || (() => emptyState("🔎", `No matching ${noun}s`, "Try a different search term or clear the filter."));
+    const update = () => {
+      const q = input.value || "";
+      const filtered = items.filter((item) => matchesQuery(item, q, opts.extraText ? opts.extraText(item) : ""));
+      target.innerHTML = filtered.length ? render(filtered) : emptyHtml(q);
+      if (summary) summary.textContent = q.trim() ? `Showing ${filtered.length} of ${items.length} ${noun}(s) for “${q.trim()}”.` : `Showing all ${items.length} ${noun}(s).`;
+      if (clear) clear.disabled = !q.trim();
+    };
+    input.addEventListener("input", update);
+    if (clear) clear.onclick = () => { input.value = ""; update(); input.focus(); };
+    update();
+  }
   const badge = (s) => {
     const map = { succeeded: "ok", running: "info", pending: "muted", failed: "err", waiting_for_approval: "warn", dead: "err", cancelled: "muted" };
     return `<span class="badge badge-${map[s] || "muted"}">${esc(s)}</span>`;
@@ -454,19 +491,24 @@
     $("#content").innerHTML = `
       <div class="overview"><div><h1>Projects</h1><p>Multi-project AI engineering workspaces</p></div>
         <button class="btn btn-primary" onclick="openProjectModal()">＋ Create Project</button></div>
+      ${searchPanelHtml("project-search", "Search projects by name, repo, branch, framework or status…")}
       ${list.length ? `<div class="card card-body"><div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Repo</th><th>Branch</th><th>Framework</th><th>Status</th><th>Created</th><th></th></tr></thead>
-        <tbody>${list.map((p) => `<tr>
-          <td><a href="#/projects/${p.id}"><strong>${esc(p.name)}</strong></a><div class="mono" style="color:var(--text-muted)">${esc(p.slug)}</div></td>
-          <td class="mono">${esc(p.configRepo)}</td>
-          <td class="mono">${esc(p.branch)}</td>
-          <td>${esc(((p.capabilities?.frameworks || []).join(", ") || p.framework || "—"))}</td>
-          <td>${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
-          <td>${timeAgo(p.createdAt)}</td>
-          <td><button class="btn btn-ghost" onclick="location.hash='#/projects/${p.id}'">Open</button></td>
-        </tr>`).join("")}</tbody></table></div></div>` :
+        <tbody id="project-tbody"></tbody></table></div></div>` :
         `<div class="card card-body">${emptyState("📁", "No projects yet", "Create your first project and the platform will auto-generate agents, skills, and a workflow.")}</div>`}`;
+    bindSearchPanel("project-search", list, projectRows, "#project-tbody", "project", { emptyHtml: () => `<tr><td colspan="7">${emptyState("🔎", "No matching projects", "Try searching by repo, branch, framework or status.")}</td></tr>` });
   });
+  function projectRows(list) {
+    return list.map((p) => `<tr>
+      <td><a href="#/projects/${p.id}"><strong>${esc(p.name)}</strong></a><div class="mono" style="color:var(--text-muted)">${esc(p.slug)}</div></td>
+      <td class="mono">${esc(p.configRepo)}</td>
+      <td class="mono">${esc(p.branch)}</td>
+      <td>${esc(((p.capabilities?.frameworks || []).join(", ") || p.framework || "—"))}</td>
+      <td>${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
+      <td>${timeAgo(p.createdAt)}</td>
+      <td><button class="btn btn-ghost" onclick="location.hash='#/projects/${p.id}'">Open</button></td>
+    </tr>`).join("");
+  }
 
   /* ---------- multi-select chips + repo picker (shared by project forms) ---------- */
   let optionCatalogCache = null;
@@ -936,14 +978,11 @@
   on("/agents", async () => {
     const list = await api("/agents");
     $("#content").innerHTML = `
-      <div class="overview"><div><h1>Agents</h1><p>Agent registry — search, categorize, enable/disable</p></div>
-        <input class="input" style="max-width:280px" id="agent-filter" placeholder="Filter agents…"/></div>
+      <div class="overview"><div><h1>Agents</h1><p>Agent registry — search, categorize, enable/disable</p></div></div>
+      ${searchPanelHtml("agent-search", "Search agents by name, type, role, model, project, skill or permission…")}
       <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Type</th><th>Name</th><th>Role</th><th>Model</th><th>Status</th><th>Project</th></tr></thead>
-      <tbody id="agent-tbody">${agentRows(list)}</tbody></table></div></div>`;
-    $("#agent-filter").addEventListener("input", (e) => {
-      const q = e.target.value.toLowerCase();
-      $("#agent-tbody").innerHTML = agentRows(list.filter((a) => (a.name + a.type + a.role).toLowerCase().includes(q)));
-    });
+      <tbody id="agent-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("agent-search", list, agentRows, "#agent-tbody", "agent", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching agents", "Try searching by type, role, model, skill or status.")}</td></tr>` });
   });
   function agentRows(list) {
     if (!list.length) return `<tr><td colspan="6">${emptyState("🤖", "No agents", "Create a project to auto-generate an agent roster.")}</td></tr>`;
@@ -1025,9 +1064,12 @@
   /* MODELS — grouped by provider, multi-select, streaming chat modal */
   // Selected model ids (survives re-renders of the Models page).
   const modelSelection = new Set();
-  // Which provider groups are currently expanded inside the "Groups" modal.
+  // Full model/provider caches for the Models page.
   let modelsCache = [];
   let providersCache = [];
+  // Client-side search state. Kept outside the route so refreshes preserve the query.
+  let modelSearchQuery = "";
+  let modelVisibleCache = [];
 
   function providerNameOf(id) {
     return providersCache.find((p) => p.id === id)?.name || id || "Unknown provider";
@@ -1056,55 +1098,156 @@
     providersCache = providers;
     // Drop selections pointing at models that no longer exist.
     for (const id of [...modelSelection]) if (!list.some((m) => m.id === id)) modelSelection.delete(id);
-    const groups = groupModelsByProvider(list);
+    renderModelsPage();
+  });
+
+  function searchableModelText(m) {
+    const caps = Object.entries(m.capabilities || {}).filter(([, enabled]) => enabled).map(([key]) => key).join(" ");
+    const tags = Array.isArray(m.tags) ? m.tags.join(" ") : "";
+    return [
+      m.displayName, m.modelId, m.id, providerNameOf(m.providerId),
+      m.active ? "active enabled" : "inactive disabled", caps, tags, m.notes,
+    ].filter(Boolean).join(" ").toLowerCase();
+  }
+
+  function filteredModels() {
+    const terms = modelSearchQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    if (!terms.length) return modelsCache;
+    return modelsCache.filter((m) => {
+      const haystack = searchableModelText(m);
+      return terms.every((term) => haystack.includes(term));
+    });
+  }
+
+  function renderModelsPage() {
+    modelVisibleCache = filteredModels();
+    const allGroups = groupModelsByProvider(modelsCache);
+    const groups = groupModelsByProvider(modelVisibleCache);
+    const hasModels = modelsCache.length > 0;
+    const hasQuery = modelSearchQuery.trim().length > 0;
     $("#content").innerHTML = `<div class="overview">
-        <div><h1>Models</h1><p>Model Registry — grouped by provider · ${list.length} model(s) in ${groups.length} group(s)</p></div>
+        <div><h1>Models</h1><p>Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)</p></div>
         <div class="flex">
+          <button class="btn" onclick="modelGroupsCollapseAll()">Collapse all</button>
+          <button class="btn" onclick="modelGroupsExpandAll()">Expand all</button>
           <button class="btn" onclick="openModelGroups()">🗂 Groups</button>
           <button class="btn btn-primary" onclick="openModel()">＋ Add Model</button>
         </div>
       </div>
+      <div class="card card-body model-search-card">
+        <div class="model-search-row">
+          <div class="model-search-box">
+            <span class="model-search-icon">⌕</span>
+            <input class="input" id="model-search" placeholder="Search models by name, ID, provider, capability, tag or status…" value="${esc(modelSearchQuery)}" autocomplete="off" oninput="modelSearch(this.value)"/>
+          </div>
+          <button class="btn btn-ghost" id="model-search-clear" onclick="modelSearchClear()" ${hasQuery ? "" : "disabled"}>Clear</button>
+        </div>
+        <div class="field-hint" id="model-search-summary">${modelSearchSummary()}</div>
+      </div>
       <div id="model-bulkbar"></div>
-      <div id="model-groups">${groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState("🧠", "No models", "Add a model and attach it to a provider.")}</div>`}</div>`;
+      <div id="model-groups">${groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState(hasModels ? "🔎" : "🧠", hasModels ? "No matching models" : "No models", hasModels ? "Try a different search term or clear the filter." : "Add a model and attach it to a provider.")}</div>`}</div>`;
     renderBulkBar();
-  });
+  }
+
+  function modelSearchSummary() {
+    const q = modelSearchQuery.trim();
+    if (!modelsCache.length) return "No models in the registry yet.";
+    if (!q) return `Showing all ${modelsCache.length} model(s). Search supports multiple words, provider names, capabilities like code or vision, and active/inactive status.`;
+    return `Showing ${modelVisibleCache.length} of ${modelsCache.length} model(s) for “${esc(q)}”.`;
+  }
+
+  window.modelSearch = (value) => {
+    modelSearchQuery = value || "";
+    const input = $("#model-search");
+    const start = input?.selectionStart ?? modelSearchQuery.length;
+    const end = input?.selectionEnd ?? modelSearchQuery.length;
+    modelVisibleCache = filteredModels();
+    const groups = groupModelsByProvider(modelVisibleCache);
+    const hasModels = modelsCache.length > 0;
+    $("#model-groups").innerHTML = groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState(hasModels ? "🔎" : "🧠", hasModels ? "No matching models" : "No models", hasModels ? "Try a different search term or clear the filter." : "Add a model and attach it to a provider.")}</div>`;
+    const summary = $("#model-search-summary");
+    if (summary) summary.innerHTML = modelSearchSummary();
+    const clear = $("#model-search-clear");
+    if (clear) clear.disabled = !modelSearchQuery.trim();
+    renderBulkBar();
+    if (input) { input.focus(); try { input.setSelectionRange(start, end); } catch {} }
+  };
+
+  window.modelSearchClear = () => {
+    modelSearchQuery = "";
+    renderModelsPage();
+    $("#model-search")?.focus();
+  };
 
   /** One collapsible provider card holding its models. */
   function renderProviderGroup(g) {
     const allSelected = g.models.length > 0 && g.models.every((m) => modelSelection.has(m.id));
-    return `<div class="card model-group" data-provider="${esc(g.providerId)}">
+    const provider = providersCache.find((p) => p.id === g.providerId) || {};
+    const inactive = g.models.length - g.active;
+    const activePct = g.models.length ? Math.round((g.active / g.models.length) * 100) : 0;
+    const caps = [...new Set(g.models.flatMap((m) => Object.entries(m.capabilities || {}).filter(([, on]) => on).map(([k]) => CAP_NAMES[k] || k)))].slice(0, 6);
+    const groupId = esc(g.providerId);
+    return `<section class="card model-group" data-provider="${groupId}">
       <div class="model-group-head">
-        <label class="model-check" title="Select every model of this provider">
-          <input type="checkbox" ${allSelected ? "checked" : ""} onchange="modelSelectProvider('${esc(g.providerId)}', this.checked)"/>
-        </label>
-        <button class="chev-btn" title="Collapse / expand this group" onclick="modelGroupToggle('${esc(g.providerId)}')"><span class="chev">▾</span></button>
-        <button class="model-group-toggle" title="Open this provider group" onclick="openModelGroup('${esc(g.providerId)}')">
-          <strong>${esc(g.name)}</strong>
-          <span class="badge badge-muted">${g.models.length} model(s)</span>
-          <span class="badge badge-${g.active ? "ok" : "muted"}">${g.active} active</span>
-        </button>
+        <div class="model-group-main" onclick="modelGroupToggle('${groupId}')" title="Collapse / expand this provider">
+          <button class="chev-btn" type="button" aria-label="Collapse / expand"><span class="chev">▾</span></button>
+          <div class="provider-avatar">${esc((g.name || "?").trim().slice(0, 1).toUpperCase())}</div>
+          <div class="model-group-title">
+            <strong>${esc(g.name)}</strong>
+            <div class="model-group-sub">${esc(provider.type || provider.apiFormat || "provider")} ${provider.baseUrl ? `· ${esc(provider.baseUrl)}` : ""}</div>
+          </div>
+        </div>
+        <div class="model-group-stats">
+          <span class="badge badge-muted">${g.models.length} total</span>
+          <span class="badge badge-ok">${g.active} active</span>
+          ${inactive ? `<span class="badge badge-muted">${inactive} inactive</span>` : ""}
+        </div>
+        <div class="model-group-actions">
+          <label class="model-check model-select-chip" title="Select visible models in this provider">
+            <input type="checkbox" ${allSelected ? "checked" : ""} onchange="modelSelectProvider('${groupId}', this.checked)"/> Select
+          </label>
+          <button class="btn btn-ghost" onclick="openModelGroup('${groupId}')">Details</button>
+        </div>
       </div>
       <div class="model-group-body">
-        <div class="table-wrap"><table><thead><tr>
-          <th style="width:34px"></th><th>Display Name</th><th>Model ID</th><th>Context</th><th>Caps</th><th>Active</th><th></th>
-        </tr></thead><tbody>
-        ${g.models.map((m) => `<tr class="${modelSelection.has(m.id) ? "row-selected" : ""}" data-model="${esc(m.id)}">
-          <td><input type="checkbox" ${modelSelection.has(m.id) ? "checked" : ""} onchange="modelSelectOne('${esc(m.id)}', this.checked)"/></td>
-          <td><strong>${esc(m.displayName)}</strong></td>
-          <td class="mono">${esc(m.modelId)}${tuningBadge(m)}</td>
-          <td>${Number(m.contextWindow || 0).toLocaleString()}</td>
-          <td>${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</td>
-          <td>${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
-          <td style="white-space:nowrap;text-align:right">
-            <button class="btn btn-ghost" onclick="openModelChat('${esc(m.id)}')">💬 Test</button>
-            <button class="btn btn-ghost" onclick="openModelEdit('${esc(m.id)}')">✏️ Edit</button>
-            <button class="btn btn-ghost" onclick="modelToggle('${esc(m.id)}', ${m.active ? "false" : "true"})">${m.active ? "Deactivate" : "Activate"}</button>
-            <button class="btn btn-ghost" onclick="modelDelete('${esc(m.id)}')">🗑</button>
-          </td></tr>`).join("")}
-        </tbody></table></div>
+        <div class="model-group-meta">
+          <div class="model-active-meter" title="${activePct}% active"><span style="width:${activePct}%"></span></div>
+          <div class="model-cap-strip">${caps.map((c) => `<span class="badge badge-muted">${esc(c)}</span>`).join(" ") || '<span class="badge badge-muted">no capabilities</span>'}</div>
+        </div>
+        <div class="model-card-grid">${g.models.map(renderModelCard).join("")}</div>
       </div>
-    </div>`;
+    </section>`;
   }
+
+  function renderModelCard(m) {
+    const id = esc(m.id);
+    const ctx = Number(m.contextWindow || 0);
+    return `<article class="model-card ${modelSelection.has(m.id) ? "row-selected" : ""}" data-model="${id}">
+      <div class="model-card-top">
+        <label class="model-card-check" title="Select model"><input data-model-check type="checkbox" ${modelSelection.has(m.id) ? "checked" : ""} onchange="modelSelectOne('${id}', this.checked)"/></label>
+        <div class="model-card-name">
+          <strong>${esc(m.displayName || m.modelId)}</strong>
+          <div class="mono model-id" title="${esc(m.modelId)}">${esc(m.modelId)}${tuningBadge(m)}</div>
+        </div>
+        ${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}
+      </div>
+      <div class="model-card-facts">
+        <span title="Context window">🧠 ${ctx ? ctx.toLocaleString() : "—"}</span>
+        <span title="Priority">↕ ${Number(m.priority || 100)}</span>
+        <span title="Cost per 1k tokens">${money(Number(m.inputCostPer1k || 0) + Number(m.outputCostPer1k || 0))}/1k</span>
+      </div>
+      <div class="model-card-caps">${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</div>
+      <div class="model-card-actions">
+        <button class="btn btn-ghost" onclick="openModelChat('${id}')">💬 Test</button>
+        <button class="btn btn-ghost" onclick="openModelEdit('${id}')">✏️ Edit</button>
+        <button class="btn btn-ghost" onclick="modelToggle('${id}', ${m.active ? "false" : "true"})">${m.active ? "Disable" : "Enable"}</button>
+        <button class="btn btn-ghost danger-text" onclick="modelDelete('${id}')">🗑</button>
+      </div>
+    </article>`;
+  }
+
+  window.modelGroupsCollapseAll = () => $$(".model-group").forEach((el) => el.classList.add("collapsed"));
+  window.modelGroupsExpandAll = () => $$(".model-group").forEach((el) => el.classList.remove("collapsed"));
 
   /** Small badge showing that a model carries per-model overrides. */
   function tuningBadge(m) {
@@ -1254,33 +1397,35 @@
   /* ---- multi-select ---- */
   window.modelSelectOne = (id, checked) => {
     if (checked) modelSelection.add(id); else modelSelection.delete(id);
-    const row = document.querySelector(`tr[data-model="${CSS.escape(id)}"]`);
+    const row = document.querySelector(`[data-model="${CSS.escape(id)}"]`);
     if (row) row.classList.toggle("row-selected", checked);
     syncGroupCheckboxes();
     renderBulkBar();
   };
   window.modelSelectProvider = (providerId, checked) => {
-    for (const m of modelsCache.filter((x) => (x.providerId || "__none__") === providerId)) {
+    const visibleForProvider = modelVisibleCache.filter((x) => (x.providerId || "__none__") === providerId);
+    for (const m of visibleForProvider) {
       if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
-      const box = document.querySelector(`tr[data-model="${CSS.escape(m.id)}"] input[type=checkbox]`);
+      const box = document.querySelector(`[data-model="${CSS.escape(m.id)}"] input[data-model-check]`);
       if (box) box.checked = checked;
-      const row = document.querySelector(`tr[data-model="${CSS.escape(m.id)}"]`);
+      const row = document.querySelector(`[data-model="${CSS.escape(m.id)}"]`);
       if (row) row.classList.toggle("row-selected", checked);
     }
     renderBulkBar();
   };
   window.modelSelectAll = (checked) => {
-    for (const m of modelsCache) {
+    const target = modelVisibleCache.length || !modelSearchQuery.trim() ? modelVisibleCache : [];
+    for (const m of target) {
       if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
     }
-    refreshCurrent();
+    renderModelsPage();
   };
-  window.modelSelectionClear = () => { modelSelection.clear(); refreshCurrent(); };
+  window.modelSelectionClear = () => { modelSelection.clear(); renderModelsPage(); };
 
   function syncGroupCheckboxes() {
     for (const card of $$(".model-group")) {
       const pid = card.dataset.provider;
-      const models = modelsCache.filter((m) => (m.providerId || "__none__") === pid);
+      const models = modelVisibleCache.filter((m) => (m.providerId || "__none__") === pid);
       const box = card.querySelector(".model-check input");
       if (!box) continue;
       const selected = models.filter((m) => modelSelection.has(m.id)).length;
@@ -1298,7 +1443,7 @@
     el.innerHTML = `<div class="bulk-bar">
       <span><strong>${n}</strong> model(s) selected</span>
       <div class="flex">
-        <button class="btn" onclick="modelSelectAll(true)">Select all (${modelsCache.length})</button>
+        <button class="btn" onclick="modelSelectAll(true)">Select visible (${modelVisibleCache.length})</button>
         <button class="btn" onclick="modelBulk('activate')">✓ Activate</button>
         <button class="btn" onclick="modelBulk('deactivate')">⏸ Deactivate</button>
         <button class="btn btn-danger" onclick="modelBulk('delete')">🗑 Delete selected</button>
@@ -1726,11 +1871,10 @@
       }
       return { catalog, chat };
     };
-    $("#content").innerHTML = `<div class="overview"><div><h1>Providers</h1><p>Provider-agnostic model providers. Use an env-var reference or paste the key (stored encrypted).</p></div><button class="btn btn-primary" onclick="openProvider()">＋ Add Provider</button></div>
-      <div class="grid-3">${list.map((p) => {
-        const ready = p.readiness?.ready !== false;
-        const u = urlHints(p);
-        return `<div class="card card-body" id="prov-${esc(p.id)}">
+    const providerCards = (items) => items.map((p) => {
+      const ready = p.readiness?.ready !== false;
+      const u = urlHints(p);
+      return `<div class="card card-body" id="prov-${esc(p.id)}">
         <div class="card-title">${esc(p.name)} ${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</div>
         <div class="meter-row"><span class="lbl">Type</span><span class="val">${esc(p.type)}</span></div>
         <div class="meter-row"><span class="lbl">Format</span><span class="val">${esc(p.apiFormat)}</span></div>
@@ -1747,7 +1891,15 @@
           ${p.type === "mock" ? "" : `<button class="btn btn-danger" onclick="providerDelete('${p.id}')">Delete</button>`}
         </div>
         <div id="prov-test-${esc(p.id)}"></div>
-      </div>`; }).join("")}</div>`;
+      </div>`;
+    }).join("");
+    $("#content").innerHTML = `<div class="overview"><div><h1>Providers</h1><p>Provider-agnostic model providers. Use an env-var reference or paste the key (stored encrypted).</p></div><button class="btn btn-primary" onclick="openProvider()">＋ Add Provider</button></div>
+      ${searchPanelHtml("provider-search", "Search providers by name, type, format, URL, secret or status…")}
+      <div class="grid-3" id="provider-grid"></div>`;
+    bindSearchPanel("provider-search", list, providerCards, "#provider-grid", "provider", {
+      extraText: (p) => { const u = urlHints(p); return `${p.active ? "active" : "inactive"} ${p.keyPresent ? "key set ready" : "missing key"} ${u.catalog} ${u.chat}`; },
+      emptyHtml: () => emptyState("🔎", "No matching providers", "Try searching by provider type, API format, URL, secret reference or status."),
+    });
   });
   window.providerToggle = async (id, active, force = false) => {
     try {
@@ -1890,11 +2042,10 @@
   /* SKILLS */
   on("/skills", async () => {
     const list = await api("/skills");
-    $("#content").innerHTML = `<div class="overview"><div><h1>Skills</h1><p>Skill Marketplace</p></div><input class="input" style="max-width:260px" id="skill-filter" placeholder="Search skills…"/></div><div class="grid-3" id="skill-grid">${skillCards(list)}</div>`;
-    $("#skill-filter").addEventListener("input", (e) => {
-      const q = e.target.value.toLowerCase();
-      $("#skill-grid").innerHTML = skillCards(list.filter((s) => (s.name+s.description+s.category).toLowerCase().includes(q)));
-    });
+    $("#content").innerHTML = `<div class="overview"><div><h1>Skills</h1><p>Skill Marketplace</p></div></div>
+      ${searchPanelHtml("skill-search", "Search skills by name, description, category, version or compatible agent…")}
+      <div class="grid-3" id="skill-grid"></div>`;
+    bindSearchPanel("skill-search", list, skillCards, "#skill-grid", "skill", { emptyHtml: () => emptyState("🔎", "No matching skills", "Try searching by category, version or compatible agent type.") });
   });
   function skillCards(list) {
     if (!list.length) return emptyState("🛠️", "No skills", "Skills are attachable capabilities injected into agents.");
@@ -1910,10 +2061,13 @@
   on("/workflows", async () => {
     const list = await api("/workflows");
     $("#content").innerHTML = `<div class="overview"><div><h1>Workflows</h1><p>Workflow Engine — agent, tool, condition, approval, parallel nodes</p></div><button class="btn btn-primary" onclick="openWorkflow()">＋ New Workflow</button></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Slug</th><th>Nodes</th><th>Version</th><th>Enabled</th><th>Project</th></tr></thead><tbody>
-      ${list.map((w) => `<tr><td><a href="#/workflows/${w.id}"><strong>${esc(w.name)}</strong></a></td><td class="mono">${esc(w.slug)}</td><td>${w.nodes.length}</td><td>v${w.version}</td><td>${w.enabled?'<span class="badge badge-ok">enabled</span>':'<span class="badge badge-muted">disabled</span>'}</td><td class="mono">${(w.projectId||"—").slice(0,12)}</td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("workflow-search", "Search workflows by name, slug, node type, project or status…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Slug</th><th>Nodes</th><th>Version</th><th>Enabled</th><th>Project</th></tr></thead><tbody id="workflow-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("workflow-search", list, workflowRows, "#workflow-tbody", "workflow", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching workflows", "Try searching by node type, slug, project or status.")}</td></tr>` });
   });
+  function workflowRows(list) {
+    return list.map((w) => `<tr><td><a href="#/workflows/${w.id}"><strong>${esc(w.name)}</strong></a></td><td class="mono">${esc(w.slug)}</td><td>${w.nodes.length}</td><td>v${w.version}</td><td>${w.enabled?'<span class="badge badge-ok">enabled</span>':'<span class="badge badge-muted">disabled</span>'}</td><td class="mono">${(w.projectId||"—").slice(0,12)}</td></tr>`).join("");
+  }
   window.openWorkflow = async () => {
     const projects = await api("/projects").catch(() => []);
     openModal("New Workflow", `<div class="field"><label>Name</label><input class="input" id="wf-name"/></div><div class="field"><label>Project</label><select class="select" id="wf-project">${projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("") || '<option value="">(no projects yet)</option>'}</select></div><div class="field"><label>Description</label><textarea class="textarea" id="wf-desc"></textarea></div><div class="flex"><button class="btn btn-primary" id="wf-go">Create</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
@@ -2057,20 +2211,26 @@
   on("/tasks", async () => {
     const list = await api("/tasks");
     $("#content").innerHTML = `<div class="overview"><div><h1>Tasks</h1><p>Task queue & execution</p></div></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Status</th><th>Agent</th><th>Project</th><th>Created</th><th></th></tr></thead><tbody>
-      ${list.map((t) => `<tr><td><strong>${esc(t.title)}</strong></td><td>${badge(t.status)}</td><td>${esc(t.agentType||"—")}</td><td class="mono">${(t.projectId||"—").slice(0,12)}</td><td>${timeAgo(t.createdAt)}</td><td><button class="btn btn-ghost" onclick="runTask('${t.id}')">Run</button></td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("task-search", "Search tasks by title, status, agent, project or workflow…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Status</th><th>Agent</th><th>Project</th><th>Created</th><th></th></tr></thead><tbody id="task-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("task-search", list, taskRows, "#task-tbody", "task", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching tasks", "Try searching by title, agent, project, workflow or status.")}</td></tr>` });
   });
+  function taskRows(list) {
+    return list.map((t) => `<tr><td><strong>${esc(t.title)}</strong></td><td>${badge(t.status)}</td><td>${esc(t.agentType||"—")}</td><td class="mono">${(t.projectId||"—").slice(0,12)}</td><td>${timeAgo(t.createdAt)}</td><td><button class="btn btn-ghost" onclick="runTask('${t.id}')">Run</button></td></tr>`).join("");
+  }
   window.runTask = async (id) => { await api(`/tasks/${id}/run`, { method: "POST" }); toast("Task queued", id.slice(0,8), "ok"); refreshCurrent(); };
 
   /* RUNS */
   on("/runs", async () => {
     const list = await api("/runs");
     $("#content").innerHTML = `<div class="overview"><div><h1>AI Run Console</h1><p>Observable agent executions (status, steps, results — never chain-of-thought)</p></div></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th><th></th></tr></thead><tbody>
-      ${list.map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("run-search", "Search runs by id, agent, status, model, task, project or correlation id…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th><th></th></tr></thead><tbody id="run-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("run-search", list, runRows, "#run-tbody", "run", { emptyHtml: () => `<tr><td colspan="7">${emptyState("🔎", "No matching runs", "Try searching by run id, agent, model, status or correlation id.")}</td></tr>` });
   });
+  function runRows(list) {
+    return list.map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("");
+  }
   on("/runs/:id/console", async (rest) => {
     const id = rest[0];
     const c = await api(`/runs/${id}/console`);
@@ -2095,19 +2255,27 @@
   /* APPROVALS */
   on("/approvals", async () => {
     const [list, policy] = await Promise.all([api("/approvals"), api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 0 }))]);
-    const pending = list.filter((a) => a.status === "pending");
-    const history = list.filter((a) => a.status !== "pending").slice(0, 50);
-    const row = (a) => `<tr><td class="mono">${esc(a.id)}</td><td><strong>${esc(a.action)}</strong>${a.taskId ? `<div class="mono" style="color:var(--text-muted)">task ${esc(a.taskId)}</div>` : ""}</td><td class="mono">${(a.projectId || "—").slice(0, 12)}</td><td>${badge(a.status === "pending" ? "waiting_for_approval" : a.status === "approved" ? "succeeded" : a.status === "rejected" ? "failed" : "cancelled")}</td><td>${esc(a.decidedBy || "—")}<div style="color:var(--text-muted);font-size:11px">${esc(a.decisionSource || "")}</div></td><td>${timeAgo(a.decidedAt || a.requestedAt)}</td>
-      <td style="white-space:nowrap">${a.status === "pending" ? `<button class="btn btn-primary" onclick="decideApproval('${a.id}','approve')">✅ Approve</button> <button class="btn" onclick="decideApproval('${a.id}','reject')">❌ Reject</button>` : ""}</td></tr>`;
-    $("#content").innerHTML = `<div class="overview"><div><h1>Approvals</h1><p>Human-in-the-loop gate for merges, deploys, migrations and other dangerous or costly steps</p></div>
-        <div class="action-row"><span class="pill">${policy.autoApprove ? "⚠️ policy: auto-approve" : "🔒 policy: human approval required"}</span><button class="btn" onclick="location.hash='#/settings'">Policy</button></div></div>
-      <div class="card card-body"><div class="card-title">Pending <span class="sub">${pending.length}</span></div>
+    const row = approvalRow;
+    const renderApprovalLists = (items) => {
+      const pending = items.filter((a) => a.status === "pending");
+      const history = items.filter((a) => a.status !== "pending").slice(0, 50);
+      return `<div class="card card-body"><div class="card-title">Pending <span class="sub">${pending.length}</span></div>
         ${pending.length ? `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Action</th><th>Project</th><th>Status</th><th>By</th><th>When</th><th></th></tr></thead><tbody>${pending.map(row).join("")}</tbody></table></div>` : emptyState("✅", "Nothing waiting", policy.autoApprove ? "Auto-approve is on — switch it off in Settings to gate dangerous steps." : "Agents will pause here (and ping Telegram) when they need a decision.")}
       </div>
       <div class="card card-body mt"><div class="card-title">History</div>
         ${history.length ? `<div class="table-wrap"><table><thead><tr><th>Id</th><th>Action</th><th>Project</th><th>Status</th><th>By</th><th>When</th><th></th></tr></thead><tbody>${history.map(row).join("")}</tbody></table></div>` : emptyState("📭", "No decisions yet", "")}
       </div>`;
+    };
+    $("#content").innerHTML = `<div class="overview"><div><h1>Approvals</h1><p>Human-in-the-loop gate for merges, deploys, migrations and other dangerous or costly steps</p></div>
+        <div class="action-row"><span class="pill">${policy.autoApprove ? "⚠️ policy: auto-approve" : "🔒 policy: human approval required"}</span><button class="btn" onclick="location.hash='#/settings'">Policy</button></div></div>
+      ${searchPanelHtml("approval-search", "Search approvals by id, action, task, project, status, decision source or approver…")}
+      <div id="approval-lists"></div>`;
+    bindSearchPanel("approval-search", list, renderApprovalLists, "#approval-lists", "approval", { emptyHtml: () => emptyState("🔎", "No matching approvals", "Try searching by action, task, project, status or approver.") });
   });
+  function approvalRow(a) {
+    return `<tr><td class="mono">${esc(a.id)}</td><td><strong>${esc(a.action)}</strong>${a.taskId ? `<div class="mono" style="color:var(--text-muted)">task ${esc(a.taskId)}</div>` : ""}</td><td class="mono">${(a.projectId || "—").slice(0, 12)}</td><td>${badge(a.status === "pending" ? "waiting_for_approval" : a.status === "approved" ? "succeeded" : a.status === "rejected" ? "failed" : "cancelled")}</td><td>${esc(a.decidedBy || "—")}<div style="color:var(--text-muted);font-size:11px">${esc(a.decisionSource || "")}</div></td><td>${timeAgo(a.decidedAt || a.requestedAt)}</td>
+      <td style="white-space:nowrap">${a.status === "pending" ? `<button class="btn btn-primary" onclick="decideApproval('${a.id}','approve')">✅ Approve</button> <button class="btn" onclick="decideApproval('${a.id}','reject')">❌ Reject</button>` : ""}</td></tr>`;
+  }
   window.decideApproval = async (id, decision) => {
     try {
       await api(`/approvals/${id}/${decision}`, { method: "POST", body: {} });
@@ -2140,20 +2308,26 @@
   on("/conversations", async () => {
     const list = await api("/conversations");
     $("#content").innerHTML = `<div class="overview"><div><h1>Conversations</h1><p>Project-aware conversations with auto-summarization</p></div></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Project</th><th>Source</th><th>Messages</th><th>Updated</th></tr></thead><tbody>
-      ${list.map((c) => `<tr><td><a href="#/conversations/${c.id}"><strong>${esc(c.title)}</strong></a></td><td class="mono">${(c.projectId||"—").slice(0,12)}</td><td>${esc(c.source)}</td><td>${c.messages.length}</td><td>${timeAgo(c.updatedAt)}</td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("conversation-search", "Search conversations by title, project, source, message text or updated time…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Project</th><th>Source</th><th>Messages</th><th>Updated</th></tr></thead><tbody id="conversation-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("conversation-search", list, conversationRows, "#conversation-tbody", "conversation", { emptyHtml: () => `<tr><td colspan="5">${emptyState("🔎", "No matching conversations", "Try searching by title, project, source or message content.")}</td></tr>` });
   });
+  function conversationRows(list) {
+    return list.map((c) => `<tr><td><a href="#/conversations/${c.id}"><strong>${esc(c.title)}</strong></a></td><td class="mono">${(c.projectId||"—").slice(0,12)}</td><td>${esc(c.source)}</td><td>${c.messages.length}</td><td>${timeAgo(c.updatedAt)}</td></tr>`).join("");
+  }
 
   /* MEMORY */
   on("/memory", async () => {
     const list = await api("/memory");
     $("#content").innerHTML = `<div class="overview"><div><h1>Memory</h1><p>GitHub-backed multi-level memory (project, agent, task, decisions, bugs, knowledge)</p></div>
       <button class="btn btn-primary" onclick="addMemory()">＋ Add Entry</button></div>
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Type</th><th>Scope</th><th>Key</th><th>Project</th><th>Tags</th></tr></thead><tbody>
-      ${list.map((m) => `<tr><td><span class="badge badge-info">${esc(m.type)}</span></td><td>${esc(m.scope)}</td><td>${esc(m.key)}</td><td class="mono">${(m.projectId||"—").slice(0,12)}</td><td>${(m.tags||[]).map(t=>`<span class="badge badge-muted">${esc(t)}</span>`).join(" ")}</td></tr>`).join("")}
-      </tbody></table></div></div>`;
+      ${searchPanelHtml("memory-search", "Search memory by type, scope, key, project, tag or content…")}
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Type</th><th>Scope</th><th>Key</th><th>Project</th><th>Tags</th></tr></thead><tbody id="memory-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("memory-search", list, memoryRows, "#memory-tbody", "memory entry", { emptyHtml: () => `<tr><td colspan="5">${emptyState("🔎", "No matching memory entries", "Try searching by type, key, tag, project or content.")}</td></tr>` });
   });
+  function memoryRows(list) {
+    return list.map((m) => `<tr><td><span class="badge badge-info">${esc(m.type)}</span></td><td>${esc(m.scope)}</td><td>${esc(m.key)}</td><td class="mono">${(m.projectId||"—").slice(0,12)}</td><td>${(m.tags||[]).map(t=>`<span class="badge badge-muted">${esc(t)}</span>`).join(" ")}</td></tr>`).join("");
+  }
   window.addMemory = async () => {
     const projects = await api("/projects").catch(() => []);
     openModal("Add Memory Entry", `<div class="field"><label>Project</label><select class="select" id="mm-project"><option value="">(global)</option>${projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></div><div class="field"><label>Type</label><select class="select" id="mm-type">${["architecture","business","technical","decision","bug","knowledge","lesson","conversation"].map(t=>`<option ${t === "knowledge" ? "selected" : ""}>${t}</option>`).join("")}</select></div><div class="field"><label>Key</label><input class="input" id="mm-key" placeholder="auth.session-strategy"/></div><div class="field"><label>Content</label><textarea class="textarea" id="mm-content"></textarea></div><div class="field"><label>Tags (comma separated)</label><input class="input" id="mm-tags"/></div><div class="flex"><button class="btn btn-primary" id="mm-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
