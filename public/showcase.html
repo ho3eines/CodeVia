@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CodeVia — Design System Reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+<!-- The real application stylesheet: this page documents what actually ships. -->
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .sc-wrap { max-width: 1180px; margin: 0 auto; padding: 28px 22px 80px; }
+  .sc-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+  .sc-swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+  .sw { border-radius: var(--radius-sm); border: 1px solid var(--stroke); overflow: hidden; background: var(--glass); }
+  .sw i { display: block; height: 52px; }
+  .sw b { display: block; font-size: 11.5px; padding: 7px 9px 2px; }
+  .sw code { display: block; font-size: 10px; color: var(--text-muted); padding: 0 9px 8px; }
+  .sc-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .sc-note { color: var(--text-muted); font-size: 12.5px; margin: 0 0 14px; max-width: 760px; }
+</style>
+</head>
+<body>
+<div class="aurora" aria-hidden="true"><span class="a1"></span><span class="a2"></span><span class="a3"></span></div>
+
+<div class="sc-wrap">
+  <div class="sc-head">
+    <div class="overview" style="margin:0">
+      <div>
+        <h1>Prism Design System</h1>
+        <p>Every component below is rendered by the same <span class="mono">app.css</span> the application ships. Flip the theme to audit both palettes.</p>
+      </div>
+    </div>
+    <div class="theme-switch" role="group" aria-label="Color theme">
+      <span class="theme-thumb"></span>
+      <button class="theme-opt" data-set="light">☀️<span>Light</span></button>
+      <button class="theme-opt" data-set="dark">🌙<span>Dark</span></button>
+    </div>
+  </div>
+
+  <div class="section-title">Palette</div>
+  <p class="sc-note">Each token is defined independently per theme. Body text holds a WCAG AAA contrast ratio against the canvas in both.</p>
+  <div class="sc-swatches" id="swatches"></div>
+
+  <div class="section-title">Buttons &amp; controls</div>
+  <div class="card card-body">
+    <div class="sc-row">
+      <button class="btn btn-primary">Primary action</button>
+      <button class="btn">Secondary</button>
+      <button class="btn btn-ghost">Ghost</button>
+      <button class="btn btn-danger">Danger</button>
+      <button class="btn" disabled>Disabled</button>
+      <span class="pill pill-live"><span class="dot"></span><span class="pill-label">Live</span></span>
+      <span class="pill pill-live offline"><span class="dot"></span><span class="pill-label">Offline</span></span>
+    </div>
+    <div class="sc-row mt">
+      <span class="badge badge-ok">ready</span>
+      <span class="badge badge-warn">needs key</span>
+      <span class="badge badge-err">failed</span>
+      <span class="badge badge-info">info</span>
+      <span class="badge badge-muted">inactive</span>
+      <label class="switch"><input type="checkbox" checked /><span class="switch-track"><span class="switch-thumb"></span></span><span class="switch-label">Active</span></label>
+      <label class="switch"><input type="checkbox" /><span class="switch-track"><span class="switch-thumb"></span></span><span class="switch-label">Off</span></label>
+    </div>
+    <div class="sc-row mt">
+      <div class="seg"><button class="seg-btn active">Overview</button><button class="seg-btn">Detail</button><button class="seg-btn">Raw</button></div>
+      <button class="filter-chip active">All <span class="chip-count">12</span></button>
+      <button class="filter-chip">Active <span class="chip-count">7</span></button>
+      <button class="filter-chip danger">Needs attention <span class="chip-count">2</span></button>
+    </div>
+  </div>
+
+  <div class="section-title">Stat cards</div>
+  <div class="stat-grid">
+    <div class="card stat"><span class="stat-icon">📁</span><div class="stat-label">Projects</div><div class="stat-value">12</div><div class="stat-sub">18 active agents</div></div>
+    <div class="card stat"><span class="stat-icon">▶️</span><div class="stat-label">Runs</div><div class="stat-value">248</div><div class="stat-sub">94% success rate</div></div>
+    <div class="card stat"><span class="stat-icon">⚡</span><div class="stat-label">Running now</div><div class="stat-value">3</div><div class="stat-sub">5 queued · 1 failed</div></div>
+    <div class="card stat"><span class="stat-icon">💰</span><div class="stat-label">Spend</div><div class="stat-value">$18.40</div><div class="stat-sub">1.2k calls · 940k tokens</div></div>
+  </div>
+
+  <div class="section-title">Charts</div>
+  <div class="grid-2">
+    <div class="card card-body"><div class="card-title">Run activity <span class="sub">last 7 days</span></div><div id="c-line"></div></div>
+    <div class="card card-body"><div class="card-title">Run outcomes</div><div id="c-donut"></div></div>
+  </div>
+  <div class="grid-2 mt">
+    <div class="card card-body"><div class="card-title">Busiest agents</div><div id="c-bar"></div></div>
+    <div class="card card-body"><div class="card-title">System health</div><div class="health-ring-row"><div id="c-gauge"></div>
+      <div class="health-ring-info"><div class="status-grid">
+        <div class="status-item"><span class="status-dot healthy"></span>API</div>
+        <div class="status-item"><span class="status-dot healthy"></span>Database</div>
+        <div class="status-item"><span class="status-dot warn"></span>Telegram</div>
+        <div class="status-item"><span class="status-dot healthy"></span>Queue</div>
+      </div></div></div></div>
+  </div>
+
+  <div class="section-title">Admin tiles</div>
+  <div class="admin-tile-grid">
+    <button class="admin-tile"><span class="tile-ico">💚</span><strong>Health &amp; diagnostics</strong><p>Component status, queue breakdown and the raw health payload.</p><div class="tile-foot"><span class="badge badge-ok">100% healthy</span></div></button>
+    <button class="admin-tile"><span class="tile-ico">🔐</span><strong>GitHub login</strong><p>OAuth client, callback URL, scopes and the strict-auth switch.</p><div class="tile-foot"><span class="badge badge-err">not configured</span></div></button>
+    <button class="admin-tile"><span class="tile-ico">🛡️</span><strong>Backup &amp; restore</strong><p>Scheduled GitHub snapshots of the whole runtime state.</p><div class="tile-foot"><span class="badge badge-ok">scheduled</span></div></button>
+  </div>
+
+  <div class="section-title">Notices &amp; feedback</div>
+  <div class="notice ok"><h4>✓ Saved and configured</h4><p>Callback: <span class="mono">https://example.com/auth/github/callback</span></p></div>
+  <div class="notice warn"><h4>⚠️ Ephemeral storage — settings are wiped on redeploy</h4><p>Attach a persistent volume, or store the variables in your host environment.</p></div>
+  <div class="notice err"><h4>Save failed</h4><p>Client secret is missing from the environment.</p></div>
+
+  <div class="section-title">Forms &amp; data</div>
+  <div class="grid-2">
+    <div class="card card-body">
+      <div class="field"><label>Provider name</label><input class="input" value="OpenAI Production" /></div>
+      <div class="field"><label>API format</label><select class="select"><option>openai</option><option>anthropic</option></select></div>
+      <div class="field"><label>API key <span class="select-count">stored encrypted</span></label><div class="key-input"><input class="input mono" type="password" value="sk-live-000000000" /><button class="btn key-eye">👁</button></div></div>
+      <div class="meter-row"><span class="lbl">Providers ready</span><div class="bar"><span style="width:75%"></span></div><span class="val">3/4</span></div>
+      <div class="meter-row"><span class="lbl">Success rate</span><div class="bar"><span style="width:94%"></span></div><span class="val">94%</span></div>
+    </div>
+    <div class="card card-body">
+      <div class="card-title">Recent activity</div>
+      <div class="activity-feed">
+        <div class="activity-item"><span class="activity-dot" style="background:var(--ok);box-shadow:0 0 10px var(--ok)"></span><div class="activity-body"><strong>code-reviewer</strong><span>2m ago · succeeded · 14s</span></div><button class="btn btn-ghost">Open</button></div>
+        <div class="activity-item"><span class="activity-dot" style="background:var(--info);box-shadow:0 0 10px var(--info)"></span><div class="activity-body"><strong>test-writer</strong><span>6m ago · running</span></div><button class="btn btn-ghost">Open</button></div>
+        <div class="activity-item"><span class="activity-dot" style="background:var(--err);box-shadow:0 0 10px var(--err)"></span><div class="activity-body"><strong>deployer</strong><span>21m ago · failed</span></div><button class="btn btn-ghost">Open</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-title">Quick actions</div>
+  <div class="card card-body"><div class="quick-grid">
+    <a class="quick-btn" href="#"><span class="q-ico">📁</span>Projects</a>
+    <a class="quick-btn" href="#"><span class="q-ico">🧠</span>Models</a>
+    <a class="quick-btn" href="#"><span class="q-ico">🔌</span>Providers</a>
+    <a class="quick-btn" href="#"><span class="q-ico">▶️</span>Runs</a>
+    <a class="quick-btn" href="#"><span class="q-ico">🛑</span>Approvals</a>
+    <a class="quick-btn" href="#"><span class="q-ico">🛡️</span>Admin</a>
+  </div></div>
+</div>
+
+<script>
+/* Theme switch (mirrors the app's behaviour) */
+document.querySelectorAll("[data-set]").forEach((b) =>
+  b.addEventListener("click", () => document.documentElement.setAttribute("data-theme", b.dataset.set)));
+
+/* Swatches straight from the computed custom properties, so this table can
+   never drift from the stylesheet. */
+const TOKENS = ["--primary","--accent","--ok","--warn","--err","--info","--bg","--surface","--text","--text-muted"];
+const paintSwatches = () => {
+  const cs = getComputedStyle(document.documentElement);
+  document.getElementById("swatches").innerHTML = TOKENS.map((t) => {
+    const v = cs.getPropertyValue(t).trim();
+    return `<div class="sw"><i style="background:${v}"></i><b>${t.replace("--","")}</b><code>${v}</code></div>`;
+  }).join("");
+};
+paintSwatches();
+new MutationObserver(paintSwatches).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+/* ---- the same chart primitives the dashboard uses ---- */
+const C = ["#7c6cff","#22d3ee","#e879f9","#34d399","#fbbf24","#fb7185"];
+function lineChart(data, labels) {
+  const w=520,h=170,pad={l:34,r:10,t:12,b:22};
+  const max=Math.max(...data,1),min=0,span=max-min||1;
+  const iw=w-pad.l-pad.r, ih=h-pad.t-pad.b;
+  const x=i=>pad.l+(i/(data.length-1))*iw, y=v=>pad.t+ih-((v-min)/span)*ih;
+  const line=data.map((v,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const area=`${line} L${x(data.length-1)},${pad.t+ih} L${pad.l},${pad.t+ih} Z`;
+  const ticks=[0,.5,1].map(f=>{const yy=pad.t+ih*f;return`<line class="grid-line" x1="${pad.l}" y1="${yy}" x2="${w-pad.r}" y2="${yy}"/><text class="axis-label" x="4" y="${yy+3}">${Math.round(max-span*f)}</text>`}).join("");
+  return `<svg class="cv-chart" viewBox="0 0 ${w} ${h}"><defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${C[0]}" stop-opacity=".42"/><stop offset="100%" stop-color="${C[0]}" stop-opacity="0"/></linearGradient></defs>${ticks}<path class="area-path" d="${area}" fill="url(#lg)"/><path class="line-path" d="${line}" stroke="${C[0]}"/>${data.map((v,i)=>`<circle class="dot" cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3" stroke="${C[0]}"><title>${labels[i]}: ${v}</title></circle>`).join("")}${labels.map((l,i)=>`<text class="axis-label" text-anchor="middle" x="${x(i).toFixed(1)}" y="${h-6}">${l}</text>`).join("")}</svg>`;
+}
+function barChart(rows) {
+  const w=520,h=170,pad={l:30,r:8,t:12,b:26};
+  const max=Math.max(...rows.map(r=>r.value),1), iw=w-pad.l-pad.r, ih=h-pad.t-pad.b;
+  const step=iw/rows.length, bw=Math.min(46,step*.62);
+  const grid=[0,.5,1].map(f=>`<line class="grid-line" x1="${pad.l}" y1="${pad.t+ih*f}" x2="${w-pad.r}" y2="${pad.t+ih*f}"/>`).join("");
+  return `<svg class="cv-chart" viewBox="0 0 ${w} ${h}">${grid}${rows.map((r,i)=>{
+    const bh=Math.max(2,(r.value/max)*ih), bx=pad.l+step*i+(step-bw)/2, by=pad.t+ih-bh;
+    return `<rect class="bar-rect" x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="6" fill="${C[i%C.length]}" style="animation-delay:${i*60}ms"/><text class="axis-label" text-anchor="middle" x="${(bx+bw/2).toFixed(1)}" y="${h-8}">${r.label}</text><text class="axis-label" text-anchor="middle" x="${(bx+bw/2).toFixed(1)}" y="${(by-4).toFixed(1)}" style="font-weight:700">${r.value}</text>`;
+  }).join("")}</svg>`;
+}
+function donutChart(rows) {
+  const size=168,stroke=16,r=(size-stroke)/2,c=2*Math.PI*r;
+  const total=rows.reduce((s,x)=>s+x.value,0); let off=0;
+  const arcs=rows.map(s=>{const f=s.value/total;const el=`<circle class="ring-value" cx="${size/2}" cy="${size/2}" r="${r}" stroke="${s.color}" stroke-width="${stroke}" stroke-dasharray="${(f*c).toFixed(2)} ${(c-f*c).toFixed(2)}" stroke-dashoffset="${(-off*c).toFixed(2)}"><title>${s.label}: ${s.value}</title></circle>`;off+=f;return el}).join("");
+  return `<div class="donut-wrap"><svg class="cv-chart" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><circle class="ring-track" cx="${size/2}" cy="${size/2}" r="${r}" stroke-width="${stroke}"/>${arcs}<text x="50%" y="48%" text-anchor="middle" style="fill:var(--text);font-size:26px;font-weight:800;font-family:var(--font)">${total}</text><text x="50%" y="62%" text-anchor="middle" class="axis-label">total runs</text></svg><div class="chart-legend">${rows.map(s=>`<span class="key"><i style="background:${s.color}"></i>${s.label} <strong style="color:var(--text)">${s.value}</strong></span>`).join("")}</div></div>`;
+}
+function gauge(p) {
+  const size=130,stroke=12,r=(size-stroke)/2,c=2*Math.PI*r,color=p>=80?"#34d399":p>=50?"#fbbf24":"#fb7185";
+  return `<svg class="cv-chart" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="flex:0 0 auto"><circle class="ring-track" cx="${size/2}" cy="${size/2}" r="${r}" stroke-width="${stroke}"/><circle class="ring-value" cx="${size/2}" cy="${size/2}" r="${r}" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${((p/100)*c).toFixed(2)} ${c.toFixed(2)}"/><text x="50%" y="47%" text-anchor="middle" style="fill:var(--text);font-size:27px;font-weight:800;font-family:var(--font)">${p}<tspan style="font-size:14px">%</tspan></text><text x="50%" y="63%" text-anchor="middle" class="axis-label">healthy</text></svg>`;
+}
+document.getElementById("c-line").innerHTML  = lineChart([4,9,6,14,11,18,13], ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]);
+document.getElementById("c-bar").innerHTML   = barChart([{label:"reviewer",value:34},{label:"tester",value:26},{label:"coder",value:19},{label:"deployer",value:12},{label:"docs",value:7}]);
+document.getElementById("c-donut").innerHTML = donutChart([{label:"succeeded",value:186,color:"#34d399"},{label:"running",value:12,color:"#60a5fa"},{label:"pending",value:28,color:"#8990b5"},{label:"failed",value:22,color:"#fb7185"}]);
+document.getElementById("c-gauge").innerHTML = gauge(83);
+</script>
+</body>
+</html>
