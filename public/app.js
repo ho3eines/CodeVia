@@ -1128,6 +1128,8 @@
     $("#content").innerHTML = `<div class="overview">
         <div><h1>Models</h1><p>Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)</p></div>
         <div class="flex">
+          <button class="btn" onclick="modelGroupsCollapseAll()">Collapse all</button>
+          <button class="btn" onclick="modelGroupsExpandAll()">Expand all</button>
           <button class="btn" onclick="openModelGroups()">🗂 Groups</button>
           <button class="btn btn-primary" onclick="openModel()">＋ Add Model</button>
         </div>
@@ -1180,39 +1182,72 @@
   /** One collapsible provider card holding its models. */
   function renderProviderGroup(g) {
     const allSelected = g.models.length > 0 && g.models.every((m) => modelSelection.has(m.id));
-    return `<div class="card model-group" data-provider="${esc(g.providerId)}">
+    const provider = providersCache.find((p) => p.id === g.providerId) || {};
+    const inactive = g.models.length - g.active;
+    const activePct = g.models.length ? Math.round((g.active / g.models.length) * 100) : 0;
+    const caps = [...new Set(g.models.flatMap((m) => Object.entries(m.capabilities || {}).filter(([, on]) => on).map(([k]) => CAP_NAMES[k] || k)))].slice(0, 6);
+    const groupId = esc(g.providerId);
+    return `<section class="card model-group" data-provider="${groupId}">
       <div class="model-group-head">
-        <label class="model-check" title="Select every model of this provider">
-          <input type="checkbox" ${allSelected ? "checked" : ""} onchange="modelSelectProvider('${esc(g.providerId)}', this.checked)"/>
-        </label>
-        <button class="chev-btn" title="Collapse / expand this group" onclick="modelGroupToggle('${esc(g.providerId)}')"><span class="chev">▾</span></button>
-        <button class="model-group-toggle" title="Open this provider group" onclick="openModelGroup('${esc(g.providerId)}')">
-          <strong>${esc(g.name)}</strong>
-          <span class="badge badge-muted">${g.models.length} model(s)</span>
-          <span class="badge badge-${g.active ? "ok" : "muted"}">${g.active} active</span>
-        </button>
+        <div class="model-group-main" onclick="modelGroupToggle('${groupId}')" title="Collapse / expand this provider">
+          <button class="chev-btn" type="button" aria-label="Collapse / expand"><span class="chev">▾</span></button>
+          <div class="provider-avatar">${esc((g.name || "?").trim().slice(0, 1).toUpperCase())}</div>
+          <div class="model-group-title">
+            <strong>${esc(g.name)}</strong>
+            <div class="model-group-sub">${esc(provider.type || provider.apiFormat || "provider")} ${provider.baseUrl ? `· ${esc(provider.baseUrl)}` : ""}</div>
+          </div>
+        </div>
+        <div class="model-group-stats">
+          <span class="badge badge-muted">${g.models.length} total</span>
+          <span class="badge badge-ok">${g.active} active</span>
+          ${inactive ? `<span class="badge badge-muted">${inactive} inactive</span>` : ""}
+        </div>
+        <div class="model-group-actions">
+          <label class="model-check model-select-chip" title="Select visible models in this provider">
+            <input type="checkbox" ${allSelected ? "checked" : ""} onchange="modelSelectProvider('${groupId}', this.checked)"/> Select
+          </label>
+          <button class="btn btn-ghost" onclick="openModelGroup('${groupId}')">Details</button>
+        </div>
       </div>
       <div class="model-group-body">
-        <div class="table-wrap"><table><thead><tr>
-          <th style="width:34px"></th><th>Display Name</th><th>Model ID</th><th>Context</th><th>Caps</th><th>Active</th><th></th>
-        </tr></thead><tbody>
-        ${g.models.map((m) => `<tr class="${modelSelection.has(m.id) ? "row-selected" : ""}" data-model="${esc(m.id)}">
-          <td><input type="checkbox" ${modelSelection.has(m.id) ? "checked" : ""} onchange="modelSelectOne('${esc(m.id)}', this.checked)"/></td>
-          <td><strong>${esc(m.displayName)}</strong></td>
-          <td class="mono">${esc(m.modelId)}${tuningBadge(m)}</td>
-          <td>${Number(m.contextWindow || 0).toLocaleString()}</td>
-          <td>${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</td>
-          <td>${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</td>
-          <td style="white-space:nowrap;text-align:right">
-            <button class="btn btn-ghost" onclick="openModelChat('${esc(m.id)}')">💬 Test</button>
-            <button class="btn btn-ghost" onclick="openModelEdit('${esc(m.id)}')">✏️ Edit</button>
-            <button class="btn btn-ghost" onclick="modelToggle('${esc(m.id)}', ${m.active ? "false" : "true"})">${m.active ? "Deactivate" : "Activate"}</button>
-            <button class="btn btn-ghost" onclick="modelDelete('${esc(m.id)}')">🗑</button>
-          </td></tr>`).join("")}
-        </tbody></table></div>
+        <div class="model-group-meta">
+          <div class="model-active-meter" title="${activePct}% active"><span style="width:${activePct}%"></span></div>
+          <div class="model-cap-strip">${caps.map((c) => `<span class="badge badge-muted">${esc(c)}</span>`).join(" ") || '<span class="badge badge-muted">no capabilities</span>'}</div>
+        </div>
+        <div class="model-card-grid">${g.models.map(renderModelCard).join("")}</div>
       </div>
-    </div>`;
+    </section>`;
   }
+
+  function renderModelCard(m) {
+    const id = esc(m.id);
+    const ctx = Number(m.contextWindow || 0);
+    return `<article class="model-card ${modelSelection.has(m.id) ? "row-selected" : ""}" data-model="${id}">
+      <div class="model-card-top">
+        <label class="model-card-check" title="Select model"><input data-model-check type="checkbox" ${modelSelection.has(m.id) ? "checked" : ""} onchange="modelSelectOne('${id}', this.checked)"/></label>
+        <div class="model-card-name">
+          <strong>${esc(m.displayName || m.modelId)}</strong>
+          <div class="mono model-id" title="${esc(m.modelId)}">${esc(m.modelId)}${tuningBadge(m)}</div>
+        </div>
+        ${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}
+      </div>
+      <div class="model-card-facts">
+        <span title="Context window">🧠 ${ctx ? ctx.toLocaleString() : "—"}</span>
+        <span title="Priority">↕ ${Number(m.priority || 100)}</span>
+        <span title="Cost per 1k tokens">${money(Number(m.inputCostPer1k || 0) + Number(m.outputCostPer1k || 0))}/1k</span>
+      </div>
+      <div class="model-card-caps">${capsBadges(m.capabilities) || '<span class="badge badge-muted">—</span>'}</div>
+      <div class="model-card-actions">
+        <button class="btn btn-ghost" onclick="openModelChat('${id}')">💬 Test</button>
+        <button class="btn btn-ghost" onclick="openModelEdit('${id}')">✏️ Edit</button>
+        <button class="btn btn-ghost" onclick="modelToggle('${id}', ${m.active ? "false" : "true"})">${m.active ? "Disable" : "Enable"}</button>
+        <button class="btn btn-ghost danger-text" onclick="modelDelete('${id}')">🗑</button>
+      </div>
+    </article>`;
+  }
+
+  window.modelGroupsCollapseAll = () => $$(".model-group").forEach((el) => el.classList.add("collapsed"));
+  window.modelGroupsExpandAll = () => $$(".model-group").forEach((el) => el.classList.remove("collapsed"));
 
   /** Small badge showing that a model carries per-model overrides. */
   function tuningBadge(m) {
@@ -1362,7 +1397,7 @@
   /* ---- multi-select ---- */
   window.modelSelectOne = (id, checked) => {
     if (checked) modelSelection.add(id); else modelSelection.delete(id);
-    const row = document.querySelector(`tr[data-model="${CSS.escape(id)}"]`);
+    const row = document.querySelector(`[data-model="${CSS.escape(id)}"]`);
     if (row) row.classList.toggle("row-selected", checked);
     syncGroupCheckboxes();
     renderBulkBar();
@@ -1371,9 +1406,9 @@
     const visibleForProvider = modelVisibleCache.filter((x) => (x.providerId || "__none__") === providerId);
     for (const m of visibleForProvider) {
       if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
-      const box = document.querySelector(`tr[data-model="${CSS.escape(m.id)}"] input[type=checkbox]`);
+      const box = document.querySelector(`[data-model="${CSS.escape(m.id)}"] input[data-model-check]`);
       if (box) box.checked = checked;
-      const row = document.querySelector(`tr[data-model="${CSS.escape(m.id)}"]`);
+      const row = document.querySelector(`[data-model="${CSS.escape(m.id)}"]`);
       if (row) row.classList.toggle("row-selected", checked);
     }
     renderBulkBar();
