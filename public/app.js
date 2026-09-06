@@ -1025,9 +1025,12 @@
   /* MODELS — grouped by provider, multi-select, streaming chat modal */
   // Selected model ids (survives re-renders of the Models page).
   const modelSelection = new Set();
-  // Which provider groups are currently expanded inside the "Groups" modal.
+  // Full model/provider caches for the Models page.
   let modelsCache = [];
   let providersCache = [];
+  // Client-side search state. Kept outside the route so refreshes preserve the query.
+  let modelSearchQuery = "";
+  let modelVisibleCache = [];
 
   function providerNameOf(id) {
     return providersCache.find((p) => p.id === id)?.name || id || "Unknown provider";
@@ -1056,18 +1059,84 @@
     providersCache = providers;
     // Drop selections pointing at models that no longer exist.
     for (const id of [...modelSelection]) if (!list.some((m) => m.id === id)) modelSelection.delete(id);
-    const groups = groupModelsByProvider(list);
+    renderModelsPage();
+  });
+
+  function searchableModelText(m) {
+    const caps = Object.entries(m.capabilities || {}).filter(([, enabled]) => enabled).map(([key]) => key).join(" ");
+    const tags = Array.isArray(m.tags) ? m.tags.join(" ") : "";
+    return [
+      m.displayName, m.modelId, m.id, providerNameOf(m.providerId),
+      m.active ? "active enabled" : "inactive disabled", caps, tags, m.notes,
+    ].filter(Boolean).join(" ").toLowerCase();
+  }
+
+  function filteredModels() {
+    const terms = modelSearchQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    if (!terms.length) return modelsCache;
+    return modelsCache.filter((m) => {
+      const haystack = searchableModelText(m);
+      return terms.every((term) => haystack.includes(term));
+    });
+  }
+
+  function renderModelsPage() {
+    modelVisibleCache = filteredModels();
+    const allGroups = groupModelsByProvider(modelsCache);
+    const groups = groupModelsByProvider(modelVisibleCache);
+    const hasModels = modelsCache.length > 0;
+    const hasQuery = modelSearchQuery.trim().length > 0;
     $("#content").innerHTML = `<div class="overview">
-        <div><h1>Models</h1><p>Model Registry — grouped by provider · ${list.length} model(s) in ${groups.length} group(s)</p></div>
+        <div><h1>Models</h1><p>Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)</p></div>
         <div class="flex">
           <button class="btn" onclick="openModelGroups()">🗂 Groups</button>
           <button class="btn btn-primary" onclick="openModel()">＋ Add Model</button>
         </div>
       </div>
+      <div class="card card-body model-search-card">
+        <div class="model-search-row">
+          <div class="model-search-box">
+            <span class="model-search-icon">⌕</span>
+            <input class="input" id="model-search" placeholder="Search models by name, ID, provider, capability, tag or status…" value="${esc(modelSearchQuery)}" autocomplete="off" oninput="modelSearch(this.value)"/>
+          </div>
+          <button class="btn btn-ghost" id="model-search-clear" onclick="modelSearchClear()" ${hasQuery ? "" : "disabled"}>Clear</button>
+        </div>
+        <div class="field-hint" id="model-search-summary">${modelSearchSummary()}</div>
+      </div>
       <div id="model-bulkbar"></div>
-      <div id="model-groups">${groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState("🧠", "No models", "Add a model and attach it to a provider.")}</div>`}</div>`;
+      <div id="model-groups">${groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState(hasModels ? "🔎" : "🧠", hasModels ? "No matching models" : "No models", hasModels ? "Try a different search term or clear the filter." : "Add a model and attach it to a provider.")}</div>`}</div>`;
     renderBulkBar();
-  });
+  }
+
+  function modelSearchSummary() {
+    const q = modelSearchQuery.trim();
+    if (!modelsCache.length) return "No models in the registry yet.";
+    if (!q) return `Showing all ${modelsCache.length} model(s). Search supports multiple words, provider names, capabilities like code or vision, and active/inactive status.`;
+    return `Showing ${modelVisibleCache.length} of ${modelsCache.length} model(s) for “${esc(q)}”.`;
+  }
+
+  window.modelSearch = (value) => {
+    modelSearchQuery = value || "";
+    const input = $("#model-search");
+    const start = input?.selectionStart ?? modelSearchQuery.length;
+    const end = input?.selectionEnd ?? modelSearchQuery.length;
+    modelVisibleCache = filteredModels();
+    const groups = groupModelsByProvider(modelVisibleCache);
+    const hasModels = modelsCache.length > 0;
+    $("#model-groups").innerHTML = groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState(hasModels ? "🔎" : "🧠", hasModels ? "No matching models" : "No models", hasModels ? "Try a different search term or clear the filter." : "Add a model and attach it to a provider.")}</div>`;
+    const summary = $("#model-search-summary");
+    if (summary) summary.innerHTML = modelSearchSummary();
+    const clear = $("#model-search-clear");
+    if (clear) clear.disabled = !modelSearchQuery.trim();
+    renderBulkBar();
+    if (input) { input.focus(); try { input.setSelectionRange(start, end); } catch {} }
+  };
+
+  window.modelSearchClear = () => {
+    modelSearchQuery = "";
+    renderModelsPage();
+    $("#model-search")?.focus();
+  };
 
   /** One collapsible provider card holding its models. */
   function renderProviderGroup(g) {
@@ -1260,7 +1329,8 @@
     renderBulkBar();
   };
   window.modelSelectProvider = (providerId, checked) => {
-    for (const m of modelsCache.filter((x) => (x.providerId || "__none__") === providerId)) {
+    const visibleForProvider = modelVisibleCache.filter((x) => (x.providerId || "__none__") === providerId);
+    for (const m of visibleForProvider) {
       if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
       const box = document.querySelector(`tr[data-model="${CSS.escape(m.id)}"] input[type=checkbox]`);
       if (box) box.checked = checked;
@@ -1270,17 +1340,18 @@
     renderBulkBar();
   };
   window.modelSelectAll = (checked) => {
-    for (const m of modelsCache) {
+    const target = modelVisibleCache.length || !modelSearchQuery.trim() ? modelVisibleCache : [];
+    for (const m of target) {
       if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
     }
-    refreshCurrent();
+    renderModelsPage();
   };
-  window.modelSelectionClear = () => { modelSelection.clear(); refreshCurrent(); };
+  window.modelSelectionClear = () => { modelSelection.clear(); renderModelsPage(); };
 
   function syncGroupCheckboxes() {
     for (const card of $$(".model-group")) {
       const pid = card.dataset.provider;
-      const models = modelsCache.filter((m) => (m.providerId || "__none__") === pid);
+      const models = modelVisibleCache.filter((m) => (m.providerId || "__none__") === pid);
       const box = card.querySelector(".model-check input");
       if (!box) continue;
       const selected = models.filter((m) => modelSelection.has(m.id)).length;
@@ -1298,7 +1369,7 @@
     el.innerHTML = `<div class="bulk-bar">
       <span><strong>${n}</strong> model(s) selected</span>
       <div class="flex">
-        <button class="btn" onclick="modelSelectAll(true)">Select all (${modelsCache.length})</button>
+        <button class="btn" onclick="modelSelectAll(true)">Select visible (${modelVisibleCache.length})</button>
         <button class="btn" onclick="modelBulk('activate')">✓ Activate</button>
         <button class="btn" onclick="modelBulk('deactivate')">⏸ Deactivate</button>
         <button class="btn btn-danger" onclick="modelBulk('delete')">🗑 Delete selected</button>

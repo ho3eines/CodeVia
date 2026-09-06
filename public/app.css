@@ -319,6 +319,16 @@ code, pre { font-family: var(--mono); }
 .diff-same { color: var(--text-muted); }
 
 /* ---------- Models page: provider groups + multi-select ---------- */
+
+.model-search-card { margin-bottom: 14px; }
+.model-search-row { display: flex; align-items: center; gap: 10px; }
+.model-search-box { position: relative; flex: 1; min-width: 220px; }
+.model-search-box .input { padding-left: 34px; }
+.model-search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; font-size: 14px; }
+.model-search-row .btn:disabled { opacity: .45; cursor: not-allowed; }
+[dir="rtl"] .model-search-box .input { padding-left: 12px; padding-right: 34px; }
+[dir="rtl"] .model-search-icon { left: auto; right: 12px; }
+@media (max-width: 760px) { .model-search-row { flex-direction: column; align-items: stretch; } }
 .model-group { margin-bottom: 14px; overflow: hidden; }
 .model-group-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .model-group-head .model-check { display: flex; align-items: center; }
