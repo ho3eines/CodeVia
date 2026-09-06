@@ -3779,7 +3779,7 @@
         <div class="card card-body"><div class="card-title">Backup & Import/Export</div>
           <div class="flex"><button class="btn" onclick="downloadBackup()">⬇ System Backup</button><button class="btn" id="restore-btn">⬆ Restore Backup</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
           <input type="file" id="restore-file" accept="application/json,.json" style="display:none"/>
-          <p style="color:var(--text-muted);font-size:12px">این فایل فقط تنظیمات GitHub Login را نگه می‌دارد. بکاپ کامل و زمان‌بندی‌شده (پروژه‌ها، مدل‌ها، پرووایدرها، ایجنت‌ها، کاربران و…) در <strong>Admin → System Backup</strong> است — با کلیدهای رمزنگاری‌شده (هرگز plaintext).</p>
+          <p style="color:var(--text-muted);font-size:12px">دکمه Restore حالا هر دو نوع فایل را تشخیص می‌دهد: بکاپ سبک Settings و بکاپ کامل <span class="mono">codevia-runtime-backup</span>. برای گرفتن بکاپ کامل از <strong>Admin → System Backup → Export full snapshot</strong> یا Run backup now استفاده کن — کلیدها فقط رمزنگاری‌شده ذخیره می‌شوند (هرگز plaintext).</p>
           <p style="color:var(--text-muted);font-size:11px">💡 در Railway، قبل از Redeploy از Admin یک بکاپ کامل بگیرید و بعد از دیپلی (که دیتابیس موقت پاک می‌شود) Restore کنید تا همه‌چیز برگردد — یا Volume را طبق راهنمای Admin متصل کنید.</p>
         </div>
       </div>
@@ -3799,8 +3799,15 @@
         if (!f) return;
         try {
           const data = JSON.parse(await f.text());
+          if (data.type === "codevia-runtime-backup") {
+            const res = await api("/admin/backup/restore", { method: "POST", body: { snapshotData: data, replace: true } });
+            if (!res.ok) throw new Error(res.error || "Full restore failed");
+            toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored. Reloading…`, "ok");
+            setTimeout(() => location.reload(), 700);
+            return;
+          }
           if (!data.adminSettings || typeof data.adminSettings !== "object") {
-            throw new Error("فایل Backup بخش adminSettings ندارد — از نسخه جدیدتر بکاپ بگیرید");
+            throw new Error("این فایل بکاپ کامل CodeVia یا بکاپ Settings معتبر نیست. برای بکاپ کامل از Admin → Backup & restore → Export full snapshot استفاده کن.");
           }
           await api("/settings/restore", { method: "POST", body: { adminSettings: data.adminSettings } });
           toast("Backup restored", "GitHub login settings were restored.", "ok");
@@ -4021,7 +4028,7 @@
             if (!confirm(`Restore snapshot ${id}? This replaces the full runtime state.`)) return;
             try {
               const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, replace: true } });
-              if (res.ok) { toast("Backup restored", `${res.records} records restored`, "ok"); refreshCurrent(); }
+              if (res.ok) { toast("Backup restored", `${res.records} records restored. Reloading…`, "ok"); setTimeout(() => location.reload(), 700); }
               else toast("Restore failed", res.error || "", "err");
             } catch (e) { toast("Restore failed", e.message, "err"); }
           });
@@ -4042,7 +4049,7 @@
         const btn = bakRestore; btn.disabled = true; btn.textContent = "Restoring…";
         try {
           const res = await api("/admin/backup/restore", { method: "POST", body: { replace: true } });
-          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok"); refreshCurrent(); }
+          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored. Reloading…`, "ok"); setTimeout(() => location.reload(), 700); }
           else toast("Restore failed", res.error || "", "err");
         } catch (e) { toast("Restore failed", e.message, "err"); }
         finally { btn.disabled = false; btn.textContent = "↺ Restore latest"; }

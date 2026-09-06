@@ -274,7 +274,11 @@ export class BackupService {
     const base = normalizeBasePath(settings.path);
     const branch = settings.branch ?? "main";
     const requested = input?.snapshot;
-    const list = await this.listBackups(undefined, 1);
+    // Use the same repo/branch/path overrides when resolving "latest". The old
+    // code listed the globally configured repository here, so restoring with an
+    // explicit repo/path could report success for the wrong snapshot or fail to
+    // apply the backup the operator just selected.
+    const list = await this.listBackups({ repo: settings.repo, branch, path: base }, 1);
     const latest = list[0];
     const target = requested && requested !== "latest" ? requested : latest?.id;
     if (!target) {
