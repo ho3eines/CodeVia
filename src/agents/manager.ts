@@ -1,4 +1,4 @@
-import type { AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task } from "../domain/entities.js";
+import type { AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task, Workflow, WorkflowNode } from "../domain/entities.js";
 import {
   agentTypesForProject,
   canonicalOption,
@@ -222,7 +222,9 @@ export class AgentManager {
     const discovered = rulesToStrings(await discoverProjectRules(this.deps.github, refreshed, detected.files)).map((r) => `${DISCOVERED_RULE_TAG}\n${r}`);
     const manual = refreshed.settings.rules.filter((r) => !r.startsWith(DISCOVERED_RULE_TAG));
     const rules = [...manual, ...discovered];
-    this.deps.projectRepo.upsert({ ...refreshed, settings: { ...refreshed.settings, skills, rules } }, { key: refreshed.slug });
+    const updatedProject = { ...refreshed, settings: { ...refreshed.settings, skills, rules } };
+    this.deps.projectRepo.upsert(updatedProject, { key: refreshed.slug });
+    this.ensureDefaultWorkflows(updatedProject);
     logger.info(`onboarded project ${projectId}`, {
       agents: agents.length,
       agentTypes: agentTypes.length,
@@ -231,6 +233,57 @@ export class AgentManager {
       detected: { languages: detected.capabilities.languages, frameworks: detected.capabilities.frameworks, databases: detected.capabilities.databases },
     });
     return { agents: agents.length, skills: seeded };
+  }
+
+  /**
+   * Every project gets executable starter workflows that mirror the product
+   * contract from the master prompt. They are generated from the enabled agent
+   * roster, so a small project does not receive a workflow containing missing
+   * specialist agents. Existing workflows are left intact (versioned user edits
+   * must never be overwritten by onboarding).
+   */
+  private ensureDefaultWorkflows(project: Project): void {
+    const existing = this.deps.workflowRepo.byProject(project.id);
+    const existingSlugs = new Set(existing.map((w) => w.slug));
+    const enabledTypes = new Set(this.deps.agentRepo.byProject(project.id).filter((a) => a.enabled).map((a) => a.type));
+    const create = (slug: string, name: string, description: string, orderedAgents: AgentType[]): Workflow | undefined => {
+      if (existingSlugs.has(slug)) return undefined;
+      const agentNodes: WorkflowNode[] = orderedAgents
+        .filter((type, index, arr) => enabledTypes.has(type) && arr.indexOf(type) === index)
+        .map((type, i) => ({ id: `${slug}-${i + 1}-${type}`, type: "agent", name: type, config: { agentType: type }, retries: 1 }));
+      if (!agentNodes.length) return undefined;
+      const approval: WorkflowNode = {
+        id: `${slug}-approval`,
+        type: "approval",
+        name: "Human approval before PR / merge / deploy",
+        config: { message: "Review the agent result before any merge, deployment, migration, or other sensitive operation." },
+        retries: 0,
+      };
+      const nodes = [...agentNodes, approval];
+      const edges = nodes.slice(0, -1).map((n, i) => ({ from: n.id, to: nodes[i + 1].id }));
+      const workflow = this.deps.workflowRepo.create({
+        projectId: project.id,
+        name,
+        slug,
+        description,
+        nodes,
+        edges,
+        enabled: true,
+      });
+      existingSlugs.add(slug);
+      return workflow;
+    };
+    const created = [
+      create("autonomous-development-loop", "Autonomous Development Loop", "Research → architecture → implementation → QA → security → code review → human approval.", ["research", "business-analyst", "system-architect", "backend-developer", "frontend-developer", "uiux", "qa-test", "security", "code-reviewer", "documentation"]),
+      create("bug-diagnosis-loop", "Bug Diagnosis Loop", "Issue/test failure → diagnosis → responsible agent → QA → review → approval.", ["qa-test", "debugging", "backend-developer", "frontend-developer", "uiux", "database", "qa-test", "code-reviewer"]),
+    ].filter(Boolean) as Workflow[];
+    if (created.length) {
+      const current = this.deps.projectRepo.findById(project.id)?.data ?? project;
+      this.deps.projectRepo.upsert(
+        { ...current, settings: { ...current.settings, workflows: [...new Set([...(current.settings.workflows ?? []), ...created.map((w) => w.id)])] }, updatedAt: new Date().toISOString() },
+        { key: current.slug },
+      );
+    }
   }
 
   /* ------------------------------------------------------------------ *

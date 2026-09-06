@@ -121,12 +121,12 @@ describe("project import — preview, create, merge", () => {
     expect(wf.id).toBeTruthy();
     const exported = (await app!.inject({ method: "GET", url: `/projects/${src.id}/export` })).json();
     expect(exported.agents.length).toBeGreaterThan(0);
-    expect(exported.workflows.length).toBe(1);
+    expect(exported.workflows.map((w: { slug: string }) => w.slug)).toEqual(expect.arrayContaining(["autonomous-development-loop", "bug-diagnosis-loop", "ship"]));
 
     const before = container.projectRepo.findMany().length;
     const preview = (await app!.inject({ method: "POST", url: "/settings/import", payload: { ...exported, dryRun: true } })).json();
     expect(preview.dryRun).toBe(true);
-    expect(preview.plan.workflows.create).toBe(1);
+    expect(preview.plan.workflows.create).toBe(exported.workflows.length);
     expect(preview.conflicts.some((c: { kind: string }) => c.kind === "project")).toBe(true); // slug taken → rename
     expect(container.projectRepo.findMany().length).toBe(before);
 
@@ -134,8 +134,8 @@ describe("project import — preview, create, merge", () => {
     expect(created.ok).toBe(true);
     expect(created.projectId).not.toBe(src.id);
     const newWfs = container.workflowRepo.byProject(created.projectId);
-    expect(newWfs.length).toBe(1);
-    expect(newWfs[0].id).not.toBe(wf.id);
+    expect(newWfs.map((w) => w.slug)).toEqual(expect.arrayContaining(["autonomous-development-loop", "bug-diagnosis-loop", "ship"]));
+    expect(newWfs.find((w) => w.slug === "ship")?.id).not.toBe(wf.id);
     expect(container.agentRepo.byProject(created.projectId).length).toBeGreaterThan(0);
 
     // Merge back into the source project: everything conflicts → skipped by default.
@@ -143,9 +143,9 @@ describe("project import — preview, create, merge", () => {
     expect(merged.imported.workflows).toBe(0);
     expect(merged.imported.skipped).toBeGreaterThan(0);
     const over = (await app!.inject({ method: "POST", url: "/settings/import", payload: { ...exported, mode: "merge", targetProjectId: src.id, conflict: "overwrite" } })).json();
-    expect(over.imported.workflows).toBe(1);
-    expect(container.workflowRepo.byProject(src.id).length).toBe(1);
-    expect(container.workflowRepo.byProject(src.id)[0].version).toBe(2);
+    expect(over.imported.workflows).toBe(exported.workflows.length);
+    expect(container.workflowRepo.byProject(src.id).length).toBe(exported.workflows.length);
+    expect(container.workflowRepo.byProject(src.id).find((x) => x.slug === "ship")?.version).toBe(2);
   });
 });
 

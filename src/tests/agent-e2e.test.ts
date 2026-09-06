@@ -26,6 +26,9 @@ describe("AgentManager end-to-end (mock GitHub + mock AI)", () => {
     expect(agents.some((a) => a.type === "backend-developer")).toBe(true);
     expect(agents.some((a) => a.type === "qa-test")).toBe(true);
     expect(container.skillRepo.count()).toBeGreaterThan(0);
+    const workflows = container.workflowRepo.byProject(project.id);
+    expect(workflows.map((w) => w.slug)).toContain("autonomous-development-loop");
+    expect(workflows.map((w) => w.slug)).toContain("bug-diagnosis-loop");
   });
 
   it("runs a task end-to-end and produces a successful run with steps", async () => {

@@ -1375,14 +1375,26 @@
     };
   };
   window.projectAsk = (id) => {
-    openModal("Ask AI on Project", `<div class="field"><label>Prompt</label><textarea class="textarea" id="ask-prompt" placeholder="بررسی کن چرا Login بعد از آخرین Commit خراب شده"></textarea></div><div class="flex"><button class="btn btn-primary" id="ask-go">Submit</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    openModal("Project Assistant — طبق پرامپ پروژه", `<div class="field"><label>درخواست</label><textarea class="textarea" id="ask-prompt" dir="auto" placeholder="مثلاً: پروژه را بررسی کن، بعد از آخرین Commit تست کامل Login را اجرا کن؛ اگر Backend بود درست کن و در نهایت PR بساز."></textarea><div class="field-hint">در حالت Autonomous، سیستم خودش Workflow/Agent مناسب را انتخاب می‌کند، Context پروژه و قوانین GitHub را inject می‌کند و عملیات حساس را به Approval می‌فرستد.</div></div><div class="grid-2"><div class="field"><label>Execution mode</label><select class="select" id="ask-mode"><option value="workflow" selected>Autonomous workflow loop</option><option value="agent">Smart single-agent routing</option><option value="simulation">Simulation / dry-run only</option></select></div><div class="field"><label>Agent hint</label><select class="select" id="ask-agent"><option value="">Auto-detect</option><option value="backend-developer">Backend</option><option value="frontend-developer">Frontend</option><option value="uiux">UI/UX</option><option value="qa-test">QA/Test</option><option value="debugging">Debugging</option><option value="database">Database</option><option value="security">Security</option><option value="devops">DevOps</option><option value="system-architect">Architect</option><option value="research">Research</option><option value="code-reviewer">Code Reviewer</option><option value="documentation">Documentation</option></select></div></div><div class="flex"><button class="btn btn-primary" id="ask-go">Start</button><button class="btn" onclick="closeModal()">Cancel</button></div><div id="ask-result" class="mt"></div>`);
+    const inp = $("#ask-prompt");
+    inp.addEventListener("input", () => applyTextDirection(inp, inp.value));
     $("#ask-go").onclick = async () => {
       const prompt = $("#ask-prompt").value.trim();
       if (!prompt) { toast("Prompt required", "", "err"); return; }
+      const btn = $("#ask-go"); btn.disabled = true; btn.textContent = "Routing…";
       try {
-        const r = await api(`/projects/${id}/ask`, { method: "POST", body: { title: prompt.slice(0, 80), description: prompt } });
-        closeModal(); toast("Request queued", `Task ${r.task.id.slice(0, 8)} → agent ${r.task.agentType || "auto"}`, "ok"); refreshCurrent();
+        const body = { title: prompt.slice(0, 80), description: prompt, executionMode: $("#ask-mode").value };
+        const hint = $("#ask-agent").value;
+        if (hint) body.agentType = hint;
+        const r = await api(`/projects/${id}/ask`, { method: "POST", body });
+        if (r.simulation) {
+          $("#ask-result").innerHTML = `<div class="card card-body"><div class="card-title">Simulation plan <span class="badge badge-info">${esc(r.routedAgentType)}</span></div>${(r.plan || []).map((s, i) => `<div class="meter-row"><span class="lbl">${i + 1}. ${esc(s.label)}</span><span>${s.tool ? `<span class="badge badge-muted">${esc(s.tool)}</span>` : ""} ${s.requiresApproval ? '<span class="badge badge-warn">approval</span>' : ""}</span></div>`).join("")}</div>`;
+          toast("Simulation ready", r.routedAgentType || "auto", "ok");
+        } else {
+          closeModal(); toast("Project request queued", `Task ${r.task.id.slice(0, 8)} · ${r.workflowId ? "workflow" : r.routedAgentType}`, "ok"); location.hash = `#/projects/${id}/runs`;
+        }
       } catch (e) { toast("Error", e.message, "err"); }
+      finally { btn.disabled = false; btn.textContent = "Start"; }
     };
   };
   window.projectRun = async (id) => {
