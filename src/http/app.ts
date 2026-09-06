@@ -2,6 +2,8 @@ import { registerHardening } from "./hardening.js";
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { readdir, readFile } from "node:fs/promises";
+import type { ServerResponse } from "node:http";
+import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import cors from "@fastify/cors";
@@ -121,22 +123,74 @@ export async function buildServer(container: Container): Promise<BuildServerResu
 
   // Serve the SPA + static assets from /public.
   const publicDir = resolve(process.cwd(), "public");
+  // In development the shell files change constantly. ETag revalidation makes
+  // browsers hold on to a stale app.css/app.js (the server answers 304), so
+  // edits appear not to land. Disable caching for the shell outside
+  // production; production keeps normal validators.
+  const isProd = getEnv().NODE_ENV === "production";
   await app.register(fastifyStatic, {
     root: publicDir,
     prefix: "/",
     wildcard: false,
+    etag: isProd,
+    lastModified: isProd,
+    cacheControl: false,
+    setHeaders: isProd
+      ? undefined
+      : (res) => {
+          // @fastify/static hands this callback the raw ServerResponse on some
+          // versions and a Fastify reply on others; support whichever arrives.
+          const target = res as Partial<ServerResponse> & { header?: (k: string, v: string) => void };
+          const set = (k: string, v: string) => {
+            if (typeof target.setHeader === "function") target.setHeader(k, v);
+            else if (typeof target.header === "function") target.header(k, v);
+          };
+          set("cache-control", "no-store, no-cache, must-revalidate");
+          set("pragma", "no-cache");
+          set("expires", "0");
+        },
   });
   // Exact URL paths of the files in /public (e.g. "/app.js", "/app.css",
   // "/index.html"). Used by the auth guard to keep the SPA shell reachable.
   const staticAssetPaths = await listStaticAssetPaths(publicDir);
 
+  /**
+   * Read index.html and stamp the asset URLs with a hash of their current
+   * contents (`app.css?v=<hash>`). A changed stylesheet therefore changes the
+   * URL, which defeats browser and proxy caches that would otherwise keep
+   * serving a stale shell after a deploy.
+   */
+  async function renderShell(): Promise<string> {
+    const html = await readFile(resolve(publicDir, "index.html"), "utf8");
+    const stamp = async (file: string) => {
+      try {
+        const buf = await readFile(resolve(publicDir, file));
+        return createHash("sha1").update(buf).digest("hex").slice(0, 10);
+      } catch {
+        return String(Date.now());
+      }
+    };
+    const [css, js] = await Promise.all([stamp("app.css"), stamp("app.js")]);
+    return html.replace("/app.css?v=DEV", `/app.css?v=${css}`).replace("/app.js?v=DEV", `/app.js?v=${js}`);
+  }
+
+  // fastify-static owns "/" and "/index.html"; intercept them in a hook so the
+  // stamped shell wins without declaring a duplicate route.
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method !== "GET") return;
+    const path = request.url.split("?")[0];
+    if (path === "/" || path === "/index.html") {
+      reply.type("text/html").header("cache-control", "no-store");
+      return reply.send(await renderShell());
+    }
+  });
+
   // SPA fallback: unknown non-API GET routes render index.html (hash routing).
   app.setNotFoundHandler(async (request, reply) => {
     const url = request.url.split("?")[0];
     if (request.method === "GET" && !url.startsWith("/api") && !url.startsWith("/docs")) {
-      const html = await readFile(resolve(publicDir, "index.html"), "utf8");
-      reply.type("text/html");
-      return reply.send(html);
+      reply.type("text/html").header("cache-control", "no-store");
+      return reply.send(await renderShell());
     }
     reply.code(404);
     return { error: "not found", url };

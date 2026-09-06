@@ -63,6 +63,34 @@ function withStatus(p: ModelProvider): ModelProvider & { readiness: ReturnType<t
   };
 }
 
+/**
+ * Provider payload for the UI: readiness/secret status plus how many models of
+ * the Models section are attached to it. The Providers page shows those counts
+ * on every card so a user can tell at a glance whether a provider is actually
+ * doing anything, without cross-referencing the Models page.
+ */
+function withStatusAndCounts(
+  p: ModelProvider,
+  container: Container,
+): ReturnType<typeof withStatus> & { modelCount: number; activeModelCount: number } {
+  const models = container.modelRepo.findMany().filter((m) => m.data.providerId === p.id);
+  return {
+    ...withStatus(p),
+    modelCount: models.length,
+    activeModelCount: models.filter((m) => m.data.active).length,
+  };
+}
+
+/**
+ * The seeded offline provider (fixed id) is the platform's always-available
+ * fallback and must never be deleted. User-created mock providers — including
+ * duplicates of the built-in one — are ordinary rows and stay deletable.
+ */
+const BUILT_IN_MOCK_PROVIDER_ID = "provider-mock";
+function isBuiltInMock(p: ModelProvider): boolean {
+  return p.id === BUILT_IN_MOCK_PROVIDER_ID;
+}
+
 /** Per-model overrides (temperature / max tokens) as stored on the model row. */
 function tuningOf(m: Model): ModelTuning {
   return {
@@ -521,7 +549,33 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   });
 
   app.get("/providers", { schema: { tags: ["providers"] } }, async () => {
-    return container.providerRepo.findMany().map((r) => withStatus(r.data));
+    return container.providerRepo.findMany().map((r) => withStatusAndCounts(r.data, container));
+  });
+
+  /**
+   * Provider dashboard summary — the numbers shown at the top of the Providers
+   * page (total / active / ready / needs a key, plus attached model counts).
+   */
+  app.get("/providers/summary", { schema: { tags: ["providers"] } }, async () => {
+    const providers = container.providerRepo.findMany().map((r) => r.data);
+    const models = container.modelRepo.findMany().map((r) => r.data);
+    const ready = providers.filter((p) => providerReadiness(p).ready);
+    const active = providers.filter((p) => p.active);
+    return {
+      total: providers.length,
+      active: active.length,
+      inactive: providers.length - active.length,
+      ready: ready.length,
+      needsKey: providers.filter((p) => !providerReadiness(p).ready).length,
+      activeAndReady: providers.filter((p) => p.active && providerReadiness(p).ready).length,
+      models: models.length,
+      activeModels: models.filter((m) => m.active).length,
+      orphanModels: models.filter((m) => !providers.some((p) => p.id === m.providerId)).length,
+      byType: providers.reduce<Record<string, number>>((acc, p) => {
+        acc[p.type] = (acc[p.type] ?? 0) + 1;
+        return acc;
+      }, {}),
+    };
   });
 
   app.post("/providers", { schema: { tags: ["providers"] } }, async (req, reply) => {
@@ -565,7 +619,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     draft.active = b.active === false ? false : readiness.ready;
     const p = container.providerRepo.create(draft);
     reply.code(201);
-    const status: ProviderStatus = withStatus(p);
+    const status: ProviderStatus = withStatusAndCounts(p, container);
 
     // 🤖 Auto-discover and add models from the newly created provider (real catalog,
     //    capabilities auto-detected). The live test result is surfaced so the UI can
@@ -577,7 +631,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   app.get("/providers/:id", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = container.providerRepo.findById(id)?.data;
-    return p ? withStatus(p) : fail(reply, 404, "provider not found");
+    return p ? withStatusAndCounts(p, container) : fail(reply, 404, "provider not found");
   });
 
   // Pre-registration connectivity test — never saves anything. Feeds the
@@ -658,7 +712,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     //    model in the provider's live catalog that is missing from the Models
     //    section is added automatically. Best-effort — a failed catalog call
     //    never fails the edit itself.
-    const status: ProviderStatus = withStatus(p);
+    const status: ProviderStatus = withStatusAndCounts(p, container);
     await attachDiscovery(status, p, container, "updated");
     return status;
   });
@@ -676,7 +730,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const p = { ...r.data, active: true, updatedAt: new Date().toISOString() };
     container.providerRepo.upsert(p);
     container.providerRegistry.invalidate(id);
-    return withStatus(p);
+    return withStatusAndCounts(p, container);
   });
 
   app.post("/providers/:id/deactivate", { schema: { tags: ["providers"] } }, async (req, reply) => {
@@ -686,7 +740,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const p = { ...r.data, active: false, updatedAt: new Date().toISOString() };
     container.providerRepo.upsert(p);
     container.providerRegistry.invalidate(id);
-    return withStatus(p);
+    return withStatusAndCounts(p, container);
   });
 
   // Live connectivity check (key presence + model catalog call) for a saved provider.
@@ -696,6 +750,119 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (!r) return fail(reply, 404, "provider not found");
     const result = await testProviderConnection(r.data);
     return { providerId: id, ...result };
+  });
+
+  /**
+   * Pull the provider's catalog and add every model that is missing from the
+   * Models section — the same discovery that runs after create/edit, but on
+   * demand. This is what the "Sync models" button on a provider card calls, so
+   * a user can refresh a provider's models without re-saving the form.
+   */
+  app.post("/providers/:id/sync-models", { schema: { tags: ["providers", "models"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const r = container.providerRepo.findById(id);
+    if (!r) return fail(reply, 404, "provider not found");
+    const status: ProviderStatus = withStatusAndCounts(r.data, container);
+    await attachDiscovery(status, r.data, container, "updated");
+    return {
+      ok: true,
+      providerId: id,
+      added: status.discoveredModels ?? 0,
+      message: status.message,
+      test: status.test,
+      ...withStatusAndCounts(r.data, container),
+    };
+  });
+
+  /**
+   * Bulk activate / deactivate / delete providers, mirroring `/models/bulk` so
+   * the Providers page can offer the same multi-select workflow as the Models
+   * page. Activation of a provider that is not ready is skipped (and reported)
+   * unless `force` is set; the built-in mock provider is never deleted.
+   */
+  app.post("/providers/bulk", { schema: { tags: ["providers"] } }, async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const action = String(b.action ?? "");
+    if (!["activate", "deactivate", "delete", "test"].includes(action)) {
+      return fail(reply, 400, `Unknown action "${action}"`, { allowed: ["activate", "deactivate", "delete", "test"] });
+    }
+    const ids = Array.isArray(b.ids) ? (b.ids as unknown[]).map((v) => String(v)).filter(Boolean) : [];
+    if (!ids.length) return fail(reply, 400, "ids[] is required");
+    const force = b.force === true;
+    const cascade = b.cascade === true;
+
+    const affected: string[] = [];
+    const missing: string[] = [];
+    const skipped: Array<{ id: string; reason: string }> = [];
+    const results: Array<{ id: string; name: string; ok: boolean; message: string }> = [];
+    let deletedModels = 0;
+
+    for (const id of ids) {
+      const row = container.providerRepo.findById(id);
+      if (!row) {
+        missing.push(id);
+        continue;
+      }
+      const p = row.data;
+      if (action === "test") {
+        const t = await testProviderConnection(p, { timeoutMs: 15000 });
+        results.push({ id, name: p.name, ok: t.ok, message: t.message });
+        affected.push(id);
+        continue;
+      }
+      if (action === "delete") {
+        if (isBuiltInMock(p)) {
+          skipped.push({ id, reason: "The built-in mock provider cannot be deleted" });
+          continue;
+        }
+        const models = container.modelRepo.findMany().filter((m) => m.data.providerId === id);
+        if (models.length && !cascade) {
+          skipped.push({ id, reason: `Provider has ${models.length} model(s) — retry with cascade` });
+          continue;
+        }
+        for (const m of models) container.modelRepo.deleteById(m.data.id);
+        deletedModels += models.length;
+        container.providerRepo.deleteById(id);
+        container.providerRegistry.invalidate(id);
+        affected.push(id);
+        continue;
+      }
+      const activate = action === "activate";
+      if (activate) {
+        const readiness = providerReadiness(p);
+        if (!readiness.ready && !force) {
+          skipped.push({ id, reason: readiness.reason ?? "Provider is not ready" });
+          continue;
+        }
+      }
+      container.providerRepo.upsert({ ...p, active: activate, updatedAt: new Date().toISOString() });
+      container.providerRegistry.invalidate(id);
+      affected.push(id);
+    }
+    return { ok: true, action, affected: affected.length, ids: affected, missing, skipped, deletedModels, results };
+  });
+
+  /**
+   * Clone a provider (same endpoint/auth/tuning, new name, stored key copied,
+   * always created inactive). Handy for spinning up a second key or a staging
+   * endpoint without retyping the whole form.
+   */
+  app.post("/providers/:id/duplicate", { schema: { tags: ["providers"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const r = container.providerRepo.findById(id);
+    if (!r) return fail(reply, 404, "provider not found");
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const existingNames = new Set(container.providerRepo.findMany().map((x) => x.data.name.toLowerCase()));
+    let name = String(b.name ?? "").trim() || `${r.data.name} (copy)`;
+    if (existingNames.has(name.toLowerCase())) {
+      let n = 2;
+      while (existingNames.has(`${name} ${n}`.toLowerCase())) n += 1;
+      name = `${name} ${n}`;
+    }
+    const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = r.data;
+    const copy = container.providerRepo.create({ ...rest, name, active: false });
+    reply.code(201);
+    return withStatusAndCounts(copy, container);
   });
 
   // List the live model catalog for a saved provider. Powers the "Add Model"
@@ -726,7 +893,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const r = container.providerRepo.findById(id);
     if (!r) return fail(reply, 404, "provider not found");
-    if (r.data.type === "mock") return fail(reply, 400, "The built-in mock provider cannot be deleted (deactivate it instead)");
+    if (isBuiltInMock(r.data)) return fail(reply, 400, "The built-in mock provider cannot be deleted (deactivate it instead)");
     const models = container.modelRepo.findMany().filter((m) => m.data.providerId === id);
     const q = req.query as { cascade?: string };
     if (models.length && q.cascade !== "true") {
