@@ -44,7 +44,7 @@ afterAll(async () => {
 });
 
 /** Minimal structural stand-ins — tsconfig uses the Node lib, not DOM. */
-type El = { textContent: string | null; querySelectorAll(sel: string): { length: number } & Iterable<El>; querySelector(sel: string): El | null; hidden: boolean; dataset: Record<string, string | undefined>; click(): void; hasAttribute(a: string): boolean; getAttribute(a: string): string | null };
+type El = { textContent: string | null; querySelectorAll(sel: string): { length: number } & Iterable<El>; querySelector(sel: string): El | null; hidden: boolean; dataset: Record<string, string | undefined>; click(): void; hasAttribute(a: string): boolean; getAttribute(a: string): string | null; dispatchEvent(e: unknown): boolean };
 
 /** Boot the SPA in jsdom and return helpers to drive it. */
 async function boot() {
@@ -213,5 +213,132 @@ describe("theming", () => {
     // an unknown value must be ignored rather than corrupting the attribute
     win.setTheme("neon", false);
     expect(win.document.documentElement.getAttribute("data-theme")).toBe("dark");
+  }, 30000);
+});
+
+describe("dialogs and navigation drawer", () => {
+  it("closes dialogs only via the × button or Escape, never an outside click", async () => {
+    const { win } = await boot();
+    const backdrop = win.document.querySelector("#modal-backdrop") as El;
+
+    win.openModal("Edit provider", "<input id='draft' value='half-typed'/>");
+    expect(backdrop.hasAttribute("hidden")).toBe(false);
+
+    // A click on the backdrop itself must NOT discard the form.
+    backdrop.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+    expect(backdrop.hasAttribute("hidden"), "outside click closed the dialog").toBe(false);
+    expect((win.document.querySelector("#draft") as El).getAttribute("value")).toBe("half-typed");
+
+    // The × button closes it.
+    (win.document.querySelector("#modal-close") as El).click();
+    expect(backdrop.hasAttribute("hidden")).toBe(true);
+  }, 30000);
+
+  it("unwinds stacked layers one at a time with Escape", async () => {
+    const { win } = await boot();
+    const esc = () => win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const hidden = (id: string) => (win.document.querySelector(id) as El).hasAttribute("hidden");
+
+    win.openModal("Form", "<p>body</p>");
+    win.showTestVerdict({ ok: true, message: "All good" }, { title: "Passed" });
+    expect(hidden("#verdict-backdrop")).toBe(false);
+    expect(hidden("#modal-backdrop")).toBe(false);
+
+    esc(); // closes the verdict only
+    expect(hidden("#verdict-backdrop")).toBe(true);
+    expect(hidden("#modal-backdrop"), "Escape closed both layers at once").toBe(false);
+
+    esc(); // now closes the form
+    expect(hidden("#modal-backdrop")).toBe(true);
+  }, 30000);
+
+  it("opens and closes the mobile drawer from every affordance", async () => {
+    const { win } = await boot();
+    const sidebar = win.document.querySelector("#sidebar") as El;
+    const scrim = win.document.querySelector("#sidebar-scrim") as El;
+    const isOpen = () => (sidebar.getAttribute("class") ?? "").includes("open");
+
+    // menu button opens, scrim becomes available
+    (win.document.querySelector("#menu-toggle") as El).click();
+    expect(isOpen()).toBe(true);
+    expect(scrim.hasAttribute("hidden")).toBe(false);
+
+    // the scrim closes it (this is what RTL users had no way to do)
+    scrim.click();
+    expect(isOpen()).toBe(false);
+    expect(scrim.hasAttribute("hidden")).toBe(true);
+
+    // the × inside the drawer closes it
+    (win.document.querySelector("#menu-toggle") as El).click();
+    expect(isOpen()).toBe(true);
+    (win.document.querySelector("#sidebar-close") as El).click();
+    expect(isOpen()).toBe(false);
+
+    // Escape closes it
+    (win.document.querySelector("#menu-toggle") as El).click();
+    expect(isOpen()).toBe(true);
+    win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(isOpen()).toBe(false);
+  }, 30000);
+
+  it("pins the drawer to the inline-start edge so RTL can reach it", () => {
+    const css = readFileSync(resolve(process.cwd(), "public", "app.css"), "utf8");
+    const block = css.slice(css.indexOf("@media (max-width: 900px)", css.indexOf("30. Responsive")));
+    // Without an explicit inline-start offset a fixed drawer keeps its static
+    // position, which stranded the RTL menu off its edge and unreachable.
+    expect(block).toMatch(/\.sidebar\s*{[^}]*inset-inline-start:\s*0/);
+    expect(block).toMatch(/\[dir="rtl"\]\s*\.sidebar\s*{[^}]*translateX\(100%\)/);
+  });
+});
+
+describe("test verdict dialog", () => {
+  it("renders an animated tick with the model reply up front", async () => {
+    const { win } = await boot();
+    win.showTestVerdict(
+      { ok: true, message: "Model responded", responseText: "OK", latencyMs: 412, status: 200 },
+      { modelId: "gpt-4o-mini" },
+    );
+    const body = win.document.querySelector("#verdict-body") as El;
+    expect(body.querySelectorAll(".verdict.ok").length).toBe(1);
+    // the checkmark path, not the cross
+    expect(body.querySelectorAll(".vm-path").length).toBe(1);
+    expect((body.querySelector(".verdict-reply") as El).textContent).toContain("OK");
+    const text = body.textContent ?? "";
+    expect(text).toContain("412 ms");
+    expect(text).toContain("gpt-4o-mini");
+  }, 30000);
+
+  it("renders a failure cross and tucks diagnostics away", async () => {
+    const { win } = await boot();
+    win.showTestVerdict({
+      ok: false,
+      message: "401 Unauthorized",
+      hint: "Check that the API key is set.",
+      status: 401,
+      url: "https://api.openai.com/v1/chat/completions",
+      method: "POST",
+    });
+    const body = win.document.querySelector("#verdict-body") as El;
+    expect(body.querySelectorAll(".verdict.err").length).toBe(1);
+    expect((body.textContent ?? "")).toContain("401 Unauthorized");
+    expect((body.querySelector(".verdict-hint") as El).textContent).toContain("Check that the API key is set.");
+    // noisy endpoint list is collapsed, not dumped inline
+    const details = body.querySelector(".verdict-details") as El;
+    expect(details, "diagnostics should be collapsible").not.toBeNull();
+    expect(details.textContent).toContain("api.openai.com");
+  }, 30000);
+
+  it("stacks over an open form without destroying it", async () => {
+    const { win } = await boot();
+    win.openModal("Add provider", "<input id='pv-name' value='My provider'/>");
+    win.showTestPending("Testing connection", "Using the values in the form…");
+    // the form modal is still mounted underneath with its value intact
+    expect((win.document.querySelector("#modal-backdrop") as El).hasAttribute("hidden")).toBe(false);
+    expect((win.document.querySelector("#pv-name") as El).getAttribute("value")).toBe("My provider");
+    expect((win.document.querySelector("#verdict-body") as El).querySelectorAll(".verdict-spinner").length).toBe(1);
+
+    win.closeVerdict();
+    expect((win.document.querySelector("#verdict-backdrop") as El).hasAttribute("hidden")).toBe(true);
+    expect((win.document.querySelector("#pv-name") as El).getAttribute("value")).toBe("My provider");
   }, 30000);
 });

@@ -28,7 +28,9 @@
   <div class="aurora" aria-hidden="true"><span class="a1"></span><span class="a2"></span><span class="a3"></span></div>
 
   <div id="app">
+    <button class="sidebar-scrim" id="sidebar-scrim" hidden aria-label="Close menu"></button>
     <aside class="sidebar" id="sidebar">
+      <button class="sidebar-close" id="sidebar-close" aria-label="Close menu">×</button>
       <div class="brand">
         <div class="brand-logo">C</div>
         <div class="brand-text">
@@ -89,6 +91,18 @@
         <button class="icon-btn" id="modal-close">×</button>
       </div>
       <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Test verdict dialog. Its own layer so it can stack above an open form
+       modal (e.g. the model editor) without destroying the form's state. -->
+  <div class="modal-backdrop verdict-backdrop" id="verdict-backdrop" hidden>
+    <div class="modal verdict-modal" id="verdict-modal">
+      <div class="modal-head">
+        <h3 id="verdict-title"></h3>
+        <button class="icon-btn" id="verdict-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" id="verdict-body"></div>
     </div>
   </div>
 

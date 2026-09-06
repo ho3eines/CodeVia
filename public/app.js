@@ -178,38 +178,112 @@
   }
   // Render a provider/model test result: destination URL(s), discovered models,
   // and — for chat tests — the text the model actually replied with.
-  function renderTestResult(r) {
-    if (!r) return "";
-    // The model's actual reply (model chat test) — the most important part, first.
-    const responseSection = typeof r.responseText === "string" && r.responseText.trim()
-      ? `<div class="test-response">
-          <div class="test-response-label">💬 Model replied${typeof r.latencyMs === "number" ? ` · ${r.latencyMs}ms` : ""}${typeof r.status === "number" ? ` · HTTP ${r.status}` : ""}</div>
-          <pre class="test-response-text">${esc(r.responseText)}</pre>
-        </div>`
-      : (typeof r.responseText === "string" ? `<div class="test-response"><div class="test-response-label">💬 Model replied with an empty response</div></div>` : "");
-    // Surface EVERY URL the platform hits (catalog + chat + the live request).
-    // Each on its own line so the user can verify exactly where requests go.
-    const allUrls = Array.from(new Set([r.catalogUrl, r.chatUrl, ...(r.urls || []), r.url].filter(Boolean)));
-    const classify = (u) => {
-      if (u === r.url && r.method) return `${r.method} request`;
-      if (u === r.catalogUrl) return "📚 catalog (model list)";
-      if (u === r.chatUrl) return "💬 chat (completion)";
-      return "→ request";
-    };
-    const urlsSection = allUrls.length
-      ? `<div class="test-urls" style="margin-top:6px;display:flex;flex-direction:column;gap:3px">
-          <div style="font-size:10px;color:var(--text-muted)">Where requests are sent:</div>
-          ${allUrls.map((u) => `<div class="mono" style="font-size:10px;word-break:break-all"><span class="badge badge-muted">${esc(classify(u))}</span> ${esc(u)}</div>`).join("")}
-        </div>`
-      : "";
-    const infos = r.modelInfos || [];
-    const list = infos.slice(0, 12).map((m) => `<div class="test-model" style="margin-top:3px"><span class="mono">${esc(m.id)}</span> ${capsBadges(m.capabilities)}</div>`).join("");
-    const modelsSection = list ? `<div class="test-models" style="margin-top:6px">${list}${infos.length > 12 ? "…" : ""}</div>` : "";
-    const caps = r.detectedCapabilities || r.capabilities;
-    const capsSection = caps && typeof caps === "object" ? `<div style="margin-top:6px">Capabilities: ${capsBadges(caps)}</div>` : "";
-    const found = typeof r.found === "boolean" ? ` <span class="badge badge-${r.found ? "ok" : "err"}">${r.found ? "found in catalog" : "not in catalog"}</span>` : "";
-    return `<div class="test-result ${r.ok ? "ok" : "err"}">${r.ok ? "✓" : "✗"} ${esc(r.message)}${found}${r.hint ? "<br>" + esc(r.hint) : ""}${responseSection}${modelsSection}${capsSection}${urlsSection}</div>`;
+  /* ---------- test verdict dialog ----------
+     Raw test payloads used to be dumped inline as a wall of text. These render
+     the outcome as a dialog with an animated tick/cross, the model's reply up
+     front, and the diagnostic noise tucked into a collapsible section. */
+
+  /** Animated success tick / failure cross. */
+  function verdictMark(ok) {
+    return `<div class="verdict-mark"><svg viewBox="0 0 60 60" aria-hidden="true">
+      <circle class="vm-ring" cx="30" cy="30" r="26"/>
+      ${ok
+        ? '<path class="vm-path" d="M18 31 L26 39 L43 22"/>'
+        : '<path class="vm-path" d="M21 21 L39 39 M39 21 L21 39"/>'}
+    </svg></div>`;
   }
+
+  /** Build the verdict body for a test result payload. */
+  function verdictHtml(r, opts = {}) {
+    const ok = !!r.ok;
+    const title = opts.title || (ok ? "Test passed" : "Test failed");
+    const chips = [];
+    if (typeof r.latencyMs === "number") chips.push(`<span class="badge badge-muted">⏱ ${r.latencyMs} ms</span>`);
+    if (typeof r.status === "number") chips.push(`<span class="badge badge-${r.status < 400 ? "ok" : "err"}">HTTP ${r.status}</span>`);
+    if (typeof r.found === "boolean") chips.push(`<span class="badge badge-${r.found ? "ok" : "warn"}">${r.found ? "in catalog" : "not in catalog"}</span>`);
+    if (opts.modelId) chips.push(`<span class="badge badge-info mono">${esc(opts.modelId)}</span>`);
+
+    const reply = typeof r.responseText === "string" && r.responseText.trim()
+      ? `<div class="verdict-reply">
+           <div class="vr-head"><span>💬 Model reply</span><span class="mono">${esc(String(r.responseText.trim().length))} chars</span></div>
+           <pre class="vr-body">${esc(r.responseText.trim())}</pre>
+         </div>`
+      : (typeof r.responseText === "string"
+          ? `<div class="verdict-hint">The request succeeded but the model returned an empty response.</div>` : "");
+
+    const hint = r.hint ? `<div class="verdict-hint">💡 ${esc(r.hint)}</div>` : "";
+
+    // Diagnostics (URLs, capabilities, catalog) collapsed by default.
+    const urls = Array.from(new Set([r.catalogUrl, r.chatUrl, ...(r.urls || []), r.url].filter(Boolean)));
+    const label = (u) => u === r.url && r.method ? `${r.method} request`
+      : u === r.catalogUrl ? "📚 catalog" : u === r.chatUrl ? "💬 chat" : "→ request";
+    const caps = r.detectedCapabilities || r.capabilities;
+    const infos = r.modelInfos || [];
+    const diagBits = [
+      urls.length ? `<div style="font-size:11px;color:var(--text-muted)">Endpoints contacted:</div>${urls.map((u) => `<div class="mono verdict-url"><span class="badge badge-muted">${esc(label(u))}</span> ${esc(u)}</div>`).join("")}` : "",
+      caps && typeof caps === "object" ? `<div class="mt" style="font-size:11px;color:var(--text-muted)">Capabilities:</div><div>${capsBadges(caps)}</div>` : "",
+      infos.length ? `<div class="mt" style="font-size:11px;color:var(--text-muted)">Catalog (${infos.length}):</div>${infos.slice(0, 12).map((m) => `<div class="mono" style="font-size:11px">${esc(m.id)}</div>`).join("")}${infos.length > 12 ? "<div style=\"font-size:11px;color:var(--text-muted)\">…</div>" : ""}` : "",
+    ].filter(Boolean).join("");
+    const diagnostics = diagBits
+      ? `<details class="verdict-details"><summary>Technical details</summary><div class="vd-body">${diagBits}</div></details>` : "";
+
+    return `<div class="verdict ${ok ? "ok" : "err"}">
+      ${verdictMark(ok)}
+      <h3>${esc(title)}</h3>
+      <p class="verdict-msg">${esc(r.message || (ok ? "The provider responded successfully." : "The request did not succeed."))}</p>
+      ${chips.length ? `<div class="verdict-chips">${chips.join("")}</div>` : ""}
+      ${reply}${hint}${diagnostics}
+      <div class="verdict-actions">
+        ${opts.retry ? `<button class="btn" onclick="${esc(opts.retry)}">↻ Test again</button>` : ""}
+        <button class="btn btn-primary" onclick="closeModal()">Done</button>
+      </div>
+    </div>`;
+  }
+
+  /* The verdict lives on its own layer so it can stack above an open form
+     modal without clearing it. Closing it returns you to the form. */
+  function openVerdict(title, bodyHtml) {
+    $("#verdict-title").textContent = title;
+    $("#verdict-body").innerHTML = bodyHtml;
+    $("#verdict-backdrop").hidden = false;
+  }
+  function closeVerdict() { $("#verdict-backdrop").hidden = true; }
+  window.closeVerdict = closeVerdict;
+  $("#verdict-close")?.addEventListener("click", closeVerdict);
+
+  /** Show the in-flight state, then swap in the verdict when it resolves. */
+  function showTestPending(title, subtitle) {
+    openVerdict(title, `<div class="verdict"><div class="verdict-spinner"></div>
+      <h3>Testing…</h3><p class="verdict-msg">${esc(subtitle || "Contacting the provider.")}</p></div>`);
+  }
+  function showTestVerdict(r, opts = {}) {
+    openVerdict(opts.title || (r.ok ? "✓ Test passed" : "✗ Test failed"), verdictHtml(r, opts));
+  }
+  window.showTestVerdict = showTestVerdict;
+  window.showTestPending = showTestPending;
+
+  /**
+   * Run a model chat test and present it as an animated verdict.
+   * Used by the model editor and the model list.
+   */
+  async function runModelTest(providerId, modelId) {
+    showTestPending("Testing model", `Sending a test message to ${modelId}…`);
+    try {
+      const r = await api("/models/test", { method: "POST", body: { providerId, modelId, message: MODEL_TEST_MSG } });
+      showTestVerdict(r, {
+        modelId,
+        title: r.ok ? "✓ Model replied" : "✗ Model test failed",
+        retry: `runModelTest('${esc(providerId)}','${esc(modelId)}')`,
+      });
+    } catch (e) {
+      showTestVerdict({ ok: false, message: e.message, hint: e.body?.hint, status: e.status }, {
+        modelId,
+        title: "✗ Model test failed",
+        retry: `runModelTest('${esc(providerId)}','${esc(modelId)}')`,
+      });
+    }
+  }
+  window.runModelTest = runModelTest;
 
   /* ---------- modal ----------
      Modals are the primary surface for detail + configuration in this UI: the
@@ -595,7 +669,14 @@
   function closePalette() { $("#palette-backdrop").hidden = true; paletteIdx = -1; }
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
-    if (e.key === "Escape") { closePalette(); closeModal(); window.closeModelChat?.(); }
+    if (e.key === "Escape") {
+      // Close only the topmost layer so Escape unwinds dialogs one at a time.
+      if (!$("#palette-backdrop").hidden) { closePalette(); return; }
+      if (!$("#verdict-backdrop").hidden) { closeVerdict(); return; }
+      if (!$("#chat-modal-backdrop").hidden) { window.closeModelChat?.(); return; }
+      if (!$("#modal-backdrop").hidden) { closeModal(); return; }
+      if ($("#sidebar")?.classList.contains("open")) setSidebar(false);
+    }
     if (!$("#palette-backdrop").hidden) {
       const inp = $("#palette-input");
       if (e.key === "ArrowDown") { e.preventDefault(); paletteIdx = Math.min(paletteIdx + 1, paletteItems.length - 1); renderPalette(); }
@@ -604,11 +685,13 @@
     }
   });
   $("#palette-input")?.addEventListener("input", renderPalette);
+  // The command palette is a transient picker, so tapping outside dismisses it.
   $("#palette-backdrop")?.addEventListener("click", (e) => { if (e.target.id === "palette-backdrop") closePalette(); });
+  // Dialogs deliberately do NOT close on an outside click: they hold forms and
+  // test output, and a stray tap used to discard work. The × button is the
+  // only pointer affordance (Escape still works as a keyboard accelerator).
   $("#modal-close")?.addEventListener("click", closeModal);
-  $("#modal-backdrop")?.addEventListener("click", (e) => { if (e.target.id === "modal-backdrop") closeModal(); });
   $("#chat-modal-close")?.addEventListener("click", () => window.closeModelChat?.());
-  $("#chat-modal-backdrop")?.addEventListener("click", (e) => { if (e.target.id === "chat-modal-backdrop") window.closeModelChat?.(); });
 
   /* ---------- theme + direction ----------
      Dark is the default; the choice is persisted and applied pre-paint by the
@@ -643,9 +726,26 @@
   if (!localStorage.getItem("cv-theme")) document.documentElement.setAttribute("data-theme", "dark");
   paintThemeButton();
 
-  /* Mobile sidebar */
-  $("#menu-toggle")?.addEventListener("click", () => $("#sidebar")?.classList.toggle("open"));
-  $("#nav")?.addEventListener("click", (e) => { if (e.target.closest("a")) $("#sidebar")?.classList.remove("open"); });
+  /* ---------- Mobile sidebar (off-canvas drawer) ----------
+     Closing must be possible in every direction mode, so there are three
+     independent affordances: the × button, the scrim, and Escape. */
+  function setSidebar(open) {
+    const sb = $("#sidebar");
+    if (!sb) return;
+    sb.classList.toggle("open", open);
+    const scrim = $("#sidebar-scrim");
+    if (scrim) scrim.hidden = !open;
+    document.body.style.overflow = open ? "hidden" : "";
+    $("#menu-toggle")?.setAttribute("aria-expanded", String(open));
+  }
+  window.setSidebar = setSidebar;
+  $("#menu-toggle")?.addEventListener("click", () => setSidebar(!$("#sidebar")?.classList.contains("open")));
+  $("#sidebar-close")?.addEventListener("click", () => setSidebar(false));
+  $("#sidebar-scrim")?.addEventListener("click", () => setSidebar(false));
+  $("#nav")?.addEventListener("click", (e) => { if (e.target.closest("a")) setSidebar(false); });
+  // Leaving the mobile breakpoint must reset the drawer, otherwise the scroll
+  // lock and scrim can persist on a desktop-width layout.
+  window.matchMedia?.("(min-width: 901px)")?.addEventListener?.("change", (ev) => { if (ev.matches) setSidebar(false); });
 
   /* ---------- Views ---------- */
 
@@ -1660,9 +1760,10 @@
           ...(typeof tune.maxTokens === "number" && !Number.isNaN(tune.maxTokens) ? { maxTokens: tune.maxTokens } : {}),
           omitTemperature: tune.omitTemperature,
         }});
-        el.innerHTML = renderTestResult(r);
-        toast(r.ok ? "Model replied" : "Test failed", r.message, r.ok ? "ok" : "err");
-      } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
+        showTestVerdict(r, { modelId: id, title: r.ok ? "✓ Model replied" : "✗ Model test failed" });
+      } catch (e) {
+        showTestVerdict({ ok: false, message: e.message, hint: e.body?.hint, status: e.status }, { modelId: id, title: "✗ Model test failed" });
+      }
     };
     $("#e-save").onclick = async () => {
       const tune = formTuning();
@@ -1872,7 +1973,7 @@
       <div class="grid-2"><div class="field"><label>Context window</label><input class="input" id="m-ctx" value="128000"/></div><div class="field"><label>Priority (lower = preferred)</label><input class="input" id="m-prio" value="100"/></div></div>
       <div id="m-caps-preview" class="field-hint" style="margin-top:-4px">Capabilities (vision / tools / reasoning / structured output / code / streaming) are detected automatically from the model id. Use <strong>Test</strong> to verify the model &amp; see the exact endpoint.</div>
       <div class="flex"><button class="btn" id="m-test">Test model</button><button class="btn btn-primary" id="m-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>
-      <div id="m-test-result"></div>`);
+`);
 
     let mode = "catalog";
     let lastCatalog = [];
@@ -1963,17 +2064,12 @@
     }
 
     $("#m-test").onclick = async () => {
-      const el = $("#m-test-result");
       const modelId = currentModelId();
       const providerId = $("#m-prov").value;
       if (!modelId) { toast("Model required", "Pick a model or type a Model ID", "err"); return; }
       if (!providerId) { toast("Provider required", "", "err"); return; }
-      el.innerHTML = `<div class="test-result">Sending test message to ${esc(modelId)}…</div>`;
-      try {
-        const r = await api("/models/test", { method: "POST", body: { providerId, modelId, message: MODEL_TEST_MSG } });
-        el.innerHTML = renderTestResult(r);
-        toast(r.ok ? "Model replied" : "Cannot test yet", r.message, r.ok ? "ok" : "warn");
-      } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
+      // The verdict replaces this dialog, so remember the form to restore it.
+      await runModelTest(providerId, modelId);
     };
     $("#m-go").onclick = async () => {
       const modelId = currentModelId();
@@ -2505,13 +2601,13 @@
     }
   };
   window.providerTest = async (id) => {
-    const el = document.getElementById("prov-test-" + id);
-    if (el) el.innerHTML = `<div class="test-result">Testing…</div>`;
+    showTestPending("Testing provider", "Checking credentials and reaching the API…");
     try {
       const r = await api(`/providers/${id}/test`, { method: "POST" });
-      if (el) el.innerHTML = renderTestResult(r);
-      toast(r.ok ? "Provider OK" : "Provider test failed", r.message, r.ok ? "ok" : "err");
-    } catch (e) { if (el) el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
+      showTestVerdict(r, { title: r.ok ? "✓ Provider reachable" : "✗ Provider test failed", retry: `providerTest('${id}')` });
+    } catch (e) {
+      showTestVerdict({ ok: false, message: e.message, hint: e.body?.hint, status: e.status }, { title: "✗ Provider test failed", retry: `providerTest('${id}')` });
+    }
   };
   /** Import catalog models that are missing from the Models section. */
   window.providerSyncModels = async (id) => {
@@ -2644,7 +2740,6 @@
             <button class="btn btn-primary" id="pv-go">${editId ? "Save changes" : "Create provider"}</button>
           </div>
         </div>
-        <div id="pv-test-result"></div>
       </div>`);
 
     // Preset picker keeps the (hidden) select in sync and re-applies defaults.
@@ -2728,13 +2823,14 @@
 
     // Test the values currently in the form (draft), never the stored config.
     $("#pv-test").onclick = async () => {
-      const el = $("#pv-test-result");
-      el.innerHTML = `<div class="test-result">Testing the values currently in the form…</div>`;
+      // Stacks over the form; closing the verdict returns to the filled form.
+      showTestPending("Testing connection", "Using the values currently in the form…");
       try {
         const r = await api("/providers/test", { method: "POST", body: { ...readForm(), ...(editId ? { providerId: editId } : {}) } });
-        el.innerHTML = renderTestResult(r);
-        toast(r.ok ? "Provider connection OK" : "Provider test failed", r.message, r.ok ? "ok" : "err");
-      } catch (e) { el.innerHTML = `<div class="test-result err">✗ ${esc(e.message)}</div>`; toast("Error", e.message, "err"); }
+        showTestVerdict(r, { title: r.ok ? "✓ Connection OK" : "✗ Connection failed" });
+      } catch (e) {
+        showTestVerdict({ ok: false, message: e.message, hint: e.body?.hint, status: e.status }, { title: "✗ Connection failed" });
+      }
     };
     $("#pv-go").onclick = async () => {
       const body = readForm();

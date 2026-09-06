@@ -845,10 +845,23 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
 
 /* ---------- 30. Responsive ---------- */
 @media (max-width: 900px) {
-  .sidebar { position: fixed; z-index: 200; height: 100vh; transform: translateX(-100%); box-shadow: var(--shadow-lg); }
-  .sidebar.open { transform: translateX(0); }
-  [dir="rtl"] .sidebar { transform: translateX(100%); inset-inline-end: 0; }
-  [dir="rtl"] .sidebar.open { transform: translateX(0); }
+  /* Off-canvas drawer. It must be pinned to the inline-start edge explicitly:
+     a position:fixed element with no offsets keeps its static position, which
+     left the RTL drawer stranded mid-screen and unreachable. */
+  .sidebar {
+    position: fixed; z-index: 200; top: 0; bottom: 0; inset-inline-start: 0; height: 100vh;
+    transform: translateX(-100%); box-shadow: var(--shadow-lg);
+  }
+  [dir="rtl"] .sidebar { transform: translateX(100%); }
+  .sidebar.open, [dir="rtl"] .sidebar.open { transform: translateX(0); }
+  /* Tap-anywhere scrim so the drawer can always be dismissed. */
+  .sidebar-scrim {
+    position: fixed; inset: 0; z-index: 199; border: 0; padding: 0; cursor: pointer;
+    background: color-mix(in srgb, var(--bg-deep) 62%, transparent);
+    backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+    animation: fadeIn .25s ease;
+  }
+  .sidebar-close { display: grid !important; }
   .menu-btn { display: inline-flex; }
   .grid-2, .grid-3, .admin-hero { grid-template-columns: 1fr; }
   .content { padding: 16px; }
@@ -864,6 +877,15 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
   .topbar { padding: 0 14px; gap: 10px; }
   .topbar-title { font-size: 14px; }
 }
+
+/* Drawer scrim + close button are mobile-only */
+.sidebar-scrim { display: none; }
+.sidebar-close {
+  display: none; position: absolute; top: 14px; inset-inline-end: 12px; width: 32px; height: 32px;
+  place-items: center; border-radius: 10px; border: 1px solid var(--stroke); background: var(--glass);
+  color: var(--text); font-size: 17px; line-height: 1; cursor: pointer; z-index: 2; transition: all .2s var(--ease);
+}
+.sidebar-close:hover { background: var(--glass-hover); transform: rotate(90deg); }
 
 /* RTL */
 [dir="rtl"] .sidebar { border-right: 0; border-left: 1px solid var(--stroke); }
@@ -932,3 +954,69 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
 }
 .btn-lg { padding: 11px 20px; font-size: 14px; border-radius: var(--radius); }
 .auth-hero .error-state { text-align: start; }
+
+/* ---------- 34. Test result dialog (animated verdict) ---------- */
+.verdict { text-align: center; padding: 8px 0 4px; }
+.verdict-mark { width: 84px; height: 84px; margin: 0 auto 14px; position: relative; }
+.verdict-mark svg { width: 100%; height: 100%; overflow: visible; }
+.verdict-mark .vm-ring {
+  fill: none; stroke-width: 4; stroke-linecap: round;
+  stroke-dasharray: 166; stroke-dashoffset: 166;
+  animation: vmRing .55s var(--ease) forwards;
+}
+.verdict-mark .vm-path {
+  fill: none; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 60; stroke-dashoffset: 60;
+  animation: vmPath .38s var(--ease) .45s forwards;
+}
+@keyframes vmRing { to { stroke-dashoffset: 0; } }
+@keyframes vmPath { to { stroke-dashoffset: 0; } }
+/* soft halo pulse behind the mark */
+.verdict-mark::after {
+  content: ""; position: absolute; inset: 6px; border-radius: 50%; z-index: -1;
+  animation: vmHalo .8s var(--ease) .4s backwards;
+}
+.verdict.ok .vm-ring, .verdict.ok .vm-path { stroke: var(--ok); }
+.verdict.err .vm-ring, .verdict.err .vm-path { stroke: var(--err); }
+.verdict.ok .verdict-mark::after { background: radial-gradient(circle, color-mix(in srgb, var(--ok) 42%, transparent), transparent 70%); }
+.verdict.err .verdict-mark::after { background: radial-gradient(circle, color-mix(in srgb, var(--err) 42%, transparent), transparent 70%); }
+@keyframes vmHalo { from { opacity: 0; transform: scale(.5); } 60% { opacity: 1; transform: scale(1.15); } to { opacity: 1; transform: scale(1); } }
+
+.verdict h3 { margin: 0 0 6px; font-size: 19px; letter-spacing: -0.02em; animation: pageIn .4s var(--ease) .5s backwards; }
+.verdict .verdict-msg { color: var(--text-muted); font-size: 13px; margin: 0 auto; max-width: 460px; animation: pageIn .4s var(--ease) .58s backwards; }
+.verdict-chips { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; margin-top: 13px; animation: pageIn .4s var(--ease) .66s backwards; }
+.verdict-reply {
+  margin-top: 16px; text-align: start; border: 1px solid var(--stroke); border-radius: var(--radius);
+  background: var(--glass); overflow: hidden; animation: pageIn .45s var(--ease) .72s backwards;
+}
+.verdict-reply .vr-head {
+  padding: 9px 13px; font-size: 11px; color: var(--text-muted); border-bottom: 1px solid var(--stroke);
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--glass);
+}
+.verdict-reply .vr-body {
+  margin: 0; padding: 14px; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+  max-height: 300px; overflow: auto; border: 0; background: transparent; font-family: var(--font);
+}
+.verdict-hint {
+  margin-top: 12px; text-align: start; border-radius: var(--radius-sm); padding: 11px 13px; font-size: 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 34%, transparent); background: color-mix(in srgb, var(--warn) 9%, transparent);
+  animation: pageIn .4s var(--ease) .78s backwards;
+}
+.verdict-details { margin-top: 12px; text-align: start; animation: pageIn .4s var(--ease) .84s backwards; }
+.verdict-details summary { cursor: pointer; font-size: 11.5px; color: var(--text-muted); font-weight: 650; padding: 6px 0; }
+.verdict-details summary:hover { color: var(--text); }
+.verdict-details .vd-body { border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 11px; background: var(--glass); margin-top: 6px; }
+.verdict-url { font-size: 10.5px; word-break: break-all; margin-top: 4px; }
+.verdict-actions { display: flex; gap: 8px; justify-content: center; margin-top: 18px; flex-wrap: wrap; animation: pageIn .4s var(--ease) .9s backwards; }
+
+/* Testing spinner shown while the request is in flight */
+.verdict-spinner { width: 66px; height: 66px; margin: 10px auto 16px; position: relative; }
+.verdict-spinner::before, .verdict-spinner::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; border: 3px solid transparent;
+}
+.verdict-spinner::before { border-top-color: var(--primary); border-right-color: var(--primary); animation: spin .85s linear infinite; }
+.verdict-spinner::after { inset: 9px; border-bottom-color: var(--accent); border-left-color: var(--accent); animation: spin 1.25s linear infinite reverse; }
+
+/* Verdict dialog stacks above an already-open form modal */
+.verdict-backdrop { z-index: 850; }
+.verdict-modal { width: min(620px, 95vw); }
