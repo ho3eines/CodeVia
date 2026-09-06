@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#070812" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/app.css" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c6cff'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Ctext x='16' y='22' font-size='17' fill='white' text-anchor='middle' font-family='monospace' font-weight='bold'%3EC%3C/text%3E%3C/svg%3E" />
   <script>
@@ -38,7 +38,11 @@
       </div>
       <nav class="nav" id="nav"></nav>
       <div class="sidebar-footer">
-        <button class="btn btn-ghost" id="theme-toggle" title="Switch between dark and light glass">🌙 Theme</button>
+        <div class="theme-switch" role="group" aria-label="Color theme">
+          <span class="theme-thumb" id="theme-thumb"></span>
+          <button class="theme-opt" data-theme-set="light" title="Light mode">☀️<span>Light</span></button>
+          <button class="theme-opt" data-theme-set="dark" title="Dark mode">🌙<span>Dark</span></button>
+        </div>
         <button class="btn btn-ghost" id="dir-toggle" title="Switch text direction (LTR / RTL)">⇄ Direction</button>
       </div>
     </aside>
@@ -51,7 +55,7 @@
           <button class="cmd-btn" id="cmd-palette-btn" title="Command Palette (Ctrl+K)">
             <span class="kbd">Ctrl</span><span class="kbd">K</span> Search
           </button>
-          <span class="pill pill-live" id="live-pill"><span class="dot"></span> Live</span>
+          <span class="pill pill-live" id="live-pill" title="Realtime connected"><span class="dot"></span><span class="pill-label" id="live-label">Live</span></span>
           <span id="user-slot"></span>
         </div>
       </header>

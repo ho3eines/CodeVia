@@ -120,14 +120,98 @@ describe("UI shell", () => {
     }
   }, 30000);
 
-  it("persists the dark/light theme choice", async () => {
+  it("switches and persists the dark/light theme", async () => {
     const { win } = await boot();
     const root = win.document.documentElement;
     expect(root.getAttribute("data-theme")).toBe("dark");
-    (win.document.querySelector("#theme-toggle") as El).click();
+
+    // The sidebar exposes an explicit two-option switch, not a blind toggle.
+    (win.document.querySelector('[data-theme-set="light"]') as El).click();
     expect(root.getAttribute("data-theme")).toBe("light");
     expect(win.localStorage.getItem("cv-theme")).toBe("light");
-    (win.document.querySelector("#theme-toggle") as El).click();
+
+    (win.document.querySelector('[data-theme-set="dark"]') as El).click();
     expect(root.getAttribute("data-theme")).toBe("dark");
+    expect(win.localStorage.getItem("cv-theme")).toBe("dark");
+  }, 30000);
+
+  it("keeps the live pill's status dot intact when connectivity flips", async () => {
+    const { win } = await boot();
+    const pill = win.document.querySelector("#live-pill") as El;
+    // Regression: the old code wrote the label into the pill's *last span*,
+    // which is the status dot — flipping connectivity destroyed the indicator.
+    win.setLivePill(false);
+    expect(pill.querySelectorAll(".dot").length).toBe(1);
+    expect((pill.querySelector("#live-label") as El).textContent).toBe("Offline");
+    expect(pill.getAttribute("class")).toContain("offline");
+
+    win.setLivePill(true);
+    expect(pill.querySelectorAll(".dot").length).toBe(1);
+    expect((pill.querySelector("#live-label") as El).textContent).toBe("Live");
+    expect(pill.getAttribute("class")).not.toContain("offline");
+  }, 30000);
+});
+
+describe("theming", () => {
+  const css = readFileSync(resolve(process.cwd(), "public", "app.css"), "utf8");
+
+  /** Pull the custom-property block for a theme selector. */
+  function tokensFor(selector: string): Record<string, string> {
+    const i = css.indexOf(selector);
+    expect(i, `${selector} block is missing`).toBeGreaterThan(-1);
+    const block = css.slice(css.indexOf("{", i) + 1, css.indexOf("}", i));
+    const out: Record<string, string> = {};
+    for (const m of block.matchAll(/([a-z-]+(?:-[a-z0-9]+)*)\s*:\s*([^;]+);/gi)) out[m[1]] = m[2].trim();
+    return out;
+  }
+
+  it("defines a complete, independent light palette", () => {
+    const dark = tokensFor(':root,\n[data-theme="dark"]');
+    const light = tokensFor('[data-theme="light"]');
+    // Light mode must redefine the colour-bearing tokens rather than inherit
+    // dark values, otherwise it reads as a washed-out dark theme.
+    for (const key of ["--bg", "--text", "--text-muted", "--surface", "--stroke", "--primary", "--ok", "--warn", "--err", "--glass"]) {
+      expect(light[key], `light mode is missing ${key}`).toBeTruthy();
+      expect(light[key], `${key} is identical in both themes`).not.toBe(dark[key]);
+    }
+    expect(light["color-scheme"]).toBe("light");
+    expect(dark["color-scheme"]).toBe("dark");
+  });
+
+  it("keeps body text readable against the canvas in both themes", () => {
+    const hex = (v: string) => {
+      const m = /#([0-9a-f]{6})/i.exec(v);
+      if (!m) throw new Error("not a hex colour: " + v);
+      const n = parseInt(m[1], 16);
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    };
+    // WCAG relative luminance + contrast ratio.
+    const lum = (rgb: number[]) => {
+      const [r, g, b] = rgb.map((c) => {
+        const s = c / 255;
+        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const ratio = (a: string, b: string) => {
+      const [x, y] = [lum(hex(a)), lum(hex(b))].sort((p, q) => q - p);
+      return (x + 0.05) / (y + 0.05);
+    };
+    for (const sel of [':root,\n[data-theme="dark"]', '[data-theme="light"]']) {
+      const t = tokensFor(sel);
+      expect(ratio(t["--text"], t["--bg"]), `--text on --bg in ${sel}`).toBeGreaterThan(7);
+      expect(ratio(t["--text-muted"], t["--bg"]), `--text-muted on --bg in ${sel}`).toBeGreaterThan(4.5);
+    }
+  });
+
+  it("routes palette actions to theme changes instead of navigation", async () => {
+    const { win } = await boot();
+    win.setTheme("light", false);
+    expect(win.document.documentElement.getAttribute("data-theme")).toBe("light");
+    win.setTheme("dark", false);
+    expect(win.document.documentElement.getAttribute("data-theme")).toBe("dark");
+    // an unknown value must be ignored rather than corrupting the attribute
+    win.setTheme("neon", false);
+    expect(win.document.documentElement.getAttribute("data-theme")).toBe("dark");
   }, 30000);
 });

@@ -113,12 +113,12 @@
     const st = await api("/auth/github/status").catch(() => ({ configured: false }));
     const next = encodeURIComponent(location.hash || "#/dashboard");
     const stepsHtml = st.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);text-align:left;margin:8px 0 0 18px">${st.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
-    $("#content").innerHTML = `<div class="card card-body" style="max-width:560px;margin:40px auto;text-align:center">
-      <div class="empty-emoji" style="font-size:44px">🔐</div>
-      <h2 style="margin:12px 0 6px">Sign in required</h2>
-      <p style="color:var(--text-muted)">This CodeVia instance requires a GitHub login for API access.</p>
+    $("#content").innerHTML = `<div class="card card-body auth-hero">
+      <div class="auth-glyph">🔐</div>
+      <h2>Sign in required</h2>
+      <p class="auth-sub">This CodeVia instance requires a GitHub login for API access.</p>
       ${st.configured
-        ? `<div class="flex mt" style="justify-content:center"><a class="btn btn-primary" href="/auth/github/login?next=${next}" style="text-decoration:none">🐙 Login with GitHub</a></div>`
+        ? `<div class="flex mt" style="justify-content:center"><a class="btn btn-primary btn-lg" href="/auth/github/login?next=${next}">🐙 Continue with GitHub</a></div>`
         : `<div class="error-state mt" style="text-align:left"><h4>GitHub login is not configured</h4>
             <p style="font-size:12px;color:var(--text-muted)">${esc(st.setupHint || "Strict mode is on, but there is no way to sign in yet.")}</p>
             ${stepsHtml}
@@ -379,10 +379,14 @@
     const pill = $("#live-pill");
     if (!pill) return;
     pill.classList.toggle("offline", !online);
-    const label = pill.querySelector("span:last-child") || pill;
-    if (label && label !== pill) label.textContent = online ? " Live" : " Offline";
+    // Write into the dedicated label element only. Targeting the last span
+    // would clobber the status dot itself (it is the pill's last child when
+    // the label is a bare text node), which is what broke the pill before.
+    const label = pill.querySelector("#live-label");
+    if (label) label.textContent = online ? "Live" : "Offline";
     pill.title = online ? "Realtime connected" : "Realtime disconnected — retrying automatically";
   }
+  window.setLivePill = setLivePill;
   function connectSocket() {
     if (typeof io === "undefined") return;
     // Reconnect forever with backoff; a failed websocket upgrade (common
@@ -562,7 +566,19 @@
     ["#/telegram", "📱", "Telegram", "bot interface"],
     ["#/settings", "⚙️", "Settings", "import/export/backup"],
     ["#/admin", "🛡️", "Admin", "system health"],
+    // Action commands: a leading "!" is dispatched instead of navigated.
+    ["!theme-light", "☀️", "Switch to Light mode", "theme · appearance"],
+    ["!theme-dark", "🌙", "Switch to Dark mode", "theme · appearance"],
+    ["!dir-toggle", "⇄", "Toggle text direction", "LTR / RTL"],
   ];
+  /** Run a palette entry: "#/route" navigates, "!action" runs a command. */
+  function runPaletteCommand(target) {
+    if (!target) return;
+    if (!target.startsWith("!")) { location.hash = target; return; }
+    if (target === "!theme-light") setTheme("light");
+    else if (target === "!theme-dark") setTheme("dark");
+    else if (target === "!dir-toggle") $("#dir-toggle")?.click();
+  }
   let paletteIdx = -1; let paletteItems = commands;
   function openPalette() {
     $("#palette-backdrop").hidden = false;
@@ -574,7 +590,7 @@
     paletteItems = commands.filter((c) => (c[1] + c[2] + c[3]).toLowerCase().includes(q));
     $("#palette-list").innerHTML = paletteItems.map((c, i) =>
       `<li data-i="${i}" class="${i === paletteIdx ? "active" : ""}"><span class="pl-ico">${c[1]}</span>${esc(c[2])}<span class="pl-sub">${esc(c[3])}</span></li>`).join("");
-    $$("#palette-list li").forEach((li) => li.addEventListener("click", () => { location.hash = paletteItems[+li.dataset.i][0]; closePalette(); }));
+    $$("#palette-list li").forEach((li) => li.addEventListener("click", () => { runPaletteCommand(paletteItems[+li.dataset.i][0]); closePalette(); }));
   }
   function closePalette() { $("#palette-backdrop").hidden = true; paletteIdx = -1; }
   document.addEventListener("keydown", (e) => {
@@ -584,7 +600,7 @@
       const inp = $("#palette-input");
       if (e.key === "ArrowDown") { e.preventDefault(); paletteIdx = Math.min(paletteIdx + 1, paletteItems.length - 1); renderPalette(); }
       if (e.key === "ArrowUp") { e.preventDefault(); paletteIdx = Math.max(paletteIdx - 1, 0); renderPalette(); }
-      if (e.key === "Enter") { e.preventDefault(); if (paletteItems[paletteIdx]) location.hash = paletteItems[paletteIdx][0]; closePalette(); }
+      if (e.key === "Enter") { e.preventDefault(); if (paletteItems[paletteIdx]) runPaletteCommand(paletteItems[paletteIdx][0]); closePalette(); }
     }
   });
   $("#palette-input")?.addEventListener("input", renderPalette);
@@ -599,18 +615,25 @@
      inline script in index.html so there is never a flash of the wrong theme. */
   function currentTheme() { return document.documentElement.getAttribute("data-theme") || "dark"; }
   function paintThemeButton() {
-    const btn = $("#theme-toggle");
-    if (btn) btn.innerHTML = currentTheme() === "dark" ? "☀️ Light mode" : "🌙 Dark mode";
     const d = $("#dir-toggle");
     if (d) d.innerHTML = (document.documentElement.getAttribute("dir") === "rtl") ? "⇄ LTR" : "⇄ RTL";
+    // The segmented switch is driven purely by the [data-theme] attribute in
+    // CSS, so there is no separate active-state to keep in sync here.
+    $$("[data-theme-set]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeSet === currentTheme())));
   }
-  $("#theme-toggle")?.addEventListener("click", () => {
-    const next = currentTheme() === "dark" ? "light" : "dark";
+  /** Apply + persist a theme. Exposed so the palette can switch it too. */
+  function setTheme(next, announce = true) {
+    if (next !== "dark" && next !== "light") return;
+    if (next === currentTheme()) return;
     document.documentElement.setAttribute("data-theme", next);
-    localStorage.setItem("cv-theme", next);
+    try { localStorage.setItem("cv-theme", next); } catch (_) {}
     paintThemeButton();
-    toast(next === "dark" ? "Dark mode" : "Light mode", "Theme saved for next visit", "");
-  });
+    if (announce) toast(next === "dark" ? "🌙 Dark mode" : "☀️ Light mode", "Saved for your next visit", "");
+  }
+  window.setTheme = setTheme;
+  $$("[data-theme-set]").forEach((btn) => btn.addEventListener("click", () => setTheme(btn.dataset.themeSet)));
+  // Legacy single-button toggle (kept for older markup/tests).
+  $("#theme-toggle")?.addEventListener("click", () => setTheme(currentTheme() === "dark" ? "light" : "dark"));
   $("#dir-toggle")?.addEventListener("click", () => {
     const next = (document.documentElement.getAttribute("dir") === "rtl") ? "ltr" : "rtl";
     document.documentElement.setAttribute("dir", next);
@@ -3048,8 +3071,9 @@
     try {
       if (authState.authenticated && authState.user && authState.user.externalId !== "demo") {
         const u = authState.user;
-        const avatar = u.avatarUrl ? `<img src="${esc(u.avatarUrl)}" alt="" style="width:22px;height:22px;border-radius:50%;vertical-align:-6px;margin-right:6px"/>` : "👤 ";
-        slot.innerHTML = `<span class="pill" title="${esc(u.email || "")} (${esc(u.role)})">${avatar}${esc(u.name)}</span> <button class="btn btn-ghost" id="logout-btn" style="padding:4px 10px">Logout</button>`;
+        const avatar = u.avatarUrl ? `<img class="user-avatar" src="${esc(u.avatarUrl)}" alt=""/>` : `<span class="user-avatar user-avatar-fallback">${esc((u.name || "?").trim().slice(0, 1).toUpperCase())}</span>`;
+        slot.innerHTML = `<span class="user-chip" title="${esc(u.email || "")} (${esc(u.role)})">${avatar}<span class="user-name">${esc(u.name)}</span><span class="badge badge-muted user-role">${esc(u.role)}</span></span>
+          <button class="btn btn-ghost" id="logout-btn" title="Sign out">⏻</button>`;
         $("#logout-btn").onclick = async () => {
           await api("/auth/logout", { method: "POST" }).catch(() => {});
           try { localStorage.removeItem("cv_token"); } catch (_) {}
@@ -3059,8 +3083,8 @@
         };
       } else {
         slot.innerHTML = authState.loginConfigured
-          ? `<a class="btn btn-primary" href="/auth/github/login" style="padding:6px 12px;text-decoration:none">🐙 Login with GitHub</a>`
-          : `<a class="btn btn-ghost" href="#/github" title="GitHub OAuth not configured" style="padding:6px 12px;text-decoration:none">👤 Demo mode</a>`;
+          ? `<a class="btn btn-primary" href="/auth/github/login">🐙 Sign in</a>`
+          : `<a class="btn btn-ghost" href="#/github" title="GitHub OAuth is not configured — running in demo mode">👤 Demo</a>`;
       }
     } catch (_) { /* leave slot empty when API unreachable */ }
   }
