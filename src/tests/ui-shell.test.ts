@@ -87,6 +87,27 @@ describe("UI shell", () => {
     expect(errors).toEqual([]);
   }, 60000);
 
+  it("renders project detail tabs and operational controls", async () => {
+    const project = await container.agentManager.createProject({
+      name: "Project Detail QA",
+      description: "Seeded by the UI test to verify project sub-pages.",
+      configRepo: "acme/project-detail-qa",
+      branch: "main",
+      framework: "Node.js",
+      database: "PostgreSQL",
+    });
+    const { go } = await boot();
+    for (const suffix of ["", "/agents", "/repositories", "/workflows", "/tasks", "/runs", "/tests", "/issues", "/pull-requests", "/skills", "/memory"]) {
+      const content = await go(`#/projects/${project.id}${suffix}`);
+      const text = content.textContent ?? "";
+      expect(text, `project route ${suffix || "/"} rendered an error state`).not.toMatch(/Something went wrong/);
+      expect(text).toContain("Project Detail QA");
+      expect(content.querySelectorAll(".project-tabs .tab").length).toBeGreaterThanOrEqual(10);
+      expect(text).toContain("Ask AI");
+      expect(text).toContain("Edit");
+    }
+  }, 60000);
+
   it("draws SVG dashboard charts and opens the analytics modal", async () => {
     const { win, go } = await boot();
     const content = await go("#/dashboard");

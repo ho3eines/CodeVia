@@ -166,7 +166,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       patch.repositories = p.repositories.map((r) => (r === cfg ? { ...r, repo, branch } : r));
     }
     const updated = save({ ...p, ...patch, id });
-    const rerun = body.reonboard === true || patch.capabilities !== undefined;
+    // Capability edits normally refresh generated agents/prompts, but UI callers
+    // can explicitly send reonboard:false when they are only saving metadata or
+    // want to stage stack changes before regenerating the roster.
+    const rerun = body.reonboard === true || (body.reonboard !== false && patch.capabilities !== undefined);
     if (rerun) await container.agentManager.onboardProject(id, []);
     return load(id) ?? updated;
   });

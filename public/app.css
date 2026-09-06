@@ -1040,3 +1040,8 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
 /* Verdict dialog stacks above an already-open form modal */
 .verdict-backdrop { z-index: 850; }
 .verdict-modal { width: min(620px, 95vw); }
+/* Project detail utilities */
+.project-tabs { margin-top: 10px; }
+.mini-pre { white-space: pre-wrap; background: var(--glass); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 10px; max-height: 360px; overflow: auto; color: var(--text); }
+label.check { display: flex; align-items: center; gap: 9px; color: var(--text-muted); font-size: 13px; margin: 8px 0; }
+label.check input { accent-color: var(--primary); }

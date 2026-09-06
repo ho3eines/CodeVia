@@ -606,7 +606,11 @@
     "/providers": "Providers", "/skills": "Skills", "/workflows": "Workflows", "/tasks": "Tasks",
     "/runs": "Runs", "/conversations": "Conversations", "/memory": "Memory", "/github": "GitHub",
     "/telegram": "Telegram", "/settings": "Settings", "/admin": "Admin", "/search": "Search",
-    "/projects/:id": "Project", "/agents/:id": "Agent", "/workflows/:id": "Workflow",
+    "/projects/:id": "Project", "/projects/:id/agents": "Project Agents", "/projects/:id/memory": "Project Memory",
+    "/projects/:id/skills": "Project Skills", "/projects/:id/repositories": "Project Repositories", "/projects/:id/workflows": "Project Workflows",
+    "/projects/:id/tasks": "Project Tasks", "/projects/:id/runs": "Project Runs", "/projects/:id/tests": "Project Tests",
+    "/projects/:id/issues": "Project Issues", "/projects/:id/pull-requests": "Project Pull Requests",
+    "/agents/:id": "Agent", "/workflows/:id": "Workflow",
     "/runs/:id/console": "Run Console", "/conversations/:id": "Conversation",
   };
   function setLangDir() {
@@ -1188,15 +1192,59 @@
 
   /* PROJECT DETAIL */
   const capLabel = (catalog, key, id) => ((catalog && catalog[key]) || []).find((o) => (o.value ?? o.id) === id)?.label || id;
+  const PROJECT_SECTIONS = [
+    ["overview", "Overview", "#/projects/"],
+    ["agents", "Agents", "/agents"],
+    ["memory", "Memory", "/memory"],
+    ["skills", "Skills", "/skills"],
+    ["repositories", "Repositories", "/repositories"],
+    ["workflows", "Workflows", "/workflows"],
+    ["tasks", "Tasks", "/tasks"],
+    ["runs", "Runs", "/runs"],
+    ["tests", "Tests", "/tests"],
+    ["issues", "Issues", "/issues"],
+    ["pull-requests", "Pull Requests", "/pull-requests"],
+  ];
+  function projectSectionNav(id, active = "overview") {
+    return `<div class="tabs project-tabs">${PROJECT_SECTIONS.map(([key, label, suffix]) => {
+      const href = key === "overview" ? `#/projects/${id}` : `#/projects/${id}${suffix}`;
+      return `<a class="tab ${active === key ? "active" : ""}" href="${esc(href)}">${esc(label)}</a>`;
+    }).join("")}</div>`;
+  }
+  function repoPath(repo) {
+    const [owner, ...rest] = String(repo || "").split("/");
+    return `${encodeURIComponent(owner || "")}/${encodeURIComponent(rest.join("/") || "")}`;
+  }
+  function projectCrumbs(p, active) {
+    return `<div class="field-hint"><a href="#/projects">Projects</a> / <a href="#/projects/${esc(p.id)}">${esc(p.name)}</a>${active && active !== "overview" ? " / " + esc(active) : ""}</div>`;
+  }
+  const projectActionBar = (p) => `<div class="action-row">
+    <button class="btn btn-primary" onclick="projectAsk(${JSON.stringify(p.id)})">❓ Ask AI</button>
+    <button class="btn" onclick="projectRun(${JSON.stringify(p.id)})">▶ Run Agent</button>
+    <button class="btn" onclick="projectTask(${JSON.stringify(p.id)})">＋ Create Task</button>
+    <button class="btn" onclick="projectWorkflow(${JSON.stringify(p.id)})">🔀 Run Workflow</button>
+    <button class="btn" onclick="projectDryRun(${JSON.stringify(p.id)})">🧪 Dry Run</button>
+    <button class="btn" onclick="projectRules(${JSON.stringify(p.id)})">📏 Rules</button>
+    <button class="btn" onclick="projectReonboard(${JSON.stringify(p.id)})">🔎 Detect & Agent.md</button>
+    <button class="btn" onclick="projectConfigureTelegram(${JSON.stringify(p.id)})">📱 Telegram</button>
+    <button class="btn" onclick="projectExport(${JSON.stringify(p.id)})">⇩ Export</button>
+    <button class="btn" onclick="projectImport(${JSON.stringify(p.id)})">⇧ Import</button>
+    <button class="btn" onclick="projectToggleActive(${JSON.stringify(p.id)}, ${JSON.stringify(!p.active)})">${p.active ? "⏸ Deactivate" : "▶ Activate"}</button>
+    <button class="btn" onclick="projectEdit(${JSON.stringify(p.id)})">⚙ Edit</button>
+  </div>`;
+  function miniJson(v) { return `<pre class="mini-pre">${esc(JSON.stringify(v ?? {}, null, 2))}</pre>`; }
+
   on("/projects/:id", async (rest) => {
     const id = rest[0];
     const p = await api("/projects/" + id);
-    const [agents, tasks, runs, workflows, catalog] = await Promise.all([
+    const [agents, tasks, runs, workflows, catalog, issues, prs] = await Promise.all([
       api(`/projects/${id}/agents`).catch(() => []),
       api(`/projects/${id}/tasks`).catch(() => []),
       api(`/projects/${id}/runs`).catch(() => []),
       api(`/projects/${id}/workflows`).catch(() => []),
       loadOptionCatalog().catch(() => null),
+      api(`/projects/${id}/issues`).catch(() => []),
+      api(`/projects/${id}/pull-requests`).catch(() => []),
     ]);
     const caps = p.capabilities || {};
     const repos = p.repositories || [{ repo: p.configRepo, branch: p.branch, role: "primary", isConfigRepo: true }];
@@ -1206,57 +1254,83 @@
     }).join("");
     const connKind = p.githubConnection?.kind ? ({ "user-oauth": `GitHub account${p.githubConnection.login ? " @" + p.githubConnection.login : ""}`, "server-token": "server token", mock: "mock/demo" }[p.githubConnection.kind] || p.githubConnection.kind) : "—";
     $("#content").innerHTML = `
-      <div class="overview"><div><h1>${esc(p.name)} ${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</h1><p>${esc(p.description)}</p></div>
-        <div class="action-row">
-          <button class="btn btn-primary" onclick="projectAsk(${JSON.stringify(p.id)})">❓ Ask AI</button>
-          <button class="btn" onclick="projectRun(${JSON.stringify(p.id)})">▶ Run Agent</button>
-          <button class="btn" onclick="projectTask(${JSON.stringify(p.id)})">＋ Create Task</button>
-          <button class="btn" onclick="projectWorkflow(${JSON.stringify(p.id)})">🔀 Run Workflow</button>
-          <button class="btn" onclick="projectDryRun(${JSON.stringify(p.id)})">🧪 Dry Run</button>
-          <button class="btn" onclick="projectRules(${JSON.stringify(p.id)})">📏 Rules</button>
-          <button class="btn" onclick="projectReonboard(${JSON.stringify(p.id)})">🔎 Detect & Agent.md</button>
-          <button class="btn" onclick="projectEdit(${JSON.stringify(p.id)})">⚙ Edit</button>
-        </div></div>
+      ${projectCrumbs(p, "overview")}
+      <div class="overview"><div><h1>${esc(p.name)} ${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</h1><p>${esc(p.description)}</p></div>${projectActionBar(p)}</div>
+      ${projectSectionNav(p.id, "overview")}
       <div class="stat-grid">
         <div class="card stat"><div class="stat-label">Config repository</div><div class="stat-value" style="font-size:16px">${esc(p.configRepo)}</div><div class="stat-sub">${esc(p.branch)} · ${repos.length} repo${repos.length === 1 ? "" : "s"} linked</div></div>
         <div class="card stat"><div class="stat-label">Agents</div><div class="stat-value">${agents.filter((a) => a.enabled).length}<span class="stat-sub"> / ${agents.length}</span></div></div>
-        <div class="card stat"><div class="stat-label">Tasks</div><div class="stat-value">${tasks.length}</div></div>
-        <div class="card stat"><div class="stat-label">Runs</div><div class="stat-value">${runs.length}</div></div>
+        <div class="card stat"><div class="stat-label">Tasks</div><div class="stat-value">${tasks.length}</div><div class="stat-sub">${tasks.filter((t)=>t.status === "running").length} running</div></div>
+        <div class="card stat"><div class="stat-label">Runs</div><div class="stat-value">${runs.length}</div><div class="stat-sub">${runs.filter((r)=>r.status === "failed").length} failed</div></div>
       </div>
       <div class="grid-2">
         <div class="card card-body">
           <div class="card-title">Repositories <span class="sub">GitHub: ${esc(connKind)}</span></div>
           <div class="table-wrap"><table><thead><tr><th>Repository</th><th>Branch</th><th>Role</th><th></th><th></th></tr></thead><tbody>
-          ${repos.map((r) => `<tr><td class="mono">${r.htmlUrl ? `<a href="${esc(r.htmlUrl)}" target="_blank" rel="noopener">${esc(r.repo)}</a>` : esc(r.repo)} ${r.private ? '<span class="badge badge-warn">private</span>' : ""}</td><td class="mono">${esc(r.branch)}</td><td><span class="badge badge-muted">${esc(r.role || "primary")}</span></td><td>${r.isConfigRepo ? '<span class="badge badge-ok" title=".ai-engineering lives here">config</span>' : ""}</td><td style="text-align:right">${repos.length > 1 ? `<button class="btn btn-ghost" title="Unlink" onclick="projectUnlinkRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">✕</button>` : ""}</td></tr>`).join("")}
+          ${repos.map((r) => `<tr><td class="mono">${r.htmlUrl ? `<a href="${esc(r.htmlUrl)}" target="_blank" rel="noopener">${esc(r.repo)}</a>` : esc(r.repo)} ${r.private ? '<span class="badge badge-warn">private</span>' : ""}</td><td class="mono">${esc(r.branch)}</td><td><span class="badge badge-muted">${esc(r.role || "primary")}</span></td><td>${r.isConfigRepo ? '<span class="badge badge-ok" title=".ai-engineering lives here">config</span>' : ""}</td><td style="text-align:right"><button class="btn btn-ghost" title="Edit" onclick="projectEditRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">✎</button>${repos.length > 1 ? `<button class="btn btn-ghost" title="Unlink" onclick="projectUnlinkRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">✕</button>` : ""}</td></tr>`).join("")}
           </tbody></table></div>
-          <div class="flex mt"><button class="btn" onclick="projectAddRepo(${JSON.stringify(p.id)})">＋ Link repository</button></div>
+          <div class="flex mt"><button class="btn" onclick="projectAddRepo(${JSON.stringify(p.id)})">＋ Link repository</button><button class="btn" onclick="projectOpenGitHub(${JSON.stringify(p.id)})">🐙 View GitHub</button></div>
         </div>
         <div class="card card-body">
           <div class="card-title">Stack & capabilities <a class="sub" href="#" onclick="projectEdit(${JSON.stringify(p.id)});return false">edit</a></div>
           ${capRows}
           <div class="meter-row"><span class="lbl">Agent roster</span><span style="flex:1;display:flex;flex-wrap:wrap;gap:4px">${(caps.agentTypes || []).length ? caps.agentTypes.map((v) => `<span class="badge badge-muted">${esc(capLabel(catalog, "agentTypes", v))}</span>`).join("") : '<span class="badge badge-muted">auto (derived from stack)</span>'}</span></div>
           <div class="meter-row"><span class="lbl">Detected skills</span><span style="flex:1;display:flex;flex-wrap:wrap;gap:4px">${(p.settings?.skills || []).length ? p.settings.skills.map((v) => `<span class="badge badge-info">${esc(v)}</span>`).join("") : '<span class="badge badge-muted">—</span>'}</span></div>
+          <div class="meter-row"><span class="lbl">Telegram</span><span class="mono">${esc(p.telegramChatId || "not connected")}</span></div>
+          <div class="meter-row"><span class="lbl">Environment</span><span class="badge badge-muted">${esc(p.settings?.environment || "development")}</span></div>
         </div>
       </div>
       <div class="grid-2 mt">
         <div class="card card-body">
-          <div class="card-title">Agents <a href="#/agents" class="sub">manage</a></div>
-          <div class="table-wrap"><table><thead><tr><th>Type</th><th>Name</th><th>Status</th></tr></thead><tbody>
-          ${agents.map((a) => `<tr><td class="mono">${esc(a.type)}</td><td>${esc(a.name)}</td><td>${a.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</td></tr>`).join("")}
+          <div class="card-title">Agents <a href="#/projects/${esc(p.id)}/agents" class="sub">manage</a></div>
+          <div class="table-wrap"><table><thead><tr><th>Type</th><th>Name</th><th>Status</th><th></th></tr></thead><tbody>
+          ${agents.map((a) => `<tr><td class="mono">${esc(a.type)}</td><td><a href="#/agents/${esc(a.id)}">${esc(a.name)}</a></td><td>${a.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</td><td><button class="btn btn-ghost" onclick="projectRunAgentType(${JSON.stringify(p.id)}, ${JSON.stringify(a.type)})">Run</button></td></tr>`).join("")}
           </tbody></table></div>
         </div>
         <div class="card card-body">
-          <div class="card-title">Workflows</div>
-          ${workflows.length ? workflows.map((w) => `<div class="list-row"><span>🔀</span><div><strong>${esc(w.name)}</strong><div class="mono" style="color:var(--text-muted)">${esc(w.slug)} · v${w.version}</div></div><span class="spacer"></span>${w.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</div>`).join("") : emptyState("🔀", "No workflows yet", "Define a workflow to orchestrate agents.")}
+          <div class="card-title">Workflows <a href="#/projects/${esc(p.id)}/workflows" class="sub">open</a></div>
+          ${workflows.length ? workflows.map((w) => `<div class="list-row"><span>🔀</span><div><strong>${esc(w.name)}</strong><div class="mono" style="color:var(--text-muted)">${esc(w.slug)} · v${w.version}</div></div><span class="spacer"></span>${w.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}<button class="btn btn-ghost" onclick="projectRunWorkflowId(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)})">Run</button></div>`).join("") : emptyState("🔀", "No workflows yet", "Define a workflow to orchestrate agents.")}
+        </div>
+      </div>
+      <div class="grid-2 mt">
+        <div class="card card-body"><div class="card-title">GitHub activity <a href="#/projects/${esc(p.id)}/issues" class="sub">issues</a> · <a href="#/projects/${esc(p.id)}/pull-requests" class="sub">PRs</a></div>
+          <div class="meter-row"><span class="lbl">Open issues</span><strong>${issues.length}</strong></div>
+          <div class="meter-row"><span class="lbl">Open PRs</span><strong>${prs.length}</strong></div>
+          <div class="flex mt"><button class="btn" onclick="location.hash='#/projects/${esc(p.id)}/tests'">🧪 Tests</button><button class="btn" onclick="location.hash='#/projects/${esc(p.id)}/runs'">▶ Runs</button></div>
+        </div>
+        <div class="card card-body"><div class="card-title">Budget guardrails <a class="sub" href="#" onclick="projectEdit(${JSON.stringify(p.id)});return false">edit</a></div>
+          <div class="meter-row"><span class="lbl">Max tokens/run</span><span class="mono">${esc(p.settings?.budget?.maxTokensPerRun ?? "—")}</span></div>
+          <div class="meter-row"><span class="lbl">Max calls/run</span><span class="mono">${esc(p.settings?.budget?.maxCallsPerRun ?? "—")}</span></div>
+          <div class="meter-row"><span class="lbl">Max cost/run</span><span class="mono">${money(p.settings?.budget?.maxCostUsdPerRun)}</span></div>
+          <div class="meter-row"><span class="lbl">Max duration</span><span class="mono">${esc(p.settings?.budget?.maxDurationMs ?? "—")} ms</span></div>
         </div>
       </div>
       <div class="card card-body mt">
-        <div class="card-title">Recent Runs</div>
+        <div class="card-title">Recent Runs <a href="#/projects/${esc(p.id)}/runs" class="sub">view all</a></div>
         ${runs.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th><th></th></tr></thead><tbody>
           ${runs.slice(0,10).map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("")}
         </tbody></table></div>` : emptyState("▶️", "No runs yet", "Ask the AI or run an agent to see executions here.")}
       </div>`;
   });
+
+  async function renderProjectResource(id, section) {
+    const p = await api("/projects/" + id);
+    const data = await api(`/projects/${id}/${section}`).catch(() => []);
+    const title = PROJECT_SECTIONS.find((x) => x[0] === section)?.[1] || section;
+    let html = "";
+    if (section === "agents") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Model</th><th>Skills</th><th>Status</th><th></th></tr></thead><tbody>${data.map((a) => `<tr><td><a href="#/agents/${esc(a.id)}"><strong>${esc(a.name)}</strong></a><div class="sub">${esc(a.role)}</div></td><td class="mono">${esc(a.type)}</td><td class="mono">${esc(a.models?.primary || "—")}</td><td>${(a.skills || []).slice(0,4).map((s)=>`<span class="badge badge-muted">${esc(s)}</span>`).join(" ")}</td><td>${a.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</td><td><button class="btn btn-ghost" onclick="projectToggleAgent(${JSON.stringify(p.id)}, ${JSON.stringify(a.id)}, ${JSON.stringify(!a.enabled)})">${a.enabled ? "Disable" : "Enable"}</button><button class="btn btn-ghost" onclick="projectRunAgentType(${JSON.stringify(p.id)}, ${JSON.stringify(a.type)})">Run</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🤖", "No agents", "Run Detect & Agent.md to generate agents.");
+    else if (section === "repositories") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Branch</th><th>Role</th><th>Config</th><th></th></tr></thead><tbody>${data.map((r) => `<tr><td class="mono">${r.htmlUrl ? `<a href="${esc(r.htmlUrl)}" target="_blank" rel="noopener">${esc(r.repo)}</a>` : esc(r.repo)}</td><td class="mono">${esc(r.branch)}</td><td>${esc(r.role)}</td><td>${r.isConfigRepo ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-muted">no</span>'}</td><td><button class="btn btn-ghost" onclick="projectEditRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">Edit</button>${data.length > 1 ? `<button class="btn btn-ghost" onclick="projectUnlinkRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">Unlink</button>` : ""}</td></tr>`).join("")}</tbody></table></div><div class="flex mt"><button class="btn btn-primary" onclick="projectAddRepo(${JSON.stringify(p.id)})">＋ Link repository</button></div>` : emptyState("🐙", "No repositories", "Link a repository to use GitHub as the source of truth.");
+    else if (section === "tasks") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Task</th><th>Agent</th><th>Status</th><th>Correlation</th><th>Updated</th><th></th></tr></thead><tbody>${data.map((t) => `<tr><td><strong>${esc(t.title)}</strong><div class="sub">${esc((t.description || "").slice(0, 100))}</div></td><td class="mono">${esc(t.agentType || "auto")}</td><td>${badge(t.status)}</td><td class="mono">${esc((t.correlationId || "").slice(0,12))}</td><td>${timeAgo(t.updatedAt)}</td><td><button class="btn btn-ghost" onclick="projectViewTask(${JSON.stringify(t.id)})">View</button><button class="btn btn-ghost" onclick="projectRunTask(${JSON.stringify(t.id)})">Run</button><button class="btn btn-ghost" onclick="projectCancelTask(${JSON.stringify(t.id)})">Cancel</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🧩", "No tasks", "Create a task or ask AI to queue work.");
+    else if (section === "runs" || section === "tests") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody>${data.map((r) => `<tr><td class="mono">${esc(r.id.slice(0,8))}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td class="mono">${esc(r.modelId || "—")}</td><td>${esc(r.totalTokens)}</td><td>${money(r.costUsd)}</td><td><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a></td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️", section === "tests" ? "No QA runs" : "No runs", "Start an agent or workflow to create executions.");
+    else if (section === "workflows") html = data.length ? data.map((w) => `<div class="list-row"><span>🔀</span><div><strong><a href="#/workflows/${esc(w.id)}">${esc(w.name)}</a></strong><div class="mono" style="color:var(--text-muted)">${esc(w.slug)} · ${w.nodes?.length || 0} nodes · v${w.version}</div></div><span class="spacer"></span>${w.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}<button class="btn btn-ghost" onclick="projectRunWorkflowId(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)})">Run</button></div>`).join("") : emptyState("🔀", "No workflows", "Re-onboard the project to generate a default workflow.");
+    else if (section === "skills") html = data.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px">${data.map((x)=>`<span class="badge badge-info">${esc(x)}</span>`).join("")}</div><div class="flex mt"><a class="btn" href="#/skills">Open Skill Marketplace</a><button class="btn" onclick="projectEdit(${JSON.stringify(p.id)})">Edit Project Stack</button></div>` : emptyState("🛠️", "No skills", "Skills are generated from project capabilities.");
+    else if (section === "memory") html = data.length ? data.map((m) => `<div class="list-row"><span>🗂️</span><div><strong>${esc(m.key)}</strong><div class="sub">${esc(m.type)} · v${esc(m.version)} · ${esc((m.tags || []).join(", "))}</div><p>${esc((m.content || "").slice(0,180))}</p></div></div>`).join("") : emptyState("🗂️", "No memory yet", "Agent summaries and decisions will appear here.");
+    else if (section === "issues" || section === "pull-requests") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Repo</th><th>#</th><th>Title</th><th>Status</th><th></th></tr></thead><tbody>${data.map((x) => `<tr><td class="mono">${esc(x.repo)}</td><td class="mono">#${esc(x.number)}</td><td>${esc(x.title)}</td><td>${badge(x.state || x.status || "open")}</td><td>${x.htmlUrl ? `<a class="btn btn-ghost" href="${esc(x.htmlUrl)}" target="_blank" rel="noopener">Open</a>` : ""}</td></tr>`).join("")}</tbody></table></div>` : emptyState(section === "issues" ? "⭕" : "⑂", section === "issues" ? "No open issues" : "No open pull requests", "GitHub data is loaded per linked repository.");
+    else html = miniJson(data);
+    $("#content").innerHTML = `${projectCrumbs(p, section)}<div class="overview"><div><h1>${esc(p.name)} / ${esc(title)}</h1><p>${esc(p.description || "")}</p></div>${projectActionBar(p)}</div>${projectSectionNav(p.id, section)}<div class="card card-body">${html}</div>`;
+  }
+  ["agents","memory","skills","repositories","workflows","tasks","runs","tests","issues","pull-requests"].forEach((section) => on(`/projects/:id/${section}`, (rest) => renderProjectResource(rest[0], section)));
+
   window.projectDryRun = (id) => {
     openModal("Dry Run — preview without changing anything", `<div class="field"><label>What should the agent do?</label><textarea class="textarea" id="dry-text" placeholder="Fix the login bug after the last commit"></textarea></div><div class="flex"><button class="btn btn-primary" id="dry-go">Preview plan</button><button class="btn" onclick="closeModal()">Close</button></div><div id="dry-out" class="mt"></div>`);
     $("#dry-go").onclick = async () => {
@@ -1350,9 +1424,26 @@
       } catch (e) { toast("Error", e.message, "err"); }
     };
   };
+  window.projectEditRepo = async (id, repo) => {
+    const repos = await api(`/projects/${id}/repositories`).catch(() => []);
+    const r = repos.find((x) => String(x.repo).toLowerCase() === String(repo).toLowerCase());
+    if (!r) { toast("Repository not found", repo, "err"); return; }
+    openModal("Edit repository link", `
+      <div class="field"><label>Repository</label><input class="input mono" id="per-repo" value="${esc(r.repo)}" disabled/></div>
+      <div class="grid-2"><div class="field"><label>Branch</label><input class="input mono" id="per-branch" value="${esc(r.branch || "main")}"/></div>
+      <div class="field"><label>Role</label><select class="select" id="per-role">${["primary","frontend","backend","mobile","infra","docs","library","other"].map((x)=>`<option value="${x}" ${x === r.role ? "selected" : ""}>${x}</option>`).join("")}</select></div></div>
+      <label class="check"><input type="checkbox" id="per-config" ${r.isConfigRepo ? "checked" : ""}/> Use this repository as the .ai-engineering configuration source of truth</label>
+      <div class="flex mt"><button class="btn btn-primary" id="per-save">Save repository</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#per-save").onclick = async () => {
+      try {
+        await api(`/projects/${id}/repositories/${repoPath(repo)}`, { method: "PATCH", body: { branch: $("#per-branch").value.trim() || "main", role: $("#per-role").value, isConfigRepo: $("#per-config").checked } });
+        closeModal(); toast("Repository updated", repo, "ok"); refreshCurrent();
+      } catch (e) { toast("Error", e.message, "err"); }
+    };
+  };
   window.projectUnlinkRepo = async (id, repo) => {
     if (!confirm(`Unlink ${repo} from this project?`)) return;
-    try { await api(`/projects/${id}/repositories/${repo}`, { method: "DELETE" }); toast("Repository unlinked", repo, "ok"); refreshCurrent(); }
+    try { await api(`/projects/${id}/repositories/${repoPath(repo)}`, { method: "DELETE" }); toast("Repository unlinked", repo, "ok"); refreshCurrent(); }
     catch (e) { toast("Error", e.message, "err"); }
   };
   window.projectReonboard = async (id) => {
@@ -1362,22 +1453,125 @@
       closeModal(); toast("Project inspected", `Agents: ${r.agents} · Skills: ${r.skills} — Agent.md ensured`, "ok"); refreshCurrent();
     } catch (e) { closeModal(); toast("Detection failed", e.message, "err"); }
   };
-  window.projectEdit = async (id) => {
-    openModal("Edit project", `<div class="repo-empty">Loading…</div>`);
-    const [p, catalog] = await Promise.all([api("/projects/" + id), loadOptionCatalog()]);
-    const caps = p.capabilities || {};
-    $("#modal-body").innerHTML = `
-      <div class="field"><label>Name</label><input class="input" id="pe-name" value="${esc(p.name)}"/></div>
-      <div class="field"><label>Description</label><textarea class="textarea" id="pe-desc">${esc(p.description || "")}</textarea></div>
-      ${CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], caps[k] || [], { placeholder: ph, single: new Set(catalog.singleSelectKeys || ["databases"]).has(k) })).join("")}
-      ${chipGroupHtml("agentTypes", "Agents to generate", catalog.agentTypes || [], caps.agentTypes || [], { core: catalog.coreAgentTypes || [], allowCustom: false, hint: "Saving re-runs onboarding: generated system prompts are refreshed with the new stack, agents outside the roster are disabled (never deleted)." })}
-      <div class="flex mt"><button class="btn btn-primary" id="pe-save">Save & re-onboard</button><button class="btn" onclick="closeModal()">Cancel</button></div>`;
-    bindChipGroups($("#modal-body"));
-    $("#pe-save").onclick = async () => {
+  window.projectToggleActive = async (id, active) => {
+    try {
+      await api(`/projects/${id}/${active ? "activate" : "deactivate"}`, { method: "POST", body: {} });
+      toast(active ? "Project activated" : "Project deactivated", "", "ok"); refreshCurrent();
+    } catch (e) { toast("Error", e.message, "err"); }
+  };
+  window.projectOpenGitHub = async (id) => {
+    const p = await api(`/projects/${id}`).catch(() => null);
+    const repo = (p?.repositories || []).find((r) => r.isConfigRepo) || (p?.repositories || [])[0];
+    if (repo?.htmlUrl) window.open(repo.htmlUrl, "_blank", "noopener");
+    else if (repo?.repo) window.open(`https://github.com/${repo.repo}`, "_blank", "noopener");
+    else location.hash = "#/github";
+  };
+  window.projectRunAgentType = async (id, agentType) => {
+    openModal("Run Agent", `<div class="field"><label>Task title</label><input class="input" id="prat-title" value="${esc(agentType)} task"/></div><div class="field"><label>Instructions</label><textarea class="textarea" id="prat-desc" placeholder="What should this agent do?"></textarea></div><div class="flex"><button class="btn btn-primary" id="prat-go">Run ${esc(agentType)}</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#prat-go").onclick = async () => {
+      const title = $("#prat-title").value.trim() || `${agentType} task`;
       try {
-        await api("/projects/" + id, { method: "PATCH", body: { name: $("#pe-name").value, description: $("#pe-desc").value, capabilities: readChipGroups($("#modal-body")) } });
-        closeModal(); toast("Project updated", "Agents regenerated for the new stack", "ok"); refreshCurrent();
+        const r = await api(`/projects/${id}/ask`, { method: "POST", body: { title, description: $("#prat-desc").value.trim() || title, agentType } });
+        closeModal(); toast("Agent queued", `${agentType} · task ${r.task.id.slice(0, 8)}`, "ok"); refreshCurrent();
       } catch (e) { toast("Error", e.message, "err"); }
+    };
+  };
+  window.projectRunWorkflowId = async (id, workflowId) => {
+    try {
+      await api(`/workflows/${workflowId}/run`, { method: "POST", body: { projectId: id, title: "Run workflow", description: "Started from project page" } });
+      toast("Workflow started", workflowId.slice(0, 8), "ok"); refreshCurrent();
+    } catch (e) { toast("Error", e.message, "err"); }
+  };
+  window.projectToggleAgent = async (projectId, agentId, enable) => {
+    try {
+      await api(`/agents/${agentId}/${enable ? "enable" : "disable"}`, { method: "POST", body: {} });
+      toast(enable ? "Agent enabled" : "Agent disabled", "", "ok"); refreshCurrent();
+    } catch (e) { toast("Error", e.message, "err"); }
+  };
+  window.projectRunTask = async (taskId) => {
+    try { const r = await api(`/tasks/${taskId}/run`, { method: "POST", body: {} }); toast("Task queued", r.jobId || taskId, "ok"); refreshCurrent(); }
+    catch (e) { toast("Error", e.message, "err"); }
+  };
+  window.projectCancelTask = async (taskId) => {
+    if (!confirm("Cancel this task?")) return;
+    try { await api(`/tasks/${taskId}/cancel`, { method: "POST", body: {} }); toast("Task cancelled", taskId.slice(0,8), "ok"); refreshCurrent(); }
+    catch (e) { toast("Error", e.message, "err"); }
+  };
+  window.projectViewTask = async (taskId) => {
+    const t = await api(`/tasks/${taskId}`);
+    openModal("Task details", `<div class="meter-row"><span class="lbl">Title</span><strong>${esc(t.title)}</strong></div><div class="meter-row"><span class="lbl">Status</span>${badge(t.status)}</div><div class="meter-row"><span class="lbl">Agent</span><span class="mono">${esc(t.agentType || "auto")}</span></div><div class="meter-row"><span class="lbl">Correlation</span><span class="mono">${esc(t.correlationId)}</span></div><div class="field"><label>Description</label><pre class="mini-pre">${esc(t.description || "")}</pre></div>${t.result ? `<div class="field"><label>Result</label>${miniJson(t.result)}</div>` : ""}${t.error ? `<div class="error-state"><h4>Task error</h4><pre>${esc(t.error)}</pre></div>` : ""}<div class="flex mt"><button class="btn btn-primary" onclick="projectRunTask('${esc(t.id)}')">Run</button><button class="btn" onclick="projectCancelTask('${esc(t.id)}')">Cancel</button><button class="btn" onclick="closeModal()">Close</button></div>`, { wide: true });
+  };
+  window.projectConfigureTelegram = async (id) => {
+    const p = await api(`/projects/${id}`);
+    const notes = p.settings?.notifications || [];
+    openModal("Project Telegram", `<div class="field"><label>Telegram chat ID</label><input class="input mono" id="ptg-chat" value="${esc(p.telegramChatId || "")}" placeholder="123456789 or -100..."/><div class="field-hint">Only the chat id is stored in project metadata. Bot tokens stay in Railway variables / secrets.</div></div><label class="check"><input type="checkbox" id="ptg-notify" ${notes.includes("telegram") ? "checked" : ""}/> Send project notifications to Telegram</label><div class="flex mt"><button class="btn btn-primary" id="ptg-save">Save Telegram settings</button><a class="btn" href="#/telegram">Open Telegram integration</a><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#ptg-save").onclick = async () => {
+      const notify = $("#ptg-notify").checked;
+      const notifications = Array.from(new Set([...(notes || []).filter((n)=>n !== "telegram"), ...(notify ? ["telegram"] : [])]));
+      try { await api(`/projects/${id}`, { method: "PATCH", body: { telegramChatId: $("#ptg-chat").value.trim(), settings: { notifications } } }); closeModal(); toast("Telegram settings saved", "", "ok"); refreshCurrent(); }
+      catch (e) { toast("Error", e.message, "err"); }
+    };
+  };
+  window.projectExport = async (id) => {
+    try {
+      const [project, agents, workflows, memory, skills] = await Promise.all([api(`/projects/${id}`), api(`/projects/${id}/agents`).catch(()=>[]), api(`/projects/${id}/workflows`).catch(()=>[]), api(`/projects/${id}/memory`).catch(()=>[]), api(`/projects/${id}/skills`).catch(()=>[])]);
+      const snapshot = { kind: "codevia.project.export", version: 1, exportedAt: new Date().toISOString(), project, agents, workflows, memoryMetadata: memory.map((m)=>({ id:m.id, key:m.key, type:m.type, tags:m.tags, refs:m.refs, source:m.source, version:m.version })), skills, secretPolicy: "No secret values are exported; only secret references in configuration metadata may appear." };
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${(project.slug || project.name || "project").replace(/[^a-z0-9._-]+/gi, "-")}-codevia-export.json`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+      toast("Project exported", "JSON snapshot prepared", "ok");
+    } catch (e) { toast("Export failed", e.message, "err"); }
+  };
+  window.projectImport = async (id) => {
+    openModal("Import project settings", `<div class="field"><label>Paste a CodeVia project export JSON</label><textarea class="textarea" id="pim-json" placeholder='{"kind":"codevia.project.export",...}'></textarea><div class="field-hint">Import updates safe project metadata only: name, description, repositories, capabilities, Telegram chat id, default model and settings. Secrets are never imported as values.</div></div><label class="check"><input type="checkbox" id="pim-reonboard" checked/> Re-run onboarding after import</label><div class="flex"><button class="btn btn-primary" id="pim-go">Validate & Import</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pim-go").onclick = async () => {
+      try {
+        const parsed = JSON.parse($("#pim-json").value || "{}");
+        const pr = parsed.project || parsed;
+        if (!pr || !pr.name) throw new Error("Invalid project export: missing project.name");
+        await api(`/projects/${id}`, { method: "PATCH", body: { name: pr.name, description: pr.description || "", repositories: pr.repositories, capabilities: pr.capabilities, defaultModelId: pr.defaultModelId, telegramChatId: pr.telegramChatId, settings: pr.settings || {}, reonboard: $("#pim-reonboard").checked } });
+        closeModal(); toast("Project imported", "Configuration restored from JSON", "ok"); refreshCurrent();
+      } catch (e) { toast("Import failed", e.message, "err"); }
+    };
+  };
+  window.projectEdit = async (id) => {
+    openModal("Edit project", `<div class="repo-empty">Loading…</div>`, { wide: true });
+    const [p, catalog, models] = await Promise.all([api("/projects/" + id), loadOptionCatalog(), api("/models").catch(() => [])]);
+    const caps = p.capabilities || {};
+    const b = p.settings?.budget || {};
+    const selectedModel = p.defaultModelId || "";
+    $("#modal-body").innerHTML = `
+      ${tabsHtml("pe", [
+        { id: "identity", label: "Identity", html: `<div class="field"><label>Name</label><input class="input" id="pe-name" value="${esc(p.name)}"/></div><div class="field"><label>Description</label><textarea class="textarea" id="pe-desc">${esc(p.description || "")}</textarea></div><div class="grid-2"><div class="field"><label>Status</label><select class="select" id="pe-active"><option value="true" ${p.active ? "selected" : ""}>Active</option><option value="false" ${!p.active ? "selected" : ""}>Inactive</option></select></div><div class="field"><label>Environment</label><select class="select" id="pe-env">${["development","staging","production"].map((x)=>`<option value="${x}" ${x === (p.settings?.environment || "development") ? "selected" : ""}>${x}</option>`).join("")}</select></div></div><div class="grid-2"><div class="field"><label>Default model</label><select class="select" id="pe-model"><option value="">Project router default</option>${models.map((m)=>`<option value="${esc(m.id)}" ${m.id === selectedModel ? "selected" : ""}>${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div><div class="field"><label>Telegram chat</label><input class="input mono" id="pe-telegram" value="${esc(p.telegramChatId || "")}" placeholder="not connected"/></div></div>` },
+        { id: "capabilities", label: "Capabilities", html: `${CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], caps[k] || [], { placeholder: ph, single: new Set(catalog.singleSelectKeys || ["databases"]).has(k) })).join("")}${chipGroupHtml("agentTypes", "Agents to generate", catalog.agentTypes || [], caps.agentTypes || [], { core: catalog.coreAgentTypes || [], allowCustom: false, hint: "Saving re-runs onboarding: generated system prompts are refreshed with the new stack, agents outside the roster are disabled (never deleted)." })}` },
+        { id: "operations", label: "Operations", html: `<div class="grid-2"><div class="field"><label>Max tokens per run</label><input class="input" type="number" id="pe-b-tokens" value="${esc(b.maxTokensPerRun ?? 20000)}"/></div><div class="field"><label>Max calls per run</label><input class="input" type="number" id="pe-b-calls" value="${esc(b.maxCallsPerRun ?? 20)}"/></div><div class="field"><label>Max cost per run (USD)</label><input class="input" type="number" step="0.01" id="pe-b-cost" value="${esc(b.maxCostUsdPerRun ?? 5)}"/></div><div class="field"><label>Max duration (ms)</label><input class="input" type="number" id="pe-b-ms" value="${esc(b.maxDurationMs ?? 300000)}"/></div></div><div class="field"><label>Notifications</label><input class="input" id="pe-notifications" value="${esc((p.settings?.notifications || []).join(", "))}" placeholder="web, telegram"/></div><div class="field"><label>Metadata (JSON)</label><textarea class="textarea mono" id="pe-meta">${esc(JSON.stringify(p.settings?.metadata || {}, null, 2))}</textarea></div>` },
+      ])}
+      <div class="flex mt"><button class="btn btn-primary" id="pe-save">Save & re-onboard</button><button class="btn" id="pe-save-lite">Save without onboarding</button><button class="btn btn-danger" id="pe-delete">Delete project</button><button class="btn" onclick="closeModal()">Cancel</button></div>`;
+    bindChipGroups($("#modal-body"));
+    const saveProject = async (reonboard) => {
+      const metadataText = $("#pe-meta")?.value || "{}";
+      let metadata = {};
+      try { metadata = JSON.parse(metadataText); } catch (_) { toast("Invalid metadata JSON", "Fix the Operations tab metadata field", "err"); return; }
+      try {
+        await api("/projects/" + id, { method: "PATCH", body: {
+          name: $("#pe-name").value.trim(), description: $("#pe-desc").value,
+          active: $("#pe-active").value === "true", defaultModelId: $("#pe-model").value, telegramChatId: $("#pe-telegram").value.trim(),
+          capabilities: readChipGroups($("#modal-body")), reonboard,
+          settings: {
+            environment: $("#pe-env").value,
+            notifications: ($("#pe-notifications").value || "").split(",").map((x)=>x.trim()).filter(Boolean),
+            metadata,
+            budget: { maxTokensPerRun: Number($("#pe-b-tokens").value) || 0, maxCallsPerRun: Number($("#pe-b-calls").value) || 0, maxCostUsdPerRun: Number($("#pe-b-cost").value) || 0, maxDurationMs: Number($("#pe-b-ms").value) || 0 },
+          },
+        } });
+        closeModal(); toast("Project updated", reonboard ? "Agents regenerated for the new stack" : "Settings saved", "ok"); refreshCurrent();
+      } catch (e) { toast("Error", e.message, "err"); }
+    };
+    $("#pe-save").onclick = () => saveProject(true);
+    $("#pe-save-lite").onclick = () => saveProject(false);
+    $("#pe-delete").onclick = async () => {
+      if (!confirm(`Delete project ${p.name}? This removes runtime records from CodeVia but does not delete GitHub repositories.`)) return;
+      try { await api(`/projects/${id}`, { method: "DELETE" }); closeModal(); toast("Project deleted", p.name, "ok"); location.hash = "#/projects"; }
+      catch (e) { toast("Delete failed", e.message, "err"); }
     };
   };
 
