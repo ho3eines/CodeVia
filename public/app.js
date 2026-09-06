@@ -95,6 +95,18 @@
     return Math.floor(diff / 86400) + "d ago";
   };
   const money = (n) => (n ? "$" + Number(n).toFixed(2) : "$0.00");
+  function isRtlText(text) {
+    const s = String(text || "");
+    const rtlChars = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/g;
+    const rtl = (s.match(rtlChars) || []).length;
+    const ltr = (s.match(/[A-Za-z0-9]/g) || []).length;
+    const startsRtl = /^[\s"'([{«،؛؟]*[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(s.trim());
+    // Persian/Arabic text often contains English model names, endpoints or code
+    // terms. Treat it as RTL as soon as it clearly contains RTL prose, not only
+    // when RTL characters outnumber Latin characters.
+    return rtl > 0 && (startsRtl || rtl >= ltr || rtl >= 4);
+  }
+  const dirForText = (text) => (isRtlText(text) ? "rtl" : "ltr");
   function toast(title, msg, kind = "") {
     const el = document.createElement("div");
     el.className = "toast " + kind;
@@ -2309,7 +2321,7 @@
       <div class="chat-thread" id="chat-thread"></div>
       <div class="chat-meta" id="chat-meta"></div>
       <div class="chat-composer">
-        <textarea class="textarea" id="chat-input" rows="2" placeholder="Send a natural message… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <textarea class="textarea" id="chat-input" rows="2" dir="auto" placeholder="پیام خود را بنویسید… / Send a natural message… (Enter to send, Shift+Enter for a new line)"></textarea>
         <div class="flex" style="justify-content:space-between;align-items:center">
           <span class="field-hint">Replies stream in token by token.</span>
           <div class="flex">
@@ -2326,6 +2338,7 @@
     $("#chat-clear").onclick = () => { modelChats.set(id, []); renderChatThread([]); $("#chat-meta").textContent = ""; };
     $("#chat-stop").onclick = () => { if (chatAbort) chatAbort.abort(); };
     const input = $("#chat-input");
+    input.addEventListener("input", () => applyTextDirection(input, input.value));
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChatMessage(id); }
     });
@@ -2345,8 +2358,16 @@
       : `<div class="chat-empty">Ask this model anything — the answer streams in like a normal chat.</div>`;
     thread.scrollTop = thread.scrollHeight;
   }
+  function applyTextDirection(el, text) {
+    if (!el) return;
+    const dir = dirForText(text);
+    el.setAttribute("dir", dir);
+    el.classList.toggle("rtl", dir === "rtl");
+    el.classList.toggle("ltr", dir !== "rtl");
+  }
   function chatBubble(role, content, id = "") {
-    return `<div class="chat-msg ${role}"${id ? ` id="${id}"` : ""}><div class="chat-role">${role === "user" ? "You" : "Model"}</div><div class="chat-text">${esc(content)}</div></div>`;
+    const dir = dirForText(content);
+    return `<div class="chat-msg ${role} ${dir}" dir="${dir}"${id ? ` id="${id}"` : ""}><div class="chat-role">${role === "user" ? "شما" : "مدل"}</div><div class="chat-text" dir="${dir}">${esc(content)}</div></div>`;
   }
 
   /**
@@ -2361,6 +2382,7 @@
     history.push({ role: "user", content: text });
     modelChats.set(id, history);
     input.value = "";
+    applyTextDirection(input, "");
     renderChatThread(history);
 
     const thread = $("#chat-thread");
@@ -2368,6 +2390,8 @@
     thread.insertAdjacentHTML("beforeend", chatBubble("assistant", "", bubbleId));
     const liveEl = document.getElementById(bubbleId);
     const textEl = liveEl.querySelector(".chat-text");
+    applyTextDirection(liveEl, "");
+    applyTextDirection(textEl, "");
     textEl.innerHTML = `<span class="chat-cursor">▍</span>`;
     thread.scrollTop = thread.scrollHeight;
 
@@ -2406,25 +2430,38 @@
             $("#chat-meta").innerHTML = `→ <span class="mono">${esc(ev.url)}</span>`;
           } else if (ev.type === "delta") {
             acc += ev.text;
+            applyTextDirection(liveEl, acc);
+            applyTextDirection(textEl, acc);
             textEl.innerHTML = `${esc(acc)}<span class="chat-cursor">▍</span>`;
             thread.scrollTop = thread.scrollHeight;
           } else if (ev.type === "done") {
             acc = ev.text || acc;
+            applyTextDirection(liveEl, acc);
+            applyTextDirection(textEl, acc);
             textEl.textContent = acc || "(empty reply)";
             $("#chat-meta").innerHTML += ` · ${ev.latencyMs}ms${ev.status ? " · HTTP " + ev.status : ""}`;
           } else if (ev.type === "error") {
+            const msg = ev.message + (ev.hint ? "\n" + ev.hint : "");
             liveEl.classList.add("err");
-            textEl.textContent = ev.message + (ev.hint ? "\n" + ev.hint : "");
+            applyTextDirection(liveEl, msg);
+            applyTextDirection(textEl, msg);
+            textEl.textContent = msg;
             acc = "";
           }
         }
       }
     } catch (e) {
       if (e.name === "AbortError") {
-        textEl.textContent = acc ? acc + " …(stopped)" : "(stopped)";
+        const msg = acc ? acc + " …(stopped)" : "(stopped)";
+        applyTextDirection(liveEl, msg);
+        applyTextDirection(textEl, msg);
+        textEl.textContent = msg;
       } else {
+        const msg = "✗ " + e.message;
         liveEl.classList.add("err");
-        textEl.textContent = "✗ " + e.message;
+        applyTextDirection(liveEl, msg);
+        applyTextDirection(textEl, msg);
+        textEl.textContent = msg;
         acc = "";
       }
     } finally {
