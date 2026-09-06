@@ -701,9 +701,16 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
 .chat-modal .modal-body { display: flex; flex-direction: column; gap: 10px; max-height: 74vh; }
 .chat-thread { flex: 1; min-height: 240px; max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px; }
 .chat-empty { color: var(--text-muted); font-size: 13px; text-align: center; margin: auto; padding: 30px 10px; }
-.chat-msg { max-width: 86%; padding: 11px 14px; border-radius: 15px; border: 1px solid var(--stroke); background: var(--glass); white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.6; animation: slideDown .28s var(--ease); }
+.chat-msg { max-width: 86%; padding: 11px 14px; border-radius: 15px; border: 1px solid var(--stroke); background: var(--glass); white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; font-size: 13px; line-height: 1.6; animation: slideDown .28s var(--ease); }
 .chat-msg.user { align-self: flex-end; background: linear-gradient(135deg, var(--primary), var(--primary-strong)); border-color: transparent; color: #fff; box-shadow: 0 6px 20px -9px var(--primary); }
 .chat-msg.assistant { align-self: flex-start; }
+.chat-msg.rtl { direction: rtl; text-align: right; unicode-bidi: plaintext; }
+.chat-msg.ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+.chat-msg.rtl.assistant { align-self: flex-end; }
+.chat-text[dir="rtl"] { direction: rtl; text-align: right; unicode-bidi: plaintext; }
+.chat-text[dir="ltr"] { direction: ltr; text-align: left; unicode-bidi: plaintext; }
+#chat-input[dir="rtl"] { direction: rtl; text-align: right; }
+#chat-input[dir="ltr"] { direction: ltr; text-align: left; }
 .chat-msg.err { border-color: color-mix(in srgb, var(--err) 48%, transparent); color: var(--err); }
 .chat-role { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; opacity: .7; margin-bottom: 3px; }
 .chat-cursor { animation: chat-blink 1s steps(2, start) infinite; }
@@ -1040,3 +1047,8 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
 /* Verdict dialog stacks above an already-open form modal */
 .verdict-backdrop { z-index: 850; }
 .verdict-modal { width: min(620px, 95vw); }
+/* Project detail utilities */
+.project-tabs { margin-top: 10px; }
+.mini-pre { white-space: pre-wrap; background: var(--glass); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 10px; max-height: 360px; overflow: auto; color: var(--text); }
+label.check { display: flex; align-items: center; gap: 9px; color: var(--text-muted); font-size: 13px; margin: 8px 0; }
+label.check input { accent-color: var(--primary); }

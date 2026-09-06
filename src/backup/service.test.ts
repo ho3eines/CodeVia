@@ -90,6 +90,38 @@ describe("BackupService", () => {
     expect(projectRepo.findById("p1")?.data.name).toBe("Demo");
   });
 
+  it("uses explicit repo/path overrides when restoring the latest GitHub snapshot", async () => {
+    github.seedRepo("acme", "other-backups", { files: [{ path: "README.md", content: "# empty backup target\n" }] });
+    projectRepo.upsert({ id: "p-override", name: "Override Restore", slug: "override", configRepo: "acme/app", branch: "main" });
+    saveBackupSettings(kv, {
+      enabled: true,
+      repo: "acme/codevia-backups",
+      branch: "main",
+      path: ".codevia/backups",
+      schedule: "0 * * * *",
+    });
+    const run = await service.runNow();
+    expect(run.ok).toBe(true);
+
+    // A fresh install may only know a different/default backup target until the
+    // operator picks the source repo in the restore form. The explicit restore
+    // input must be used for both listing latest and reading files.
+    fx.db.run("DELETE FROM records");
+    fx.db.run("DELETE FROM jobs");
+    fx.db.run("DELETE FROM kv");
+    saveBackupSettings(kv, { repo: "acme/other-backups", branch: "main", path: ".codevia/backups" });
+
+    const restored = await service.restoreFromGitHub({
+      repo: "acme/codevia-backups",
+      branch: "main",
+      path: ".codevia/backups",
+      replace: true,
+    });
+    expect(restored.ok).toBe(true);
+    expect(restored.records).toBe(1);
+    expect(projectRepo.findById("p-override")?.data.name).toBe("Override Restore");
+  });
+
   it("restores from an in-memory snapshot object", () => {
     const snapshot = {
       version: 1,

@@ -87,6 +87,48 @@ describe("UI shell", () => {
     expect(errors).toEqual([]);
   }, 60000);
 
+  it("renders project detail tabs and operational controls", async () => {
+    const project = await container.agentManager.createProject({
+      name: "Project Detail QA",
+      description: "Seeded by the UI test to verify project sub-pages.",
+      configRepo: "acme/project-detail-qa",
+      branch: "main",
+      framework: "Node.js",
+      database: "PostgreSQL",
+    });
+    const { go } = await boot();
+    for (const suffix of ["", "/agents", "/repositories", "/workflows", "/tasks", "/runs", "/tests", "/issues", "/pull-requests", "/skills", "/memory"]) {
+      const content = await go(`#/projects/${project.id}${suffix}`);
+      const text = content.textContent ?? "";
+      expect(text, `project route ${suffix || "/"} rendered an error state`).not.toMatch(/Something went wrong/);
+      expect(text).toContain("Project Detail QA");
+      expect(content.querySelectorAll(".project-tabs .tab").length).toBeGreaterThanOrEqual(10);
+      expect(text).toContain("Ask AI");
+      expect(text).toContain("Edit");
+    }
+  }, 60000);
+
+  it("auto-detects Persian text direction in the model chat", async () => {
+    const { win, go, settle } = await boot();
+    await go("#/models");
+    const models = await fetch(`${baseUrl}/models`).then((r) => r.json() as Promise<Array<{ id: string; providerId: string }>>);
+    const mock = models.find((m) => m.providerId === "provider-mock") ?? models[0];
+    expect(mock).toBeTruthy();
+
+    win.openModelChat(mock.id);
+    const input = win.document.querySelector("#chat-input") as any;
+    input.value = "سلام، لطفاً وضعیت پروژه را بررسی کن";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    expect(input.getAttribute("dir")).toBe("rtl");
+
+    (win.document.querySelector("#chat-send") as El).click();
+    await settle(1200);
+    const userBubble = win.document.querySelector(".chat-msg.user") as El;
+    expect(userBubble.getAttribute("dir")).toBe("rtl");
+    expect((userBubble.querySelector(".chat-text") as El).getAttribute("dir")).toBe("rtl");
+    expect(userBubble.textContent).toContain("سلام");
+  }, 30000);
+
   it("draws SVG dashboard charts and opens the analytics modal", async () => {
     const { win, go } = await boot();
     const content = await go("#/dashboard");

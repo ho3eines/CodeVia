@@ -192,8 +192,10 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
         defaultModelId: src.defaultModelId as string | undefined,
         settings: settings ? { ...settings, skills: Array.from(new Set([...(settings.skills ?? []), ...skills])) } : undefined,
       });
-      // Onboarding scaffolds a default agent set; imported agents replace same-slug ones.
+      // Onboarding scaffolds default agents/workflows; imported entities replace
+      // same-slug/name scaffolds instead of duplicating them in the new project.
       for (const a of container.agentRepo.byProject(project.id)) agentBySlug.set(a.slug, a);
+      for (const w of container.workflowRepo.byProject(project.id)) workflowByName.set(w.name, w);
     }
     if (!project) return reply.code(500).send({ error: "import failed to resolve project" });
     const projectId = project.id;

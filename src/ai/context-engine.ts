@@ -46,7 +46,12 @@ export class ContextEngine {
     // 1. Agent system + role
     sources.push({ label: "agent-system", content: this.buildAgentSystem(agent) });
 
-    // 2. Skills
+    // 2. The user's actual project request + CodeVia operating contract.
+    // This must be explicit in the model context; otherwise a routed agent sees
+    // only repository/profile data and cannot faithfully act on the user's ask.
+    if (task) sources.push({ label: "task-request", content: this.buildTaskRequest(project, task) });
+
+    // 3. Skills
     const skills = opts.skills;
     if (skills) {
       const compiled = skills.compile(agent.skills);
@@ -92,6 +97,24 @@ export class ContextEngine {
       `You are the ${agent.name} agent for project context.`,
       `Max iterations: ${agent.maxIterations}. Timeout: ${agent.timeoutMs}ms.`,
     ].filter(Boolean).join("\n\n");
+  }
+
+  private buildTaskRequest(project: Project, task: Task): string {
+    const input = Object.keys(task.input ?? {}).length ? `\nInput JSON:\n${JSON.stringify(task.input, null, 2)}` : "";
+    return [
+      `Project: ${project.name} (${project.slug})`,
+      `Task: ${task.title}`,
+      task.description ? `User request:\n${task.description}` : "User request: (same as title)",
+      input,
+      "",
+      "Operating contract:",
+      "- Treat GitHub and the project's .ai-engineering directory as the persistent source of truth.",
+      "- Inspect repository context before proposing or making code/config changes; never make blind changes.",
+      "- Do not expose chain-of-thought; return action summaries, decisions, tool results, risks, and next steps only.",
+      "- Never write plaintext secrets. Use secret references such as OPENAI_API_KEY or TELEGRAM_BOT_TOKEN.",
+      "- Sensitive operations (merge, deploy, migration, destructive change, costly run) require human approval.",
+      "- Prefer a practical Plan → Implement/Simulate → Test → Review → Commit/PR result shape.",
+    ].filter(Boolean).join("\n");
   }
 
   private toRepoRef(project: Project): GithubRepoRef | undefined {

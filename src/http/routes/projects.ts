@@ -166,7 +166,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       patch.repositories = p.repositories.map((r) => (r === cfg ? { ...r, repo, branch } : r));
     }
     const updated = save({ ...p, ...patch, id });
-    const rerun = body.reonboard === true || patch.capabilities !== undefined;
+    // Capability edits normally refresh generated agents/prompts, but UI callers
+    // can explicitly send reonboard:false when they are only saving metadata or
+    // want to stage stack changes before regenerating the roster.
+    const rerun = body.reonboard === true || (body.reonboard !== false && patch.capabilities !== undefined);
     if (rerun) await container.agentManager.onboardProject(id, []);
     return load(id) ?? updated;
   });
@@ -276,6 +279,14 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return out;
   });
 
+  const workflowForIntent = (projectId: string, text: string): string | undefined => {
+    const workflows = container.workflowRepo.byProject(projectId).filter((w) => w.enabled);
+    const lower = text.toLowerCase();
+    const bugLike = /bug|fix|error|failing|test|login|debug|خطا|ارور|باگ|خراب|رفع|دیباگ|تست|لاگین|ورود/.test(lower);
+    const wanted = bugLike ? "bug-diagnosis-loop" : "autonomous-development-loop";
+    return workflows.find((w) => w.slug === wanted)?.id ?? workflows[0]?.id;
+  };
+
   // Natural-language AI action on a project (routed through Agent Manager)
   app.post("/projects/:id/ask", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -284,16 +295,39 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (!project) return fail(reply, 404, "project not found");
     const title = String(body.title ?? "AI request");
     const description = String(body.description ?? body.prompt ?? title);
+    const executionMode = body.executionMode === "agent" || body.executionMode === "simulation" ? body.executionMode : "workflow";
+    const routedAgentType = (body.agentType as AgentType | undefined) ?? container.agentRouter.route(`${title} ${description}`);
+    const workflowId = typeof body.workflowId === "string" && body.workflowId
+      ? body.workflowId
+      : executionMode === "workflow"
+        ? workflowForIntent(id, `${title} ${description}`)
+        : undefined;
+    if (executionMode === "simulation") {
+      const agent = container.agentRepo.byType(id, routedAgentType);
+      const plan = agent ? defaultPlanFor(agent, {
+        id: "simulation",
+        projectId: id,
+        title,
+        description,
+        status: "created",
+        agentType: routedAgentType,
+        correlationId: "simulation",
+        input: body.input as Record<string, unknown> | undefined ?? {},
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }) : [];
+      return { simulation: true, projectId: id, routedAgentType, workflowId, plan: plan.map((s) => ({ label: s.label, tool: s.tool, requiresApproval: s.requiresApproval })) };
+    }
     const task = container.agentManager.createTask({
       projectId: id,
       title,
       description,
-      agentType: body.agentType as never,
-      workflowId: body.workflowId as string | undefined,
-      input: body.input as Record<string, unknown> | undefined,
+      agentType: workflowId ? undefined : routedAgentType,
+      workflowId,
+      input: { ...(body.input as Record<string, unknown> | undefined ?? {}), routedAgentType, executionMode },
     });
     const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
-    return { task, jobId: job.id };
+    return { task, jobId: job.id, routedAgentType, workflowId, executionMode };
   });
 
   // Re-run onboarding
