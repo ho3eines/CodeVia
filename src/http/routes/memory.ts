@@ -4,6 +4,14 @@ import type { MemoryEntry, MemoryType, MemoryScope } from "../../domain/entities
 import { randomUUID } from "node:crypto";
 
 export function registerMemoryRoutes(app: FastifyInstance, container: Container): void {
+  /** Mirror the project's memory index into CodeVia/memory.md (best-effort). */
+  const syncMemoryFile = async (projectId: string | undefined): Promise<void> => {
+    if (!projectId) return;
+    const p = container.projectRepo.findById(projectId)?.data;
+    if (!p) return;
+    await container.projectFiles.syncMemory(p, container.memoryRepo.byProject(projectId));
+  };
+
   app.get("/memory", { schema: { tags: ["memory"] } }, async (req) => {
     const q = req.query as { projectId?: string; type?: string; scope?: string };
     let entries = container.memoryRepo.findMany();
@@ -33,6 +41,7 @@ export function registerMemoryRoutes(app: FastifyInstance, container: Container)
     };
     container.memoryRepo.upsert(entry, { projectId: entry.projectId, key: entry.key });
     // Also persist to the GitHub-backed store when available (source of truth).
+    await syncMemoryFile(entry.projectId);
     return entry;
   });
 
@@ -41,9 +50,42 @@ export function registerMemoryRoutes(app: FastifyInstance, container: Container)
     return container.memoryRepo.findById(id)?.data ?? { error: "memory entry not found" };
   });
 
+  app.patch("/memory/:id", { schema: { tags: ["memory"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = container.memoryRepo.findById(id);
+    if (!rec) {
+      reply.code(404);
+      return { error: "memory entry not found" };
+    }
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const patch: Partial<MemoryEntry> = {};
+    if (typeof b.key === "string" && b.key.trim()) patch.key = b.key.trim();
+    if (typeof b.content === "string") patch.content = b.content;
+    if (Array.isArray(b.tags)) patch.tags = b.tags.map((t) => String(t));
+    if (Array.isArray(b.refs)) patch.refs = b.refs.map((t) => String(t));
+    if (typeof b.type === "string" && ["architecture", "business", "technical", "decision", "bug", "knowledge", "lesson", "conversation"].includes(b.type)) {
+      patch.type = b.type as MemoryType;
+    }
+    if (typeof b.scope === "string" && ["global", "project", "agent", "task", "conversation"].includes(b.scope)) {
+      patch.scope = b.scope as MemoryScope;
+    }
+    const updated: MemoryEntry = {
+      ...rec.data,
+      ...patch,
+      id,
+      version: rec.data.version + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    container.memoryRepo.upsert(updated, { projectId: updated.projectId, key: updated.key });
+    await syncMemoryFile(updated.projectId);
+    return updated;
+  });
+
   app.delete("/memory/:id", { schema: { tags: ["memory"] } }, async (req) => {
     const { id } = req.params as { id: string };
+    const rec = container.memoryRepo.findById(id);
     container.memoryRepo.deleteById(id);
+    await syncMemoryFile(rec?.data.projectId);
     return { ok: true };
   });
 }

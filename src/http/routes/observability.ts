@@ -42,8 +42,11 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
   });
 
   // Agent observability dashboard
-  app.get("/observability/agents", { schema: { tags: ["observability"] } }, async () => {
-    const runs = container.runRepo.findMany().map((r) => r.data);
+  app.get("/observability/agents", { schema: { tags: ["observability"] } }, async (req) => {
+    const q = req.query as { agentId?: string; projectId?: string };
+    let runs = container.runRepo.findMany().map((r) => r.data);
+    if (q.agentId) runs = runs.filter((r) => r.agentId === q.agentId);
+    if (q.projectId) runs = runs.filter((r) => r.projectId === q.projectId);
     const byAgent = new Map<string, typeof runs>();
     for (const r of runs) {
       const list = byAgent.get(r.agentId) ?? [];

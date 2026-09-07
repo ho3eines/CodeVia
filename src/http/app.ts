@@ -84,6 +84,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
         { name: "dashboard", description: "Dashboards" },
         { name: "projects", description: "Projects & AI onboarding" },
         { name: "agents", description: "Agent registry & execution" },
+        { name: "tools", description: "Agent tool catalog" },
         { name: "models", description: "Model registry" },
         { name: "providers", description: "Model providers" },
         { name: "skills", description: "Skill marketplace" },

@@ -5,12 +5,18 @@ import type { ModelRepository } from "../ai/model-repo.js";
 import type { IModelProvider } from "../ai/types.js";
 import { logger } from "../logger.js";
 import { randomUUID } from "node:crypto";
+import { projectBriefLines } from "../domain/project-brief.js";
 
 /** Per-agent-type scaffolding: role, mission, skills, tools, permissions. */
-const AGENT_SCAFFOLD: Record<
-  AgentType,
-  { role: string; mission: string; skills: string[]; tools: string[]; permissions: string[] }
-> = {
+export interface AgentScaffold {
+  role: string;
+  mission: string;
+  skills: string[];
+  tools: string[];
+  permissions: string[];
+}
+
+export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
   orchestrator: {
     role: "Orchestrator",
     mission: "Decide which agent, model, skill, tool, memory, and workflow to use for each task. Coordinate agent chains and approvals.",
@@ -29,7 +35,7 @@ const AGENT_SCAFFOLD: Record<
     role: "Research Agent",
     mission: "Analyze the problem, extract requirements, research sources, compare architectures, and produce structured findings in knowledge memory.",
     skills: ["microservices", "restapi"],
-    tools: ["search", "save_memory"],
+    tools: ["read_file", "search", "save_memory"],
     permissions: ["github.read", "memory.read", "memory.write"],
   },
   "business-analyst": {
@@ -44,7 +50,7 @@ const AGENT_SCAFFOLD: Record<
     mission: "Define architecture, boundaries, and high-level design. Preserve the existing architecture unless there is a clear reason to change it.",
     skills: ["microservices", "restapi"],
     tools: ["list_branches", "read_file", "save_memory"],
-    permissions: ["github.read", "memory.read"],
+    permissions: ["github.read", "memory.read", "memory.write"],
   },
   "backend-developer": {
     role: "Backend Developer",
@@ -85,7 +91,7 @@ const AGENT_SCAFFOLD: Record<
     role: "QA/Test Agent",
     mission: "Detect affected files, run tests/static analysis/security scans, classify failures, and route them to the responsible agent.",
     skills: ["testing", "playwright"],
-    tools: ["run_tests", "run_build", "search"],
+    tools: ["list_commits", "read_file", "run_tests", "run_build", "search", "save_memory"],
     permissions: ["github.read", "memory.read", "memory.write"],
   },
   security: {
@@ -139,7 +145,7 @@ const AGENT_SCAFFOLD: Record<
   },
 };
 
-const AGENT_TYPES: AgentType[] = [
+export const AGENT_TYPES: AgentType[] = [
   "orchestrator",
   "project-manager",
   "research",
@@ -159,6 +165,15 @@ const AGENT_TYPES: AgentType[] = [
   "performance",
   "release",
 ];
+
+/** Scaffold (role/mission/skills/tools/permissions) for one agent type. */
+export function scaffoldFor(type: AgentType): AgentScaffold {
+  return AGENT_SCAFFOLD[type] ?? AGENT_SCAFFOLD["backend-developer"];
+}
+
+export function isAgentType(value: unknown): value is AgentType {
+  return typeof value === "string" && (AGENT_TYPES as string[]).includes(value);
+}
 
 export interface GenerateAgentOptions {
   defaultModelId?: string;
@@ -208,7 +223,7 @@ export class AgentGenerator {
         slug: type,
         role: scaffold.role,
         description: scaffold.mission,
-        configPath: `.ai-engineering/agents/${type}.yaml`,
+        configPath: `CodeVia/agents/${type}.md`,
         systemPrompt: this.buildSystemPrompt(type, scaffold, project),
         projectPrompt: project.description,
         skills: scaffold.skills,
@@ -229,6 +244,20 @@ export class AgentGenerator {
     }
     logger.info(`AgentGenerator created ${created.length} agents for project ${project.id}`);
     return created;
+  }
+
+  /**
+   * Default system prompt for one agent type in a project. Used by `generate`
+   * and by the "New agent" API/UI when the caller leaves the prompt empty.
+   */
+  promptFor(type: AgentType, project: Project): string {
+    const s = scaffoldFor(type);
+    return this.buildSystemPrompt(type, s, project);
+  }
+
+  /** Default model assignment for one agent type (primary + fallbacks + specialized routing). */
+  modelsFor(defaultModelId: string | undefined, type: AgentType): Agent["models"] {
+    return this.buildModels(defaultModelId, type);
   }
 
   private buildSystemPrompt(type: AgentType, s: { role: string; mission: string }, project: Project): string {
@@ -252,22 +281,10 @@ export class AgentGenerator {
 
   /** Human-readable multi-select profile for the system prompt. */
   private profileLines(project: Project): string[] {
-    const c = project.capabilities;
-    if (!c) {
-      return [`Tech: ${project.framework ?? "unknown"} / ${project.primaryLanguage ?? "unknown"} / ${project.database ?? "unknown"}`];
-    }
-    const line = (label: string, values: string[]): string | undefined => (values.length ? `${label}: ${values.join(", ")}` : undefined);
-    const repos = (project.repositories ?? []).map((r) => `${r.repo}@${r.branch} (${r.role})`);
-    return [
-      line("Platforms", c.platforms),
-      line("Languages", c.languages),
-      line("Frameworks", c.frameworks),
-      line("Databases", c.databases),
-      line("Deployment", c.deploymentTargets),
-      line("Key features", c.features),
-      line("Integrations", c.integrations),
-      repos.length > 1 ? `Repositories: ${repos.join("; ")}` : undefined,
-    ].filter((x): x is string => !!x);
+    const lines = projectBriefLines(project);
+    // The prompt already states the primary repository above; only repeat the
+    // repo list when the project links several repositories.
+    return (project.repositories ?? []).length > 1 ? lines : lines.filter((l) => !l.startsWith("Repositories:"));
   }
 
   private buildModels(defaultModelId: string | undefined, type: AgentType): Agent["models"] {

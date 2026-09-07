@@ -2,7 +2,7 @@
 
 A **production-ready, multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled** AI engineering platform. CodeVia acts as a real **AI Engineering Organization** for each of your software projects — with specialized agents for research, architecture, backend/frontend development, UI/UX, database, DevOps, QA, security, code review, documentation, debugging, refactoring, performance, and release.
 
-> **GitHub is the source of truth.** Persistent project data (agents, prompts, skills, memory, workflows, tasks, decisions, rules) lives in the project repository under `.ai-engineering/`. The database is used only for runtime state, cache, index, search, queue, and cost/usage metrics.
+> **GitHub is the source of truth.** Persistent project data lives in the project repository under **`CodeVia/`** (`project.md` manifest, `agents/`, `skills.md`, `tasks/`, managed `memory.md`) plus workflow files under `.ai-engineering/`. The database is used only for runtime state, cache, index, search, queue, and cost/usage metrics — and can be rehydrated anytime with “Pull from GitHub”.
 
 ---
 
@@ -46,11 +46,14 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (24 tests)
+npm test            # unit + integration + end-to-end (374 tests)
+npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run typecheck   # strict TypeScript
 npm run build       # compile + copy static UI into dist/
 npm start           # run the production build
 ```
+
+> Testing guide (step-by-step, incl. manual UI scenarios): [`TESTING.md`](TESTING.md).
 
 ---
 

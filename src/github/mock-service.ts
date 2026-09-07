@@ -13,11 +13,19 @@ import type {
   ListRepositoriesOptions,
   CreateRepositoryOptions,
 } from "./types.js";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
+/** Disk snapshot so mock repos (incl. the CodeVia/ project folder) survive restarts. Tests opt out via VITEST. */
+function mockPersistPath(): string {
+  return process.env.MOCK_GITHUB_PATH ?? "./data/mock-github.json";
+}
 
 interface MockRepo {
   ref: GithubRepoRef;
   branches: Map<string, string>; // branch -> head sha
-  files: Map<string, GithubFile>;
+  /** Per-branch file trees — like real git, branches are isolated from each other. */
+  trees: Map<string, Map<string, GithubFile>>;
   commits: GithubCommit[];
   pulls: GithubPullRequest[];
   issues: GithubIssue[];
@@ -45,8 +53,11 @@ export class MockGitHubService implements IGitHubService {
   readonly kind = "mock" as const;
   private repos = new Map<string, MockRepo>();
   private counter = 1;
+  private readonly persistEnabled: boolean;
 
-  constructor(opts: { seedDemoRepos?: boolean } = {}) {
+  constructor(opts: { seedDemoRepos?: boolean; persist?: boolean } = {}) {
+    this.persistEnabled = opts.persist ?? process.env.VITEST !== "true";
+    if (this.persistEnabled) this.load();
     if (opts.seedDemoRepos !== false) {
       for (const d of MOCK_DEMO_REPOS) {
         this.seedRepo(d.owner, d.name, {
@@ -56,6 +67,57 @@ export class MockGitHubService implements IGitHubService {
           files: [{ path: "README.md", content: `# ${d.name}\n\n${d.description}\n` }],
         });
       }
+      // Seeding merges into (never wipes) loaded state; persist once afterwards.
+      this.persist();
+    }
+  }
+
+  /** Serialize repos to disk (best-effort, mock mode only). */
+  private persist(): void {
+    if (!this.persistEnabled) return;
+    try {
+      mkdirSync(dirname(mockPersistPath()), { recursive: true });
+      const snap = [...this.repos.entries()].map(([key, r]) => [
+        key,
+        {
+          ...r,
+          branches: [...r.branches.entries()],
+          trees: [...r.trees.entries()].map(([b, t]) => [b, [...t.entries()]]),
+        },
+      ]);
+      writeFileSync(mockPersistPath(), JSON.stringify({ version: 2, repos: snap }));
+    } catch {
+      /* mock persistence must never break the platform */
+    }
+  }
+
+  private load(): void {
+    try {
+      if (!existsSync(mockPersistPath())) return;
+      const snap = JSON.parse(readFileSync(mockPersistPath(), "utf8")) as {
+        version?: number;
+        repos: Array<[string, Record<string, unknown>]>;
+      };
+      for (const [key, r] of snap.repos ?? []) {
+        const rec = r as Omit<MockRepo, "branches" | "trees"> & {
+          branches: Array<[string, string]>;
+          trees?: Array<[string, Array<[string, GithubFile]>]>;
+          files?: Array<[string, GithubFile]>;
+        };
+        // v1 snapshots had one shared file map → migrate it onto the default branch.
+        const trees = new Map<string, Map<string, GithubFile>>();
+        if (rec.trees) {
+          for (const [b, entries] of rec.trees) trees.set(b, new Map(entries));
+        } else if (rec.files) {
+          trees.set(rec.defaultBranch ?? "main", new Map(rec.files));
+        }
+        const { files: _dropped, trees: _t, ...rest } = rec;
+        void _dropped;
+        void _t;
+        this.repos.set(key, { ...rest, branches: new Map(rec.branches), trees });
+      }
+    } catch {
+      /* corrupted snapshot → start clean */
     }
   }
 
@@ -70,19 +132,21 @@ export class MockGitHubService implements IGitHubService {
     // Re-seeding an existing repo (e.g. onboarding a project onto a demo repo)
     // only adds missing files — it never wipes commits/PRs made by agents.
     if (existing) {
-      for (const f of opts?.files ?? []) if (!existing.files.has(f.path)) existing.files.set(f.path, f);
+      const tree = this.tree(existing, branch);
+      for (const f of opts?.files ?? []) if (!tree.has(f.path)) tree.set(f.path, f);
       if (!existing.branches.has(branch)) existing.branches.set(branch, existing.commits[0]?.sha ?? this.sha("seed"));
       if (opts?.description) existing.description = opts.description;
+      this.persist();
       return existing.ref;
     }
-    const files = new Map<string, GithubFile>();
-    for (const f of opts?.files ?? []) files.set(f.path, f);
+    const tree = new Map<string, GithubFile>();
+    for (const f of opts?.files ?? []) tree.set(f.path, f);
     const now = new Date().toISOString();
     const sha = this.sha("seed");
     const repo: MockRepo = {
       ref: { owner, name },
       branches: new Map([[branch, sha]]),
-      files,
+      trees: new Map([[branch, tree]]),
       commits: [{ sha, message: `seed ${name}`, author: "seed", date: now }],
       pulls: [],
       issues: [],
@@ -93,6 +157,7 @@ export class MockGitHubService implements IGitHubService {
       private: !!opts?.private,
     };
     this.repos.set(key, repo);
+    this.persist();
     return { owner, name };
   }
 
@@ -104,6 +169,21 @@ export class MockGitHubService implements IGitHubService {
     const r = this.repos.get(`${ref.owner}/${ref.name}`);
     if (!r) throw new Error(`Mock repo not found: ${ref.owner}/${ref.name}`);
     return r;
+  }
+
+  /**
+   * File tree for a branch. Unknown branches start as a copy of the default
+   * branch (lenient like the rest of the mock — real git would reject them).
+   */
+  private tree(r: MockRepo, branch?: string): Map<string, GithubFile> {
+    const name = branch || r.defaultBranch;
+    let t = r.trees.get(name);
+    if (!t) {
+      const base = r.trees.get(r.defaultBranch) ?? new Map<string, GithubFile>();
+      t = new Map(base);
+      r.trees.set(name, t);
+    }
+    return t;
   }
 
   private sha(input: string): string {
@@ -124,9 +204,14 @@ export class MockGitHubService implements IGitHubService {
     const repo: MockRepo = {
       ref: { owner, name },
       branches: new Map([[defaultBranch, sha]]),
-      files: new Map(
-        (opts.autoInit === false ? [] : [{ path: "README.md", content: `# ${name}\n\n${opts.description ?? ""}\n` }]).map((f) => [f.path, f]),
-      ),
+      trees: new Map([
+        [
+          defaultBranch,
+          new Map(
+            (opts.autoInit === false ? [] : [{ path: "README.md", content: `# ${name}\n\n${opts.description ?? ""}\n` }]).map((f) => [f.path, f] as [string, GithubFile]),
+          ),
+        ],
+      ]),
       commits: [{ sha, message: `create ${name}`, author: "mock-user", date: now }],
       pulls: [],
       issues: [],
@@ -137,6 +222,7 @@ export class MockGitHubService implements IGitHubService {
       private: !!opts.private,
     };
     this.repos.set(key, repo);
+    this.persist();
     return {
       owner,
       name,
@@ -154,10 +240,11 @@ export class MockGitHubService implements IGitHubService {
 
   async listFiles(ref: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]> {
     const r = this.repo(ref);
+    const tree = this.tree(r, branch);
     const base = path && path !== "." ? (path.endsWith("/") ? path : path + "/") : "";
-    return [...r.files.keys()]
+    return [...tree.keys()]
       .filter((p) => p.startsWith(base))
-      .map((p) => ({ path: p, type: "blob", size: (r.files.get(p)?.content ?? "").length }));
+      .map((p) => ({ path: p, type: "blob", size: (tree.get(p)?.content ?? "").length }));
   }
 
   async listRepositories(opts: ListRepositoriesOptions = {}): Promise<GithubRepository[]> {
@@ -200,23 +287,32 @@ export class MockGitHubService implements IGitHubService {
     return this.repo(ref).releases;
   }
 
-  async getFile(ref: GithubRepoRef, path: string): Promise<GithubFile | undefined> {
-    return this.repo(ref).files.get(path);
+  async getFile(ref: GithubRepoRef, path: string, branch?: string): Promise<GithubFile | undefined> {
+    return this.tree(this.repo(ref), branch).get(path);
   }
 
   async createBranch(ref: GithubRepoRef, name: string, baseSha: string): Promise<GithubBranch> {
     const r = this.repo(ref);
-    if (!r.branches.has(name)) r.branches.set(name, baseSha);
+    if (!r.branches.has(name)) {
+      r.branches.set(name, baseSha);
+      // The new branch starts as a copy of whichever branch the base sha
+      // belongs to (default branch when the sha is unknown).
+      const baseBranch = [...r.branches.entries()].find(([, sha]) => sha === baseSha)?.[0] ?? r.defaultBranch;
+      r.trees.set(name, new Map(this.tree(r, baseBranch)));
+    }
+    this.persist();
     return { name, sha: baseSha };
   }
 
   async commit(ref: GithubRepoRef, branch: string, message: string, files: GithubFile[]): Promise<GithubCommit> {
     const r = this.repo(ref);
-    for (const f of files) r.files.set(f.path, f);
+    const tree = this.tree(r, branch);
+    for (const f of files) tree.set(f.path, f);
     const sha = this.sha(message + Date.now());
     r.branches.set(branch, sha);
     const commit: GithubCommit = { sha, message, author: "codevia-agent", date: new Date().toISOString() };
     r.commits.unshift(commit);
+    this.persist();
     return commit;
   }
 
@@ -232,6 +328,7 @@ export class MockGitHubService implements IGitHubService {
       createdAt: new Date().toISOString(),
     };
     r.pulls.unshift(pr);
+    this.persist();
     return pr;
   }
 
@@ -241,6 +338,7 @@ export class MockGitHubService implements IGitHubService {
     if (!pr) throw new Error(`PR #${number} not found`);
     if (patch.title) pr.title = patch.title;
     if (patch.state) pr.state = patch.state;
+    this.persist();
     return pr;
   }
 
@@ -253,6 +351,7 @@ export class MockGitHubService implements IGitHubService {
       htmlUrl: `https://github.com/${ref.owner}/${ref.name}/issues/${r.issues.length + 1}`,
     };
     r.issues.unshift(issue);
+    this.persist();
     return issue;
   }
 
@@ -270,9 +369,13 @@ export class MockGitHubService implements IGitHubService {
     if (!pr) return { merged: false, message: `PR #${number} not found` };
     if (pr.state !== "open") return { merged: false, message: `PR #${number} is ${pr.state}` };
     const sha = this.sha(`merge-${number}-${Date.now()}`);
+    // Merge = union of the head tree into the base tree (head wins).
+    const base = this.tree(r, pr.base);
+    for (const [p, f] of this.tree(r, pr.head)) base.set(p, f);
     r.branches.set(pr.base, sha);
     r.commits.unshift({ sha, message: opts.commitTitle ?? `Merge pull request #${number} (${opts.method ?? "merge"})`, author: "codevia-agent", date: new Date().toISOString() });
     pr.state = "merged";
+    this.persist();
     return { merged: true, sha };
   }
 }

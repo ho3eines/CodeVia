@@ -17,6 +17,7 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       projectId: String(b.projectId),
       title: String(b.title ?? "Task"),
       description: b.description as string | undefined,
+      priority: (b.priority as "low" | "medium" | "high" | "critical" | undefined) ?? "medium",
       agentType: b.agentType as never,
       workflowId: b.workflowId as string | undefined,
       input: b.input as Record<string, unknown> | undefined,
@@ -27,6 +28,40 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
   app.get("/tasks/:id", { schema: { tags: ["tasks"] } }, async (req) => {
     const { id } = req.params as { id: string };
     return container.taskRepo.findById(id)?.data ?? { error: "task not found" };
+  });
+
+  app.patch("/tasks/:id", { schema: { tags: ["tasks"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = container.taskRepo.findById(id);
+    if (!rec) {
+      reply.code(404);
+      return { error: "task not found" };
+    }
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const patch: Partial<typeof rec.data> = {};
+    if (typeof b.title === "string" && b.title.trim()) patch.title = b.title.trim();
+    if (typeof b.description === "string") patch.description = b.description;
+    if (["low", "medium", "high", "critical"].includes(String(b.priority))) {
+      patch.priority = b.priority as "low" | "medium" | "high" | "critical";
+    }
+    if (typeof b.agentType === "string") patch.agentType = b.agentType as never;
+    if (typeof b.workflowId === "string" || b.workflowId === undefined) {
+      patch.workflowId = (b.workflowId as string | undefined) || undefined;
+    }
+    const updated = { ...rec.data, ...patch, id, updatedAt: new Date().toISOString() };
+    container.taskRepo.upsert(updated, { projectId: updated.projectId, parentId: updated.parentTaskId });
+    live.emit({ type: "task.updated", taskId: id, data: { status: updated.status } });
+    return updated;
+  });
+
+  app.delete("/tasks/:id", { schema: { tags: ["tasks"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!container.taskRepo.findById(id)) {
+      reply.code(404);
+      return { error: "task not found" };
+    }
+    container.taskRepo.deleteById(id);
+    return { ok: true };
   });
 
   app.post("/tasks/:id/run", { schema: { tags: ["tasks"] } }, async (req) => {
@@ -53,10 +88,13 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
   });
 
   app.get("/runs", { schema: { tags: ["runs"] } }, async (req) => {
-    const q = req.query as { projectId?: string; status?: string };
+    const q = req.query as { projectId?: string; status?: string; agentId?: string; agentType?: string; taskId?: string };
     let runs = container.runRepo.findMany().map((r) => r.data);
     if (q.projectId) runs = runs.filter((r) => r.projectId === q.projectId);
     if (q.status) runs = runs.filter((r) => r.status === q.status);
+    if (q.agentId) runs = runs.filter((r) => r.agentId === q.agentId);
+    if (q.agentType) runs = runs.filter((r) => r.agentType === q.agentType);
+    if (q.taskId) runs = runs.filter((r) => r.taskId === q.taskId);
     return runs;
   });
 

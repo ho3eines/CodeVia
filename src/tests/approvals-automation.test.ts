@@ -289,10 +289,11 @@ describe("rules discovery, budget control, dry run", () => {
 
   it("dry run previews the plan, writes and approvals without creating a task or run", async () => {
     const project = await container.agentManager.createProject({ name: "Dry", description: "x", configRepo: "acme/dry" });
-    const res = await app!.inject({ method: "POST", url: `/projects/${project.id}/dry-run`, payload: { title: "Fix login bug", description: "login broken after last commit" } });
+    const res = await app!.inject({ method: "POST", url: `/projects/${project.id}/dry-run`, payload: { title: "Fix login bug", description: "login broken after last commit", agentType: "backend-developer" } });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.simulation).toBe(true);
+    expect(body.agent.type).toBe("backend-developer");
     expect(body.plan.length).toBeGreaterThan(3);
     expect(body.writes.some((w: { tool: string }) => w.tool === "write_file")).toBe(true);
     expect(body.approvalsNeeded).toBeGreaterThan(0);
