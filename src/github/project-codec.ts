@@ -272,16 +272,30 @@ export interface ParsedAgent {
 export function parseAgentFile(content: string): ParsedAgent | undefined {
   const { data } = parseMatter(content);
   if (!str(data.type) || !str(data.id)) return undefined;
+  // (R08) Schema-2 files must fail closed: a malformed numeric limit must never
+  // be silently widened to a compatibility default (a broken "BROKEN" budget
+  // becoming 20000 tokens defeats the whole point of a budget). Missing fields
+  // keep their defaults for backward compatibility; only PRESENT-but-invalid
+  // values are rejected. Legacy (pre-schema-2) files stay lenient.
+  const strict = data.schemaVersion === 2;
+  const requireNumber = (key: string, fallback: number, opts: { min?: number; integer?: boolean } = {}): number => {
+    if (!Object.hasOwn(data, key)) return fallback;
+    const v = data[key];
+    const min = opts.min ?? 0;
+    if (typeof v === "number" && Number.isFinite(v) && v >= min && (!opts.integer || Number.isInteger(v))) return v;
+    if (!strict) return num(v, fallback);
+    throw new Error(`CodeVia agent file: ${key} must be ${opts.integer ? `an integer >= ${min}` : `a finite number >= ${min}`}, got ${JSON.stringify(v) ?? String(v)}`);
+  };
   return {
     projectId: str(data.projectId) || undefined, slug: str(data.slug) || undefined, configPath: str(data.configPath) || undefined, createdAt: str(data.createdAt) || undefined, updatedAt: str(data.updatedAt) || undefined,
     id: str(data.id), type: str(data.type), name: str(data.name, str(data.type)),
     role: str(data.role), description: str(data.description),
-    enabled: data.enabled !== false, version: num(data.version, 1),
+    enabled: data.enabled !== false, version: requireNumber("version", 1, { integer: true, min: 1 }),
     tools: arr(data.tools), permissions: arr(data.permissions), skills: arr(data.skills),
     generatedSkills: Array.isArray(data.generatedSkills) ? arr(data.generatedSkills) : undefined,
     models: (data.models as Agent["models"]) ?? { primary: "", fallbacks: [], specialized: {} },
-    maxIterations: num(data.maxIterations, 5), timeoutMs: num(data.timeoutMs, 120000),
-    tokenBudget: num(data.tokenBudget, 20000), memorySources: arr(data.memorySources),
+    maxIterations: requireNumber("maxIterations", 5), timeoutMs: requireNumber("timeoutMs", 120000),
+    tokenBudget: requireNumber("tokenBudget", 20000), memorySources: arr(data.memorySources),
     systemPrompt: str(data.systemPrompt),
     projectPrompt: typeof data.projectPrompt === "string" ? data.projectPrompt : undefined,
   };

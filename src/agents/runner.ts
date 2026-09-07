@@ -118,7 +118,7 @@ export class AgentRunner {
       this.deps.runRepo.upsert(run, { projectId: project.id, parentId: task.id });
     };
     await eventBus.publish("agent.started", { runId: run.id, agentId: agent.id, projectId: project.id }, { correlationId, projectId: project.id });
-    live.emit({ type: "run.updated", runId: run.id, data: { status: "running", agent: agent.name } });
+    live.emit({ type: "run.updated", runId: run.id, projectId: project.id, data: { status: "running", agent: agent.name } });
     try {
       const memory = this.memoryFor(project, github, agent);
       const built = await this.deps.contextEngine.build({ project: executionProject, agent, task, skills: this.deps.skillsRegistry, github, memory });
@@ -173,7 +173,7 @@ export class AgentRunner {
         record.status = "running";
         record.startedAt = new Date().toISOString();
         persist();
-        live.emit({ type: "step.updated", runId: run.id, data: { ...record } });
+        live.emit({ type: "step.updated", runId: run.id, projectId: project.id, data: { ...record } });
         let approved = false;
         if (step.requiresApproval) {
           if (!this.deps.requestApproval) throw new Error(`No approval channel configured for ${step.label}`);
@@ -214,7 +214,7 @@ export class AgentRunner {
         }
         record.finishedAt = new Date().toISOString();
         persist();
-        live.emit({ type: "step.updated", runId: run.id, data: { ...record } });
+        live.emit({ type: "step.updated", runId: run.id, projectId: project.id, data: { ...record } });
         checkActive();
         if (record.status === "failed") break;
       }
@@ -223,7 +223,7 @@ export class AgentRunner {
       if (run.status === "failed") run.error = run.steps.find((s) => s.status === "failed")?.detail ?? "Plan did not complete";
       persist();
       await eventBus.publish(run.status === "succeeded" ? "agent.completed" : "agent.failed", { runId: run.id, agentId: agent.id, projectId: project.id, taskId: task.id }, { correlationId, projectId: project.id });
-      live.emit({ type: "run.updated", runId: run.id, data: { status: run.status, verification: run.verification } });
+      live.emit({ type: "run.updated", runId: run.id, projectId: project.id, data: { status: run.status, verification: run.verification } });
       await this.deps.projectFiles?.syncRun(project, run);
       return run;
     } catch (err) {
@@ -237,7 +237,7 @@ export class AgentRunner {
       persist();
       await this.deps.projectFiles?.syncRun(project, run);
       await eventBus.publish("agent.failed", { runId: run.id, projectId: project.id, error: run.error }, { correlationId, projectId: project.id });
-      live.emit({ type: "run.updated", runId: run.id, data: { status: run.status, error: run.error } });
+      live.emit({ type: "run.updated", runId: run.id, projectId: project.id, data: { status: run.status, error: run.error } });
       throw err;
     }
   }

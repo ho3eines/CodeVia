@@ -12,7 +12,7 @@ import {
 } from "../../domain/project-options.js";
 import { parseRepoFullName } from "../../github/types.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
-import { resolveRequestUser } from "../auth.js";
+import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken } from "../../auth/github-tokens.js";
 import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
@@ -36,6 +36,14 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return r ? hydrateProject(r.data) : undefined;
   };
   const save = (p: Project): Promise<Project> => container.agentManager.saveProject(p);
+  /**
+   * (A02) Ownership guard: missing AND foreign projects read as 404, so direct
+   * access reveals neither existence nor content (matches the list filter).
+   * Shared (unowned) projects stay accessible to every account — the same
+   * rule the Socket.io realtime layer enforces via canAccessProject.
+   */
+  const canAccess = (req: Parameters<typeof resolveRequestUser>[0], p: Project): boolean =>
+    canAccessProject(resolveRequestUser(req, container).user, p);
 
   // Option catalog for the multi-select project form (platforms, languages, …).
   app.get("/projects/options", { schema: { tags: ["projects"] } }, async () => {
@@ -49,7 +57,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return container.projectRepo
       .findMany()
       .map((r) => hydrateProject(r.data))
-      .filter((p) => !p.ownerId || p.ownerId === user.id);
+      .filter((p) => canAccessProject(user, p));
   });
 
   // Create project + auto-onboard (Agent Generator / Skills / Workflow / Rules)
@@ -120,7 +128,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.get("/projects/:id", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return p;
   });
 
@@ -128,7 +136,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const patch: Partial<Project> = {};
     if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim();
     if (typeof body.description === "string") patch.description = body.description;
@@ -194,7 +202,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.post("/projects/:id/pull", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const summary = await container.projectFiles.restore(p, {
       projectRepo: container.projectRepo,
       agentRepo: container.agentRepo,
@@ -216,7 +224,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.get("/projects/:id/files", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     try {
       const entries = await container.github.listFiles({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.branch || p.branch, q.path || "CodeVia");
@@ -229,7 +237,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.get("/projects/:id/file", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     if (!q.path) return fail(reply, 400, "path query is required");
     try {
@@ -244,58 +252,72 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.post("/projects/:id/activate", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return save({ ...p, active: true });
   });
 
   app.post("/projects/:id/deactivate", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return save({ ...p, active: false });
   });
 
-  app.delete("/projects/:id", { schema: { tags: ["projects"] } }, async (req) => {
+  app.delete("/projects/:id", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     container.projectRepo.deleteById(id);
     return { ok: true };
   });
 
   // Sub-resources
-  app.get("/projects/:id/agents", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/agents", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return container.agentRepo.byProject(id);
   });
 
-  app.get("/projects/:id/skills", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/skills", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return [];
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return p.settings.skills;
   });
 
-  app.get("/projects/:id/memory", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/memory", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return container.memoryRepo.byProject(id);
   });
 
-  app.get("/projects/:id/workflows", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/workflows", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return container.workflowRepo.byProject(id);
   });
 
-  app.get("/projects/:id/tasks", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/tasks", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return container.taskRepo.byProject(id);
   });
 
-  app.get("/projects/:id/runs", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/runs", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return container.runRepo.byProject(id);
   });
 
-  app.get("/projects/:id/tests", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/tests", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return container.runRepo.byProject(id).filter((r) => r.agentType === "qa-test");
   });
 
@@ -306,10 +328,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github }).service;
   };
 
-  app.get("/projects/:id/issues", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/issues", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return [];
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const q = req.query as { repo?: string };
     const gh = githubForProject(req, p);
     const targets = q.repo ? p.repositories.filter((r) => r.repo === q.repo) : p.repositories;
@@ -326,10 +348,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return out;
   });
 
-  app.get("/projects/:id/pull-requests", { schema: { tags: ["projects"] } }, async (req) => {
+  app.get("/projects/:id/pull-requests", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return [];
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const q = req.query as { repo?: string };
     const gh = githubForProject(req, p);
     const targets = q.repo ? p.repositories.filter((r) => r.repo === q.repo) : p.repositories;
@@ -350,7 +372,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.get("/projects/:id/overview", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const gh = githubForProject(req, p);
     const agents = container.agentRepo.byProject(id);
     const tasks = container.taskRepo.byProject(id);
@@ -444,7 +466,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const q = req.query as { repo?: string; limit?: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const gh = githubForProject(req, p);
     const targets = q.repo ? p.repositories.filter((r) => r.repo === q.repo) : p.repositories;
     const out: Array<Record<string, unknown>> = [];
@@ -465,7 +487,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const q = req.query as { repo?: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const target = q.repo
       ? p.repositories.find((r) => r.repo.toLowerCase() === String(q.repo).toLowerCase())
       : configRepoOf(p.repositories);
@@ -485,7 +507,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const title = String(body.title ?? "").trim();
     if (!title) return fail(reply, 400, "Issue title is required");
     const target = typeof body.repo === "string" && body.repo
@@ -513,7 +535,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const title = String(body.title ?? "").trim();
     const head = String(body.head ?? "").trim();
     const base = String(body.base ?? "").trim();
@@ -543,7 +565,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id, number } = req.params as { id: string; number: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const target = typeof body.repo === "string" && body.repo
       ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
       : configRepoOf(p.repositories);
@@ -570,7 +592,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { slug?: string; slugs?: string[] };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const slugs = [...(body.slug ? [body.slug] : []), ...(Array.isArray(body.slugs) ? body.slugs : [])]
       .map((s) => String(s).trim())
       .filter(Boolean);
@@ -585,7 +607,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.delete("/projects/:id/skills/:slug", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id, slug } = req.params as { id: string; slug: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const next = await save({ ...p, settings: { ...p.settings, skills: p.settings.skills.filter((s) => s !== slug) } });
     return next.settings.skills;
   });
@@ -603,7 +625,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     const project = load(id);
-    if (!project) return fail(reply, 404, "project not found");
+    if (!project || !canAccess(req, project)) return fail(reply, 404, "project not found");
     const description = String(body.description ?? body.prompt ?? body.title ?? "").trim();
     if (!description) return fail(reply, 400, "A non-empty project request is required");
     const title = String(body.title ?? description.slice(0, 120)).trim() || description.slice(0, 120);
@@ -653,7 +675,8 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.post("/projects/:id/onboard", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
-    if (!load(id)) return fail(reply, 404, "project not found");
+    const onboardTarget = load(id);
+    if (!onboardTarget || !canAccess(req, onboardTarget)) return fail(reply, 404, "project not found");
     return container.agentManager.onboardProject(id, Array.isArray(body.tech) ? (body.tech as string[]) : []);
   });
 
@@ -661,7 +684,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.get("/projects/:id/rules", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return p.settings.rules.map((text, index) => {
       const discovered = text.startsWith(DISCOVERED_RULE_TAG);
       const body = discovered ? text.slice(DISCOVERED_RULE_TAG.length).trim() : text;
@@ -673,7 +696,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.put("/projects/:id/rules", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const body = (req.body ?? {}) as { rules?: string[]; keepDiscovered?: boolean };
     const manual = Array.isArray(body.rules) ? body.rules.map((r) => String(r).trim()).filter(Boolean) : [];
     const discovered = body.keepDiscovered === false ? [] : p.settings.rules.filter((r) => r.startsWith(DISCOVERED_RULE_TAG));
@@ -686,7 +709,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.post("/projects/:id/dry-run", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const body = (req.body ?? {}) as { title?: string; description?: string; agentType?: string };
     const text = `${body.title ?? ""} ${body.description ?? ""}`.trim();
     const agentType = (body.agentType as AgentType | undefined) ?? container.agentRouter.route(text);
@@ -725,7 +748,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.get("/projects/:id/repositories", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return p.repositories.map((r) => ({ ...r, path: r.isConfigRepo ? "CodeVia" : undefined }));
   });
 
@@ -734,7 +757,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const repo = String(body.repo ?? body.fullName ?? "").trim();
     if (!isValidRepoFullName(repo)) return fail(reply, 400, `Invalid repository "${repo}" — expected owner/name`);
     const existing = p.repositories.find((r) => r.repo.toLowerCase() === repo.toLowerCase());
@@ -759,7 +782,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id, owner, name } = req.params as { id: string; owner: string; name: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const full = `${owner}/${name}`.toLowerCase();
     const target = p.repositories.find((r) => r.repo.toLowerCase() === full);
     if (!target) return fail(reply, 404, "repository not linked to this project");
@@ -780,7 +803,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   app.delete("/projects/:id/repositories/:owner/:name", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id, owner, name } = req.params as { id: string; owner: string; name: string };
     const p = load(id);
-    if (!p) return fail(reply, 404, "project not found");
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const full = `${owner}/${name}`.toLowerCase();
     const repos = p.repositories.filter((r) => r.repo.toLowerCase() !== full);
     if (repos.length === p.repositories.length) return fail(reply, 404, "repository not linked to this project");

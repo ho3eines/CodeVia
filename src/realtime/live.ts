@@ -6,12 +6,18 @@
  * This is the "Real-Time Communication" seam — swappable for the equivalent
  * SignalR-style channel. It deliberately publishes only status + step + result,
  * never model CoT.
+ *
+ * Security (A03): every event is project-scoped. The Socket.io layer routes
+ * each event to the room of its project (`project:<id>`), and only sockets
+ * that subscribed to a project they may access join that room — so a client
+ * can never receive another tenant's live events. `projectId` is therefore a
+ * required field (enforced by the compiler at every emit site).
  */
-type LiveEvent =
-  | { type: "run.updated"; runId: string; data: Record<string, unknown> }
-  | { type: "step.updated"; runId: string; data: Record<string, unknown> }
-  | { type: "notification"; data: Record<string, unknown> }
-  | { type: "task.updated"; taskId: string; data: Record<string, unknown> };
+export type LiveEvent =
+  | { type: "run.updated"; runId: string; projectId: string; data: Record<string, unknown> }
+  | { type: "step.updated"; runId: string; projectId: string; data: Record<string, unknown> }
+  | { type: "notification"; projectId: string; data: Record<string, unknown> }
+  | { type: "task.updated"; taskId: string; projectId: string; data: Record<string, unknown> };
 
 interface Emitter {
   emit(event: LiveEvent): void;

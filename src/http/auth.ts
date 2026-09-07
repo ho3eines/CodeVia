@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { User } from "../domain/entities.js";
+import type { User, Project } from "../domain/entities.js";
 import type { UserRole, Permission } from "../types.js";
 import type { Container } from "../app/container.js";
 import { extractSessionToken, verifySession } from "../auth/github-oauth.js";
@@ -35,8 +35,14 @@ declare module "fastify" {
 /**
  * Resolve the current user for a request.
  *
- * Priority: `Authorization: Bearer <session>` / `cv_session` cookie (GitHub
- * login) -> `x-user-id` override (tests) -> demo owner (local dev).
+ * Only proof of identity is a valid signed session (`Authorization: Bearer
+ * <session>` / `cv_session` cookie from GitHub login). Without one the caller
+ * is the demo owner — allowed only while strict auth is off (see below).
+ *
+ * (A01) There is deliberately NO caller-supplied identity override: a client
+ * header like `x-user-id` is not evidence of identity, so accepting it let any
+ * caller bypass strict authentication with an owner-role identity. Tests that
+ * need a specific user mint a real signed session (`signSession`) instead.
  */
 export function resolveRequestUser(req: FastifyRequest, container?: Container): { user: User; authenticated: boolean } {
   const headers = (req.headers ?? {}) as Record<string, unknown>;
@@ -53,11 +59,18 @@ export function resolveRequestUser(req: FastifyRequest, container?: Container): 
   } catch {
     // Invalid/expired session -> fall through to demo user.
   }
-  const overridden = req.headers["x-user-id"];
-  if (overridden) {
-    return { user: { ...DEMO_USER, id: String(overridden) }, authenticated: false };
-  }
   return { user: DEMO_USER, authenticated: false };
+}
+
+/**
+ * Can this user see and drive this project? `ownerId` empty means "shared" —
+ * legacy rows and single-user installs stay visible to every account (this
+ * mirrors the project list filter and the per-user Telegram scoping). Owned
+ * projects are only accessible to their owner. Shared with the Socket.io
+ * handshake/room authorization so HTTP and realtime enforce the same rule.
+ */
+export function canAccessProject(user: User, project: Pick<Project, "ownerId">): boolean {
+  return !project.ownerId || project.ownerId === user.id;
 }
 
 export function authMiddleware(opts: { container: Container; can?: Permission }) {
@@ -81,7 +94,7 @@ export function authMiddleware(opts: { container: Container; can?: Permission })
     } catch {
       // kv unavailable (tests) — fall back to the env flag.
     }
-    if (requireAuth && !authenticated && !req.headers["x-user-id"]) {
+    if (requireAuth && !authenticated) {
       // Strict mode must never lock everyone out: while GitHub login is not
       // configured there is no way to obtain a session, so enforcing 401 here
       // would brick the whole UI (including the Admin page needed to fix it).

@@ -57,6 +57,8 @@ export interface ContextPack {
   totalFiles: number;
   stack: Stack;
   stackSummary: string;
+  /** Canonical architecture text (CodeVia/context.md) — must reach the model (R01). */
+  projectContext?: string;
   configs: RelatedFile[];
   related: RelatedFile[];
   memory: Array<{ key: string; type: string; content: string }>;
@@ -122,6 +124,17 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
   }
   empty.totalFiles = allPaths.length;
   empty.tree = allPaths.filter((p) => !p.startsWith("CodeVia/"));
+
+  // (R01) The canonical context document is prompt material, not only a
+  // registry source: its full text rides along in the pack and is rendered
+  // by renderPromptContext, so stored architecture constraints are consumed
+  // by the default implementation path instead of sitting unused in Git.
+  try {
+    const canonical = await getFile(CONTEXT_FILE);
+    if (canonical) empty.projectContext = canonical.slice(0, 4000);
+  } catch (err) {
+    if (opts.strict) throw err;
+  }
 
   // Entity registry from the persisted context file (best-effort).
   empty.registry = parseRegistry(await getFile(RUNTIME_CONTEXT_FILE) ?? await getFile(CONTEXT_FILE));
@@ -278,6 +291,10 @@ export function renderPromptContext(pack: ContextPack, target: string): string {
   if (pack.tree.length > 0) {
     lines.push(`Repository tree (${pack.totalFiles} files):`);
     lines.push(...pack.tree.slice(0, 60).map((p) => `- ${p}`));
+  }
+  if (pack.projectContext) {
+    lines.push(`--- CodeVia/context.md (canonical project context) ---`);
+    lines.push(pack.projectContext);
   }
   const reg = Object.values(pack.registry);
   if (reg.length > 0) {

@@ -307,18 +307,42 @@ export class AgentManager {
     for (const run of this.deps.runRepo.byProject(projectId)) await this.deps.projectFiles.syncRun(p, run);
   }
 
+  /** Tasks whose latest runtime-state write did not reach Git (R07 outbox). */
+  private pendingTaskSyncs = new Set<string>();
+
   /** Best-effort: mirror one task into CodeVia/tasks/<id>.md (never throws). */
   async syncTaskFile(projectId: string, task: Task): Promise<boolean> {
+    const key = `${projectId}:${task.id}`;
     try {
       const files = this.deps.projectFiles;
       if (!files) return false;
       const stored = this.deps.projectRepo.findById(projectId)?.data;
       if (!stored) return false;
-      return await files.syncTask(hydrateProject(stored), task);
+      const ok = await files.syncTask(hydrateProject(stored), task);
+      if (ok) this.pendingTaskSyncs.delete(key);
+      else this.pendingTaskSyncs.add(key);
+      return ok;
     } catch (err) {
+      this.pendingTaskSyncs.add(key);
       logger.warn("syncTaskFile failed", { projectId, taskId: task.id, err: String(err) });
       return false;
     }
+  }
+
+  /**
+   * (R07) Retry a task-state write that failed earlier (e.g. during a Git
+   * outage). A cancelled task must not permanently pretend Git is in sync:
+   * callers report `repositorySynced` and re-attempt on the next touch.
+   * Returns undefined when there is nothing pending to retry.
+   */
+  async retryTaskSync(projectId: string, taskId: string): Promise<boolean | undefined> {
+    if (!this.pendingTaskSyncs.has(`${projectId}:${taskId}`)) return undefined;
+    const task = this.deps.taskRepo.findById(taskId)?.data;
+    if (!task) {
+      this.pendingTaskSyncs.delete(`${projectId}:${taskId}`);
+      return undefined;
+    }
+    return this.syncTaskFile(projectId, task);
   }
 
   /**
@@ -698,7 +722,7 @@ export class AgentManager {
 
     assertTaskActive(this.deps.taskRepo, task);
     this.deps.taskRepo.upsert({ ...task, status: "running", error: undefined }, { projectId: task.projectId, parentId: task.parentTaskId });
-    live.emit({ type: "task.updated", taskId, data: { status: "running" } });
+    live.emit({ type: "task.updated", taskId, projectId: task.projectId, data: { status: "running" } });
 
     try {
       if ((task.input as Record<string, unknown> | undefined)?.executionMode === "autonomous" && !task.workflowId) {
@@ -733,7 +757,7 @@ export class AgentManager {
         if (result.status === "waiting_for_approval") {
           const waiting: Task = { ...this.deps.taskRepo.findById(taskId)!.data, status: "waiting_for_approval", approvalRequired: true, updatedAt: new Date().toISOString() };
           this.deps.taskRepo.upsert(waiting, { projectId: task.projectId, parentId: task.parentTaskId });
-          live.emit({ type: "task.updated", taskId, data: { status: "waiting_for_approval" } });
+          live.emit({ type: "task.updated", taskId, projectId: task.projectId, data: { status: "waiting_for_approval" } });
           return waiting;
         }
         if (result.status === "failed") {
@@ -749,7 +773,7 @@ export class AgentManager {
       if (prev.status === "cancelled") throw new TaskCancelledError(taskId);
       const done: Task = { ...prev, status: "succeeded", error: undefined, updatedAt: new Date().toISOString() };
       this.deps.taskRepo.upsert(done, { projectId: task.projectId, parentId: task.parentTaskId });
-      live.emit({ type: "task.updated", taskId, data: { status: "succeeded" } });
+      live.emit({ type: "task.updated", taskId, projectId: task.projectId, data: { status: "succeeded" } });
       await this.syncRuntimeState(task.projectId);
       return done;
     } catch (err) {
@@ -758,13 +782,13 @@ export class AgentManager {
       if (err instanceof TaskCancelledError || failed.status === "cancelled") {
         logger.info("runTask cancelled", { taskId });
         this.deps.taskRepo.upsert({ ...failed, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
-        live.emit({ type: "task.updated", taskId, data: { status: "cancelled" } });
+        live.emit({ type: "task.updated", taskId, projectId: failed.projectId, data: { status: "cancelled" } });
         await this.syncRuntimeState(task.projectId);
         return this.deps.taskRepo.findById(taskId)!.data;
       }
       logger.error("runTask failed", { taskId, err: String(err) });
       this.deps.taskRepo.upsert({ ...failed, status: "failed", error: String(err), updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
-      live.emit({ type: "task.updated", taskId, data: { status: "failed", error: String(err) } });
+      live.emit({ type: "task.updated", taskId, projectId: failed.projectId, data: { status: "failed", error: String(err) } });
       await this.syncRuntimeState(task.projectId);
       throw err;
     }

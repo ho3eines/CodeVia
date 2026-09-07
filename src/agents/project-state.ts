@@ -1,6 +1,7 @@
 import type { Agent, AgentType, MemoryEntry, Project, Skill, Task, Workflow } from "../domain/entities.js";
+import type { GithubFile } from "../github/types.js";
 import type { StateRepositories, ProjectFilesService, PullSummary } from "../github/project-files.js";
-import { AGENTS_DIR, CONTEXT_FILE, MEMORY_FILE, PROJECT_FILE, SKILLS_FILE, renderAgentFile, renderMemoryFile, renderProjectFile, renderSkillsFile } from "../github/project-files.js";
+import { AGENTS_DIR, CONTEXT_FILE, MEMORY_FILE, PROJECT_FILE, SKILLS_FILE, parseMatter, renderAgentFile, renderMemoryFile, renderProjectFile, renderSkillsFile } from "../github/project-files.js";
 import { localId, renderRulesFile, renderSkillFile, renderWorkflowFile, RULES_FILE, SKILL_DIR, slugSchema, statePath, WORKFLOW_DIR } from "../github/state-codec.js";
 import { agentTypesForProject, hydrateProject, skillsForCapabilities } from "../domain/project-options.js";
 import { AgentGenerator } from "./generator.js";
@@ -48,6 +49,7 @@ export class ProjectStateCoordinator {
     await d.files.restore(stored, d, { snapshot });
     let project = hydrateProject(d.projectRepo.findById(projectId)!.data);
     const first = !snapshot.manifest;
+    const needsMigration = Boolean(snapshot.manifest && snapshot.manifest.schemaVersion !== 2);
     if (first) {
       project = await d.inspect(project);
       // Derive initial attachments only once. An intentionally empty saved list stays empty.
@@ -57,9 +59,49 @@ export class ProjectStateCoordinator {
       }
     }
     const existingAgents = d.agentRepo.byProject(projectId);
+    // (R03/R04) Tombstones carry identity. Deletion must survive repository
+    // copies — where IDs are re-bound to a new project — so recognize
+    // tombstones by slug/type and by both the current and the copied-from
+    // path, never only by the current file path.
+    const tombstonedPaths = new Set<string>();
+    const tombstonedWorkflowSlugs = new Set<string>();
+    const agentTombstones: Array<{ slug?: string; type?: string }> = [];
+    for (const [path, content] of snapshot.contents) {
+      if (!path.endsWith(".md") || !(path.startsWith(`${AGENTS_DIR}/`) || path.startsWith(`${WORKFLOW_DIR}/`))) continue;
+      const data = parseMatter(content).data as Record<string, unknown>;
+      if (data.deleted !== true) continue;
+      tombstonedPaths.add(path);
+      if (path.startsWith(`${WORKFLOW_DIR}/`) && typeof data.slug === "string" && data.slug) tombstonedWorkflowSlugs.add(data.slug);
+      if (path.startsWith(`${AGENTS_DIR}/`)) agentTombstones.push({ slug: typeof data.slug === "string" ? data.slug : undefined, type: typeof data.type === "string" ? data.type : undefined });
+    }
+    const manifestProjectId = typeof snapshot.manifest?.id === "string" ? snapshot.manifest.id : undefined;
+    // (R05/R06) Legacy installs keep definitions only in the database.
+    // Migration must preserve them: author their files into CodeVia/ as part
+    // of initialization, before anything is allowed to prune DB-only records.
+    const legacyAgentFiles: GithubFile[] = [];
+    const legacyWorkflows: Workflow[] = [];
+    if (first || needsMigration) {
+      for (const a of existingAgents) {
+        const path = a.configPath ?? statePath(AGENTS_DIR, a.type);
+        if (!snapshot.contents.has(path) && !tombstonedPaths.has(path)) legacyAgentFiles.push({ path, content: renderAgentFile(a) });
+      }
+      for (const w of d.workflowRepo?.byProject(projectId) ?? []) {
+        const path = statePath(WORKFLOW_DIR, w.id);
+        if (!snapshot.contents.has(path) && !tombstonedPaths.has(path) && !legacyWorkflows.some((x) => x.id === w.id)) {
+          legacyWorkflows.push(w);
+        }
+      }
+    }
+    const legacyAgentPaths = new Set(legacyAgentFiles.map((f) => f.path));
     // Defaults are used only to describe missing units, never to rewrite an existing one.
     const candidates = d.generator.generate({ ...project, repositoryState: undefined }, { agentTypes: agentTypesForProject(project.capabilities), persist: false, preserveExisting: true });
-    const missingAgents = candidates.filter((a) => !existingAgents.some((e) => e.id === a.id) && !snapshot.contents.has(a.configPath ?? statePath(AGENTS_DIR, a.type)));
+    const missingAgents = candidates.filter((a) => {
+      const path = a.configPath ?? statePath(AGENTS_DIR, a.type);
+      if (existingAgents.some((e) => e.id === a.id) || snapshot.contents.has(path) || legacyAgentPaths.has(path)) return false;
+      if (tombstonedPaths.has(path)) return false;
+      const slug = a.slug ?? a.type;
+      return !agentTombstones.some((t) => t.slug === slug && (!t.type || t.type === a.type));
+    });
     const agents = [...existingAgents, ...missingAgents];
     const templates = new Map([...(d.skillRepo?.globalCatalog() ?? BUILTIN_SKILLS), ...snapshot.skillDefinitions].map((s) => [s.slug, s]));
     const skillDrafts = new Map<string, Skill>();
@@ -83,12 +125,19 @@ export class ProjectStateCoordinator {
     // A newly discovered enabled skill must be usable even before explicit attachment.
     for (const skill of snapshot.skillDefinitions) if (skill.enabled) visit(skill.slug);
     const missingPromptHistory = d.files.missingPromptHistoryFiles(project, agents, snapshot).length > 0;
-    const existingWorkflows = snapshot.workflows;
-    const missingWorkflows = workflowDrafts(project, agents).filter((w) => !existingWorkflows.some((e) => e.slug === w.slug) && !snapshot.contents.has(statePath(WORKFLOW_DIR, w.id)));
+    const existingWorkflows = [...snapshot.workflows, ...legacyWorkflows];
+    const missingWorkflows = workflowDrafts(project, agents).filter((w) => {
+      if (existingWorkflows.some((e) => e.slug === w.slug)) return false;
+      if (snapshot.contents.has(statePath(WORKFLOW_DIR, w.id)) || tombstonedPaths.has(statePath(WORKFLOW_DIR, w.id))) return false;
+      if (tombstonedWorkflowSlugs.has(w.slug)) return false;
+      // A copied repository keeps the source project's tombstone filename;
+      // drafts derive their path from the source project's deterministic ID.
+      if (manifestProjectId && manifestProjectId !== project.id && tombstonedPaths.has(statePath(WORKFLOW_DIR, localId(manifestProjectId, "workflow", w.slug)))) return false;
+      return true;
+    });
     const missingRules = !snapshot.contents.has(RULES_FILE);
     const missingMemory = !snapshot.contents.has(MEMORY_FILE);
     const missingContext = !snapshot.contents.has(CONTEXT_FILE);
-    const needsMigration = snapshot.manifest && snapshot.manifest.schemaVersion !== 2;
     if (!first && !needsMigration && !missingAgents.length && !skillDrafts.size && !missingWorkflows.length && !missingRules && !missingMemory && !missingContext && snapshot.skillsLoaded && !missingPromptHistory) {
       return { agents: agents.length, tasks: snapshot.tasks.length, memory: snapshot.memory.length, skills: project.settings.skills, files: snapshot.files, sha: snapshot.sha, workflows: existingWorkflows.length };
     }
@@ -131,6 +180,8 @@ export class ProjectStateCoordinator {
       ...draft.agents.map((a) => ({ path: a.configPath ?? statePath(AGENTS_DIR, a.type), content: renderAgentFile(a) })),
       ...draft.skills.map((s) => ({ path: statePath(SKILL_DIR, s.slug), content: renderSkillFile(s) })),
       ...draft.workflows.map((w) => ({ path: statePath(WORKFLOW_DIR, w.id), content: renderWorkflowFile(w) })),
+      ...legacyAgentFiles,
+      ...legacyWorkflows.map((w) => ({ path: statePath(WORKFLOW_DIR, w.id), content: renderWorkflowFile(w) })),
       ...d.files.missingPromptHistoryFiles(project, agents, snapshot),
     ];
     // Validate all model-authored output before this atomic missing-files commit.

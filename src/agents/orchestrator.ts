@@ -432,7 +432,7 @@ export class AutonomousOrchestrator {
     child.input.skills = selection.skills;
     child.input.skillAssignments = selection.assignments;
     this.deps.taskRepo.upsert(child, { projectId: parent.projectId, parentId: parent.id });
-    live.emit({ type: "task.updated", taskId: child.id, data: { status: "created", parentTaskId: parent.id, projectId: parent.projectId, assignedAgentId: agent.id, skills: selection.skills } });
+    live.emit({ type: "task.updated", taskId: child.id, projectId: parent.projectId, data: { status: "created", parentTaskId: parent.id, projectId: parent.projectId, assignedAgentId: agent.id, skills: selection.skills } });
     return child;
   }
 
@@ -463,7 +463,7 @@ export class AutonomousOrchestrator {
     if (!stored) return;
     const next: Task = { ...stored, status: stored.status === "cancelled" ? "cancelled" : status, error, updatedAt: new Date().toISOString() };
     this.deps.taskRepo.upsert(next, { projectId: task.projectId, parentId: task.parentTaskId });
-    live.emit({ type: "task.updated", taskId: task.id, data: { status: next.status, projectId: task.projectId } });
+    live.emit({ type: "task.updated", taskId: task.id, projectId: task.projectId, data: { status: next.status, projectId: task.projectId } });
     const project = this.deps.projectRepo.findById(task.projectId)?.data;
     if (project && this.deps.files) await this.deps.files.syncTask(project, next);
   }

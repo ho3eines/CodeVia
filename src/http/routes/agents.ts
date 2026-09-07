@@ -302,7 +302,10 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     const r = container.agentRepo.findById(id);
     if (r) {
       const p = container.projectRepo.findById(r.data.projectId)?.data;
-      if (p) await container.projectFiles.tombstone(p, container.projectFiles.agentPath(r.data));
+      // The tombstone records the agent's identity (R04): a copied repository
+      // re-binds IDs, so deletion must be recognizable by slug/type, not just
+      // by the file path used at delete time.
+      if (p) await container.projectFiles.tombstone(p, container.projectFiles.agentPath(r.data), { kind: "agent", id: r.data.id, slug: r.data.slug ?? r.data.type, type: r.data.type });
       container.agentRepo.deleteById(id);
     }
     return { ok: true };

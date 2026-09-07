@@ -33,7 +33,9 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerBackupRoutes } from "./routes/backup.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerAuthRoutes } from "./routes/auth.js";
-import { authMiddleware } from "./auth.js";
+import { authMiddleware, canAccessProject, DEMO_USER } from "./auth.js";
+import { extractSessionToken, verifySession } from "../auth/github-oauth.js";
+import type { User } from "../domain/entities.js";
 import { registerProjectStateHook } from "./project-state-hook.js";
 import { getEnv } from "../config/env.js";
 
@@ -106,7 +108,14 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   });
   await app.register(swaggerUi, { routePrefix: "/docs" });
 
-  // Realtime: Socket.io broadcast; only observable status/step/result, never CoT.
+  // Realtime: Socket.io; only observable status/step/result, never CoT.
+  // Security (A03):
+  //   1. The handshake is authenticated exactly like HTTP — a valid signed
+  //      session wins; strict mode rejects anonymous sockets when login is
+  //      configured; the documented demo fallback applies only where HTTP
+  //      would also allow it (strict auth with no way to log in).
+  //   2. Events are room-scoped per project. A socket only receives events
+  //      for projects it subscribed to AND may access (canAccessProject).  // There is deliberately no global broadcast anymore.
   const io = new SocketIOServer(app.server, {
     cors: { origin: true, credentials: true },
     transports: ["websocket", "polling"],
@@ -115,12 +124,92 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     pingTimeout: 20000,
     maxHttpBufferSize: 1 * 1024 * 1024,
   });
+  const projectRoom = (projectId: string): string => `project:${projectId}`;
+  const effectiveRequireAuth = async (): Promise<boolean> => {
+    let requireAuth = getEnv().REQUIRE_AUTH;
+    try {
+      const { getEffectiveRequireAuth } = await import("../auth/admin-settings.js");
+      requireAuth = getEffectiveRequireAuth(container.kv);
+    } catch {
+      // kv unavailable (tests) — fall back to the env flag.
+    }
+    return requireAuth;
+  };
+  const loginConfigured = async (): Promise<boolean> => {
+    try {
+      const { getEffectiveOAuthConfig } = await import("../auth/admin-settings.js");
+      return !!getEffectiveOAuthConfig(container.kv);
+    } catch {
+      // kv unavailable — assume configured so the env flag still applies.
+      return true;
+    }
+  };
+  io.use(async (socket, next) => {
+    try {
+      const headers = socket.handshake.headers as Record<string, unknown>;
+      const payload = verifySession(extractSessionToken(headers));
+      if (payload) {
+        const user = container.userRepo.findById(payload.sub)?.data;
+        if (user) {
+          socket.data.user = user;
+          socket.data.authenticated = true;
+          return next();
+        }
+      }
+      if ((await effectiveRequireAuth()) && (await loginConfigured())) {
+        return next(new Error("Authentication required (GitHub login)"));
+      }
+      socket.data.user = DEMO_USER;
+      socket.data.authenticated = false;
+      return next();
+    } catch {
+      return next(new Error("Authentication failed"));
+    }
+  });
   live.bind({
-    emit: (event) => io.emit(event.type, event),
+    emit: (event) => io.to(projectRoom(event.projectId)).emit(event.type, event),
   });
   io.on("connection", (socket) => {
-    logger.debug("client connected", { socketId: socket.id });
+    const user = (socket.data.user as User | undefined) ?? DEMO_USER;
+    logger.debug("client connected", { socketId: socket.id, userId: user.id, authenticated: socket.data.authenticated === true });
     socket.on("disconnect", () => logger.debug("client disconnected", { socketId: socket.id }));
+
+    const mayAccess = (projectId: string): boolean => {
+      if (!projectId) return false;
+      const p = container.projectRepo.findById(projectId)?.data;
+      return !!p && canAccessProject(user, p);
+    };
+    const projectIdOf = (payload: unknown): string => {
+      const pid = (payload as { projectId?: unknown } | undefined)?.projectId;
+      return typeof pid === "string" ? pid.trim() : "";
+    };
+
+    // Join the room of one project the user may access.
+    socket.on("subscribe", (payload: unknown, ack?: (result: unknown) => void) => {
+      const projectId = projectIdOf(payload);
+      if (!mayAccess(projectId)) {
+        ack?.({ ok: false, error: "forbidden" });
+        return;
+      }
+      void socket.join(projectRoom(projectId));
+      ack?.({ ok: true, projectId });
+    });
+    // Join the rooms of every accessible project (what the SPA does on load).
+    socket.on("subscribe_all", (_payload: unknown, ack?: (result: unknown) => void) => {
+      let joined = 0;
+      for (const rec of container.projectRepo.findMany()) {
+        if (canAccessProject(user, rec.data)) {
+          void socket.join(projectRoom(rec.data.id));
+          joined += 1;
+        }
+      }
+      ack?.({ ok: true, projects: joined });
+    });
+    socket.on("unsubscribe", (payload: unknown, ack?: (result: unknown) => void) => {
+      const projectId = projectIdOf(payload);
+      if (projectId) void socket.leave(projectRoom(projectId));
+      ack?.({ ok: true });
+    });
   });
 
   // Serve the SPA + static assets from /public.

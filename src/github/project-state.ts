@@ -358,7 +358,15 @@ export class ProjectFilesService {
   syncConversation(p: Project, c: Conversation): Promise<boolean> { return this.writeFiles(p, [{ path: this.entityPath(p, "conversation", CONVERSATION_DIR, c.id), content: renderConversationFile(c), sourceSha: c.repositoryRevision }], "[CodeVia] save conversation"); }
   syncContext(p: Project, content: string): Promise<boolean> { return this.writeFiles(p, [{ path: RUNTIME_CONTEXT_FILE, content }], "[CodeVia] save runtime context", false); }
   async readContext(p: Project): Promise<string | undefined> { const state = await this.pull(p); return state.contents.get(RUNTIME_CONTEXT_FILE) ?? state.contents.get(CONTEXT_FILE); }
-  tombstone(p: Project, path: string): Promise<boolean> { return this.writeFiles(p, [{ path, content: matter({ schemaVersion: 2, deleted: true }, "Intentionally removed. Do not regenerate automatically.") }], "[CodeVia] remove definition"); }
+  /**
+   * Intentional removal. The tombstone records the entity identity (kind, id,
+   * slug/type) so a copied repository — where IDs are re-bound to a new project
+   * — still recognizes the deletion (R03/R04); the file path alone is not a
+   * stable identity across copies.
+   */
+  tombstone(p: Project, path: string, meta: { kind?: string; id?: string; slug?: string; type?: string } = {}): Promise<boolean> {
+    return this.writeFiles(p, [{ path, content: matter({ schemaVersion: 2, deleted: true, ...meta }, "Intentionally removed. Do not regenerate automatically.") }], "[CodeVia] remove definition");
+  }
 
   async updateMemory(p: Project, mutate: (entries: MemoryEntry[]) => MemoryEntry[]): Promise<MemoryEntry[]> {
     return this.locked(p, async () => {
@@ -504,7 +512,21 @@ export class ProjectFilesService {
         const key = id("task", t.id)!;
         const existing = repos.taskRepo.findById(key)?.data;
         if (existing && existing.projectId !== p.id) throw stateError(`task identity crosses projects: ${key}`);
-        if (existing) continue; // Runtime owns current state; Git history never resurrects cancellation.
+        if (existing) {
+          // (R02) Runtime owns the status of live work — Git history never
+          // resurrects cancellation. But finished work is history: content
+          // edits made in Git (title/description/brief/error) must reach the
+          // API instead of staying DB-authoritative forever.
+          if (!["created", "queued", "running", "waiting_for_approval"].includes(existing.status)) {
+            const brief = typeof t.researchBrief === "string" ? t.researchBrief : undefined;
+            const changed = existing.title !== t.title || existing.description !== t.description || existing.error !== (t.error ?? undefined) || (brief !== undefined && existing.input?.researchBrief !== brief);
+            if (changed) repos.taskRepo.upsert({
+              ...existing, title: t.title, description: t.description, error: t.error ?? undefined, updatedAt: t.updatedAt || existing.updatedAt,
+              input: { ...existing.input, ...(brief !== undefined ? { researchBrief: brief } : {}) },
+            }, { projectId: p.id, parentId: id("task", t.parentTaskId) });
+          }
+          continue;
+        }
         const interrupted = ["running", "queued", "waiting_for_approval"].includes(t.status);
         repos.taskRepo.upsert({ ...t, id: key, projectId: p.id, agentType: t.agentType as Task["agentType"], assignedAgentId: id("agent", t.assignedAgentId), workflowId: id("workflow", t.workflowId), parentTaskId: id("task", t.parentTaskId),
           status: interrupted ? "failed" : t.status, error: interrupted ? "Restored interrupted execution; review before explicitly retrying." : t.error,
@@ -515,6 +537,13 @@ export class ProjectFilesService {
         const key = id("run", r.id)!; const existing = repos.runRepo.findById(key)?.data;
         if (existing && existing.projectId !== p.id) throw stateError(`run identity crosses projects: ${key}`);
         if (!existing) repos.runRepo.upsert({ ...r, steps: rebind(r.steps) as Run["steps"], id: key, projectId: p.id, taskId: id("task", r.taskId)!, agentId: id("agent", r.agentId)!, workflowId: id("workflow", r.workflowId), status: ["running", "queued", "waiting_for_approval"].includes(r.status) ? "failed" : r.status }, { projectId: p.id, parentId: id("task", r.taskId) });
+        // (R02) Completed runs are history: Git edits to the human-visible
+        // content (summary/verification/error) flow through; status and steps
+        // stay runtime-owned.
+        else {
+          const changed = existing.summary !== r.summary || existing.verification !== r.verification || existing.error !== r.error;
+          if (changed) repos.runRepo.upsert({ ...existing, summary: r.summary, verification: r.verification, error: r.error }, { projectId: p.id, parentId: id("task", r.taskId) });
+        }
       }
       if (repos.conversationRepo && project.repositoryState) {
         const keep = new Set(snapshot.conversations.map((c) => id("conversation", c.id)));

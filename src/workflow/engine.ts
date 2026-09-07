@@ -69,7 +69,7 @@ export class WorkflowEngine {
     }
     const github = this.deps.githubForProject?.(project) ?? this.deps.github;
     await eventBus.publish("workflow.started", { workflowId: workflow.id, projectId: project.id }, { correlationId, projectId: project.id });
-    live.emit({ type: "task.updated", taskId: task.id, data: { status: "running" } });
+    live.emit({ type: "task.updated", taskId: task.id, projectId: task.projectId, data: { status: "running" } });
     const nodes = new Map(workflow.nodes.map((node) => [node.id, node]));
     const completed = new Map<string, NodeTrace>();
     const pending = new Set(nodes.keys());
@@ -212,7 +212,7 @@ export class WorkflowEngine {
         logger.error(`workflow node ${node.name} failed`, { err: String(err) });
       } finally {
         completed.set(node.id, record);
-        live.emit({ type: "task.updated", taskId: task.id, data: { workflowNode: node.id, nodeStatus: record.status } });
+        live.emit({ type: "task.updated", taskId: task.id, projectId: task.projectId, data: { workflowNode: node.id, nodeStatus: record.status } });
       }
     };
 
@@ -264,7 +264,7 @@ export class WorkflowEngine {
     }
     const error = trace.find((r) => r.status === "failed")?.output as { error?: string; output?: string } | undefined;
     if (status === "succeeded") await eventBus.publish("workflow.completed", { workflowId: workflow.id, projectId: project.id }, { correlationId, projectId: project.id });
-    live.emit({ type: "task.updated", taskId: task.id, data: { status, verification } });
+    live.emit({ type: "task.updated", taskId: task.id, projectId: task.projectId, data: { status, verification } });
     return { workflowId: workflow.id, status, outputs, trace, repositories: [...implementations.values()], verification, error: error?.error ?? error?.output };
   }
 }

@@ -189,7 +189,15 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
     const signature = String(headers["x-hub-signature-256"] ?? "");
     const secret = getWebhookSecret();
     const event = String(headers["x-github-event"] ?? "");
-    if (secret && !verifyGithubSignature(secret, signature, rawBody)) {
+    if (!secret) {
+      // Fail closed: a delivery that cannot be verified must never trigger
+      // agent automation. Configure GITHUB_WEBHOOK_SECRET (and the same secret
+      // in the GitHub webhook settings) to enable webhook processing.
+      logger.warn("github webhook rejected: no signing secret configured (fail closed)");
+      reply.code(503);
+      return { ok: false, error: "GitHub webhook secret is not configured (set GITHUB_WEBHOOK_SECRET); delivery rejected" };
+    }
+    if (!verifyGithubSignature(secret, signature, rawBody)) {
       logger.warn("github webhook signature invalid");
       reply.code(401);
       return { ok: false, error: "invalid signature" };

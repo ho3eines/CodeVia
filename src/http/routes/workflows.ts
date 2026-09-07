@@ -68,7 +68,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
     const { id } = req.params as { id: string };
     const w = container.workflowRepo.findById(id)?.data;
     const p = w && container.projectRepo.findById(w.projectId)?.data;
-    if (p) await container.projectFiles.tombstone(p, container.projectFiles.pathFor(p, "workflow", id));
+    // The tombstone records the workflow identity (R03): slug + id survive
+    // repository copies where IDs are re-bound to a new project.
+    if (p) await container.projectFiles.tombstone(p, container.projectFiles.pathFor(p, "workflow", id), { kind: "workflow", id: w?.id ?? id, slug: w?.slug });
     container.workflowRepo.deleteById(id);
     return { ok: true };
   });

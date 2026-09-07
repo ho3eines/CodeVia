@@ -56,7 +56,7 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     container.taskRepo.upsert(updated, { projectId: updated.projectId, parentId: updated.parentTaskId });
     const p = container.projectRepo.findById(updated.projectId)?.data;
     if (p) await container.projectFiles.syncTask(p, updated);
-    live.emit({ type: "task.updated", taskId: id, data: { status: updated.status } });
+    live.emit({ type: "task.updated", taskId: id, projectId: updated.projectId, data: { status: updated.status } });
     return updated;
   });
 
@@ -92,16 +92,21 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     const t = container.taskRepo.findById(id);
     if (!t) return { error: "task not found" };
     if (["succeeded", "failed", "cancelled"].includes(t.data.status)) {
-      return { ...t.data, alreadyFinal: true };
+      // (R07) A final task may still owe its Git write from an earlier outage:
+      // retry the pending sync instead of permanently pretending Git is in sync.
+      const retried = await container.agentManager.retryTaskSync(t.data.projectId, id);
+      return { ...t.data, alreadyFinal: true, ...(retried === undefined ? {} : { repositorySynced: retried }) };
     }
     // Queued → dropped before the worker picks it up; running → the runner
     // observes the status between steps and stops cooperatively.
     const updated = { ...t.data, status: "cancelled" as const, updatedAt: new Date().toISOString() };
     container.taskRepo.upsert(updated, { projectId: updated.projectId, parentId: updated.parentTaskId });
     container.approvals.cancelForTask(id);
-    await container.agentManager.syncTaskFile(updated.projectId, updated);
-    live.emit({ type: "task.updated", taskId: id, data: { status: "cancelled" } });
-    return updated;
+    const repositorySynced = await container.agentManager.syncTaskFile(updated.projectId, updated);
+    live.emit({ type: "task.updated", taskId: id, projectId: updated.projectId, data: { status: "cancelled" } });
+    // (R07) Cancellation works locally even during a Git outage, but the
+    // response must say so explicitly instead of claiming the repo is current.
+    return { ...updated, repositorySynced };
   });
 
   app.get("/runs", { schema: { tags: ["runs"] } }, async (req) => {

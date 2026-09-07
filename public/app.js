@@ -489,7 +489,13 @@
         withCredentials: true,
       });
     } catch (_) { return; }
-    socket.on("connect", () => setLivePill(true));
+    socket.on("connect", () => {
+      setLivePill(true);
+      // Server routes events into per-project rooms; ask for every project this
+      // account may access (re-subscribe on every reconnect). Unsubscribed or
+      // foreign projects are never delivered.
+      try { socket.emit("subscribe_all", {}, () => {}); } catch (_) { /* noop */ }
+    });
     socket.on("disconnect", () => setLivePill(false));
     // Swallow handshake/upgrade errors: the client keeps retrying in the
     // background and the pill shows the state. Never throws into route().
@@ -2158,6 +2164,9 @@
   // Client-side search state. Kept outside the route so refreshes preserve the query.
   let modelSearchQuery = "";
   let modelVisibleCache = [];
+  // Which provider groups are collapsed — kept across data refreshes so an
+  // add/edit/delete no longer re-expands everything and loses your place.
+  const modelCollapsedGroups = new Set();
 
   function providerNameOf(id) {
     return providersCache.find((p) => p.id === id)?.name || id || "Unknown provider";
@@ -2207,14 +2216,20 @@
     });
   }
 
+  /** The groups list HTML — shared by full render, search-as-you-type and in-place data refresh. */
+  function modelGroupsInnerHtml() {
+    const groups = groupModelsByProvider(modelVisibleCache);
+    const hasModels = modelsCache.length > 0;
+    return groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState(hasModels ? "🔎" : "🧠", hasModels ? "No matching models" : "No models", hasModels ? "Try a different search term or clear the filter." : "Add a model and attach it to a provider.")}</div>`;
+  }
+
   function renderModelsPage() {
     modelVisibleCache = filteredModels();
     const allGroups = groupModelsByProvider(modelsCache);
-    const groups = groupModelsByProvider(modelVisibleCache);
     const hasModels = modelsCache.length > 0;
     const hasQuery = modelSearchQuery.trim().length > 0;
     $("#content").innerHTML = `<div class="overview">
-        <div><h1>Models</h1><p>Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)</p></div>
+        <div><h1>Models</h1><p id="models-head-note">Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)</p></div>
         <div class="flex">
           <button class="btn" onclick="modelGroupsCollapseAll()">Collapse all</button>
           <button class="btn" onclick="modelGroupsExpandAll()">Expand all</button>
@@ -2233,7 +2248,7 @@
         <div class="field-hint" id="model-search-summary">${modelSearchSummary()}</div>
       </div>
       <div id="model-bulkbar"></div>
-      <div id="model-groups">${groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState(hasModels ? "🔎" : "🧠", hasModels ? "No matching models" : "No models", hasModels ? "Try a different search term or clear the filter." : "Add a model and attach it to a provider.")}</div>`}</div>`;
+      <div id="model-groups">${modelGroupsInnerHtml()}</div>`;
     renderBulkBar();
   }
 
@@ -2250,9 +2265,7 @@
     const start = input?.selectionStart ?? modelSearchQuery.length;
     const end = input?.selectionEnd ?? modelSearchQuery.length;
     modelVisibleCache = filteredModels();
-    const groups = groupModelsByProvider(modelVisibleCache);
-    const hasModels = modelsCache.length > 0;
-    $("#model-groups").innerHTML = groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState(hasModels ? "🔎" : "🧠", hasModels ? "No matching models" : "No models", hasModels ? "Try a different search term or clear the filter." : "Add a model and attach it to a provider.")}</div>`;
+    $("#model-groups").innerHTML = modelGroupsInnerHtml();
     const summary = $("#model-search-summary");
     if (summary) summary.innerHTML = modelSearchSummary();
     const clear = $("#model-search-clear");
@@ -2267,6 +2280,34 @@
     $("#model-search")?.focus();
   };
 
+  /**
+   * (Models page) Re-fetch the data and re-render only the list — never the
+   * whole page. Used after add/edit/delete/activate/bulk so scroll position,
+   * focus, the search box, the selection and the collapsed provider groups
+   * stay exactly where they were: no "reload" jumping back to the top.
+   */
+  async function refreshModelsData() {
+    if (!location.hash.startsWith("#/models")) return refreshCurrent();
+    const groups = $("#model-groups");
+    if (!groups) return refreshCurrent(); // page shell not mounted
+    try {
+      const [list, providers] = await Promise.all([api("/models"), api("/providers").catch(() => [])]);
+      modelsCache = list;
+      providersCache = providers;
+      // Drop selections pointing at models that no longer exist.
+      for (const id of [...modelSelection]) if (!list.some((m) => m.id === id)) modelSelection.delete(id);
+      modelVisibleCache = filteredModels();
+      groups.innerHTML = modelGroupsInnerHtml();
+      const allGroups = groupModelsByProvider(modelsCache);
+      const note = $("#models-head-note");
+      if (note) note.textContent = `Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)`;
+      const summary = $("#model-search-summary");
+      if (summary) summary.innerHTML = modelSearchSummary();
+      renderBulkBar();
+    } catch (e) { toast("Error", e.message, "err"); }
+  }
+  window.refreshModelsData = refreshModelsData;
+
   /** One collapsible provider card holding its models. */
   function renderProviderGroup(g) {
     const allSelected = g.models.length > 0 && g.models.every((m) => modelSelection.has(m.id));
@@ -2275,7 +2316,7 @@
     const activePct = g.models.length ? Math.round((g.active / g.models.length) * 100) : 0;
     const caps = [...new Set(g.models.flatMap((m) => Object.entries(m.capabilities || {}).filter(([, on]) => on).map(([k]) => CAP_NAMES[k] || k)))].slice(0, 6);
     const groupId = esc(g.providerId);
-    return `<section class="card model-group" data-provider="${groupId}">
+    return `<section class="card model-group${modelCollapsedGroups.has(g.providerId) ? " collapsed" : ""}" data-provider="${groupId}">
       <div class="model-group-head">
         <div class="model-group-main" onclick="modelGroupToggle('${groupId}')" title="Collapse / expand this provider">
           <button class="chev-btn" type="button" aria-label="Collapse / expand"><span class="chev">▾</span></button>
@@ -2334,8 +2375,14 @@
     </article>`;
   }
 
-  window.modelGroupsCollapseAll = () => $$(".model-group").forEach((el) => el.classList.add("collapsed"));
-  window.modelGroupsExpandAll = () => $$(".model-group").forEach((el) => el.classList.remove("collapsed"));
+  window.modelGroupsCollapseAll = () => {
+    $$(".model-group").forEach((el) => el.classList.add("collapsed"));
+    for (const g of groupModelsByProvider(modelVisibleCache)) modelCollapsedGroups.add(g.providerId);
+  };
+  window.modelGroupsExpandAll = () => {
+    $$(".model-group").forEach((el) => el.classList.remove("collapsed"));
+    modelCollapsedGroups.clear();
+  };
 
   /** Small badge showing that a model carries per-model overrides. */
   function tuningBadge(m) {
@@ -2473,14 +2520,17 @@
           maxTokens: tune.maxTokens,
           omitTemperature: tune.omitTemperature,
         }});
-        closeModal(); toast("Model updated", $("#e-mid").value.trim(), "ok"); refreshCurrent();
+        closeModal(); toast("Model updated", $("#e-mid").value.trim(), "ok"); refreshModelsData();
       } catch (e) { toast("Error", e.message, "err"); }
     };
   };
 
   window.modelGroupToggle = (providerId) => {
     const card = document.querySelector(`.model-group[data-provider="${CSS.escape(providerId)}"]`);
-    if (card) card.classList.toggle("collapsed");
+    if (!card) return;
+    // Remember the collapsed state so in-place data refreshes keep it.
+    const collapsed = card.classList.toggle("collapsed");
+    if (collapsed) modelCollapsedGroups.add(providerId); else modelCollapsedGroups.delete(providerId);
   };
 
   /* ---- multi-select ---- */
@@ -2549,7 +2599,7 @@
       const r = await api("/models/bulk", { method: "POST", body: { action, ids } });
       modelSelection.clear();
       toast(`${r.affected} model(s) ${action === "delete" ? "deleted" : action + "d"}`, "", "ok");
-      refreshCurrent();
+      refreshModelsData();
     } catch (e) { toast("Error", e.message, "err"); }
   };
 
@@ -2764,18 +2814,18 @@
         closeModal();
         if (saved && saved.duplicate) toast("Already registered", saved.message || modelId, "warn");
         else toast("Model added", modelId, "ok");
-        refreshCurrent();
+        refreshModelsData();
       } catch (e) { toast("Error", e.message, "err"); }
     };
   };
 
   window.modelToggle = async (id, active) => {
-    try { await api(`/models/${id}/${active ? "activate" : "deactivate"}`, { method: "POST" }); toast(active ? "Model activated" : "Model deactivated", "", "ok"); refreshCurrent(); }
+    try { await api(`/models/${id}/${active ? "activate" : "deactivate"}`, { method: "POST" }); toast(active ? "Model activated" : "Model deactivated", "", "ok"); refreshModelsData(); }
     catch (e) { toast("Error", e.message, "err"); }
   };
   window.modelDelete = async (id) => {
     if (!confirm("Delete this model?")) return;
-    try { await api(`/models/${id}`, { method: "DELETE" }); modelSelection.delete(id); toast("Model deleted", "", "ok"); refreshCurrent(); }
+    try { await api(`/models/${id}`, { method: "DELETE" }); modelSelection.delete(id); toast("Model deleted", "", "ok"); refreshModelsData(); }
     catch (e) { toast("Error", e.message, "err"); }
   };
   // Default test message (mirrors the server default) — short, cheap, verifiable.

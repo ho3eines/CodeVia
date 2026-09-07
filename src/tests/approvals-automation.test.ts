@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createHmac } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { Container } from "../app/container.js";
 import { buildServer } from "../http/app.js";
@@ -8,7 +9,13 @@ import { eventBus, generateCorrelationId } from "../events/bus.js";
 import { diffLines, diffSummary } from "../prompts/versions.js";
 import { discoverProjectRules, rulesToStrings } from "../agents/rules-discovery.js";
 import { logger } from "../logger.js";
+import { getEnvFresh } from "../config/env.js";
 import { freshDb } from "./test-helpers.js";
+
+// The webhook route fails closed without a signing secret, so every test file
+// that posts deliveries must configure one (vitest isolates env per file).
+process.env.GITHUB_WEBHOOK_SECRET = "test-webhook-secret-for-automation-0123456789";
+getEnvFresh(); // env is cached at first read — refresh so the secret above is seen
 
 let cleanup: (() => void) | undefined;
 let container: Container;
@@ -169,11 +176,13 @@ describe("GitHub event automation", () => {
 
   it("the webhook route forwards the delivery id into the event", async () => {
     const project = await container.agentManager.createProject({ name: "Hook", description: "x", configRepo: "acme/hook" });
+    const body = JSON.stringify({ repository: { full_name: "acme/hook" }, ref: "refs/heads/dev" });
+    const signature = "sha256=" + createHmac("sha256", process.env.GITHUB_WEBHOOK_SECRET!).update(body).digest("hex");
     const res = await app!.inject({
       method: "POST",
       url: "/webhooks/github",
-      headers: { "x-github-event": "push", "x-github-delivery": "uuid-1", "content-type": "application/json" },
-      payload: { repository: { full_name: "acme/hook" }, ref: "refs/heads/dev" },
+      headers: { "x-github-event": "push", "x-github-delivery": "uuid-1", "content-type": "application/json", "x-hub-signature-256": signature },
+      payload: body,
     });
     expect(res.statusCode).toBe(202);
     const tasks = container.taskRepo.byProject(project.id);

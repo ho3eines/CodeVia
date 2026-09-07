@@ -6,7 +6,9 @@ import type { IGitHubService } from "../github/types.js";
 import type { ITelegramService } from "../integrations/telegram.js";
 import type { NotificationRepository } from "../observability/repos.js";
 import type { Logger } from "../logger.js";
-import type { Job } from "../domain/entities.js";
+import type { Job, Project } from "../domain/entities.js";
+import type { ApprovalRepository } from "../approvals/service.js";
+import type { ApprovalRequest } from "../approvals/service.js";
 import { randomUUID } from "node:crypto";
 
 export interface WorkerDeps {
@@ -16,7 +18,11 @@ export interface WorkerDeps {
   workflowRepo: WorkflowRepository;
   projectRepo: ProjectRepository;
   taskRepo: TaskRepository;
+  /** Approvals are the only legitimate authorization for dangerous github.op jobs. */
+  approvalRepo: ApprovalRepository;
   github: IGitHubService;
+  /** Project-scoped GitHub connection (per-user token when linked); falls back to `github`. */
+  githubForProject?: (project: Project) => IGitHubService;
   telegram: ITelegramService;
   notificationRepo: NotificationRepository;
   logger: Logger;
@@ -157,10 +163,13 @@ export class Worker {
         break;
       }
       case "merge_pr": {
-        // Merges are dangerous: only allowed when the job carries an approval id
-        // that was decided "approved" (Telegram/web approval flow).
-        if (!p.approvalId) throw new Error("github.op merge_pr requires approvalId");
-        const res = await gh.mergePullRequest(repo, Number(p.number), { method: (p.method as "merge" | "squash" | "rebase") ?? "squash" });
+        // (A04) Merges are dangerous: the job must carry the id of a real approval
+        // request that exists, is approved, belongs to this project, and actually
+        // records merging THIS pull request. The merge also runs through the
+        // project's own GitHub connection, never an unscoped platform default.
+        this.requireApprovedMergeApproval(p, project, repo, Number(p.number));
+        const ghForMerge = project && this.deps.githubForProject ? this.deps.githubForProject(project) : gh;
+        const res = await ghForMerge.mergePullRequest(repo, Number(p.number), { method: (p.method as "merge" | "squash" | "rebase") ?? "squash" });
         if (!res.merged) throw new Error(`merge_pr #${p.number} failed: ${res.message ?? "unknown"}`);
         break;
       }
@@ -176,6 +185,73 @@ export class Worker {
       });
     }
   }
+
+  /**
+   * (A04) Validate that a merge_pr job is backed by a genuine, approved approval
+   * request for this exact project and pull request. Checks, in order:
+   *   1. the job carries an approvalId,
+   *   2. the approval record exists,
+   *   3. its status is "approved" (never pending/rejected/expired),
+   *   4. it belongs to the same project the job targets,
+   *   5. it records this exact PR number, and the repository when one is recorded
+   *      (required when the project has multiple repositories, so a generic
+   *      "merge PR #12" approval can never authorize merging into another repo).
+   */
+  private requireApprovedMergeApproval(
+    payload: Record<string, unknown>,
+    project: Project | undefined,
+    repo: { owner: string; name: string },
+    number: number,
+  ): ApprovalRequest {
+    const approvalId = String(payload.approvalId ?? "").trim();
+    if (!approvalId) throw new Error("github.op merge_pr requires approvalId");
+    const approval = this.deps.approvalRepo.findById(approvalId)?.data;
+    if (!approval) throw new Error(`github.op merge_pr: approval ${approvalId} not found`);
+    if (approval.status !== "approved") {
+      throw new Error(`github.op merge_pr: approval ${approvalId} is ${approval.status}, not approved`);
+    }
+    const projectId = String(payload.projectId ?? "");
+    if (!projectId || !approval.projectId || approval.projectId !== projectId) {
+      throw new Error(`github.op merge_pr: approval ${approvalId} does not belong to project ${projectId || "(none)"}`);
+    }
+    const detail = (approval.detail ?? {}) as Record<string, unknown>;
+    const nested = (detail.input ?? detail.payload ?? {}) as Record<string, unknown>;
+    const recordedNumber =
+      pickPositiveNumber(detail.number) ?? pickPositiveNumber(nested.number) ??
+      pickPositiveNumber(detail.pr) ?? pickPositiveNumber(detail.prNumber) ??
+      pickPositiveNumber(nested.pr) ?? pickPositiveNumber(nested.prNumber);
+    if (recordedNumber === undefined || recordedNumber !== number) {
+      throw new Error(`github.op merge_pr: approval ${approvalId} does not record pull request #${number}`);
+    }
+    const recordedRepo =
+      pickRepoString(detail.repo) ?? pickRepoString(nested.repo) ?? pickRepoString(detail.repository) ?? pickRepoString(nested.repository);
+    const fullName = `${repo.owner}/${repo.name}`.toLowerCase();
+    if (recordedRepo) {
+      if (recordedRepo.toLowerCase() !== fullName) {
+        throw new Error(`github.op merge_pr: approval ${approvalId} records repository ${recordedRepo}, not ${fullName}`);
+      }
+    } else if (!project || project.repositories.length > 1) {
+      throw new Error(
+        `github.op merge_pr: approval ${approvalId} must record the repository when the project has multiple repositories`,
+      );
+    }
+    return approval;
+  }
+}
+
+function pickPositiveNumber(value: unknown): number | undefined {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function pickRepoString(value: unknown): string | undefined {
+  if (typeof value === "string" && value.includes("/")) return value.trim();
+  if (value && typeof value === "object") {
+    const r = value as { owner?: unknown; name?: unknown; full_name?: unknown };
+    if (typeof r.owner === "string" && typeof r.name === "string") return `${r.owner}/${r.name}`;
+    if (typeof r.full_name === "string") return r.full_name;
+  }
+  return undefined;
 }
 
 export const workerCorrelation = () => `job_${randomUUID()}`;

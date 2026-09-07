@@ -8,6 +8,7 @@ import { resolveGitHubService } from "../github/registry.js";
 import { memoryResolver } from "../memory/index.js";
 import type { MemoryType } from "../domain/entities.js";
 import { compileAssignedSkills } from "../skills/assignment.js";
+import { CONTEXT_FILE } from "../github/project-codec.js";
 
 export interface ContextSource {
   label: string;
@@ -64,6 +65,19 @@ export class ContextEngine {
     // 3. Project rules
     const rules = project.settings.rules.join("\n\n");
     if (rules) sources.push({ label: "rules", content: rules });
+
+    // 3.1 Canonical project context (CodeVia/context.md). Storing the
+    // architecture document in Git only helps if the default execution path
+    // actually consumes it (R01): it is injected as its own source here.
+    const repoRef = this.toRepoRef(project);
+    if (repoRef) {
+      try {
+        const canonical = await github.getFile(repoRef, CONTEXT_FILE, project.branch);
+        if (canonical?.content) sources.push({ label: "project-context", content: canonical.content.slice(0, 6000) });
+      } catch {
+        // Advisory: a missing/unreadable context file must not break context building.
+      }
+    }
 
     // 4. Project technical profile
     const profile = await this.detectProfile(project, github);

@@ -203,7 +203,9 @@ export class ApprovalService {
         return pending;
       }
     }
-    live.emit({ type: "notification", data: { kind: "approval.required", approvalId: req.id, action, projectId: req.projectId } });
+    // Approvals are project-scoped in practice; "" keeps a (theoretical)
+    // projectless request fail-closed instead of leaking it to every room.
+    live.emit({ type: "notification", projectId: req.projectId ?? "", data: { kind: "approval.required", approvalId: req.id, action } });
     void eventBus.publish("approval.required", { approvalId: req.id, action, projectId: req.projectId, taskId: req.taskId }, { correlationId: req.correlationId, projectId: req.projectId });
     // Register the waiter before exposing the request. Notification delivery
     // must not delay an immediate decision or a task cancellation.
@@ -235,7 +237,7 @@ export class ApprovalService {
       const current = this.deps.taskRepo?.findById(id)?.data;
       if (current && ["created", "queued", "running", "waiting_for_approval"].includes(current.status)) {
         this.deps.taskRepo!.upsert({ ...current, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: current.projectId, parentId: current.parentTaskId });
-        live.emit({ type: "task.updated", taskId: id, data: { status: "cancelled" } });
+        live.emit({ type: "task.updated", taskId: id, projectId: current.projectId, data: { status: "cancelled" } });
       }
     }
     let count = 0;
@@ -299,7 +301,7 @@ export class ApprovalService {
     // The task resumes (approved) or the step is skipped (rejected/expired) — either
     // way it is no longer waiting on a human.
     this.setTaskStatus(next.taskId, "running");
-    live.emit({ type: "notification", data: { kind: `approval.${next.status}`, approvalId: next.id, projectId: next.projectId } });
+    live.emit({ type: "notification", projectId: next.projectId ?? "", data: { kind: `approval.${next.status}`, approvalId: next.id } });
     void eventBus.publish(
       approved ? "approval.granted" : "approval.rejected",
       { approvalId: next.id, action: next.action, projectId: next.projectId, taskId: next.taskId, status: next.status },
@@ -318,7 +320,7 @@ export class ApprovalService {
       { ...rec.data, status, approvalRequired: status === "waiting_for_approval" ? true : rec.data.approvalRequired, updatedAt: new Date().toISOString() },
       { projectId: rec.data.projectId, parentId: rec.data.parentTaskId },
     );
-    live.emit({ type: "task.updated", taskId, data: { status } });
+    live.emit({ type: "task.updated", taskId, projectId: rec.data.projectId, data: { status } });
   }
 }
 
