@@ -196,6 +196,30 @@ async function main() {
     const pull = await api(`/projects/${pid}/pull`, { method: "POST", body: {} });
     check("pull restores from git", pull.status === 200 && pull.json.agents > 0 && pull.json.tasks > 0, `status=${pull.status}`);
 
+    // Continuity: merged work is extended, never overwritten
+    const prsAll = (await api(`/projects/${pid}/pull-requests`)).json ?? [];
+    const bePr = prsAll.find((p) => p.head.includes("backend"));
+    check("backend PR exists to merge", !!bePr);
+    const be1 = kids.find((k) => k.agentType === "backend-developer");
+    const mg = await api(`/projects/${pid}/pull-requests/${bePr.number}/merge`, { method: "POST", body: {} });
+    check("merge brings code to main", mg.json?.merged === true, JSON.stringify(mg.json).slice(0, 120));
+    const ask2 = await api(`/projects/${pid}/ask`, {
+      method: "POST",
+      body: { title: "Add login rate limiting", description: "Throttle login attempts per IP", executionMode: "autonomous" },
+    });
+    check("follow-up ask accepted", ask2.status === 200 && ask2.json.task?.id, `status=${ask2.status}`);
+    const parent2 = await waitForTask(pid, ask2.json.task.id);
+    check("follow-up completes", parent2.status === "succeeded", `status=${parent2.status}`);
+    const prsNew = (await api(`/projects/${pid}/pull-requests`)).json ?? [];
+    const v2 = await api(
+      `/projects/${pid}/file?path=${encodeURIComponent("src/SmokeShop.Api/Controllers/LoginController.cs")}&branch=${encodeURIComponent(prsNew[0].head)}`,
+    );
+    const v2c = v2.json?.content ?? "";
+    check("follow-up extends merged work (no overwrite)", v2c.includes("Existing implementation preserved") && v2c.includes(be1.id), `${v2c.length} chars`);
+    check("follow-up adds its own TODOs", v2c.toLowerCase().includes("throttle"), `${v2c.length} chars`);
+    const ctxFile = await api(`/projects/${pid}/file?path=${encodeURIComponent("CodeVia/context.md")}`);
+    check("CodeVia/context.md tracks the entity", ctxFile.status === 200 && ctxFile.json.content.includes("LoginController.cs"), `status=${ctxFile.status}`);
+
     // Restart persistence: same DB + snapshot, zero re-onboard
     await stopServer();
     serverLogs = "";

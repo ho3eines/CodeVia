@@ -27,6 +27,7 @@ export const AGENTS_DIR = `${CODEVIA_DIR}/agents`;
 export const SKILLS_FILE = `${CODEVIA_DIR}/skills.md`;
 export const TASKS_DIR = `${CODEVIA_DIR}/tasks`;
 export const MEMORY_FILE = `${CODEVIA_DIR}/memory.md`;
+export const CONTEXT_FILE = `${CODEVIA_DIR}/context.md`;
 
 const KNOWN_MEMORY_TYPES = ["architecture", "business", "technical", "decision", "bug", "knowledge", "lesson", "conversation"];
 
@@ -422,6 +423,16 @@ export class ProjectFilesService {
 
   async syncMemory(project: Project, memory: MemoryEntry[]): Promise<boolean> {
     return this.commitSafe(project, `[CodeVia] sync memory (${memory.length} entries)`, [{ path: MEMORY_FILE, content: renderMemoryFile(memory) }]);
+  }
+
+  /** Persist the agent context brief (rendered by `renderContextMarkdown`). */
+  async syncContext(project: Project, markdown: string): Promise<boolean> {
+    return this.commitSafe(project, "[CodeVia] sync context", [{ path: CONTEXT_FILE, content: markdown }]);
+  }
+
+  /** Read the persisted context brief back (undefined when absent). */
+  async readContext(project: Project): Promise<string | undefined> {
+    return this.readSafe(project, CONTEXT_FILE);
   }
 
   /** Read the folder back. Missing files → empty collections (never throws). */

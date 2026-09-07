@@ -1,5 +1,5 @@
 import type { Agent, AgentType, Project, Run, Task } from "../domain/entities.js";
-import type { ProjectRepository, TaskRepository } from "../domain/repos.js";
+import type { ProjectRepository, TaskRepository, MemoryRepository } from "../domain/repos.js";
 import type { AgentRepository } from "./agent-repo.js";
 import type { AgentRunner } from "./runner.js";
 import type { AgentRouter } from "./router.js";
@@ -13,7 +13,8 @@ import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
 import { projectBrief } from "../domain/project-brief.js";
 import type { ProjectFilesService } from "../github/project-files.js";
-import { slugify, scaffoldFor, notePathFor, changeNote } from "./scaffold.js";
+import { slugify, scaffoldFor, notePathFor, changeNote, entityFor, detectStack } from "./scaffold.js";
+import { buildContextPack, syncProjectContext, renderPromptContext, extendContent, type ContextPack } from "./context.js";
 
 /**
  * Autonomous task loop — the flow the project page promises:
@@ -27,8 +28,14 @@ import { slugify, scaffoldFor, notePathFor, changeNote } from "./scaffold.js";
  * - Deterministic (mock / no key): heuristic breakdown + stack-aware code
  *   scaffolds (valid source files at conventional paths, task wired in as
  *   TODOs) committed on a per-subtask branch with a change note next to them.
+ *   Follow-up work EXTENDS merged files instead of overwriting them, and
+ *   every run refreshes CodeVia/context.md (architecture + entity registry).
  *   The loop, the branches, the git commits, the PRs, the QA gate and the
  *   fix loop are all real — only the "thinking" is templated.
+ *
+ * Both levels read a context pack first (repo tree, manifests, related
+ * files, entity registry, recent memory) so implementers code against the
+ * existing project instead of reinventing it.
  *
  * The parent task status is owned by the caller (AgentManager.runTask): this
  * class throws on failure and returns a summary on success.
@@ -63,6 +70,8 @@ export interface AutonomousDeps {
   maxFixLoops?: number;
   /** Project folder sync (optional — CodeVia/tasks/*.md per subtask). */
   files?: ProjectFilesService;
+  /** Project memory index (optional — feeds the context pack so implementers remember). */
+  memoryRepo?: MemoryRepository;
 }
 
 export interface AutonomousSummary {
@@ -165,6 +174,7 @@ export function deterministicBrief(project: Project, task: Task, repoFiles: stri
     ``,
     `Affected areas: ${areas.join(", ")}.`,
     `Suggested owners: ${owners.join(", ")}.`,
+    `Stack: backend ${detectStack(project).backend} · frontend ${detectStack(project).frontend}.`,
     `Repository signals: ${repoFiles.length} file(s) visible on ${project.branch}; research run observed:`,
     ...researchSummary.split("\n").slice(0, 6).map((l) => `  ${l.slice(0, 140)}`),
     ``,
@@ -225,6 +235,19 @@ export class AutonomousOrchestrator {
     // ---- Phase 3: implement (code → git → PR) -------------------------------
     const buildTaskIds: string[] = [];
     const files: string[] = [];
+    // Entity → file ownership claimed this loop (persisted to CodeVia/context.md).
+    const registryEntries: Array<{ entity: string; path: string; agentType: AgentType; subtaskId: string; at: string }> = [];
+    const claim = (item: BreakdownItem, childId: string): void => {
+      const target = cleanPath(item.files[0]);
+      if (!target || target.startsWith("docs/tasks/")) return;
+      registryEntries.push({
+        entity: entityFor(item.title, item.description).pascal,
+        path: target,
+        agentType: item.agentType,
+        subtaskId: childId,
+        at: new Date().toISOString(),
+      });
+    };
     for (const item of breakdown) {
       const agent = this.needAgent(project.id, item.agentType);
       const child = this.spawn(task, item.title, this.withDuty(item.agentType, item.description, brief), item.agentType);
@@ -234,6 +257,7 @@ export class AutonomousOrchestrator {
       const run = await this.execute(child, agent, project, plan);
       this.mark(child, run.status === "succeeded" ? "succeeded" : "failed", runError(run));
       if (run.status !== "succeeded") throw new Error(`${agent.name} failed: ${runError(run)}`);
+      claim(item, child.id);
     }
 
     // ---- Phase 4: QA gate + bounded fix loop --------------------------------
@@ -273,7 +297,17 @@ export class AutonomousOrchestrator {
       const fixRun = await this.execute(fixChild, fixAgent, project, fixPlan);
       this.mark(fixChild, fixRun.status === "succeeded" ? "succeeded" : "failed", runError(fixRun));
       if (fixRun.status !== "succeeded") throw new Error(`${fixAgent.name} fix failed: ${runError(fixRun)}`);
+      claim(fixItem, fixChild.id);
     }
+
+    // Persist the refreshed architecture + continuity brief (never throws).
+    await syncProjectContext({
+      files: this.deps.files,
+      github: this.deps.github,
+      project,
+      memoryRepo: this.deps.memoryRepo,
+      entries: registryEntries,
+    });
 
     return { researchTaskId: researchTask.id, buildTaskIds, qaTaskIds, fixLoops, usedRealAi: Boolean(chat), files };
   }
@@ -430,7 +464,29 @@ export class AutonomousOrchestrator {
   ): Promise<PlanStep[]> {
     const plan = defaultPlanFor(agent, child);
     const target = cleanPath(item.files[0]) ?? `docs/tasks/${child.id}.md`;
-    const content = await this.fileContent(chat, project, agent, child, item, target, brief, fixContext);
+    // Context first: read the existing project (tree, manifests, related
+    // files, memory) + the current target content so codegen extends the
+    // project instead of reinventing it. Advisory — never blocks the plan.
+    const entity = entityFor(item.title, item.description);
+    let pack: ContextPack | undefined;
+    let existing: string | undefined;
+    try {
+      pack = await buildContextPack({
+        github: this.deps.github,
+        project,
+        memoryRepo: this.deps.memoryRepo,
+        target,
+        entityRoute: entity.route,
+      });
+      if (!target.startsWith("docs/tasks/")) {
+        existing = await this.readBaseFile(project, target);
+        if (existing && pack) pack.related.unshift({ path: target, content: existing.slice(0, 2500) });
+      }
+    } catch {
+      pack = undefined;
+      existing = undefined;
+    }
+    const content = await this.fileContent(chat, project, agent, child, item, target, brief, pack, existing, fixContext);
     const writer = plan.find((s) => s.tool === "write_file");
     if (!writer) throw new Error(`${agent.name} has no permitted write step — cannot implement`);
     // Per-subtask branch (unique per child so reruns never pile unrelated
@@ -459,12 +515,13 @@ export class AutonomousOrchestrator {
       const idx = plan.indexOf(writer);
       const followUps: PlanStep[] = [];
       for (const path of extra) {
+        const extraExisting = path.startsWith("docs/tasks/") ? undefined : await this.readBaseFile(project, path).catch(() => undefined);
         followUps.push({
           label: `Write ${path}`,
           tool: "write_file",
           input: {
             path,
-            content: await this.fileContent(chat, project, agent, child, { ...item, files: [path] }, path, brief, fixContext),
+            content: await this.fileContent(chat, project, agent, child, { ...item, files: [path] }, path, brief, pack, extraExisting, fixContext),
             message: `[${agent.name}] ${child.title}`.slice(0, 120),
             ...onBranch,
           },
@@ -496,32 +553,62 @@ export class AutonomousOrchestrator {
     item: BreakdownItem,
     target: string,
     brief: string,
+    pack?: ContextPack,
+    existing?: string,
     fixContext?: string,
   ): Promise<string> {
     if (chat) {
       try {
-        const files = await this.repoFiles(project).catch(() => [] as string[]);
+        const files = pack?.tree ?? (await this.repoFiles(project).catch(() => [] as string[]));
+        const context = pack ? `\n${renderPromptContext(pack, target)}\n` : "";
         const raw = await chat.chat(
           `You are the ${agent.name} (${agent.role}). Output ONLY the file content, no fences, no explanations.`,
-          `Repository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nSubtask: ${item.title}\n${item.description}\n\nResearch brief:\n${brief}\n${fixContext ? `\nQA failures to fix (address exactly these):\n${fixContext}\n` : ""}\nProject definition (from the project setup selections):\n${projectBrief(project)}\nWrite the complete content of "${target}" for project "${project.name}". Output ONLY the file content.`,
+          `Subtask: ${item.title}\n${item.description}\n\nResearch brief:\n${brief}\n${fixContext ? `\nQA failures to fix (address exactly these):\n${fixContext}\n` : ""}\nProject definition (from the project setup selections):\n${projectBrief(project)}\n${context || `Repository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n`}\n${existing ? `The file "${target}" ALREADY EXISTS (current content is in the context above). EXTEND it: keep every existing export/symbol/behavior working, add the new behavior, match the file's own conventions. Do NOT rewrite it from scratch.\n` : `The file "${target}" does not exist yet. Create it following the repo's existing conventions (see context).\n`}Write the complete content of "${target}" for project "${project.name}". Output ONLY the file content.`,
           4000,
         );
         const cleaned = raw.replace(/^```[a-z]*\n/i, "").replace(/\n```$/i, "").trim();
         if (cleaned.length > 20) return cleaned.slice(0, 24000);
       } catch (err) {
-        logger.warn("AI codegen failed, using change-note fallback", { taskId: child.id, err: String(err) });
+        logger.warn("AI codegen failed, using scaffold fallback", { taskId: child.id, err: String(err) });
       }
     }
-    // Deterministic fallback: the traceability note stays a change note;
-    // every other target gets a valid stack-aware code scaffold.
+    // Deterministic fallback: the traceability note stays a change note.
     if (target.startsWith("docs/tasks/")) {
       return changeNote(agent.name, child, item.description, brief, fixContext);
     }
-    const parentTitle = child.title.replace(/^(Implement|Fix) \([^)]*\):\s*/i, "");
+    const parentTitle = child.title.replace(/^(Implement|Fix) \([^)]*\):\s*/i, "") || child.title;
+    // Merged work is never overwritten: follow-up subtasks extend it.
+    if (existing && existing.trim().length > 0) {
+      const todos = brief
+        .split("\n")
+        .map((l) => l.trim().replace(/^[-*\d.)\s]+/, ""))
+        .filter((l) => l.length > 3)
+        .slice(0, 5)
+        .map((l) => l.slice(0, 140));
+      if (fixContext) {
+        todos.push(
+          ...fixContext
+            .split("\n")
+            .map((l) => l.trim().replace(/^[-*\d.)\s]+/, ""))
+            .filter((l) => l.length > 3)
+            .slice(0, 3)
+            .map((l) => `fix: ${l.slice(0, 120)}`),
+        );
+      }
+      return extendContent({
+        existing: existing.slice(0, 24000),
+        path: target,
+        agentName: agent.name,
+        agentType: agent.type,
+        taskTitle: parentTitle,
+        subtaskId: child.id,
+        todos: todos.length > 0 ? todos : [parentTitle],
+      });
+    }
     const scaffold = scaffoldFor({
       agentType: agent.type,
       project,
-      task: { ...child, title: parentTitle || child.title, description: item.description } as Task,
+      task: { ...child, title: parentTitle, description: item.description } as Task,
       childId: child.id,
       brief,
       fixContext,
@@ -535,6 +622,17 @@ export class AutonomousOrchestrator {
     if (!owner || rest.length === 0) return [];
     const entries = await this.deps.github.listFiles({ owner, name: rest.join("/") }, project.branch);
     return entries.map((e) => e.path).filter((p) => !p.startsWith(".git/")).slice(0, 200);
+  }
+
+  /** Current content of a path on the base branch (undefined when absent). */
+  private async readBaseFile(project: Project, path: string): Promise<string | undefined> {
+    try {
+      const [owner, ...rest] = String(project.configRepo ?? "").split("/");
+      if (!owner || rest.length === 0) return undefined;
+      return (await this.deps.github.getFile({ owner, name: rest.join("/") }, path, project.branch))?.content;
+    } catch {
+      return undefined;
+    }
   }
 }
 

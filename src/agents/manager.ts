@@ -667,6 +667,7 @@ export class AgentManager {
           providerRepo: this.deps.providerRepo,
           providerRegistry: this.deps.providerRegistry,
           files: this.deps.projectFiles,
+          memoryRepo: this.deps.memoryRepo,
         });
         await orchestrator.run(taskId);
       } else if (task.workflowId) {
