@@ -112,7 +112,7 @@ node --import tsx scripts/audit-pipeline.mjs > data/audit/pipeline-audit.json
 
 ## قرارداد repository-first
 
-آخرین اجرای کامل: **۵۴۷ تست / ۴۰ فایل**، به‌همراه **۳۳/۳۳ smoke check**؛ typecheck و build موفق (۲۰۲۶-۰۹-۰۷).
+آخرین اجرای کامل پس از بازبینی اتصال GitHub و بازیابی mock: **۵۷۰ تست / ۴۱ فایل**، به‌همراه **۳۳/۳۳ smoke check**؛ typecheck و build موفق (۲۰۲۶-۰۹-۰۷).
 
 [راهنمای وضعیت پروژه در Git](docs/REPOSITORY_STATE.md) مرجع رفتار جدید است. تست متمرکز:
 
@@ -134,3 +134,25 @@ node --import tsx scripts/audit-repository-state.mjs
 ```
 
 اجرای ۲۰۲۶-۰۹-۰۷: **۸ gap، سه کنترل موفق، صفر خطای probe**. هم‌زمان ۵۴۷ تست regression و ۳۳ smoke check همچنان سبز بودند. این اسکریپت مستقل، رفتار نامطلوب را «تست سبز» نمی‌نامد: exit code یک یعنی نقص قرارداد و دو یعنی اشکال خود probe. شواهد در `data/audit/repository-state-audit.json` و توضیح در [گزارش جدید](docs/REPOSITORY_STATE_AUDIT.md) است. این بررسی به اصلاح کد محصول منجر نشده؛ هشت مورد هنوز باز هستند.
+
+## بازبینی تغییرات سیشن قبلی: اتصال GitHub و بازیابی mock
+
+**۲۰۲۶-۰۹-۰۷** — مبنای بررسی، چهار کامیت PR شمارهٔ ۳۳ تا `604c98d` بود. سوئیت موجود روی آن نسخه **۵۵۱/۵۵۱** پاس شد، اما تست‌های جدید **۱۰ شکست قابل بازتولید** در انتخاب هویت اتصال، تنظیم OAuth از Admin، مرور فایل‌ها و حفاظت از وضعیت canonical نشان دادند. پس از اصلاح، **۱۹ تست جدید** نسبت به آن نسخه داریم و کل **۵۷۰ تست / ۴۱ فایل** پاس می‌شوند.
+
+پوشش افزوده:
+
+- توکن کاربر دیگر جایگزین مالک/کاربر اتصال مشخصی که توکن ندارد نمی‌شود؛ fallback تک‌توکنی فقط برای پروژهٔ قدیمی فاقد هر دو هویت باقی می‌ماند. چند توکن، حذف توکن و اتصال صریح `server-token` نیز کنترل می‌شوند.
+- OAuth تنظیم‌شده از environment یا Admin بدون توکن کاربر، به‌جای شبیه‌سازی بی‌صدا پیام ورود می‌دهد.
+- `/projects/:id/files` و `/projects/:id/file` همان اتصال OAuth پروژه را، با branch انتخابی، استفاده می‌کنند. خطاهای واقعی 401/404/503 نه mock می‌سازند و نه تعریف‌های DB را جایگزین می‌کنند؛ حالت نوشتن بازیابی mock نیز روی اتصال واقعی رد می‌شود.
+- نبودن مخزن جانبی، یا ظاهرشدن مخزن canonical بین بررسی موجودی و گرفتن قفل، مجوز بازنویسی تعریف‌ها نیست. onboarding پس از ازدست‌رفتن snapshot، پرامپت سفارشی/ایجنت غیرفعال را حفظ می‌کند؛ roster خالی هم باعث حذف حافظه و اسکیل‌های ذخیره‌شده نمی‌شود.
+
+اجرای متمرکز:
+
+```bash
+npx vitest run --maxWorkers=2 --minWorkers=1 \
+  src/tests/agent-github-contract.test.ts \
+  src/tests/repository-state.test.ts \
+  src/tests/project-github-files.test.ts
+```
+
+اجرای نهایی: `npm test -- --maxWorkers=2 --minWorkers=1`، `npm run typecheck`، `npm run build` و `npm run smoke` همگی موفق بودند. تست‌ها با credentialهای GitHub خالی، SQLite موقت، Mock GitHub و transport ساختگی برای adapter واقعی اجرا شدند؛ ورود OAuth یا مخزن production واقعاً آزمایش/تغییر داده نشده است. این بازبینی محدود، به معنی بسته‌شدن شکاف‌های مستقل [ممیزی repository state](docs/REPOSITORY_STATE_AUDIT.md) یا [ممیزی pipeline](docs/PIPELINE_AUDIT.md) نیست.

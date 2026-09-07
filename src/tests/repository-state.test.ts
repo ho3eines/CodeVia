@@ -270,6 +270,70 @@ describe("fail-closed repository boundary", () => {
   });
 });
 
+describe("mock recovery safeguards", () => {
+  async function loseMockSnapshot() {
+    c.githubAutomation.stop();
+    // Keep the restored database, but start with a fresh in-memory GitHub.
+    c = new Container(); await c.ensureSeed();
+    gh = c.github as MockGitHubService;
+  }
+
+  it("does not overwrite canonical edits when only a linked mock repository is missing", async () => {
+    const research = c.agentRepo.byType(p.id, "research")!;
+    const linked: Project = { ...p, repositories: [...p.repositories, { repo: "acme/missing-linked", branch: "develop", role: "other" }] };
+    c.projectRepo.upsert(linked, { key: linked.slug });
+    await edit(PROJECT_FILE, renderProjectFile(linked, c.agentRepo.byProject(p.id), [], []));
+    const human = renderAgentFile({ ...research, systemPrompt: "New canonical prompt; never overwrite with the cache." });
+    await edit(research.configPath!, human);
+    const commit = vi.spyOn(gh, "commit");
+
+    await c.agentManager.readProject(p.id);
+
+    expect(await get(research.configPath!)).toBe(human);
+    expect(c.agentRepo.findById(research.id)!.data.systemPrompt).toContain("New canonical prompt");
+    expect(commit).not.toHaveBeenCalled();
+    expect(await gh.listBranches({ owner: "acme", name: "missing-linked" })).toEqual([expect.objectContaining({ name: "develop" })]);
+  });
+
+  it("rechecks canonical contents before bootstrapping after a stale repository listing", async () => {
+    const research = c.agentRepo.byType(p.id, "research")!;
+    const human = renderAgentFile({ ...research, systemPrompt: "The repository appeared before recovery acquired the lock." });
+    await edit(research.configPath!, human);
+    // Another read/recovery can create the repo after the absence check. The
+    // inventory is not permission to replace its now-authoritative contents.
+    vi.spyOn(gh, "listRepositories").mockResolvedValueOnce([]);
+    const commit = vi.spyOn(gh, "commit");
+    await c.agentManager.readProject(p.id);
+    expect(await get(research.configPath!)).toBe(human);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("preserves customized disabled agents when explicit onboarding recovers a lost mock snapshot", async () => {
+    const research = c.agentRepo.byType(p.id, "research")!;
+    await c.projectFiles.syncAgents(p, [{ ...research, enabled: false, systemPrompt: "Recovered user-authored prompt", version: 17 }]);
+    await loseMockSnapshot();
+
+    await c.agentManager.onboardProject(p.id);
+
+    expect(c.agentRepo.findById(research.id)!.data).toMatchObject({ enabled: false, systemPrompt: "Recovered user-authored prompt", version: 17 });
+    expect(await get(research.configPath!)).toContain("Recovered user-authored prompt");
+  });
+
+  it("preserves cached memory and skills even when a restored project has no agents", async () => {
+    for (const agent of c.agentRepo.byProject(p.id)) c.agentRepo.deleteById(agent.id);
+    const entry = memory(); c.memoryRepo.upsert(entry, { projectId: p.id, key: entry.key });
+    const skillCount = c.skillRepo.byProject(p.id).length;
+    await loseMockSnapshot();
+
+    await c.agentManager.readProject(p.id);
+
+    expect(c.agentRepo.byProject(p.id)).toEqual([]);
+    expect(c.memoryRepo.byProject(p.id)).toEqual([entry]);
+    expect(c.skillRepo.byProject(p.id)).toHaveLength(skillCount);
+    expect(await get(MEMORY_FILE)).toContain("Keep this entire section.");
+  });
+});
+
 describe("missing-only AI generation", () => {
   it("authors initial project text with the selected model, accounts for usage and never grants capabilities", async () => {
     const selected = await model("selected-older"); await model("unrelated-newer");

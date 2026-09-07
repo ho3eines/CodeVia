@@ -177,15 +177,15 @@ export class AgentManager {
     const project = hydrateProject(stored);
     const github = this.githubFor(project);
     if (github.kind !== "mock") return;
-    const links = project.repositories.length ? project.repositories : [{ repo: project.configRepo, branch: project.branch }];
     const existing = new Set((await github.listRepositories({ limit: 1000 })).map((r) => r.fullName.toLowerCase()));
-    const missing = links.some((link) => !existing.has(String(link.repo).toLowerCase()));
-    if (!missing) return;
-    if (this.deps.agentRepo.byProject(projectId).length) {
-      // A repo already wiped/recreated from scratch in mock mode must not lose the
-      // working agents/skills in the DB. Mirror current definitions without a
-      // compare-and-swap baseline (this is explicitly a bootstrap, not a user edit).
-      await this.syncProjectState(projectId, undefined, false);
+    // Losing an auxiliary repo must never make the database authoritative over
+    // an intact config repo. The file service seeds those extra repos on read.
+    if (existing.has(project.configRepo.toLowerCase())) return;
+    if (project.repositoryState || this.deps.agentRepo.byProject(projectId).length) {
+      // This mode rechecks absence of CodeVia state under the repository lock.
+      // A concurrently recovered repo wins; normal saves still check conflicts.
+      // Keep memory/skills/history even when the saved roster is intentionally empty.
+      await this.syncProjectState(projectId, undefined, { recoverMissingMock: true });
     }
   }
 
@@ -265,6 +265,9 @@ export class AgentManager {
   async onboardProject(projectId: string, _tech: string[] = []): Promise<{ agents: number; skills: number; seeded: number }> {
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!stored) throw new Error(`Project ${projectId} not found`);
+    // Preserve restored definitions before starter seeding makes a lost mock
+    // repository look like an existing (empty) canonical repository.
+    await this.ensureProjectRepo(projectId);
     await this.ensureMockRepo(hydrateProject(stored));
     const p = await this.refreshProject(projectId);
     return { agents: this.deps.agentRepo.byProject(projectId).length, skills: p.settings.skills.length, seeded: 0 };
@@ -308,7 +311,7 @@ export class AgentManager {
   }
 
   /** Explicit user save/export. Runtime completion must use syncRuntimeState instead. */
-  async syncProjectState(projectId: string, targetRevision?: string, checkConflicts = true): Promise<boolean> {
+  async syncProjectState(projectId: string, targetRevision?: string, opts: { recoverMissingMock?: boolean } = {}): Promise<boolean> {
     const files = this.deps.projectFiles;
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!files || !stored) return false;
@@ -325,7 +328,7 @@ export class AgentManager {
       for (const dependency of skill.dependencies) include(dependency);
     };
     for (const slug of [...p.settings.skills, ...agents.flatMap((a) => a.skills)]) include(slug);
-    return files.syncAll(p, { promptVersions: this.deps.promptVersionRepo?.byProject(projectId).map((v) => targetRevision ? { ...v, repositoryRevision: targetRevision } : v), agents, tasks: this.deps.taskRepo.byProject(projectId), memory: this.deps.memoryRepo?.byProject(projectId) ?? [], skillCatalog: [...catalog.values()].map((s) => targetRevision ? { ...s, repositoryRevision: targetRevision } : s), workflows: this.deps.workflowRepo.byProject(projectId).map((w) => targetRevision ? { ...w, repositoryRevision: targetRevision } : w), runs: this.deps.runRepo.byProject(projectId), conversations: this.deps.conversationRepo?.findMany({ projectId }).map((r) => targetRevision ? { ...r.data, repositoryRevision: targetRevision } : r.data) }, { checkConflicts });
+    return files.syncAll(p, { promptVersions: this.deps.promptVersionRepo?.byProject(projectId).map((v) => targetRevision ? { ...v, repositoryRevision: targetRevision } : v), agents, tasks: this.deps.taskRepo.byProject(projectId), memory: this.deps.memoryRepo?.byProject(projectId) ?? [], skillCatalog: [...catalog.values()].map((s) => targetRevision ? { ...s, repositoryRevision: targetRevision } : s), workflows: this.deps.workflowRepo.byProject(projectId).map((w) => targetRevision ? { ...w, repositoryRevision: targetRevision } : w), runs: this.deps.runRepo.byProject(projectId), conversations: this.deps.conversationRepo?.findMany({ projectId }).map((r) => targetRevision ? { ...r.data, repositoryRevision: targetRevision } : r.data) }, opts);
   }
 
   /** Save observed execution history without rewriting prompts, skills, rules or memory. */

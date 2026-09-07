@@ -5,7 +5,7 @@ import { getEnv } from "../config/env.js";
 import { logger } from "../logger.js";
 import type { KvStore } from "../db/kv.js";
 import { getUserGitHubToken, hasRepoScope, GITHUB_TOKEN_KV_PREFIX } from "../auth/github-tokens.js";
-import { isGitHubOAuthConfigured } from "../auth/github-oauth.js";
+import { getEffectiveOAuthConfig } from "../auth/admin-settings.js";
 
 /** A configured GitHub connection bound to a project. */
 export interface GithubConnection {
@@ -118,16 +118,15 @@ export type { IGitHubService, GithubRepoRef } from "./types.js";
  * for a real user access token and stores it per user, so this is the intended
  * "use the OAuth credentials" path — not the server PAT.
  *
- * Order:
- *   1. the exact connection user (legacy user-oauth),
- *   2. the project owner,
- *   3. when a legacy project has no owner, a single-user install falls back to
- *      the only stored user token (the platform is effectively that user).
+ * An explicit connection user is authoritative; otherwise use the project
+ * owner. A missing/undecryptable token for either identity must NOT select a
+ * different user's token. Only legacy projects with neither identity may use
+ * the sole stored user token for backwards compatibility.
  * Returns the userId when a decryptable token exists, otherwise undefined.
  */
 export function resolveProjectUserIdWithGitHubToken(kv: KvStore, project: import("../domain/entities.js").Project, allowSoleUser = true): string | undefined {
-  const explicit = project.githubConnection?.userId ?? project.ownerId;
-  if (explicit && getUserGitHubToken(kv, explicit)) return explicit;
+  const explicit = project.githubConnection?.userId || project.ownerId;
+  if (explicit) return getUserGitHubToken(kv, explicit) ? explicit : undefined;
   if (!allowSoleUser) return undefined;
   const stored = kv.all();
   const userKeys = Object.keys(stored).filter((k) => k.startsWith(GITHUB_TOKEN_KV_PREFIX));
@@ -167,7 +166,7 @@ export function resolveGitHubForProject(opts: {
     if (userId) {
       return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
     }
-    if (isGitHubOAuthConfigured()) {
+    if (getEffectiveOAuthConfig(opts.kv)) {
       throw new Error(`GitHub OAuth is configured, but no user token is stored for project ${opts.project.name}. Log in with GitHub once; then project actions use your repository access without GITHUB_TOKEN.`);
     }
     if (opts.fallback.kind === "mock") return opts.fallback;

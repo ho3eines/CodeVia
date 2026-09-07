@@ -223,7 +223,8 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (!p) return fail(reply, 404, "project not found");
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     try {
-      const entries = await container.github.listFiles({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.branch || p.branch, q.path || "CodeVia");
+      const gh = githubForProject(req, p);
+      const entries = await gh.listFiles({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.branch || p.branch, q.path || "CodeVia");
       return entries;
     } catch (err) {
       return fail(reply, 502, `GitHub unreachable: ${String(err).slice(0, 200)}`);
@@ -237,7 +238,8 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     if (!q.path) return fail(reply, 400, "path query is required");
     try {
-      const file = await container.github.getFile({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.path, q.branch || p.branch);
+      const gh = githubForProject(req, p);
+      const file = await gh.getFile({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.path, q.branch || p.branch);
       if (!file) return fail(reply, 404, `file not found: ${q.path}`);
       return { path: q.path, content: file.content.slice(0, 60000), sha: file.sha };
     } catch (err) {

@@ -355,9 +355,9 @@ export class ProjectFilesService {
     return [...files.values()];
   }
 
-  async syncAll(project: Project, input: { agents: Agent[]; tasks: Task[]; memory: MemoryEntry[]; skillCatalog?: Array<{ slug: string; description?: string }>; workflows?: Workflow[]; runs?: Run[]; conversations?: Conversation[]; promptVersions?: PromptVersion[] }, opts: { checkConflicts?: boolean } = {}): Promise<boolean> {
+  async syncAll(project: Project, input: { agents: Agent[]; tasks: Task[]; memory: MemoryEntry[]; skillCatalog?: Array<{ slug: string; description?: string }>; workflows?: Workflow[]; runs?: Run[]; conversations?: Conversation[]; promptVersions?: PromptVersion[] }, opts: { recoverMissingMock?: boolean } = {}): Promise<boolean> {
     const definitions = (input.skillCatalog ?? []).filter((s): s is Skill => "instructions" in s);
-    return this.writeFiles(project, [
+    const files: StateWrite[] = [
       { path: PROJECT_FILE, content: renderProjectFile(project, input.agents, input.tasks, input.memory) },
       { path: RULES_FILE, content: renderRulesFile(project.settings.rules) },
       ...input.agents.map((a) => ({ path: this.agentPath(a), content: renderAgentFile(a), sourceSha: a.repositoryRevision })),
@@ -369,7 +369,19 @@ export class ProjectFilesService {
       ...(input.runs ?? []).map((r) => ({ path: this.entityPath(project, "run", RUN_DIR, r.id), content: renderRunFile(r), runtime: true })),
       ...(input.conversations ?? []).map((c) => ({ path: this.entityPath(project, "conversation", CONVERSATION_DIR, c.id), content: renderConversationFile(c), sourceSha: c.repositoryRevision })),
       ...this.promptWrites(project, input.agents, input.promptVersions, true),
-    ], "[CodeVia] save project state", opts.checkConflicts ?? true);
+    ];
+    if (opts.recoverMissingMock) {
+      // Recovery is not a general conflict-check bypass. Only a missing mock
+      // snapshot may be filled, and the absence check + commit share one lock.
+      return this.locked(project, async () => {
+        if (this.github(project).kind !== "mock") throw stateError("mock recovery cannot write to real GitHub");
+        const current = await this.raw(project);
+        if (current.contents.size) return false;
+        await this.commit(project, current, files, "[CodeVia] recover missing mock project state");
+        return true;
+      });
+    }
+    return this.writeFiles(project, files, "[CodeVia] save project state");
   }
   agentPath(a: Agent): string {
     const path = a.configPath ?? statePath(AGENTS_DIR, a.id);
