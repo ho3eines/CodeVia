@@ -64,6 +64,7 @@ export function buildModelsEndpoint(
 
 /** Build the chat-completions URL for an OpenAI-compatible provider. */
 export function buildChatEndpoint(config: ModelProvider): string {
+  if (config.apiFormat === "custom") return (config.baseUrl ?? "").trim();
   const base = ensureVersionPath(config.baseUrl ?? "https://api.openai.com/v1", "/v1");
   return `${base}/chat/completions`;
 }
