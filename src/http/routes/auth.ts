@@ -20,6 +20,7 @@ import { resolveRequestUser } from "../auth.js";
 import { getEnv } from "../../config/env.js";
 import { logger } from "../../logger.js";
 import { deleteUserGitHubToken, describeUserGitHubToken, storeUserGitHubToken } from "../../auth/github-tokens.js";
+import { adoptStrandedProjects } from "../../github/registry.js";
 
 /**
  * GitHub OAuth login + session routes.
@@ -141,6 +142,20 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
         storeUserGitHubToken(container.kv, user.id, accessToken, { scopes: scope, login: profile.login });
       } catch (err) {
         logger.warn("could not persist user GitHub token", { err: String(err) });
+      }
+      // Projects left without a usable identity (created in demo mode, or bound
+      // to a user whose token is gone) would keep running against the mock in
+      // background jobs. Now that a real token exists, hand them over.
+      try {
+        adoptStrandedProjects({
+          kv: container.kv,
+          projects: container.projectRepo.findMany({}).map((r) => r.data),
+          save: (p) => void container.projectRepo.update(p),
+          userId: user.id,
+          login: profile.login,
+        });
+      } catch (err) {
+        logger.warn("could not adopt stranded GitHub projects", { err: String(err) });
       }
       await container.auditRepo.record({
         userId: user.id,

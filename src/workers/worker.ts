@@ -7,8 +7,7 @@ import type { ITelegramService } from "../integrations/telegram.js";
 import type { NotificationRepository } from "../observability/repos.js";
 import type { Logger } from "../logger.js";
 import type { Job, Project } from "../domain/entities.js";
-import type { ApprovalRepository } from "../approvals/service.js";
-import type { ApprovalRequest } from "../approvals/service.js";
+import type { ApprovalRepository, ApprovalRequest } from "../approvals/service.js";
 import { randomUUID } from "node:crypto";
 
 export interface WorkerDeps {
@@ -21,7 +20,7 @@ export interface WorkerDeps {
   /** Approvals are the only legitimate authorization for dangerous github.op jobs. */
   approvalRepo: ApprovalRepository;
   github: IGitHubService;
-  /** Project-scoped GitHub connection (per-user token when linked); falls back to `github`. */
+  /** Per-project connection; falls back to `github` when a project has none. */
   githubForProject?: (project: Project) => IGitHubService;
   telegram: ITelegramService;
   notificationRepo: NotificationRepository;
@@ -140,7 +139,10 @@ export class Worker {
     const [owner, name] = repoStr.split("/");
     if (!owner || !name) throw new Error(`github.op ${op}: repo "owner/name" is required`);
     const repo = { owner, name };
-    const gh = this.deps.github;
+    // Use the project's own GitHub connection so background ops authenticate as
+    // the user who linked it, instead of the platform-wide service (which is
+    // the mock unless a server GITHUB_TOKEN is set).
+    const gh = (project && this.deps.githubForProject?.(project)) ?? this.deps.github;
     switch (op) {
       case "comment_pr":
         await gh.commentOnPullRequest(repo, Number(p.number), String(p.body ?? ""));

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RealGitHubService } from "../github/real-service.js";
+import type { IGitHubService } from "../github/types.js";
 import { verifyGithubChecks } from "../tools/github-checks.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { CORE_TOOLS } from "../tools/core-tools.js";
@@ -7,8 +8,10 @@ import type { ToolContext } from "../tools/types.js";
 import type { ModelProvider, Project } from "../domain/entities.js";
 import { Container } from "../app/container.js";
 import { freshDb } from "./test-helpers.js";
-import { storeUserGitHubToken } from "../auth/github-tokens.js";
-import { resolveGitHubForProject, setUserGitHubFetchForTest } from "../github/registry.js";
+import { deleteUserGitHubToken, storeUserGitHubToken } from "../auth/github-tokens.js";
+import { saveGitHubAdminSettings } from "../auth/admin-settings.js";
+import { getEnvFresh } from "../config/env.js";
+import { resolveGitHubForProject, resolveProjectUserIdWithGitHubToken, setUserGitHubFetchForTest } from "../github/registry.js";
 import { encryptSecret } from "../auth/encrypted-secrets.js";
 import { OpenAICompatibleProvider } from "../ai/http-provider.js";
 import { AnthropicProvider } from "../ai/anthropic-provider.js";
@@ -67,7 +70,7 @@ beforeEach(async () => {
   project = await c.agentManager.createProject({ name: "Contract", description: "app", configRepo: "acme/app" });
   ctx = { project, agent: c.agentRepo.byType(project.id, "backend-developer")!, github: { kind: "real", listBranches: async () => [{ name: "feature", sha: "head-sha" }], getChecks: async () => [{ name: "build", status: "success" }] } as unknown as ToolContext["github"], logger: { info() {}, warn() {}, error() {} } as unknown as ToolContext["logger"], correlationId: "contract" };
 });
-afterEach(() => { c.githubAutomation.stop(); setUserGitHubFetchForTest(undefined); vi.restoreAllMocks(); fx.cleanup(); });
+afterEach(() => { c.githubAutomation.stop(); setUserGitHubFetchForTest(undefined); vi.restoreAllMocks(); vi.unstubAllEnvs(); getEnvFresh(); fx.cleanup(); });
 
 describe("CI evidence and tool guards", () => {
   it("verifies an exact SHA, not the unchanged main branch", async () => {
@@ -146,6 +149,76 @@ describe("project-scoped connections", () => {
     await bound.listBranches(repo);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(() => resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "user-oauth", userId: "missing-owner" } }, kv: c.kv, fallback: c.github })).toThrow(/reconnected/);
+  });
+  it("keeps mock only when neither a user login nor OAuth is configured", () => {
+    const bound = resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: c.github });
+    expect(bound.kind).toBe("mock");
+  });
+  it("does not substitute a real server fallback for a stale mock connection without a user token", () => {
+    const realFallback = { kind: "real" as const } as IGitHubService;
+    const bound = resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: realFallback });
+    expect(bound.kind).not.toBe("real");
+  });
+  it("uses the owner's real GitHub login even for a project saved with mock connection", async () => {
+    storeUserGitHubToken(c.kv, "owner-a", "fake-project-token", { scopes: "repo", login: "owner-a" });
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer fake-project-token");
+      return json([{ name: "main", commit: { sha: "head" } }]);
+    });
+    setUserGitHubFetchForTest(fetcher as typeof fetch);
+    const bound = resolveGitHubForProject({ project: { ...project, ownerId: "owner-a", githubConnection: { kind: "mock" } }, kv: c.kv, fallback: c.github });
+    expect(bound.kind).toBe("real");
+    await bound.listBranches(repo);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { ownerId: "missing-owner", githubConnection: { kind: "mock" as const } },
+    { githubConnection: { kind: "mock" as const, userId: "missing-connection-user" } },
+    { ownerId: "missing-owner", githubConnection: { kind: "mock" as const, userId: "" } },
+  ])("does not borrow the sole token when the project already has an identity: %j", (identity) => {
+    storeUserGitHubToken(c.kv, "other-user", "other-user-token");
+    const owned = { ...project, ...identity };
+    expect(resolveProjectUserIdWithGitHubToken(c.kv, owned)).toBeUndefined();
+    expect(resolveGitHubForProject({ project: owned, kv: c.kv, fallback: c.github }).kind).toBe("mock");
+  });
+  it("does not switch an explicit connection to its owner's token when that connection expires", () => {
+    storeUserGitHubToken(c.kv, "owner-a", "owner-token");
+    const owned: Project = { ...project, ownerId: "owner-a", githubConnection: { kind: "mock", userId: "expired-user" } };
+    expect(resolveProjectUserIdWithGitHubToken(c.kv, owned)).toBeUndefined();
+  });
+  it("supports the sole OAuth token only for an ownerless legacy mock project", async () => {
+    storeUserGitHubToken(c.kv, "sole-user", "sole-user-token");
+    const legacy: Project = { ...project, ownerId: undefined, githubConnection: { kind: "mock" } };
+    expect(resolveProjectUserIdWithGitHubToken(c.kv, legacy)).toBe("sole-user");
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sole-user-token");
+      return json([{ name: "main", commit: { sha: "head" } }]);
+    });
+    setUserGitHubFetchForTest(fetcher as typeof fetch);
+    const bound = resolveGitHubForProject({ project: legacy, kv: c.kv, fallback: c.github });
+    await bound.listBranches(repo);
+    deleteUserGitHubToken(c.kv, "sole-user");
+    await expect(bound.listBranches(repo)).rejects.toThrow(/token not configured/);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("does not guess an owner for a legacy project when multiple OAuth tokens exist", () => {
+    storeUserGitHubToken(c.kv, "first-user", "first-token");
+    storeUserGitHubToken(c.kv, "second-user", "second-token");
+    expect(resolveProjectUserIdWithGitHubToken(c.kv, { ...project, ownerId: undefined, githubConnection: { kind: "mock" } })).toBeUndefined();
+  });
+  it.each(["environment", "admin"])("requires login instead of mocking when OAuth is configured via %s", (source) => {
+    vi.stubEnv("GITHUB_CLIENT_SECRET", "test-only-oauth-app-secret");
+    vi.stubEnv("GITHUB_CLIENT_ID", source === "environment" ? "test-client-id" : "");
+    if (source === "admin") saveGitHubAdminSettings(c.kv, { clientId: "admin-client-id" });
+    getEnvFresh();
+    expect(() => resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: c.github })).toThrow(/Log in with GitHub/);
+  });
+  it("keeps explicit server-token connections separate from stale mock promotion", () => {
+    storeUserGitHubToken(c.kv, "owner-a", "owner-token");
+    const connected: Project = { ...project, ownerId: "owner-a", githubConnection: { kind: "server-token" } };
+    const fallback = { kind: "real" as const } as IGitHubService;
+    expect(resolveGitHubForProject({ project: connected, kv: c.kv, fallback })).toBe(fallback);
+    expect(() => resolveGitHubForProject({ project: connected, kv: c.kv, fallback: c.github })).toThrow(/refusing a mock fallback/);
   });
   it("rehydrates default provider adapters from persisted credentials on restart", async () => {
     const stored = c.providerRepo.findById("provider-openai")!.data;

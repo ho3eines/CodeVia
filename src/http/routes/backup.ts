@@ -43,7 +43,9 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
       github: {
         kind: container.github.kind,
         connected: container.github.kind === "real",
-        hint: container.github.kind === "real" ? undefined : "GitHub is in mock mode — set GITHUB_TOKEN and GITHUB_ENABLED=true to back up to a real repository.",
+        // Backups run on a schedule with no signed-in user, so they need the
+        // server credential — a per-user OAuth login cannot stand in for it.
+        hint: container.github.kind === "real" ? undefined : "Backups run unattended and need a server credential: set GITHUB_TOKEN and GITHUB_ENABLED=true. Logging in with GitHub connects your projects, but does not back them up.",
       },
       schedule: {
         cron: effective.schedule,

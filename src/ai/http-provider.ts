@@ -1,3 +1,4 @@
+import { buildDirectChatRequest, directChatText } from "./direct-chat.js";
 import { decryptSecret } from "../auth/encrypted-secrets.js";
 import type {
   ChatRequest,
@@ -36,6 +37,7 @@ export class OpenAICompatibleProvider implements IModelProvider {
   }
 
   async listModels(): Promise<ProviderModelInfo[]> {
+    if (this.config.apiFormat === "custom") return [];
     // For custom-compatible endpoints we surface a small default catalog that the
     // registry can enrich. Real catalog data lives in the Model Registry (GitHub).
     return [
@@ -78,16 +80,19 @@ export class OpenAICompatibleProvider implements IModelProvider {
       }));
     }
 
-    const url = buildChatEndpoint(this.config);
+    const direct = this.config.apiFormat === "custom";
+    if (direct && req.tools?.length) throw new Error("Custom chat does not support native tool calling");
+    const custom = direct ? buildDirectChatRequest(this.config, req.modelId, req.messages, key) : undefined;
+    const url = custom?.url ?? buildChatEndpoint(this.config);
     const started = Date.now();
     const res = await fetch(url, {
       method: "POST",
-      headers: {
+      headers: custom?.headers ?? {
         "Content-Type": "application/json",
         ...(this.config.authType === "bearer" && key ? { Authorization: `Bearer ${key}` } : {}),
         ...(this.config.authType === "api-key" && key ? { "api-key": key } : {}),
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(custom?.body ?? body),
       signal: req.signal ? AbortSignal.any([req.signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs),
     });
 
@@ -103,7 +108,7 @@ export class OpenAICompatibleProvider implements IModelProvider {
       totalTokens: (json.usage?.prompt_tokens ?? 0) + (json.usage?.completion_tokens ?? 0),
     };
     const choice = json.choices?.[0];
-    const content = choice?.message?.content ?? "";
+    const content = direct ? directChatText(json) : choice?.message?.content ?? "";
     const durationMs = Date.now() - started;
     logger.debug(`provider chat ${this.name}`, { modelId: req.modelId, durationMs, ...usage });
     return {

@@ -180,3 +180,20 @@ Project detection → GitHub changes → Agent Router → Context Engine
 ## ⚖️ License
 
 MIT — see [LICENSE](LICENSE).
+
+### Direct JSON chat providers (Ptero / MLP)
+
+For an API accepting `{ "model": "…", "messages": […] }` and returning
+`{ "text": "…" }`, select **Custom HTTP**, with API format **custom**.
+The Base URL is the **complete POST endpoint**, not an OpenAI base URL:
+
+- Base URL: `https://ptero.pro/wp-json/mlp/v1/chat`
+- Auth: `bearer`; enter the key in the provider form or use Secret Ref `MLP_API_KEY`.
+- Add model IDs manually, for example `codestral:free`, then run the model chat test.
+
+This format does not append `/v1` or `/chat/completions`, query a model catalog,
+request streaming, or send temperature/max-token parameters. The chat UI receives
+one complete reply. Native tool calls are unsupported and rejected. No connection
+is verified until a model chat test is run. Usage is unknown when omitted by the API.
+Existing custom providers that implement OpenAI's contract should use API format
+**openai** instead. Ptero has not been live-tested with credentials by this change.

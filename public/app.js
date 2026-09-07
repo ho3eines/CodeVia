@@ -3028,6 +3028,7 @@
   function providerUrlHints(p) {
     const base = String(p.baseUrl || "").replace(/\/+$/, "");
     const fmt = p.apiFormat;
+    if (fmt === "custom") return { catalog: "Not available — add model IDs manually", chat: base || "—" };
     if (fmt === "anthropic") {
       return {
         catalog: base ? (base.endsWith("/v1") ? `${base}/models?limit=50` : `${base}/v1/models?limit=50`) : "—",

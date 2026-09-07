@@ -21,14 +21,14 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
     }
     if (projectId) {
       const p = c.projectRepo.findById(projectId)?.data;
-      if (p) await c.projectFiles.restore(p);
+      if (p) await c.agentManager.readProject(p.id);
       return;
     }
     // /skills without projectId is intentionally the global TEMPLATE marketplace.
     if (resource === "skills") return;
     if (req.method === "GET") {
       for (const { data: p } of c.projectRepo.findMany()) {
-        if (!p.ownerId || p.ownerId === req.user?.id) await c.projectFiles.restore(p);
+        if (!p.ownerId || p.ownerId === req.user?.id) await c.agentManager.readProject(p.id);
       }
     }
   });

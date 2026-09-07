@@ -13,7 +13,8 @@ import {
 import { parseRepoFullName } from "../../github/types.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
-import { describeUserGitHubToken } from "../../auth/github-tokens.js";
+import { describeUserGitHubToken, getUserGitHubToken } from "../../auth/github-tokens.js";
+import { logger } from "../../logger.js";
 import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
 import { isAgentType } from "../../agents/generator.js";
@@ -203,6 +204,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    // In Simulation/Mock mode a repository that was never seen by the mock is
+    // rebuilt from the current DB before the canonical read; real connections
+    // still fail closed rather than substituting cached state.
+    await container.agentManager.readProject(id);
     const summary = await container.projectFiles.restore(p, {
       projectRepo: container.projectRepo,
       agentRepo: container.agentRepo,
@@ -227,7 +232,8 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     try {
-      const entries = await container.github.listFiles({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.branch || p.branch, q.path || "CodeVia");
+      const gh = githubForProject(req, p);
+      const entries = await gh.listFiles({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.branch || p.branch, q.path || "CodeVia");
       return entries;
     } catch (err) {
       return fail(reply, 502, `GitHub unreachable: ${String(err).slice(0, 200)}`);
@@ -241,7 +247,8 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     if (!q.path) return fail(reply, 400, "path query is required");
     try {
-      const file = await container.github.getFile({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.path, q.branch || p.branch);
+      const gh = githubForProject(req, p);
+      const file = await gh.getFile({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.path, q.branch || p.branch);
       if (!file) return fail(reply, 404, `file not found: ${q.path}`);
       return { path: q.path, content: file.content.slice(0, 60000), sha: file.sha };
     } catch (err) {
@@ -321,14 +328,54 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return container.runRepo.byProject(id).filter((r) => r.agentType === "qa-test");
   });
 
-  /** GitHub service for a project: the linking user's token when available, else the platform default. */
+  /**
+   * GitHub service for a project inside a request.
+   *
+   * The signed-in user's own token wins over whatever identity the project was
+   * created with, so the repositories reachable here are exactly the ones the
+   * GitHub page lists for this user. Only unauthenticated/token-less callers
+   * fall back to the project's stored connection.
+   */
   const githubForProject = (req: Parameters<typeof resolveRequestUser>[0], p: Project) => {
-    if (p.githubConnection) return container.githubForProject(p);
     const { user, authenticated } = resolveRequestUser(req, container);
+    const requestUserId = authenticated ? user.id : undefined;
+    if (requestUserId && getUserGitHubToken(container.kv, requestUserId)) {
+      adoptProjectConnection(p, requestUserId);
+      return container.githubForProject(p, requestUserId);
+    }
+    if (p.githubConnection) return container.githubForProject(p);
     return resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github }).service;
   };
 
+  /**
+   * Re-bind a project whose stored connection can no longer authenticate to the
+   * user who is actually connected to GitHub.
+   *
+   * Projects created before the GitHub login existed were persisted with
+   * `kind: "mock"` and the pre-login `user-demo` owner. Requests are repaired by
+   * the caller's own token, but background work (agent runs, workers, webhooks)
+   * has no request user and would keep failing — or silently seed a mock repo.
+   * Adopting the connection once, on first authenticated touch, fixes both.
+   *
+   * A connection that already resolves to a usable token is never reassigned,
+   * so a project stays with its owner while that owner remains connected.
+   */
+  const adoptProjectConnection = (p: Project, userId: string): void => {
+    const current = p.githubConnection;
+    if (current?.kind === "user-oauth" && current.userId && getUserGitHubToken(container.kv, current.userId)) return;
+    const login = describeUserGitHubToken(container.kv, userId).login;
+    if (current?.kind === "user-oauth" && current.userId === userId && current.login === login) return;
+    p.githubConnection = { kind: "user-oauth", userId, login };
+    try {
+      container.projectRepo.update(p);
+    } catch (err) {
+      // Never fail the request over bookkeeping — the token above still works.
+      logger.warn(`could not adopt GitHub connection for project ${p.id}: ${String(err).slice(0, 200)}`);
+    }
+  };
+
   app.get("/projects/:id/issues", { schema: { tags: ["projects"] } }, async (req, reply) => {
+
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
@@ -729,7 +776,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       updatedAt: now,
     };
     const plan = defaultPlanFor(agent, task);
-    const context = await container.contextEngine.build({ project: p, agent, task, skills: container.skillsRegistry, github: container.github }).catch(() => undefined);
+    const context = await container.contextEngine.build({ project: p, agent, task, skills: container.skillsRegistry, github: githubForProject(req, p) }).catch(() => undefined);
     const tools = plan.filter((s) => s.tool).map((s) => container.toolRegistry.get(s.tool!)).filter(Boolean);
     return {
       simulation: true,
@@ -774,7 +821,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     let repos = existing ? p.repositories.map((r) => (r === existing ? { ...r, ...link } : r)) : [...p.repositories, link as ProjectRepositoryLink];
     if (link.isConfigRepo) repos = repos.map((r) => ({ ...r, isConfigRepo: r.repo.toLowerCase() === repo.toLowerCase() }));
     const updated = await save({ ...p, repositories: normalizeRepositories(repos) });
-    if (container.github.kind === "mock") await container.agentManager.onboardProject(id, []);
+    // Seed the demo structure only when this project really has no real
+    // connection — not merely because the platform-wide service is the mock.
+    if (githubForProject(req, p).kind === "mock") await container.agentManager.onboardProject(id, []);
     return updated;
   });
 

@@ -1,3 +1,4 @@
+import { buildDirectChatRequest, directChatText } from "./direct-chat.js";
 import type { ModelProvider } from "../domain/entities.js";
 import type { ChatMessage } from "./types.js";
 import {
@@ -44,6 +45,7 @@ export function buildStreamRequest(
   opts: StreamChatOptions,
   apiKey?: string,
 ): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
+  if (config.apiFormat === "custom") return buildDirectChatRequest(config, modelId, opts.messages, apiKey);
   const temperature = opts.temperature ?? config.defaultTemperature ?? 0.3;
   const maxTokens = opts.maxTokens ?? config.maxTokensDefault ?? 1024;
   // Some model routes reject `temperature` outright — the field is then omitted.
@@ -100,7 +102,6 @@ export function buildStreamRequest(
       };
     }
     case "openai":
-    case "custom":
     default: {
       const headers: Record<string, string> = { "content-type": "application/json", accept: "text/event-stream" };
       if (apiKey) {
@@ -145,7 +146,6 @@ export function extractStreamDelta(apiFormat: ModelProvider["apiFormat"], payloa
       return String(message?.content ?? "");
     }
     case "openai":
-    case "custom":
     default: {
       const choices = Array.isArray(obj.choices) ? (obj.choices as Array<Record<string, unknown>>) : [];
       const delta = (choices[0]?.delta ?? choices[0]?.message) as Record<string, unknown> | undefined;
@@ -262,6 +262,12 @@ export async function* streamModelChat(
               ? `Endpoint or model not found — check the Base URL, API format, and that "${modelId}" exists.`
               : undefined,
       };
+      return;
+    }
+    if (config.apiFormat === "custom") {
+      const text = directChatText(await res.json());
+      if (text) yield { type: "delta", text };
+      yield { type: "done", text, latencyMs: Date.now() - started, status: res.status };
       return;
     }
     const sse = config.apiFormat !== "ollama";
