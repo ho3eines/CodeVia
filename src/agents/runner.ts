@@ -2,6 +2,7 @@ import type { Agent, Project, ProjectRepositoryLink, Run, RunStep, Task } from "
 import type { RunRepository, CostRepository } from "../observability/repos.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
+import { compileAssignedSkills, type SkillSelection, type SkillTask } from "../skills/assignment.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
 import type { ContextEngine } from "../ai/context-engine.js";
 import type { ProviderRegistry } from "../ai/provider-registry.js";
@@ -13,6 +14,7 @@ import { logger } from "../logger.js";
 import { defaultPlanFor, type PlanStep } from "./plan.js";
 import { randomUUID } from "node:crypto";
 import { memoryResolver } from "../memory/index.js";
+import { CodeViaMemoryStore } from "../memory/codevia-store.js";
 import type { IMemoryStore } from "../memory/store.js";
 import { toRepoRef } from "../tools/core-tools.js";
 import type { MemoryRepository } from "../domain/repos.js";
@@ -39,6 +41,7 @@ export interface AgentRunnerDeps {
   memoryFor?: (project: Project) => IMemoryStore;
   memoryRepo?: MemoryRepository;
   projectFiles?: ProjectFilesService;
+  refresh?: (projectId: string) => Promise<{ project: Project; agents: Agent[] }>;
   isCancelled?: (taskId: string) => boolean;
   /** Checks the complete ancestry, not just the current subtask. */
   checkActive?: (task: Task) => void;
@@ -51,6 +54,7 @@ export interface PrepareContext {
   project: Project;
   checkActive: () => void;
   setSummary: (summary: string) => void;
+  assignSkills: (task: SkillTask) => SkillSelection;
 }
 export type PreparePlan = (ctx: PrepareContext) => Promise<PlanStep[]>;
 
@@ -72,8 +76,9 @@ export interface RunRequest {
 export class AgentRunner {
   constructor(private readonly deps: AgentRunnerDeps) {}
 
-  private memoryFor(project: Project, github: IGitHubService): IMemoryStore | undefined {
+  private memoryFor(project: Project, github: IGitHubService, agent: Agent): IMemoryStore | undefined {
     if (this.deps.memoryFor) return this.deps.memoryFor(project);
+    if (this.deps.projectFiles) return new CodeViaMemoryStore(this.deps.projectFiles, project, `agent:${agent.type}`);
     return memoryResolver.resolve({
       repo: project.configRepo ? toRepoRef(project.configRepo) : undefined,
       branch: project.branch, localRoot: `./data/memory/${project.id}`, github,
@@ -81,7 +86,11 @@ export class AgentRunner {
   }
 
   async run(req: RunRequest): Promise<Run> {
-    const { task, agent, project } = req;
+    const { task } = req;
+    const fresh = await this.deps.refresh?.(req.project.id);
+    const project = fresh?.project ?? req.project;
+    const agent = fresh ? fresh.agents.find((a) => a.id === req.agent.id) : req.agent;
+    if (!agent) throw new Error("Agent definition is absent from CodeVia; refusing stale cached agent");
     if (!agent.enabled) throw new Error(`Agent ${agent.name} (${agent.type}) is disabled`);
     if (agent.projectId !== project.id || task.projectId !== project.id) throw new Error("Agent, task and project must belong to the same project");
     const correlationId = task.correlationId || generateCorrelationId();
@@ -111,8 +120,10 @@ export class AgentRunner {
     await eventBus.publish("agent.started", { runId: run.id, agentId: agent.id, projectId: project.id }, { correlationId, projectId: project.id });
     live.emit({ type: "run.updated", runId: run.id, data: { status: "running", agent: agent.name } });
     try {
-      const memory = this.memoryFor(project, github);
+      const memory = this.memoryFor(project, github, agent);
       const built = await this.deps.contextEngine.build({ project: executionProject, agent, task, skills: this.deps.skillsRegistry, github, memory });
+      run.skills = built.skills;
+      persist();
       checkActive();
       const prepare = req.preparePlan ?? (!req.plan && isWriter(agent.type)
         ? (ctx: PrepareContext) => prepareSingleImplementation(ctx, agent, task, this.deps.memoryRepo)
@@ -127,7 +138,21 @@ export class AgentRunner {
         allowMock: !prepare && !req.plan,
       }) : undefined;
       if (prepare) {
-        plan = await prepare({ chat, context: built.context, github, project: executionProject, checkActive, setSummary: (s) => { run.summary = s; } });
+        plan = await prepare({
+          chat, context: built.context, github, project: executionProject, checkActive,
+          setSummary: (s) => { run.summary = s; },
+          assignSkills: (target) => {
+            checkActive();
+            const selection = this.deps.skillsRegistry.forTask(project, agent, target);
+            run.skills = selection.assignments;
+            const sources = built.sources.filter((s) => s.label !== "skills");
+            const content = compileAssignedSkills(selection.assignments);
+            if (content) sources.splice(2, 0, { label: "skills", content });
+            chat?.setContext(sources.map((s) => `## ${s.label}\n${s.content}`).join("\n\n---\n\n"));
+            persist();
+            return selection;
+          },
+        });
       } else if (!req.plan && chat) {
         run.summary = await chat.chat(
           "Analyze the request against the supplied repository context. Return concise findings, risks and next actions. Never claim to have run tests or modified files without tool evidence.",
@@ -182,7 +207,7 @@ export class AgentRunner {
           record.detail = result.output.slice(0, 4000);
           record.data = result.data;
           if (typeof result.data?.verification === "string") run.verification = result.data.verification as Run["verification"];
-          if (result.ok && step.tool === "save_memory") this.indexMemory(task, agent, project, step.input, result.data);
+          if (result.ok && step.tool === "save_memory" && memory?.kind !== "codevia") this.indexMemory(task, agent, project, step.input, result.data);
         } else {
           record.status = "succeeded";
           record.detail = step.detail ?? "Planning/analysis stage completed; no external command executed.";
@@ -199,6 +224,7 @@ export class AgentRunner {
       persist();
       await eventBus.publish(run.status === "succeeded" ? "agent.completed" : "agent.failed", { runId: run.id, agentId: agent.id, projectId: project.id, taskId: task.id }, { correlationId, projectId: project.id });
       live.emit({ type: "run.updated", runId: run.id, data: { status: run.status, verification: run.verification } });
+      await this.deps.projectFiles?.syncRun(project, run);
       return run;
     } catch (err) {
       run.status = err instanceof TaskCancelledError ? "cancelled" : "failed";
@@ -209,6 +235,7 @@ export class AgentRunner {
         } else if (step.status === "pending") step.status = "skipped";
       }
       persist();
+      await this.deps.projectFiles?.syncRun(project, run);
       await eventBus.publish("agent.failed", { runId: run.id, projectId: project.id, error: run.error }, { correlationId, projectId: project.id });
       live.emit({ type: "run.updated", runId: run.id, data: { status: run.status, error: run.error } });
       throw err;
@@ -231,7 +258,7 @@ export class AgentRunner {
       const repo = this.deps.memoryRepo;
       if (!repo) return;
       const key = String(data?.key ?? input?.key ?? `${agent.slug}/${task.id}`);
-      const content = String(input?.content ?? "").slice(0, 4000);
+      const content = String(input?.content ?? "");
       if (!content) return;
       const type = String(data?.type ?? input?.type ?? "knowledge") as MemoryType;
       const tags = Array.isArray(input?.tags) ? (input.tags as string[]) : [agent.type];
@@ -261,8 +288,7 @@ export class AgentRunner {
           { projectId: project.id, key },
         );
       }
-      const files = this.deps.projectFiles;
-      if (files) void files.syncMemory(project, repo.byProject(project.id)).catch(() => undefined);
+
     } catch (err) {
       logger.warn("memory DB index failed", { projectId: project.id, err: String(err) });
     }

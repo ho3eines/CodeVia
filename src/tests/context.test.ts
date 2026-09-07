@@ -6,7 +6,7 @@ import {
   buildContextPack, renderContextMarkdown, parseRegistry, mergeRegistry,
   renderPromptContext, extendContent, syncProjectContext,
 } from "../agents/context.js";
-import { CONTEXT_FILE } from "../github/project-files.js";
+import { CONTEXT_FILE, RUNTIME_CONTEXT_FILE } from "../github/project-files.js";
 import { freshDb } from "./test-helpers.js";
 
 /* ------------------------------------------------------------------ *
@@ -220,7 +220,7 @@ describe("continuity end-to-end (mock AI + mock GitHub)", () => {
     expect(v2).toContain("Throttle");
 
     // The context file tracks the architecture + entity ownership.
-    const ctx = (await gh.getFile(ref, CONTEXT_FILE, "main"))?.content ?? "";
+    const ctx = (await gh.getFile(ref, RUNTIME_CONTEXT_FILE, "main"))?.content ?? "";
     expect(ctx).toContain("Login");
     expect(ctx).toContain(target);
     expect(parseRegistry(ctx).Login?.path).toBe(target);

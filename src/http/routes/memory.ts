@@ -1,91 +1,62 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
-import type { MemoryEntry, MemoryType, MemoryScope } from "../../domain/entities.js";
+import type { MemoryEntry } from "../../domain/entities.js";
 import { randomUUID } from "node:crypto";
+import { localId, memorySchema } from "../../github/state-codec.js";
 
 export function registerMemoryRoutes(app: FastifyInstance, container: Container): void {
-  /** Mirror the project's memory index into CodeVia/memory.md (best-effort). */
-  const syncMemoryFile = async (projectId: string | undefined): Promise<void> => {
-    if (!projectId) return;
-    const p = container.projectRepo.findById(projectId)?.data;
-    if (!p) return;
-    await container.projectFiles.syncMemory(p, container.memoryRepo.byProject(projectId));
-  };
-
   app.get("/memory", { schema: { tags: ["memory"] } }, async (req) => {
     const q = req.query as { projectId?: string; type?: string; scope?: string };
-    let entries = container.memoryRepo.findMany();
-    if (q.projectId) entries = container.memoryRepo.findMany({ projectId: q.projectId });
-    let data = entries.map((r) => r.data);
+    let data = (q.projectId ? container.memoryRepo.byProject(q.projectId) : container.memoryRepo.findMany().map((r) => r.data));
     if (q.type) data = data.filter((d) => d.type === q.type);
     if (q.scope) data = data.filter((d) => d.scope === q.scope);
     return data;
   });
-
-  app.post("/memory", { schema: { tags: ["memory"] } }, async (req) => {
-    const b = req.body as Record<string, unknown>;
-    const now = new Date().toISOString();
-    const entry: MemoryEntry = {
-      id: randomUUID(),
-      projectId: b.projectId as string | undefined,
-      scope: (b.scope as MemoryScope) ?? "project",
-      type: (b.type as MemoryType) ?? "knowledge",
-      key: String(b.key ?? "entry"),
-      content: String(b.content ?? ""),
-      tags: (b.tags as string[]) ?? [],
-      refs: (b.refs as string[]) ?? [],
-      source: "web",
-      version: 1,
-      createdAt: now,
-      updatedAt: now,
-    };
-    container.memoryRepo.upsert(entry, { projectId: entry.projectId, key: entry.key });
-    // Also persist to the GitHub-backed store when available (source of truth).
-    await syncMemoryFile(entry.projectId);
+  app.post("/memory", { schema: { tags: ["memory"] } }, async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>, now = new Date().toISOString();
+    const projectId = typeof b.projectId === "string" ? b.projectId : undefined;
+    const type = String(b.type ?? "knowledge"), key = String(b.key ?? "entry");
+    const entry = memorySchema.parse({ id: projectId ? localId(projectId, "memory", `${type}\0${key}`) : randomUUID(), projectId, type, key, scope: b.scope ?? "project", content: b.content ?? "", tags: b.tags ?? [], refs: b.refs ?? [], source: "web", version: 1, createdAt: now, updatedAt: now });
+    if (projectId) {
+      const p = container.projectRepo.findById(projectId)?.data;
+      if (!p) return reply.code(404).send({ error: "project not found" });
+      await container.projectFiles.updateMemory(p, (entries) => {
+        if (entries.some((e) => e.id === entry.id)) throw Object.assign(new Error("Memory key/type already exists; update it explicitly"), { statusCode: 409 });
+        return [...entries, entry];
+      });
+    } else container.memoryRepo.upsert(entry, { key });
     return entry;
   });
-
-  app.get("/memory/:id", { schema: { tags: ["memory"] } }, async (req) => {
-    const { id } = req.params as { id: string };
-    return container.memoryRepo.findById(id)?.data ?? { error: "memory entry not found" };
-  });
-
+  app.get("/memory/:id", { schema: { tags: ["memory"] } }, async (req, reply) => container.memoryRepo.findById((req.params as { id: string }).id)?.data ?? reply.code(404).send({ error: "memory entry not found" }));
   app.patch("/memory/:id", { schema: { tags: ["memory"] } }, async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const rec = container.memoryRepo.findById(id);
-    if (!rec) {
-      reply.code(404);
-      return { error: "memory entry not found" };
-    }
+    const { id } = req.params as { id: string }; const rec = container.memoryRepo.findById(id)?.data;
+    if (!rec) return reply.code(404).send({ error: "memory entry not found" });
     const b = (req.body ?? {}) as Record<string, unknown>;
-    const patch: Partial<MemoryEntry> = {};
-    if (typeof b.key === "string" && b.key.trim()) patch.key = b.key.trim();
-    if (typeof b.content === "string") patch.content = b.content;
-    if (Array.isArray(b.tags)) patch.tags = b.tags.map((t) => String(t));
-    if (Array.isArray(b.refs)) patch.refs = b.refs.map((t) => String(t));
-    if (typeof b.type === "string" && ["architecture", "business", "technical", "decision", "bug", "knowledge", "lesson", "conversation"].includes(b.type)) {
-      patch.type = b.type as MemoryType;
-    }
-    if (typeof b.scope === "string" && ["global", "project", "agent", "task", "conversation"].includes(b.scope)) {
-      patch.scope = b.scope as MemoryScope;
-    }
-    const updated: MemoryEntry = {
-      ...rec.data,
-      ...patch,
-      id,
-      version: rec.data.version + 1,
-      updatedAt: new Date().toISOString(),
+    const patch = Object.fromEntries(["key", "content", "tags", "refs", "type", "scope"].filter((k) => b[k] !== undefined).map((k) => [k, b[k]]));
+    let updated: MemoryEntry;
+    const edit = (current: MemoryEntry) => {
+      const next = memorySchema.parse({ ...current, ...patch, version: current.version + 1, updatedAt: new Date().toISOString() });
+      if (next.projectId) next.id = localId(next.projectId, "memory", `${next.type}\0${next.key}`);
+      return next;
     };
-    container.memoryRepo.upsert(updated, { projectId: updated.projectId, key: updated.key });
-    await syncMemoryFile(updated.projectId);
-    return updated;
+    if (rec.projectId) {
+      const p = container.projectRepo.findById(rec.projectId)!.data;
+      await container.projectFiles.updateMemory(p, (entries) => {
+        const current = entries.find((e) => e.id === id);
+        if (!current) throw Object.assign(new Error("Memory entry was removed in the repository"), { statusCode: 409 });
+        updated = edit(current);
+        if (entries.some((e) => e.id !== id && e.id === updated.id)) throw Object.assign(new Error("Memory key/type already exists"), { statusCode: 409 });
+        return [...entries.filter((e) => e.id !== id), updated];
+      });
+    } else { updated = edit(rec); container.memoryRepo.upsert(updated, { key: updated.key }); }
+    return updated!;
   });
-
   app.delete("/memory/:id", { schema: { tags: ["memory"] } }, async (req) => {
-    const { id } = req.params as { id: string };
-    const rec = container.memoryRepo.findById(id);
-    container.memoryRepo.deleteById(id);
-    await syncMemoryFile(rec?.data.projectId);
+    const { id } = req.params as { id: string }; const entry = container.memoryRepo.findById(id)?.data;
+    if (entry?.projectId) {
+      const p = container.projectRepo.findById(entry.projectId)!.data;
+      await container.projectFiles.updateMemory(p, (entries) => entries.filter((e) => e.id !== id));
+    } else container.memoryRepo.deleteById(id);
     return { ok: true };
   });
 }

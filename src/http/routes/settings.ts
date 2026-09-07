@@ -133,6 +133,7 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
     let project: Project | undefined;
     const conflicts: Array<{ kind: string; key: string; action: "skip" | "overwrite" | "rename" }> = [];
     if (mode === "merge") {
+      if (b.targetProjectId && container.projectRepo.findById(b.targetProjectId)) await container.agentManager.readProject(b.targetProjectId);
       project = b.targetProjectId ? container.projectRepo.findById(b.targetProjectId)?.data : undefined;
       if (!project) return reply.code(404).send({ error: "targetProjectId not found (required for mode=merge)" });
     } else {
@@ -215,6 +216,7 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
       const agent = {
         ...(existing ?? {}),
         ...a,
+        repositoryRevision: existing?.repositoryRevision ?? project.repositoryRevision,
         id,
         projectId,
         version: existing ? existing.version + 1 : 1,
@@ -240,6 +242,7 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
       const wf = {
         ...(existing ?? {}),
         ...w,
+        repositoryRevision: existing?.repositoryRevision ?? project.repositoryRevision,
         nodes,
         id,
         projectId,
@@ -282,6 +285,7 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
         result.skills = newSkills.length;
       }
     }
+    await container.agentManager.syncProjectState(projectId);
     await container.auditRepo.record({
       action: "project.imported",
       projectId,

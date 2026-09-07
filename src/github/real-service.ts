@@ -164,7 +164,9 @@ export class RealGitHubService implements IGitHubService {
       const urlPath = dir ? dir.replace(/^\/+|\/+$/g, "") : "";
       const res = await this.request(`/repos/${repo.owner}/${repo.name}/contents/${urlPath.split("/").map(encodeURIComponent).join("/")}${q}`);
       const body = (await res.json()) as Array<{ path: string; type: string; size?: number }>;
-      for (const item of body ?? []) {
+      if (!Array.isArray(body)) throw new Error("GitHub did not return a directory listing");
+      if (body.length >= 1000) throw new Error("GitHub Contents API directory limit reached; refusing an incomplete listing");
+      for (const item of body) {
         if (seen.has(item.path)) continue;
         seen.add(item.path);
         const directory = item.type === "dir" || item.type === "tree";
@@ -174,6 +176,7 @@ export class RealGitHubService implements IGitHubService {
       }
     };
     await walk(path ?? "");
+    if (out.length >= 8000) throw new Error("GitHub tree limit reached; refusing a truncated listing");
     return out;
   }
 

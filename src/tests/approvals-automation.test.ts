@@ -250,7 +250,7 @@ describe("rules discovery, budget control, dry run", () => {
     expect(all).toContain("CI is defined");
     expect(new Set(discovered.map((r) => r.category))).toContain("testing");
 
-    // Manual rules survive re-onboarding, discovered ones are regenerated (not duplicated).
+    // Both manual and previously discovered rules survive re-onboarding unchanged.
     await app!.inject({ method: "PUT", url: `/projects/${project.id}/rules`, payload: { rules: ["Use Persian for user-facing strings."] } });
     await app!.inject({ method: "POST", url: `/projects/${project.id}/onboard`, payload: {} });
     const after = (await app!.inject({ method: "GET", url: `/projects/${project.id}/rules` })).json() as Array<{ discovered: boolean; text: string }>;
@@ -279,6 +279,7 @@ describe("rules discovery, budget control, dry run", () => {
     const project = await container.agentManager.createProject({ name: "Budget", description: "x", configRepo: "acme/budget" });
     const stored = container.projectRepo.findById(project.id)!.data;
     container.projectRepo.upsert({ ...stored, settings: { ...stored.settings, budget: { ...stored.settings.budget, maxDurationMs: 1 } } }, { key: stored.slug });
+    await container.agentManager.syncProjectState(project.id);
     const task = container.agentManager.createTask({ projectId: project.id, title: "Slow thing", description: "", agentType: "backend-developer" });
     await new Promise((r) => setTimeout(r, 5));
     await expect(container.agentManager.runTask(task.id)).rejects.toThrow(/Budget exceeded/);

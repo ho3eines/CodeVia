@@ -196,6 +196,8 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
 
   private async resolveView(t: TelegramUpdate): Promise<View> {
     const chatId = t.chatId!;
+    // Only after access gating: all project-backed views read fresh repository state.
+    if (!/^\/(?:stop|cancel)(?:@\w+)?(?:\s|$)/i.test(t.text ?? "")) for (const p of this.ownedProjects()) await this.deps.agentManager.readProject(p.id);
     if (t.callbackData) {
       return this.resolveCallback(chatId, t.callbackData);
     }
@@ -769,7 +771,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   }
 
   private skillsView(p: Project | undefined): View {
-    const skills = this.deps.skillRepo?.findMany().map((r) => r.data).filter((s) => s.enabled) ?? [];
+    const skills = (p ? this.deps.skillRepo?.byProject(p.id) : this.deps.skillRepo?.globalCatalog())?.filter((s) => s.enabled) ?? [];
     const scoped = p && p.settings?.skills?.length
       ? skills.filter((s) => p.settings?.skills?.includes(s.slug))
       : skills;
@@ -829,6 +831,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       projectId: project.id,
       title,
       description: text,
+      input: { executionMode: "autonomous", source: "telegram" },
     });
     const job = this.deps.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
     return {
@@ -839,6 +842,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
         `🆔 ${task.id}`,
         `📦 ${project.name}`,
         `⚙️ status: queued`,
+        "🔎 Research → specialist tasks + skills → implementation → QA",
         "",
         "Run `/status` or open the project menu to track progress.",
       ].join("\n"),

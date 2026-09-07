@@ -1,6 +1,6 @@
 import type { Agent, AgentType, Project } from "../domain/entities.js";
 import type { AgentRepository } from "./agent-repo.js";
-import type { SkillRepository } from "../skills/registry.js";
+import { SkillRegistry, type SkillRepository } from "../skills/registry.js";
 import type { ModelRepository } from "../ai/model-repo.js";
 import type { IModelProvider } from "../ai/types.js";
 import { logger } from "../logger.js";
@@ -20,28 +20,28 @@ export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
   orchestrator: {
     role: "Orchestrator",
     mission: "Decide which agent, model, skill, tool, memory, and workflow to use for each task. Coordinate agent chains and approvals.",
-    skills: [],
+    skills: ["task-planning"],
     tools: [],
     permissions: ["github.read", "memory.read"],
   },
   "project-manager": {
     role: "Project Manager",
     mission: "Break down work, order tasks, and track the project's shared state (sprint, objective, open tasks).",
-    skills: [],
+    skills: ["task-planning"],
     tools: ["search"],
     permissions: ["project.read", "memory.read"],
   },
   research: {
     role: "Research Agent",
     mission: "Analyze the problem, extract requirements, research sources, compare architectures, and produce structured findings in knowledge memory.",
-    skills: ["microservices", "restapi"],
+    skills: ["research", "task-planning"],
     tools: ["read_file", "search", "save_memory"],
     permissions: ["github.read", "memory.read", "memory.write"],
   },
   "business-analyst": {
     role: "Business Analyst",
     mission: "Extract business requirements, acceptance criteria, and user stories from the request.",
-    skills: [],
+    skills: ["research"],
     tools: ["search"],
     permissions: ["project.read", "memory.read"],
   },
@@ -185,6 +185,9 @@ export interface GenerateAgentOptions {
    * NOT in the roster are disabled (never deleted — re-onboarding can re-enable).
    */
   agentTypes?: AgentType[];
+  /** Bootstrap drafts are validated and committed before indexing. */
+  persist?: boolean;
+  preserveExisting?: boolean;
 }
 
 /**
@@ -203,9 +206,10 @@ export class AgentGenerator {
   generate(project: Project, opts: GenerateAgentOptions = {}): Agent[] {
     const defaultModelId = opts.defaultModelId ?? project.defaultModelId;
     const created: Agent[] = [];
+    const skills = new SkillRegistry(this.skillsRepo);
     const roster = opts.agentTypes?.length ? AGENT_TYPES.filter((t) => opts.agentTypes!.includes(t)) : AGENT_TYPES;
     // Agents outside the selected roster are switched off (kept for history).
-    for (const a of this.agentRepo.byProject(project.id)) {
+    for (const a of opts.persist === false || opts.preserveExisting !== false ? [] : this.agentRepo.byProject(project.id)) {
       if (!roster.includes(a.type) && a.enabled) {
         this.agentRepo.upsert({ ...a, enabled: false, updatedAt: new Date().toISOString() }, { projectId: project.id });
       }
@@ -213,6 +217,12 @@ export class AgentGenerator {
     for (const type of roster) {
       const scaffold = AGENT_SCAFFOLD[type];
       const existing = this.agentRepo.byType(project.id, type);
+      if (existing && opts.preserveExisting !== false) { created.push(existing); continue; }
+      const generatedSkills = skills.forTask(project, { type, name: scaffold.role, skills: scaffold.skills }).skills;
+      const previousDefaults = existing?.generatedSkills ?? scaffold.skills;
+      const manual = existing?.skills.filter((slug) => !previousDefaults.includes(slug)) ?? [];
+      const removed = existing?.generatedSkills ? previousDefaults.filter((slug) => !existing.skills.includes(slug)) : [];
+
       // Agents are per-project, so ids must be project-unique (a fixed
       // `agent-<type>` id would collide across projects and wipe other rosters).
       const agent: Agent = {
@@ -226,7 +236,8 @@ export class AgentGenerator {
         configPath: `CodeVia/agents/${type}.md`,
         systemPrompt: this.buildSystemPrompt(type, scaffold, project),
         projectPrompt: project.description,
-        skills: scaffold.skills,
+        skills: [...new Set([...generatedSkills.filter((slug) => !removed.includes(slug)), ...manual])],
+        generatedSkills: generatedSkills.filter((slug) => !manual.includes(slug)),
         tools: scaffold.tools,
         permissions: scaffold.permissions,
         models: this.buildModels(defaultModelId, type),
@@ -239,10 +250,10 @@ export class AgentGenerator {
         createdAt: existing?.createdAt ?? new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      const saved = this.agentRepo.upsert(agent, { projectId: project.id });
-      created.push(saved.data);
+      if (opts.persist !== false) this.agentRepo.upsert(agent, { projectId: project.id });
+      created.push(agent);
     }
-    logger.info(`AgentGenerator created ${created.length} agents for project ${project.id}`);
+    logger.debug(`AgentGenerator prepared ${created.length} definitions for project ${project.id}`);
     return created;
   }
 
@@ -290,10 +301,11 @@ export class AgentGenerator {
   private buildModels(defaultModelId: string | undefined, type: AgentType): Agent["models"] {
     const all = this.modelRepo.listActive();
     const primary = defaultModelId && all.some((m) => m.id === defaultModelId) ? defaultModelId : all[0]?.id ?? "";
-    const reasoning = all.find((m) => m.capabilities.reasoning)?.id ?? primary;
-    const coding = all.find((m) => m.capabilities.code)?.id ?? primary;
-    const fast = all[0]?.id ?? primary;
-    const vision = all.find((m) => m.capabilities.vision)?.id ?? primary;
+    const selected = all.find((m) => m.id === primary);
+    const reasoning = selected?.capabilities.reasoning ? primary : all.find((m) => m.capabilities.reasoning)?.id ?? primary;
+    const coding = selected?.capabilities.code ? primary : all.find((m) => m.capabilities.code)?.id ?? primary;
+    const fast = primary;
+    const vision = selected?.capabilities.vision ? primary : all.find((m) => m.capabilities.vision)?.id ?? primary;
     return {
       primary,
       fallbacks: all.map((m) => m.id).filter((id) => id !== primary).slice(0, 2),

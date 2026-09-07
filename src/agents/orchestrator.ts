@@ -7,12 +7,14 @@ import type { IGitHubService } from "../github/types.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
 import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { ProjectFilesService } from "../github/project-files.js";
+import type { SkillRegistry } from "../skills/registry.js";
+import { PLANNING_INSTRUCTION, RESEARCH_INSTRUCTION, planningRequest, researchRequest } from "./planning.js";
 import { defaultPlanFor, type PlanStep } from "./plan.js";
 import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
 import { projectBrief } from "../domain/project-brief.js";
 import { buildContextPack, renderPromptContext, syncProjectContext, registryPathFor, type RegistryEntry } from "./context.js";
-import { assertWriter, defaultItem, IMPLEMENTERS, parseBreakdown, prepareImplementation, pullRequestStep, repositoryForAgent, type BreakdownItem } from "./implementation.js";
+import { assertWriter, defaultItem, IMPLEMENTERS, orderBreakdown, parseBreakdown, prepareImplementation, pullRequestStep, repositoryForAgent, type BreakdownItem } from "./implementation.js";
 import { slugify, scaffoldFor, notePathFor, entityFor, detectStack } from "./scaffold.js";
 import { assertTaskActive, ExecutionBudget, TaskCancelledError } from "./execution.js";
 import { randomUUID } from "node:crypto";
@@ -26,6 +28,7 @@ export interface AutonomousDeps {
   agentRepo: AgentRepository;
   agentRunner: AgentRunner;
   agentRouter: AgentRouter;
+  skillsRegistry: SkillRegistry;
   github: IGitHubService;
   githubForProject?: (project: Project) => IGitHubService;
   modelRepo: ModelRepository;
@@ -110,6 +113,12 @@ export const IMPLEMENTER_DUTIES: Record<string, string> = {
     "Your duty: implement the data work (schema, migrations, queries) for this subtask, commit it, and open a PR.",
   uiux:
     "Your duty: implement the UX/design work (layout, styles, user flows) for this subtask, commit it, and open a PR.",
+  documentation:
+    "Your duty: update the relevant setup, architecture or API documentation for this subtask, verify it against the implementation, and deliver it in the review PR.",
+  refactoring:
+    "Your duty: improve the specified code structure without changing behavior; preserve contracts and add regression coverage in the review PR.",
+  performance:
+    "Your duty: address the specified bottleneck, preserve behavior and document measurable verification in the review PR.",
 };
 
 export const QA_DUTY =
@@ -169,6 +178,21 @@ export class AutonomousOrchestrator {
   constructor(private readonly deps: AutonomousDeps) {}
 
   async run(taskId: string): Promise<AutonomousSummary> {
+    try {
+      return await this.execute(taskId);
+    } catch (err) {
+      // Planned tasks are visible before dispatch. Do not leave unexecuted
+      // dependants looking runnable after an upstream failure/cancellation.
+      for (const { data: child } of this.deps.taskRepo.findMany({ parentId: taskId })) {
+        if (["created", "queued", "running"].includes(child.status)) {
+          await this.mark(child, "cancelled", `Not executed: the owning task stopped. ${String(err)}`);
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async execute(taskId: string): Promise<AutonomousSummary> {
     const task = this.deps.taskRepo.findById(taskId)?.data;
     if (!task) throw new Error(`Task ${taskId} not found`);
     let project = this.deps.projectRepo.findById(task.projectId)?.data;
@@ -189,7 +213,11 @@ export class AutonomousOrchestrator {
     const qaAgent = this.needAgent(project.id, "qa-test");
     if (!qaAgent.tools.includes("run_tests")) throw new Error("Autonomous preflight failed: QA needs the run_tests CI verification tool");
     let available = IMPLEMENTERS.filter((t) => this.deps.agentRepo.byType(project!.id, t)?.enabled);
-    if (typeof task.input?.agentHint === "string" && available.includes(task.input.agentHint as AgentType)) available = [task.input.agentHint as AgentType];
+    const hint = task.input?.agentHint ?? task.agentType;
+    if (hint !== undefined && hint !== "") {
+      if (typeof hint !== "string" || !available.includes(hint as AgentType)) throw new Error(`Autonomous preflight failed: requested implementer ${String(hint)} is unavailable`);
+      available = [hint as AgentType];
+    }
     if (!available.length) throw new Error("Autonomous preflight failed: no enabled implementer");
     const pack = await buildContextPack({ github, project, memoryRepo: this.deps.memoryRepo, strict: true });
     check();
@@ -200,8 +228,8 @@ export class AutonomousOrchestrator {
     const researchPlan: PreparePlan = async (ctx) => {
       if (ctx.chat) {
         usedRealAi = true;
-        brief = await ctx.chat.chat("You are a senior business analyst writing an implementation brief. Return requirements, affected areas, acceptance criteria and risks, under 400 words.", `Task: ${task.title}\n${task.description}\n${projectBrief(project!)}\n${renderPromptContext(pack, "(research)")}`, 1500);
-        const raw = await ctx.chat.chat("You are an engineering manager breaking work into implementer subtasks. Reply ONLY with a JSON array.", `Task: ${task.title}\n${task.description}\nResearch brief:\n${brief}\n${renderPromptContext(pack, "(planning)")}\nAllowed agentType values (enabled in this project): ${available.join(", ")}. Return 1–4 items: {"agentType","title","description","files":[1–5 repo-relative paths]}. Reuse the exact existing files, and define matching API contracts for backend/frontend.`, 2000);
+        brief = await ctx.chat.chat(RESEARCH_INSTRUCTION, researchRequest(project!, task, renderPromptContext(pack, "(research)")), 2000);
+        const raw = await ctx.chat.chat(PLANNING_INSTRUCTION, planningRequest(project!, task, brief, renderPromptContext(pack, "(planning)"), available.map((type) => this.needAgent(project!.id, type)), this.deps.skillsRegistry), 4000);
         breakdown = parseBreakdown(raw, available);
         for (const item of breakdown) {
           const owned = registryPathFor(pack.registry, item.agentType, entityFor(item.title, item.description).pascal);
@@ -221,10 +249,39 @@ export class AutonomousOrchestrator {
     if (!brief) brief = deterministicBrief(project, task, pack.tree, summarizeRun(researchRun));
     if (!breakdown.length) breakdown = this.simulatedBreakdown(project, task, pack.registry, available);
     check();
+    // Validate every owner/skill before the first source write. Legacy plans
+    // without the new fields get explicit, deterministic task contracts.
+    breakdown = orderBreakdown(breakdown).map((item, index, ordered) => {
+      const agent = this.needAgent(project!.id, item.agentType);
+      assertWriter(agent);
+      const criteria = item.acceptanceCriteria?.length ? item.acceptanceCriteria : [
+        `Deliver the requested ${item.agentType} change: ${item.description || item.title}`,
+        "Preserve existing behavior and shared interfaces; add or update relevant regression coverage.",
+      ];
+      const selection = this.deps.skillsRegistry.forTask(project!, agent, {
+        title: item.title, description: item.description,
+        input: { files: item.files, skills: item.skills, skillInstructions: item.skillInstructions },
+      });
+      return { ...item, dependsOn: item.dependsOn ?? (index ? [ordered[index - 1].id!] : []), acceptanceCriteria: criteria, skills: selection.skills };
+    });
     this.updateParent(task, { input: { ...this.deps.taskRepo.findById(task.id)!.data.input, researchBrief: brief, breakdown } });
-    for (const item of breakdown) assertWriter(this.needAgent(project.id, item.agentType));
 
-    const buildTaskIds: string[] = [];
+    const planned = new Map<string, Task>();
+    for (const item of breakdown) {
+      const child = this.spawn(task, item.title, this.implementationDescription(item, brief), item.agentType, {
+        planItemId: item.id, researchBrief: brief, files: item.files,
+        skills: item.skills, skillInstructions: item.skillInstructions,
+        acceptanceCriteria: item.acceptanceCriteria,
+      });
+      planned.set(item.id!, child);
+    }
+    for (const item of breakdown) {
+      const child = planned.get(item.id!)!;
+      child.input.dependsOn = (item.dependsOn ?? []).map((id) => planned.get(id)!.id);
+      this.deps.taskRepo.upsert(child, { projectId: task.projectId, parentId: task.id });
+    }
+    this.updateParent(task, { input: { ...this.deps.taskRepo.findById(task.id)!.data.input, breakdown: breakdown.map((item) => ({ ...item, taskId: planned.get(item.id!)!.id, assignedAgentId: planned.get(item.id!)!.assignedAgentId, repository: repositoryForAgent(project!, item.agentType).repo })) } });
+    const buildTaskIds = [...planned.values()].map((child) => child.id);
     const qaTaskIds: string[] = [];
     const work = new Map<string, WorkingCopy>();
     const claims: Array<{ entity: string; path: string; agentType: string; subtaskId: string; at: string }> = [];
@@ -233,8 +290,17 @@ export class AutonomousOrchestrator {
     const implement = async (item: BreakdownItem, fixContext?: string) => {
       check();
       const agent = this.needAgent(project!.id, item.agentType);
-      const child = this.spawn(task, fixContext ? `Fix (attempt ${fixLoops}): ${item.title}` : item.title, `${IMPLEMENTER_DUTIES[item.agentType]}\n\nResearch brief:\n${brief}\n\nSubtask:\n${item.description}${fixContext ? `\n\nQA failures:\n${fixContext}` : ""}`, item.agentType);
-      buildTaskIds.push(child.id);
+      const child = fixContext ? this.spawn(task, `Fix (attempt ${fixLoops}): ${item.title}`, this.implementationDescription(item, brief, fixContext), item.agentType, {
+        planItemId: item.id, researchBrief: brief, files: item.files,
+        skills: item.skills, skillInstructions: item.skillInstructions,
+        acceptanceCriteria: item.acceptanceCriteria, fixContext,
+        dependsOn: [qaTaskIds[qaTaskIds.length - 1]],
+      }) : planned.get(item.id!)!;
+      if (fixContext) buildTaskIds.push(child.id);
+      // The coordinator dispatches only when all declared producers succeeded.
+      if (!fixContext) for (const id of child.input.dependsOn as string[]) {
+        if (this.deps.taskRepo.findById(id)?.data.status !== "succeeded") throw new Error(`Subtask ${child.id} is blocked by ${id}`);
+      }
       const link = repositoryForAgent(project!, item.agentType);
       let working = work.get(link.repo);
       if (!working) {
@@ -267,10 +333,8 @@ export class AutonomousOrchestrator {
       claims.push({ entity: entityFor(item.title, item.description).pascal, path: item.files[0], agentType: item.agentType, subtaskId: child.id, at: new Date().toISOString() });
       saveArtifacts();
     };
-    // Data contracts are established before their UI consumers, irrespective of
-    // the order returned by the model. Same-repo agents share one task branch.
-    const order: Partial<Record<AgentType, number>> = { database: 0, "backend-developer": 1, "frontend-developer": 2, uiux: 3 };
-    breakdown.sort((a, b) => (order[a.agentType] ?? 4) - (order[b.agentType] ?? 4));
+    // Explicit dependencies plus data-before-UI tie-breaking determine dispatch.
+    // Same-repo agents share one task branch and receive previous deliverables.
     for (const item of breakdown) await implement(item);
 
     // One draft PR per repository enables pull_request CI. Fixes update these
@@ -292,7 +356,10 @@ export class AutonomousOrchestrator {
     let verification: Run["verification"];
     for (;;) {
       check();
-      const qaTask = this.spawn(task, fixLoops ? `Re-verify (attempt ${fixLoops + 1}): ${task.title}` : `Verify: ${task.title}`, `${QA_DUTY}\n\nResearch brief:\n${brief}\n\nChanged files:\n${artifacts().map((r) => `${r.repo}@${r.branch}: ${r.files.join(", ")}`).join("\n")}`, "qa-test");
+      const qaTask = this.spawn(task, fixLoops ? `Re-verify (attempt ${fixLoops + 1}): ${task.title}` : `Verify: ${task.title}`, `${QA_DUTY}\n\nResearch brief:\n${brief}\n\nAcceptance criteria:\n${breakdown.flatMap((item) => item.acceptanceCriteria ?? []).map((c) => `- ${c}`).join("\n")}\n\nChanged files:\n${artifacts().map((r) => `${r.repo}@${r.branch}: ${r.files.join(", ")}`).join("\n")}`, "qa-test", {
+        researchBrief: brief, acceptanceCriteria: breakdown.flatMap((item) => item.acceptanceCriteria ?? []),
+        dependsOn: buildTaskIds, repositories: artifacts(),
+      });
       qaTaskIds.push(qaTask.id);
       const qaPlan: PlanStep[] = [...work.values()].flatMap((r) => [
         ...r.files.filter((p) => !p.startsWith("docs/tasks/")).map((path) => ({ label: `Inspect ${r.repo}:${path}`, tool: "read_file", input: { repo: r.repo, branch: r.branch, path } })),
@@ -344,12 +411,28 @@ export class AutonomousOrchestrator {
     return items.length ? items : [defaultItem(project, task, available[0], registry)];
   }
 
-  private spawn(parent: Task, title: string, description: string, agentType: AgentType): Task {
+  private implementationDescription(item: BreakdownItem, brief: string, fixContext?: string): string {
+    return [
+      IMPLEMENTER_DUTIES[item.agentType],
+      `Research brief:\n${brief}`,
+      `Subtask:\n${item.description}`,
+      `Acceptance criteria:\n${(item.acceptanceCriteria ?? []).map((c) => `- ${c}`).join("\n")}`,
+      `Assigned skills: ${(item.skills ?? []).join(", ") || "No compatible catalog skills; follow project rules."}`,
+      fixContext ? `QA failures:\n${fixContext}` : "",
+    ].filter(Boolean).join("\n\n");
+  }
+
+  private spawn(parent: Task, title: string, description: string, agentType: AgentType, input: Record<string, unknown> = {}): Task {
     assertTaskActive(this.deps.taskRepo, parent);
+    const agent = this.needAgent(parent.projectId, agentType);
+    const project = this.deps.projectRepo.findById(parent.projectId)!.data;
     const now = new Date().toISOString();
-    const child: Task = { id: `task-${randomUUID().slice(0, 8)}`, projectId: parent.projectId, parentTaskId: parent.id, title: title.slice(0, 120), description, priority: parent.priority, status: "running", agentType, correlationId: parent.correlationId, input: { autonomous: true, parentTaskId: parent.id }, createdAt: now, updatedAt: now };
+    const child: Task = { id: `task-${randomUUID().slice(0, 8)}`, projectId: parent.projectId, parentTaskId: parent.id, title: title.slice(0, 120), description, priority: parent.priority, status: "created", agentType, assignedAgentId: agent.id, correlationId: parent.correlationId, input: { ...input, autonomous: true, parentTaskId: parent.id }, createdAt: now, updatedAt: now };
+    const selection = this.deps.skillsRegistry.forTask(project, agent, child);
+    child.input.skills = selection.skills;
+    child.input.skillAssignments = selection.assignments;
     this.deps.taskRepo.upsert(child, { projectId: parent.projectId, parentId: parent.id });
-    live.emit({ type: "task.updated", taskId: child.id, data: { status: "running", parentTaskId: parent.id, projectId: parent.projectId } });
+    live.emit({ type: "task.updated", taskId: child.id, data: { status: "created", parentTaskId: parent.id, projectId: parent.projectId, assignedAgentId: agent.id, skills: selection.skills } });
     return child;
   }
 
@@ -362,6 +445,11 @@ export class AutonomousOrchestrator {
         ? await this.deps.executor(task, agent, project, opts.plan)
         : await this.deps.agentRunner.run({ ...opts, task, agent, project, providerRegistry: this.deps.providerRegistry });
       assertTaskActive(this.deps.taskRepo, task);
+      const latest = this.deps.taskRepo.findById(task.id)!.data;
+      this.deps.taskRepo.upsert({ ...latest, assignedAgentId: agent.id, result: {
+        ...latest.result, runId: run.id, summary: run.summary ?? latest.result?.summary,
+        verification: run.verification ?? latest.result?.verification, skills: run.skills ?? latest.result?.skills,
+      } }, { projectId: task.projectId, parentId: task.parentTaskId });
       await this.mark(task, run.status === "succeeded" ? "succeeded" : "failed", run.status === "succeeded" ? undefined : runError(run));
       return run;
     } catch (err) {

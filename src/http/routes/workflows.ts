@@ -1,8 +1,17 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { Workflow } from "../../domain/entities.js";
+import { parseWorkflowFile, renderWorkflowFile } from "../../github/state-codec.js";
 
 export function registerWorkflowRoutes(app: FastifyInstance, container: Container): void {
+  const persist = async (w: Workflow) => {
+    parseWorkflowFile(renderWorkflowFile(w));
+    const p = container.projectRepo.findById(w.projectId)?.data;
+    if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    await container.projectFiles.syncWorkflow(p, w);
+    container.workflowRepo.upsert(w, { projectId: w.projectId });
+    return w;
+  };
   app.get("/workflows", { schema: { tags: ["workflows"] } }, async () => {
     return container.workflowRepo.findMany().map((r) => r.data);
   });
@@ -18,7 +27,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
       edges: (b.edges as Workflow["edges"]) ?? [],
       enabled: b.enabled !== false,
     });
-    return w;
+    return persist(w);
   });
 
   app.get("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req) => {
@@ -33,9 +42,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
     const b = req.body as Record<string, unknown>;
     const r = container.workflowRepo.findById(id);
     if (!r) return { error: "workflow not found" };
-    const w = { ...r.data, ...b, id, version: r.data.version + 1, updatedAt: new Date().toISOString() } as Workflow;
+    const w = { ...r.data, ...b, id, projectId: r.data.projectId, version: r.data.version + 1, updatedAt: new Date().toISOString() } as Workflow;
     container.workflowRepo.upsert(w, { projectId: w.projectId });
-    return w;
+    return persist(w);
   });
 
   // Execute a workflow via a task.
@@ -57,6 +66,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
 
   app.delete("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req) => {
     const { id } = req.params as { id: string };
+    const w = container.workflowRepo.findById(id)?.data;
+    const p = w && container.projectRepo.findById(w.projectId)?.data;
+    if (p) await container.projectFiles.tombstone(p, container.projectFiles.pathFor(p, "workflow", id));
     container.workflowRepo.deleteById(id);
     return { ok: true };
   });

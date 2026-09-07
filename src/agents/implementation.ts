@@ -6,13 +6,21 @@ import type { PrepareContext } from "./runner.js";
 import { extractJson } from "./llm.js";
 import { buildContextPack, extendContent, registryPathFor, renderPromptContext, type RegistryEntry } from "./context.js";
 import { changeNote, entityFor, notePathFor, scaffoldFor, slugify } from "./scaffold.js";
+import { skillInstructions, skillSlugs } from "../skills/assignment.js";
 
-export const IMPLEMENTERS: AgentType[] = ["backend-developer", "frontend-developer", "database", "uiux"];
-const WRITERS: AgentType[] = [...IMPLEMENTERS, "documentation", "refactoring", "performance"];
+export const IMPLEMENTERS: AgentType[] = ["backend-developer", "frontend-developer", "database", "uiux", "documentation", "refactoring", "performance"];
+const WRITERS = IMPLEMENTERS;
+export const MAX_SUBTASKS = 12;
 export const isWriter = (type: AgentType): boolean => WRITERS.includes(type);
 export const MAX_FILE_CHARS = 200_000;
 
 export interface BreakdownItem {
+  /** Stable identifier within this plan, used by dependsOn (not a database id). */
+  id?: string;
+  dependsOn?: string[];
+  acceptanceCriteria?: string[];
+  skills?: string[];
+  skillInstructions?: Record<string, string>;
   agentType: AgentType;
   title: string;
   description: string;
@@ -78,18 +86,63 @@ export function defaultItem(project: Project, task: Task, type: AgentType, regis
   };
 }
 
-/** Parse the model's allowed paths strictly; never silently drop requested files. */
+/** Parse bounded, executable model output. Invalid plans never fall back to fabricated work. */
 export function parseBreakdown(raw: string, allowed: AgentType[]): BreakdownItem[] {
   const parsed = extractJson(raw);
-  if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 4) throw new Error("Expected 1–4 implementer subtasks");
-  return parsed.map((value) => {
+  if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > MAX_SUBTASKS) throw new Error(`Expected 1–${MAX_SUBTASKS} implementer subtasks`);
+  const items = parsed.map((value, index): BreakdownItem => {
     const item = value as Record<string, unknown> | null;
     if (!item || !allowed.includes(item.agentType as AgentType) || typeof item.title !== "string" || !item.title.trim()) throw new Error("Breakdown selected an unavailable implementer or empty title");
+    if (item.description !== undefined && (typeof item.description !== "string" || item.description.length > 6000)) throw new Error("Subtask description must be text of at most 6000 characters");
     if (!Array.isArray(item.files) || item.files.length < 1 || item.files.length > 5) throw new Error("Each subtask requires 1–5 file paths");
     const files = item.files.map(cleanRepoPath);
     if (new Set(files).size !== files.length) throw new Error("Breakdown contains duplicate file paths");
-    return { agentType: item.agentType as AgentType, title: item.title.slice(0, 120), description: String(item.description ?? ""), files };
+    const id = item.id ?? `step-${index + 1}`;
+    if (typeof id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(id)) throw new Error("Subtask id must be a short stable identifier");
+    const strings = (value: unknown, label: string, max: number): string[] | undefined => {
+      if (value === undefined) return undefined;
+      if (!Array.isArray(value) || value.length > max || value.some((s) => typeof s !== "string" || !s.trim() || s.length > 600)) throw new Error(`Invalid ${label} list`);
+      if (new Set(value).size !== value.length) throw new Error(`Duplicate ${label}`);
+      return value as string[];
+    };
+    return {
+      id, agentType: item.agentType as AgentType, title: item.title.trim().slice(0, 120),
+      description: typeof item.description === "string" ? item.description : item.title, files,
+      dependsOn: strings(item.dependsOn, "dependency", MAX_SUBTASKS),
+      acceptanceCriteria: strings(item.acceptanceCriteria, "acceptance criteria", 10),
+      skills: skillSlugs(item.skills),
+      skillInstructions: skillInstructions(item.skillInstructions),
+    };
   });
+  // Validate the whole graph now, before any implementation can write a file.
+  orderBreakdown(items);
+  return items;
+}
+
+/** Explicit dependencies win; role ordering is only a tie-break for ready tasks. */
+export function orderBreakdown(items: BreakdownItem[]): BreakdownItem[] {
+  const normalized = items.map((item, i) => ({ ...item, id: item.id ?? `step-${i + 1}` }));
+  const byId = new Map(normalized.map((item) => [item.id, item]));
+  if (byId.size !== items.length) throw new Error("Duplicate subtask id");
+  for (const item of normalized) {
+    for (const dep of item.dependsOn ?? []) {
+      if (dep === item.id || !byId.has(dep)) throw new Error(`Invalid dependency ${dep} on subtask ${item.id}`);
+    }
+  }
+  const rank: Partial<Record<AgentType, number>> = { database: 0, "backend-developer": 1, "frontend-developer": 2, uiux: 3, refactoring: 4, performance: 5, documentation: 6 };
+  const remaining = [...normalized];
+  const result: BreakdownItem[] = [];
+  const done = new Set<string>();
+  while (remaining.length) {
+    const ready = remaining.filter((item) => (item.dependsOn ?? []).every((dep) => done.has(dep)))
+      .sort((a, b) => (rank[a.agentType] ?? 7) - (rank[b.agentType] ?? 7));
+    if (!ready.length) throw new Error("Circular subtask dependencies");
+    const next = ready[0];
+    result.push(next);
+    done.add(next.id);
+    remaining.splice(remaining.indexOf(next), 1);
+  }
+  return result;
 }
 
 export interface ImplementationOptions {
@@ -131,6 +184,7 @@ export async function prepareImplementation(
       const request = [
         `Subtask: ${item.title}\n${item.description}`,
         `Research brief:\n${opts.brief}`,
+        item.acceptanceCriteria?.length ? `Acceptance criteria:\n${item.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}` : "",
         opts.fixContext ? `QA failures to fix:\n${opts.fixContext}` : "",
         renderPromptContext(pack, target),
         opts.handoff ? `Other repository deliverables (match these API contracts):\n${opts.handoff}` : "",
@@ -185,6 +239,14 @@ export async function prepareSingleImplementation(ctx: PrepareContext, agent: Ag
     if (items.length !== 1) throw new Error("A single-agent task must produce one implementation item");
     item = items[0];
   }
+  ctx.assignSkills({
+    title: item.title, description: item.description,
+    input: {
+      ...task.input, files: item.files,
+      skills: item.skills ?? task.input.skills,
+      skillInstructions: Object.keys(item.skillInstructions ?? {}).length ? item.skillInstructions : task.input.skillInstructions,
+    },
+  });
   const handoff: string[] = [];
   const workflow = task.input?.workflow as { artifacts?: unknown } | undefined;
   if (Array.isArray(workflow?.artifacts)) {

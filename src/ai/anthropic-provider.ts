@@ -59,7 +59,7 @@ export class AnthropicProvider implements IModelProvider {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.config.timeoutMs),
+      signal: req.signal ? AbortSignal.any([req.signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
