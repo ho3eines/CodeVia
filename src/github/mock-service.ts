@@ -172,10 +172,36 @@ export class MockGitHubService implements IGitHubService {
     return { login: "mock-user", name: "Mock GitHub User", scopes: ["repo", "read:user", "user:email"] };
   }
 
+  /**
+   * Auto-provision a repository that is referenced but was never created in the
+   * simulation (restored database, migrated install, lost snapshot file, a repo
+   * name typed by hand). Mock mode is self-contained: instead of failing every
+   * later read/write with "Mock repo not found", the repository is created
+   * empty — project state initialization then fills CodeVia/ as needed.
+   * Create-only: an existing repository is never wiped or replaced.
+   */
   private repo(ref: GithubRepoRef): MockRepo {
-    const r = this.repos.get(`${ref.owner}/${ref.name}`);
-    if (!r) throw new Error(`Mock repo not found: ${ref.owner}/${ref.name}`);
-    return r;
+    const key = `${ref.owner}/${ref.name}`;
+    const existing = this.repos.get(key);
+    if (existing) return existing;
+    const now = new Date().toISOString();
+    const sha = this.sha(`auto:${key}`);
+    const repo: MockRepo = {
+      ref: { owner: ref.owner, name: ref.name },
+      branches: new Map([["main", sha]]),
+      trees: new Map([["main", new Map<string, GithubFile>()]]),
+      commits: [{ sha, message: `auto-provision ${key}`, author: "mock-user", date: now }],
+      pulls: [],
+      issues: [],
+      releases: [],
+      defaultBranch: "main",
+      description: undefined,
+      language: undefined,
+      private: false,
+    };
+    this.repos.set(key, repo);
+    this.persist();
+    return repo;
   }
 
   /**

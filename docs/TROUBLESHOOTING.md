@@ -181,18 +181,30 @@ with escaped text; a custom provider/tool that writes its own messages must do t
 
 ## "Mock repo not found"
 
-This exact error comes from the **mock adapter**, not from real GitHub. It
-usually means a restored/migrated project references a repository missing from
-its simulated GitHub snapshot.
+`CodeVia repository state: read/validation failed (Error: Mock repo not found: owner/name)`
+on every project page means the database references a repository the mock
+simulation never created — typically a **restored backup/migrated database**, a
+**lost `data/mock-github.json` snapshot** (the DB survived, the mock did not), or
+a repository name typed by hand while GitHub was not connected.
 
-- **Offline/simulation:** opening the project creates missing simulated repos
-  on their configured branches. If the config repo was lost, saved database
-  definitions and history are recovered before the canonical read, including
-  disabled/customized agents and projects with an empty roster. An absent
-  auxiliary repo does not authorize overwriting an intact config repo; recovery
-  rechecks that `CodeVia/` is empty under the repository lock. Projects with no
-  saved definitions can use **Load / fill missing** (`POST /projects/:id/onboard`)
-  to initialize them. Repeated reads do not regenerate existing definitions.
+The platform heals this by itself — no action needed:
+
+1. **The repository is auto-provisioned** the moment it is referenced (with the
+   project's own branch), so project pages, branches, files, issues, PRs and
+   commits all work again. Auto-provisioning is create-only: an existing
+   repository is never wiped or replaced.
+2. **Saved database definitions and history are recovered** before the canonical
+   read when the config repo was lost — including disabled/customized agents and
+   projects with an empty roster. An absent auxiliary repo does not authorize
+   overwriting an intact config repo; recovery rechecks that `CodeVia/` is empty
+   under the repository lock.
+3. **Genuinely missing `CodeVia/` state is initialized once** (mock/simulation
+   connections only): a project with no repository state and no agents gets its
+   agents, skills, workflows, rules and memory authored and committed on first
+   view, exactly like explicit onboarding (**↻ Load / fill missing**,
+   `POST /projects/:id/onboard`). A repository that already carries state — or
+   intentionally removed definitions — is never regenerated; repeated reads do
+   not re-initialize.
 - **GitHub OAuth:** a project saved with `githubConnection.kind = "mock"` uses
   the stored OAuth token of its connection user, or its owner when no connection
   user is set. Log in again as that user if the token is absent/undecryptable.

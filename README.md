@@ -37,7 +37,7 @@ npm run dev
 open http://localhost:8080
 ```
 
-The platform seeds built-in **skills**, **providers** and **mock models** on boot. Create a project and it first reads `CodeVia/` from its connected repository. Existing material is reused; only missing definitions are authored. Real repositories need an active model to generate missing material; offline Mock scaffolds are labelled simulation.
+The platform seeds built-in **skills**, **providers** and **mock models** on boot. Create a project and it first reads `CodeVia/` from its connected repository. Existing material is reused; only missing definitions are authored. Real repositories need an active model to generate missing material; offline Mock scaffolds are labelled simulation. In mock/demo mode the system is self-healing: a project that references a repository the simulation never created (restored database, lost mock snapshot) gets that repository auto-provisioned — with the project's branch — and its missing `CodeVia/` state initialized once, so no page or project option ever fails with "Mock repo not found" (see [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)).
 
 ### Seed a demo project (optional)
 

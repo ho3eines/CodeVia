@@ -6,6 +6,7 @@ import { logger } from "../logger.js";
 import type { KvStore } from "../db/kv.js";
 import { getUserGitHubToken, hasRepoScope, GITHUB_TOKEN_KV_PREFIX } from "../auth/github-tokens.js";
 import { getEffectiveOAuthConfig } from "../auth/admin-settings.js";
+import { DEMO_USER_ID } from "../auth/identity.js";
 
 /** A configured GitHub connection bound to a project. */
 export interface GithubConnection {
@@ -180,14 +181,18 @@ export function resolveGitHubForProject(opts: {
   }
   // `mock` was persisted while the platform ran in demo/simulation mode. Use the
   // real OAuth user token obtained from GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET
-  // login; never reach for GITHUB_TOKEN here. If login is configured but no user
-  // token exists yet, fail with an actionable message instead of silent mock.
+  // login; never reach for GITHUB_TOKEN here. A project attached to a real user
+  // (or an ownerless legacy one) fails with an actionable message instead of
+  // silent mock. A project created by the pre-login demo owner while strict
+  // auth is off IS a simulation project: OAuth being configured server-side
+  // must not brick demo-mode usage of it.
   if (connection.kind === "mock") {
     const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project);
     if (userId) {
       return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
     }
-    if (getEffectiveOAuthConfig(opts.kv)) {
+    const identity = opts.project.githubConnection?.userId || opts.project.ownerId;
+    if (identity !== DEMO_USER_ID && getEffectiveOAuthConfig(opts.kv)) {
       throw new Error(`GitHub OAuth is configured, but no user token is stored for project ${opts.project.name}. Log in with GitHub once; then project actions use your repository access without GITHUB_TOKEN.`);
     }
     if (opts.fallback.kind === "mock") return opts.fallback;
@@ -228,6 +233,11 @@ export function adoptStrandedProjects(opts: {
     // A server-token project keeps working as long as the server token is set.
     if (connection?.kind === "server-token" && isServerGitHubEnabled()) continue;
     project.githubConnection = { kind: "user-oauth", userId: opts.userId, login: opts.login };
+    // Hand the project over, not just its connection: a project still owned by
+    // the pre-login demo owner would otherwise stay invisible to the adopter
+    // (project list and routes filter on ownerId). Projects owned by a real
+    // user keep their owner — only the dead connection is re-bound.
+    if (project.ownerId === DEMO_USER_ID) project.ownerId = opts.userId;
     try {
       opts.save(project);
       adopted.push(project.id);
