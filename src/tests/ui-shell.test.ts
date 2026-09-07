@@ -452,6 +452,29 @@ describe("test verdict dialog", () => {
     expect((win.document.querySelector("#verdict-backdrop") as El).hasAttribute("hidden")).toBe(true);
     expect((win.document.querySelector("#pv-name") as El).getAttribute("value")).toBe("My provider");
   }, 30000);
+
+  it("Done closes the verdict via closeVerdict, never closeModal", async () => {
+    const { win } = await boot();
+    // Regression: the verdict's Done button called closeModal(), which hides
+    // the *form* modal underneath and left the verdict stuck open.
+    win.openModal("Add provider", "<input id='pv-name' value='My provider'/>");
+    win.showTestVerdict({ ok: true, message: "Provider reachable" }, { title: "✓ Provider reachable" });
+    const hidden = (id: string) => (win.document.querySelector(id) as El).hasAttribute("hidden");
+
+    const done = [...(win.document.querySelectorAll("#verdict-body button") as unknown as El[])].find(
+      (b) => (b.textContent ?? "").trim() === "Done",
+    );
+    expect(done).toBeTruthy();
+    // The bug: the button called closeModal() (hid the form, left the verdict
+    // stuck). It must target the verdict's own layer.
+    expect((done as El).getAttribute("onclick")).toBe("closeVerdict()");
+    // jsdom's "outside-only" mode does not run inline handlers on .click(), so
+    // execute the attribute exactly as the browser would.
+    win.eval((done as El).getAttribute("onclick") as string);
+    expect(hidden("#verdict-backdrop"), "Done must close the verdict").toBe(true);
+    expect(hidden("#modal-backdrop"), "Done must NOT close the form underneath").toBe(false);
+    expect((win.document.querySelector("#pv-name") as El).getAttribute("value")).toBe("My provider");
+  }, 30000);
 });
 
 describe("inline event handler markup", () => {

@@ -247,7 +247,7 @@
       ${reply}${hint}${diagnostics}
       <div class="verdict-actions">
         ${opts.retry ? `<button class="btn" onclick="${esc(opts.retry)}">↻ Test again</button>` : ""}
-        <button class="btn btn-primary" onclick="closeModal()">Done</button>
+        <button class="btn btn-primary" onclick="closeVerdict()">Done</button>
       </div>
     </div>`;
   }
