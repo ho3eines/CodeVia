@@ -133,6 +133,29 @@ describe("task ownership and retries", () => {
     expect(c.taskRepo.findById(parent.id)?.data.status).toBe("cancelled");
   });
 
+  it("recovers an execution job orphaned by a process restart", () => {
+    const { parent } = parentAndChild("running");
+    const job = c.queue.enqueue("agent.run", { taskId: parent.id });
+    c.queue.claim(1);
+
+    const recovered = c.queue.recoverInterruptedExecutions();
+    expect(recovered.retrying.map((j) => j.id)).toEqual([job.id]);
+    expect(recovered.dead).toEqual([]);
+    expect(c.queue.getById(job.id)).toMatchObject({ status: "pending", attempts: 1 });
+    expect(c.queue.claim(1).map((j) => j.id)).toEqual([job.id]);
+  });
+
+  it("dead-letters an interrupted execution that exhausted its retry budget", () => {
+    const { parent } = parentAndChild("running");
+    const job = c.queue.enqueue("agent.run", { taskId: parent.id }, { maxAttempts: 1 });
+    c.queue.claim(1);
+
+    const recovered = c.queue.recoverInterruptedExecutions();
+    expect(recovered.retrying).toEqual([]);
+    expect(recovered.dead.map((j) => j.id)).toEqual([job.id]);
+    expect(c.queue.getById(job.id)).toMatchObject({ status: "dead", attempts: 1 });
+  });
+
   it("does not report another worker's row after losing a job-claim race", () => {
     c.queue.enqueue("notify", { test: true });
     const otherDb = new Db(fx.path);

@@ -1,5 +1,5 @@
 import type { AgentType, Project } from "../domain/entities.js";
-import type { ProjectRepository } from "../domain/repos.js";
+import type { ProjectRepository, TaskRepository } from "../domain/repos.js";
 import type { AgentRepository } from "../agents/agent-repo.js";
 import type { AgentManager } from "../agents/manager.js";
 import type { JobQueue } from "../db/queue.js";
@@ -26,6 +26,7 @@ import { logger } from "../logger.js";
  */
 export interface GithubAutomationDeps {
   projectRepo: ProjectRepository;
+  taskRepo: TaskRepository;
   agentRepo: AgentRepository;
   agentManager: AgentManager;
   queue: JobQueue;
@@ -170,6 +171,10 @@ export class GithubAutomation {
           input: { source: "github", event: ctx.event, action: ctx.action, repo: ctx.repo, branch: ctx.branch, deliveryId },
         });
         this.deps.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
+        this.deps.taskRepo.upsert(
+          { ...task, status: "queued", updatedAt: new Date().toISOString() },
+          { projectId: task.projectId, parentId: task.parentTaskId },
+        );
         this.deps.auditRepo.record({
           action: "github.event.routed",
           projectId: project.id,

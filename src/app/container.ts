@@ -191,6 +191,7 @@ export class Container {
     });
     this.githubAutomation = new GithubAutomation({
       projectRepo: this.projectRepo,
+      taskRepo: this.taskRepo,
       agentRepo: this.agentRepo,
       agentManager: this.agentManager,
       queue: this.queue,
