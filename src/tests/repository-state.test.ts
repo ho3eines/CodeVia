@@ -237,6 +237,37 @@ describe("fail-closed repository boundary", () => {
     await expect(c.projectFiles.writeFiles(p, [{ path: "CodeVia/leak.md", content: `ghp_${"a".repeat(36)}` }], "No secrets")).rejects.toThrow(/credential material/);
     expect(await gh.getFile(ref(), "CodeVia/leak.md", p.branch)).toBeUndefined();
   });
+
+  it("rebuilds a missing mock repository from current definitions instead of returning Mock repo not found", async () => {
+    // Simulate an imported/legacy project whose repository was never seen by the
+    // mock. Read/API actions must recover it from the database, not brick the UI.
+    const legacy: Project = {
+      ...p,
+      id: "legacy-missing-repo",
+      slug: "legacy-missing-repo",
+      configRepo: "ho3eines/Projects",
+      branch: "main",
+      repositories: [{ repo: "ho3eines/Projects", branch: "main", role: "primary", isConfigRepo: true }],
+      repositoryState: p.repositoryState,
+    };
+    c.projectRepo.upsert(legacy, { key: legacy.slug });
+    const source = c.agentRepo.byType(p.id, "research")!;
+    const restored = { ...source, id: "agent-research-legacy-missing", projectId: legacy.id, configPath: "CodeVia/agents/research.md", repositoryRevision: undefined };
+    c.agentRepo.upsert(restored, { projectId: legacy.id });
+    for (const skill of c.skillRepo.byProject(p.id)) {
+      c.skillRepo.upsert({ ...skill, id: localId(legacy.id, "skill", skill.slug), projectId: legacy.id }, { key: skill.slug, projectId: legacy.id });
+    }
+
+    await c.agentManager.readProject(legacy.id);
+    expect(c.agentRepo.findById(restored.id)?.data.name).toBe(source.name);
+    expect(c.agentRepo.findById(restored.id)?.data.systemPrompt).toBe(source.systemPrompt);
+    expect((await gh.listFiles({ owner: "ho3eines", name: "Projects" }, "main")).some((f) => f.path === "CodeVia/agents/research.md")).toBe(true);
+
+    const srv = await server();
+    const list = await srv.inject({ method: "GET", url: `/projects/${legacy.id}/agents` });
+    expect(list.statusCode).toBe(200);
+    expect((list.json() as Array<{ id: string }>).some((a) => a.id === restored.id)).toBe(true);
+  });
 });
 
 describe("missing-only AI generation", () => {

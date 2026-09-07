@@ -195,6 +195,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p) return fail(reply, 404, "project not found");
+    // In Simulation/Mock mode a repository that was never seen by the mock is
+    // rebuilt from the current DB before the canonical read; real connections
+    // still fail closed rather than substituting cached state.
+    await container.agentManager.readProject(id);
     const summary = await container.projectFiles.restore(p, {
       projectRepo: container.projectRepo,
       agentRepo: container.agentRepo,

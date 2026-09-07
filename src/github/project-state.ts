@@ -85,7 +85,34 @@ export class ProjectFilesService {
     const raw = this.baselines.get(this.cacheKey(p))?.get(path);
     return raw !== undefined && parseMatter(raw).data.deleted === true;
   }
+  /**
+   * Simulation mode is a self-contained universe: a project that was imported,
+   * backed up, or configured for a repo the mock has not seen must not become a
+   * read-only trap. Create the missing simulated repository so reads and the
+   * project actions keep working, then the normal state sync/initialization can
+   * rebuild CodeVia/* from the current database.
+   */
+  private async seedMissingMockRepos(p: Project): Promise<boolean> {
+    const gh = this.github(p);
+    if (gh.kind !== "mock") return false;
+    const links = p.repositories.length ? p.repositories : [{ repo: p.configRepo, branch: p.branch }];
+    const mock = gh as unknown as { seedRepo(owner: string, name: string, opts?: { files?: GithubFile[]; branch?: string; description?: string }): unknown };
+    const existing = new Set((await gh.listRepositories({ limit: 1000 })).map((r) => r.fullName.toLowerCase()));
+    let seeded = false;
+    for (const link of links) {
+      const [owner, ...rest] = String(link.repo).split("/");
+      const name = rest.join("/") || "repo";
+      if (!owner || !name) continue;
+      if (existing.has(`${owner}/${name}`.toLowerCase())) continue;
+      // Minimal, safe initial commit. The higher-level coordinator writes the real
+      // CodeVia/* definitions after this read; all writes below are confirmed first.
+      mock.seedRepo(owner, name, { files: [{ path: "README.md", content: `# ${p.name}\n\n${p.description}\n` }], branch: link.branch, description: p.description });
+      seeded = true;
+    }
+    return seeded;
+  }
   private async raw(p: Project): Promise<{ sha: string; contents: Map<string, string> }> {
+    await this.seedMissingMockRepos(p);
     const sha = await this.head(p);
     const cached = this.snapshots.get(this.cacheKey(p));
     // HEAD is checked on EVERY read. Only immutable contents for that SHA are cached.
@@ -328,7 +355,7 @@ export class ProjectFilesService {
     return [...files.values()];
   }
 
-  async syncAll(project: Project, input: { agents: Agent[]; tasks: Task[]; memory: MemoryEntry[]; skillCatalog?: Array<{ slug: string; description?: string }>; workflows?: Workflow[]; runs?: Run[]; conversations?: Conversation[]; promptVersions?: PromptVersion[] }): Promise<boolean> {
+  async syncAll(project: Project, input: { agents: Agent[]; tasks: Task[]; memory: MemoryEntry[]; skillCatalog?: Array<{ slug: string; description?: string }>; workflows?: Workflow[]; runs?: Run[]; conversations?: Conversation[]; promptVersions?: PromptVersion[] }, opts: { checkConflicts?: boolean } = {}): Promise<boolean> {
     const definitions = (input.skillCatalog ?? []).filter((s): s is Skill => "instructions" in s);
     return this.writeFiles(project, [
       { path: PROJECT_FILE, content: renderProjectFile(project, input.agents, input.tasks, input.memory) },
@@ -342,7 +369,7 @@ export class ProjectFilesService {
       ...(input.runs ?? []).map((r) => ({ path: this.entityPath(project, "run", RUN_DIR, r.id), content: renderRunFile(r), runtime: true })),
       ...(input.conversations ?? []).map((c) => ({ path: this.entityPath(project, "conversation", CONVERSATION_DIR, c.id), content: renderConversationFile(c), sourceSha: c.repositoryRevision })),
       ...this.promptWrites(project, input.agents, input.promptVersions, true),
-    ], "[CodeVia] save project state");
+    ], "[CodeVia] save project state", opts.checkConflicts ?? true);
   }
   agentPath(a: Agent): string {
     const path = a.configPath ?? statePath(AGENTS_DIR, a.id);

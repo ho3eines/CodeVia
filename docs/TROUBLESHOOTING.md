@@ -181,7 +181,18 @@ with escaped text; a custom provider/tool that writes its own messages must do t
 
 ## "Mock repo not found"
 
-Happens if a task runs against a repo the mock hasn't seen. Creating a project via the API/UI seeds a starter `.ai-engineering/` repo automatically; re-onboard via `POST /projects/:id/onboard`.
+In **Simulation / mock mode** the platform now auto-recreates a missing mock
+repository from the project database the first time the project is read or
+opened, so project, agent, skill and task actions keep working without
+re-configuring the repo. Creating a project via the API/UI already seeds the
+starter repo automatically; re-onboard via `POST /projects/:id/onboard`.
+
+If the message still appears, the project is using a **real** GitHub connection
+whose repository the connected account cannot see, or the server is configured
+with `GITHUB_TOKEN`/`GITHUB_ENABLED=true` but that repository does not exist
+there. Real GitHub outages deliberately **fail closed** — the platform never
+silently substitutes cached definitions — so fix the repository/token and
+retry.
 
 ## Tests fail to run (Vite can't resolve `node:sqlite`)
 
