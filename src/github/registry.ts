@@ -142,7 +142,28 @@ export function resolveGitHubForProject(opts: {
   project: import("../domain/entities.js").Project;
   kv: KvStore;
   fallback: IGitHubService;
+  /**
+   * The signed-in user behind the current request, when there is one.
+   *
+   * Each user must act as themselves: the repositories listed on the GitHub
+   * page come from *this* user's OAuth token, so project actions have to use
+   * the same credential. Resolving by `project.ownerId` instead meant a project
+   * created by (or seeded for) another identity — including the pre-login
+   * `user-demo` owner — kept using a foreign token or fell back to the mock,
+   * even though the caller was properly connected to GitHub.
+   *
+   * Background work (workers, webhooks, schedules) has no request user and
+   * keeps using the connection stored on the project.
+   */
+  requestUserId?: string;
 }): IGitHubService {
+  // A signed-in user always acts as themselves, whoever owns the project. This
+  // is also the safer default: the caller can only ever reach repositories
+  // their own token already grants.
+  if (opts.requestUserId && getUserGitHubToken(opts.kv, opts.requestUserId)) {
+    const userId = opts.requestUserId;
+    return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
+  }
   const connection = opts.project.githubConnection;
   if (!connection) return opts.fallback; // legacy installations
   if (connection.kind === "user-oauth") {
