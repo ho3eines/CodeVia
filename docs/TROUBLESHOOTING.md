@@ -181,7 +181,26 @@ with escaped text; a custom provider/tool that writes its own messages must do t
 
 ## "Mock repo not found"
 
-Happens if a task runs against a repo the mock hasn't seen. Creating a project via the API/UI seeds a starter `.ai-engineering/` repo automatically; re-onboard via `POST /projects/:id/onboard`.
+`CodeVia repository state: read/validation failed; cached definitions were not substituted (Error: Mock repo not found: owner/name)`
+on every project page means the database references a repository the mock
+simulation never created — typically a **restored backup/migrated database**,
+a **lost `data/mock-github.json` snapshot** (the DB survived, the mock did not),
+or a repository name typed by hand while GitHub was not connected.
+
+The platform now heals this by itself — no action needed:
+
+1. **The repository is auto-provisioned** the moment it is referenced (with the
+   project's own branch), so project pages, branches, files, issues, PRs and
+   commits all work again.
+2. **Genuinely missing `CodeVia/` state is initialized once** (mock/simulation
+   connections only): agents, skills, workflows, rules and memory are authored
+   and committed, exactly like explicit onboarding. A repository that already
+   carries state — or intentionally removed definitions — is never regenerated.
+
+On older builds the workaround is `POST /projects/:id/onboard`
+(**↻ Load / fill missing** on the project page). Real (token-backed) GitHub
+connections never auto-create anything: a project whose owner's connection went
+stale must be reconnected by its owner, and the API says so explicitly.
 
 ## Tests fail to run (Vite can't resolve `node:sqlite`)
 

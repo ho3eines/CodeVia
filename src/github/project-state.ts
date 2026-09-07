@@ -26,6 +26,13 @@ export interface ProjectFilesDeps {
   githubForProject?: (project: Project) => IGitHubService;
   repositories?: StateRepositories;
   transaction?: <T>(fn: () => T) => T;
+  /**
+   * Best-effort hook run (under the repository lock) before state is read or
+   * written. Wired to mock auto-provisioning so a referenced repository that is
+   * missing from the simulation is created — with the project's own branch —
+   * instead of failing every state operation.
+   */
+  ensureRepository?: (project: Project) => void | Promise<void>;
 }
 export interface PullSummary { promptVersions?: number; agents: number; tasks: number; memory: number; skills: string[]; files: string[]; workflows?: number; runs?: number; conversations?: number; sha?: string; }
 export interface RepositorySnapshot {
@@ -86,6 +93,7 @@ export class ProjectFilesService {
     return raw !== undefined && parseMatter(raw).data.deleted === true;
   }
   private async raw(p: Project): Promise<{ sha: string; contents: Map<string, string> }> {
+    if (this.deps.ensureRepository) await this.deps.ensureRepository(p);
     const sha = await this.head(p);
     const cached = this.snapshots.get(this.cacheKey(p));
     // HEAD is checked on EVERY read. Only immutable contents for that SHA are cached.

@@ -236,7 +236,7 @@ export class AgentManager {
   async onboardProject(projectId: string, _tech: string[] = []): Promise<{ agents: number; skills: number; seeded: number }> {
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!stored) throw new Error(`Project ${projectId} not found`);
-    this.ensureMockRepo(hydrateProject(stored));
+    this.ensureProjectRepositories(hydrateProject(stored));
     const p = await this.refreshProject(projectId);
     return { agents: this.deps.agentRepo.byProject(projectId).length, skills: p.settings.skills.length, seeded: 0 };
   }
@@ -260,7 +260,7 @@ export class AgentManager {
     if (next.configRepo !== old.configRepo || next.branch !== old.branch) {
       // Connection changes are explicit. Existing destination state wins; absent state
       // is migrated from the current project, never generated over another folder.
-      this.ensureMockRepo(next);
+      this.ensureProjectRepositories(next);
       const snapshot = await this.deps.projectFiles?.pull(next);
       targetRevision = snapshot?.sha;
       next.repositoryRevision = targetRevision;
@@ -554,8 +554,14 @@ export class AgentManager {
     ].join("\n");
   }
 
-  /** Seed a mock repository with a starter .ai-engineering structure for demos. */
-  private ensureMockRepo(project: Project): void {
+  /**
+   * Seed a mock repository with a starter .ai-engineering structure for demos.
+   * Public: also invoked through ProjectFilesService.ensureRepository before
+   * every state read/write, so a project whose repository is missing from the
+   * simulation (restored database, lost mock snapshot) is re-created instead of
+   * erroring — including its non-default branches.
+   */
+  ensureProjectRepositories(project: Project): void {
     const github = this.githubFor(project);
     if (github.kind !== "mock") return;
     const mock = github as unknown as {

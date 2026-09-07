@@ -1,5 +1,31 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../app/container.js";
+import { logger } from "../logger.js";
+
+/**
+ * A project whose repository state was never initialized (fresh mock repo,
+ * restored database, migrated install) gets its missing definitions authored
+ * once — mock/simulation connections only, so a real repository is never
+ * written without an explicit onboarding action. Idempotent: projects that
+ * already carry state (or agents) are left untouched.
+ */
+async function bootstrapMissingState(c: Container, projectId: string): Promise<void> {
+  // Re-read after restore: a repository manifest marks the project initialized.
+  const p = c.projectRepo.findById(projectId)?.data;
+  if (!p || p.repositoryState || c.agentRepo.byProject(projectId).length > 0) return;
+  try {
+    if (c.githubForProject(p).kind !== "mock") return;
+  } catch {
+    return; // unreachable connection — leave initialization to explicit onboarding
+  }
+  try {
+    await c.agentManager.refreshProject(projectId);
+    logger.info("auto-initialized missing project state", { component: "project-state", projectId, repo: p.configRepo });
+  } catch (err) {
+    // The read already succeeded; a failed bootstrap must not break the page.
+    logger.warn("auto-initialization of missing project state failed", { component: "project-state", projectId, repo: p.configRepo, err: String(err) });
+  }
+}
 
 /** Repository-backed views never silently substitute stale DB definitions. */
 export function registerProjectStateHook(app: FastifyInstance, c: Container): void {
@@ -21,14 +47,20 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
     }
     if (projectId) {
       const p = c.projectRepo.findById(projectId)?.data;
-      if (p) await c.projectFiles.restore(p);
+      if (p) {
+        await c.projectFiles.restore(p);
+        await bootstrapMissingState(c, projectId);
+      }
       return;
     }
     // /skills without projectId is intentionally the global TEMPLATE marketplace.
     if (resource === "skills") return;
     if (req.method === "GET") {
       for (const { data: p } of c.projectRepo.findMany()) {
-        if (!p.ownerId || p.ownerId === req.user?.id) await c.projectFiles.restore(p);
+        if (!p.ownerId || p.ownerId === req.user?.id) {
+          await c.projectFiles.restore(p);
+          await bootstrapMissingState(c, p.id);
+        }
       }
     }
   });

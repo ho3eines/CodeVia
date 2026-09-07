@@ -80,7 +80,7 @@ export class Container {
   readonly github: IGitHubService = resolveGitHubService();
   readonly githubForProject = (project: Project): IGitHubService => resolveGitHubForProject({ project, kv: this.kv, fallback: this.github });
   /** Project folder (CodeVia/*) sync between the database and the project repo. Shares the platform github instance. */
-  readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github, githubForProject: this.githubForProject, repositories: { projectRepo: this.projectRepo, agentRepo: this.agentRepo, taskRepo: this.taskRepo, memoryRepo: this.memoryRepo, skillRepo: this.skillRepo, workflowRepo: this.workflowRepo, runRepo: this.runRepo, conversationRepo: this.conversationRepo, promptVersionRepo: this.promptVersionRepo }, transaction: (fn) => this.db.tx(fn) });
+  readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github, githubForProject: this.githubForProject, ensureRepository: (p) => this.agentManager.ensureProjectRepositories(p), repositories: { projectRepo: this.projectRepo, agentRepo: this.agentRepo, taskRepo: this.taskRepo, memoryRepo: this.memoryRepo, skillRepo: this.skillRepo, workflowRepo: this.workflowRepo, runRepo: this.runRepo, conversationRepo: this.conversationRepo, promptVersionRepo: this.promptVersionRepo }, transaction: (fn) => this.db.tx(fn) });
   readonly telegram = resolveTelegramService();
   readonly memoryResolver: MemoryResolver = memoryResolver;
   readonly agentRouter = new AgentRouter();
