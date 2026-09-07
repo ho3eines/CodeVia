@@ -157,6 +157,18 @@ describe("project-scoped connections", () => {
     const bound = resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: c.github });
     expect(bound.kind).toBe("mock");
   });
+  it("uses the owner's real GitHub login even for a project saved with mock connection", async () => {
+    storeUserGitHubToken(c.kv, "owner-a", "fake-project-token", { scopes: "repo", login: "owner-a" });
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer fake-project-token");
+      return json([{ name: "main", commit: { sha: "head" } }]);
+    });
+    setUserGitHubFetchForTest(fetcher as typeof fetch);
+    const bound = resolveGitHubForProject({ project: { ...project, ownerId: "owner-a", githubConnection: { kind: "mock" } }, kv: c.kv, fallback: c.github });
+    expect(bound.kind).toBe("real");
+    await bound.listBranches(repo);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it("rehydrates default provider adapters from persisted credentials on restart", async () => {
     const stored = c.providerRepo.findById("provider-openai")!.data;
     c.providerRepo.upsert({ ...stored, active: true, secretValueEnc: JSON.stringify(encryptSecret("saved-ui-key")) });

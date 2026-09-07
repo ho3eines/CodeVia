@@ -131,12 +131,21 @@ export function resolveGitHubForProject(opts: {
     if (isServerGitHubEnabled()) return new RealGitHubService();
     throw new Error(`Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`);
   }
-  // `mock` was persisted while the platform ran in demo/simulation mode. Once a
-  // real server token is configured the stronger connection must win; otherwise
-  // every project action keeps talking to an isolated mock that never has the
-  // repository and users see "Mock repo not found" no matter what env is set.
-  if (opts.fallback.kind === "real") return opts.fallback;
-  if (opts.fallback.kind === "mock") return opts.fallback;
+  // `mock` was persisted while the platform ran in demo/simulation mode. Prefer
+  // a genuinely configured GitHub connection instead of the stale marker:
+  //   1. an owner/operator who has logged in through GitHub (OAuth user token),
+  //   2. the server-wide GITHUB_TOKEN when GITHUB_ENABLED/production is active.
+  // Then keep mock only while the server itself is mock.
+  if (connection.kind === "mock") {
+    const userId = opts.project.githubConnection?.userId ?? opts.project.ownerId;
+    const userToken = userId ? getUserGitHubToken(opts.kv, userId) : undefined;
+    if (userToken) {
+      return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId!)?.token, label: "project owner's GitHub connection", fetchImpl: userGitHubFetch });
+    }
+    if (opts.fallback.kind === "real") return opts.fallback;
+    if (isServerGitHubEnabled()) return new RealGitHubService();
+    if (opts.fallback.kind === "mock") return opts.fallback;
+  }
   let mock = projectMocks.get(opts.fallback);
   if (!mock) { mock = new MockGitHubService(); projectMocks.set(opts.fallback, mock); }
   return mock;
