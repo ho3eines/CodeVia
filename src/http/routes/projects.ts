@@ -692,7 +692,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       input: { ...(body.input as Record<string, unknown> | undefined ?? {}), routedAgentType, agentHint: body.agentType, executionMode },
     });
     const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
-    return { task, jobId: job.id, routedAgentType, workflowId, executionMode };
+    const queued = { ...task, status: "queued" as const, updatedAt: new Date().toISOString() };
+    container.taskRepo.upsert(queued, { projectId: task.projectId, parentId: task.parentTaskId });
+    return { task: queued, jobId: job.id, routedAgentType, workflowId, executionMode };
   });
 
   // Re-run onboarding

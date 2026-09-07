@@ -43,6 +43,56 @@ export class JobQueue {
     return row ? this.mapJob(row) : undefined;
   }
 
+  /**
+   * Recover execution rows owned by a worker process that disappeared.
+   *
+   * The current SQLite deployment runs one in-process worker. Consequently a
+   * `running` row found before that worker starts cannot still have a live
+   * owner. Leaving it untouched permanently wedges both the job and its task.
+   * Count the interrupted attempt and put it back at the front of the normal
+   * retry path (or dead-letter it when its retry budget is exhausted).
+   *
+   * Deliberately limited to agent/workflow execution: blindly replaying an
+   * interrupted GitHub mutation or notification could duplicate an external
+   * side effect whose acknowledgement was lost during shutdown.
+   */
+  recoverInterruptedExecutions(): { retrying: Job[]; dead: Job[] } {
+    return this.db.tx(() => {
+      const rows = this.db.all(
+        `SELECT * FROM jobs
+         WHERE status = 'running' AND type IN ('agent.run', 'workflow.run')
+         ORDER BY created_at ASC`,
+      ) as Record<string, unknown>[];
+      const retrying: Job[] = [];
+      const dead: Job[] = [];
+      const now = nowIso();
+      for (const row of rows) {
+        const attempts = Number(row.attempts) + 1;
+        const maxAttempts = Number(row.max_attempts);
+        const exhausted = attempts >= maxAttempts;
+        const error = `Worker interrupted while processing attempt ${attempts}/${maxAttempts}`;
+        this.db.run(
+          `UPDATE jobs
+           SET status = :status, attempts = :attempts, scheduled_at = NULL,
+               started_at = NULL, finished_at = :finished_at, error = :error,
+               updated_at = :now
+           WHERE id = :id AND status = 'running'`,
+          {
+            id: String(row.id),
+            status: exhausted ? "dead" : "pending",
+            attempts,
+            finished_at: exhausted ? now : null,
+            error,
+            now,
+          },
+        );
+        const recovered = this.getById(String(row.id));
+        if (recovered) (exhausted ? dead : retrying).push(recovered);
+      }
+      return { retrying, dead };
+    });
+  }
+
   /** Claim a batch of pending jobs (oldest first by created_at). */
   claim(limit = 5): Job[] {
     if (!Number.isFinite(limit) || limit <= 0) return [];

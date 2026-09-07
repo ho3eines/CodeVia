@@ -61,7 +61,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
       input: (b.input as Record<string, unknown>) ?? {},
     });
     const job = container.queue.enqueue("workflow.run", { taskId: task.id }, { correlationId: task.correlationId });
-    return { task, jobId: job.id };
+    const queued = { ...task, status: "queued" as const, updatedAt: new Date().toISOString() };
+    container.taskRepo.upsert(queued, { projectId: task.projectId, parentId: task.parentTaskId });
+    return { task: queued, jobId: job.id };
   });
 
   app.delete("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req) => {
