@@ -118,7 +118,7 @@
     $("#content").innerHTML = `<div class="skeleton-line w60"></div><div class="skeleton-line w90"></div><div class="skeleton-card-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div>`;
   }
   function renderError(err) {
-    $("#content").innerHTML = `<div class="error-state"><h4>Something went wrong</h4><pre>${esc(err && (err.message || err))}</pre><div class="flex mt"><button class="btn btn-primary" onclick="location.reload()">Retry</button></div></div>`;
+    $("#content").innerHTML = `<div class="error-state"><h4>Something went wrong</h4><pre>${esc(err && (err.message || err))}</pre><div class="flex mt"><button class="btn btn-primary" onclick="refreshCurrent()">Retry</button></div></div>`;
   }
   /* Strict mode (REQUIRE_AUTH) + no session: show a login screen instead of a raw 401. */
   async function renderLoginRequired() {
@@ -499,16 +499,27 @@
     socket.on("disconnect", () => setLivePill(false));
     // Swallow handshake/upgrade errors: the client keeps retrying in the
     // background and the pill shows the state. Never throws into route().
+    // Realtime events can burst (step.updated streams once per token batch), so
+    // coalesce same-page refreshes: at most one silent refresh per 400ms keeps
+    // the page live without re-rendering on every event.
+    let realtimeRefreshTimer = null;
+    const realtimeRefresh = () => {
+      if (realtimeRefreshTimer) return;
+      realtimeRefreshTimer = setTimeout(() => {
+        realtimeRefreshTimer = null;
+        refreshCurrent();
+      }, 400);
+    };
     socket.on("connect_error", () => setLivePill(false));
     socket.on("run.updated", (ev) => {
-      if (ev.runId && (location.hash.startsWith("#/runs") || /^#\/projects\/[^/]+\/(runs|tests)$/.test(location.hash))) refreshCurrent();
+      if (ev.runId && (location.hash.startsWith("#/runs") || /^#\/projects\/[^/]+\/(runs|tests)$/.test(location.hash))) realtimeRefresh();
       if (ev.data && ev.data.status === "succeeded") toast("Run completed", ev.runId, "ok");
     });
     socket.on("step.updated", (ev) => {
-      if (ev.runId && location.hash.includes("/console")) refreshCurrent();
+      if (ev.runId && location.hash.includes("/console")) realtimeRefresh();
     });
     socket.on("task.updated", (ev) => {
-      if (ev.taskId && (location.hash.startsWith("#/tasks") || /^#\/projects\/[^/]+\/tasks$/.test(location.hash))) refreshCurrent();
+      if (ev.taskId && (location.hash.startsWith("#/tasks") || /^#\/projects\/[^/]+\/tasks$/.test(location.hash))) realtimeRefresh();
     });
     socket.on("notification", (ev) => {
       const kind = ev && ev.data && ev.data.kind;
@@ -588,8 +599,14 @@
     return null;
   }
 
-  async function route() {
-    showSkeleton();
+  /**
+   * Render the current hash route. `{ silent: true }` (used by refreshCurrent)
+   * keeps the current DOM visible while data re-fetches and swaps in — no
+   * skeleton flash, no visual "reload" — so actions and realtime updates stay
+   * smooth. A full navigation (hashchange) still shows the skeleton.
+   */
+  async function route(opts = {}) {
+    if (!opts.silent) showSkeleton();
     // Strip the query part ("#/github?login=success") before matching routes.
     const hash = (location.hash.replace(/^#/, "").split("?")[0]) || "/dashboard";
     renderNav();
@@ -691,9 +708,47 @@
     const pref = localStorage.getItem("cv-dir") || "ltr";
     document.documentElement.setAttribute("dir", pref);
   }
+  /**
+   * Same-page refresh without the skeleton flash. Re-fetches the route's data
+   * and swaps it in place, preserving scroll position (and focus is left to
+   * the page's own state), so the UI never "reloads" on an action.
+   */
   function refreshCurrent() {
-    return route();
+    const scrollY = window.scrollY;
+    const { hash } = location;
+    return route({ silent: true }).then(() => {
+      // Only restore the scroll when we did not navigate away mid-refresh.
+      if (location.hash === hash) window.scrollTo(0, Math.min(scrollY, document.body.scrollHeight));
+    });
   }
+
+  /**
+   * Drop module-level caches after a full backup restore replaced the entire
+   * database, so the next render re-fetches everything instead of showing
+   * pre-restore data. (A full page reload used to do this implicitly.)
+   */
+  function resetClientCaches() {
+    authState.authenticated = false;
+    authState.user = null;
+    authState.requireAuth = false;
+    authState.loginConfigured = false;
+    authState.githubToken = null;
+    optionCatalogCache = null;
+    modelsCache = [];
+    providersCache = [];
+    modelVisibleCache = [];
+    modelSearchQuery = "";
+    modelSelection.clear();
+    providersPageCache = [];
+    providersVisibleCache = [];
+    providerSummary = null;
+    providerQuery = "";
+    providerFilter = "all";
+    providerSort = "name";
+    providerSelection.clear();
+    wfDraft = null;
+  }
+  window.resetClientCaches = resetClientCaches;
   // Views are rendered with inline handlers in the generated HTML. Functions
   // declared inside this IIFE are not visible to inline `onclick` attributes,
   // so expose the refresh action explicitly for those handlers and realtime
@@ -4339,8 +4394,10 @@
           if (data.type === "codevia-runtime-backup") {
             const res = await api("/admin/backup/restore", { method: "POST", body: { snapshotData: data, replace: true } });
             if (!res.ok) throw new Error(res.error || "Full restore failed");
-            toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored. Reloading…`, "ok");
-            setTimeout(() => location.reload(), 700);
+            toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok");
+            // The restore replaced the whole database — drop client caches and
+            // re-render in place so nothing stale lingers (no page reload).
+            setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700);
             return;
           }
           if (!data.adminSettings || typeof data.adminSettings !== "object") {
@@ -4565,7 +4622,7 @@
             if (!confirm(`Restore snapshot ${id}? This replaces the full runtime state.`)) return;
             try {
               const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, replace: true } });
-              if (res.ok) { toast("Backup restored", `${res.records} records restored. Reloading…`, "ok"); setTimeout(() => location.reload(), 700); }
+              if (res.ok) { toast("Backup restored", `${res.records} records restored`, "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
               else toast("Restore failed", res.error || "", "err");
             } catch (e) { toast("Restore failed", e.message, "err"); }
           });
@@ -4586,7 +4643,7 @@
         const btn = bakRestore; btn.disabled = true; btn.textContent = "Restoring…";
         try {
           const res = await api("/admin/backup/restore", { method: "POST", body: { replace: true } });
-          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored. Reloading…`, "ok"); setTimeout(() => location.reload(), 700); }
+          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
           else toast("Restore failed", res.error || "", "err");
         } catch (e) { toast("Restore failed", e.message, "err"); }
         finally { btn.disabled = false; btn.textContent = "↺ Restore latest"; }

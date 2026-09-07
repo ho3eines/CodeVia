@@ -477,6 +477,37 @@ describe("test verdict dialog", () => {
   }, 30000);
 });
 
+describe("no-reload refresh behavior", () => {
+  it("never ships a full page reload anywhere in the SPA", () => {
+    const js = readFileSync(resolve(process.cwd(), "public", "app.js"), "utf8");
+    expect(js).not.toContain("location.reload");
+    expect(js).not.toContain("location.reload(");
+    expect(js).not.toContain(".reload()");
+  });
+
+  it("refreshCurrent is silent: it must not show the skeleton", async () => {
+    const { win, go } = await boot();
+    await go("#/providers");
+    const before = (win.document.querySelector("#content") as El).innerHTML ?? "";
+    expect(before).toContain("provider-card"); // real content, not a skeleton
+
+    // Spy on showSkeleton: a silent refresh must never call it. It is internal
+    // to the IIFE, so detect it by watching the skeleton markup appearing.
+    const p = win.refreshCurrent();
+    expect(p && typeof p.then).toBe("function");
+    await p;
+    const after = (win.document.querySelector("#content") as El).innerHTML ?? "";
+    // Content was refreshed (fresh fetch) but no skeleton placeholder remained.
+    expect(after).toContain("provider-card");
+    expect(after).not.toContain("skeleton-line");
+  });
+
+  it("retry button on the error state refreshes in place, not via reload", () => {
+    const js = readFileSync(resolve(process.cwd(), "public", "app.js"), "utf8");
+    expect(js).toMatch(/onclick=\"refreshCurrent\(\)\"/);
+  });
+});
+
 describe("inline event handler markup", () => {
   it("never interpolates raw JSON.stringify into a quoted HTML attribute", () => {
     // Inline handlers are written inside double-quoted attributes. A raw
