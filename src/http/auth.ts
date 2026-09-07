@@ -14,15 +14,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
 };
 
 /** A demo/default owner so local (unauthenticated) usage works out of the box. */
-export const DEMO_USER: User = {
-  id: "user-demo",
-  externalId: "demo",
-  email: "demo@codevia.local",
-  name: "Demo Owner",
-  role: "owner",
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-};
+export { DEMO_USER, DEMO_USER_ID } from "../auth/identity.js";
+import { DEMO_USER } from "../auth/identity.js";
 
 declare module "fastify" {
   interface FastifyRequest {
