@@ -371,6 +371,8 @@ export interface RunStep {
   status: "pending" | "running" | "succeeded" | "failed" | "skipped";
   tool?: string;
   detail?: string;
+  /** Structured tool evidence (commit SHA, branch, CI checks), not private reasoning. */
+  data?: Record<string, unknown>;
   startedAt?: ISODate;
   finishedAt?: ISODate;
 }
@@ -384,6 +386,9 @@ export interface Run {
   agentType: AgentType;
   status: RunStatus;
   steps: RunStep[];
+  /** Final deliverable/analysis, never a reasoning trace. */
+  summary?: string;
+  verification?: "passed" | "failed" | "unverified" | "simulated";
   modelId?: ID;
   inputTokens: number;
   outputTokens: number;

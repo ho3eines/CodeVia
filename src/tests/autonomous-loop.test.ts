@@ -22,7 +22,7 @@ function stubRun(task: Task, status: Run["status"], failedLabel?: string): Run {
     agentType: task.agentType ?? "backend-developer",
     status,
     steps: failedLabel
-      ? [{ index: 0, label: "Do work", status: "running" }, { index: 1, label: failedLabel, status: "failed", detail: "boom: assertion failed" }]
+      ? [{ index: 0, label: "Do work", status: "running" }, { index: 1, label: failedLabel, status: "failed", detail: "boom: assertion failed", data: task.agentType === "qa-test" ? { verification: "failed", fixable: true } : undefined }]
       : [{ index: 0, label: "Do work", status: "succeeded" }],
   } as Run;
 }
@@ -252,7 +252,8 @@ describe("autonomous loop end-to-end (mock AI + mock GitHub)", () => {
     const [owner, ...rest] = project.configRepo.split("/");
     const repo = { owner, name: rest.join("/") };
     const pulls = await container.github.listPullRequests(repo);
-    expect(pulls.length).toBeGreaterThanOrEqual(2);
+    expect(pulls.length).toBe(1);
+    expect(done.result?.verification).toBe("simulated");
     const branches = (await container.github.listBranches(repo)).map((b) => b.name);
     for (const pr of pulls) {
       // Every PR head is a branch that actually exists (no dangling PRs).
@@ -288,7 +289,9 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
         let content = "canned";
         if (system.includes("business analyst")) content = "CANNED BRIEF: throttle logins, reuse the login handler.";
         else if (system.includes("engineering manager")) content = breakdownJson;
-        else {
+        else if (user.includes("--- START CURRENT FILE ---")) {
+          content = JSON.stringify({ edits: [{ oldText: "public class LoginHandler {}", newText: "public class LoginHandler { public bool Throttle() => true; }" }] });
+        } else {
           const target = user.match(/complete content of "([^"]+)"/)?.[1] ?? "file";
           content = target.startsWith("docs/tasks/")
             ? `# note for ${target}\n\ncanned note\n`
@@ -375,7 +378,7 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
 
     // Breakdown was told to reuse owned files…
     const bdPrompt = prompts.find((p) => p.system.includes("engineering manager"))?.user ?? "";
-    expect(bdPrompt).toContain("REUSE its exact file");
+    expect(bdPrompt).toContain("Reuse the exact existing files");
     expect(bdPrompt).toContain(owned);
 
     // …and the invented parallel path was remapped to the owned file: the
@@ -387,10 +390,11 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
     expect(branchFiles).not.toContain("src/Invented/LoginStuff.cs");
 
     // Codegen saw the existing file content and its output was committed verbatim.
-    const cgPrompt = prompts.find((p) => p.user.includes(`"${owned}"`))?.user ?? "";
+    const cgPrompt = prompts.find((p) => p.user.includes("--- START CURRENT FILE ---"))?.user ?? "";
     expect(cgPrompt).toContain("EXTEND it");
     expect(cgPrompt).toContain("HANDWRITTEN v1");
-    expect((await gh.getFile(ref, owned, prs[0].head))?.content).toContain("// CANNED CODE for " + owned);
+    expect((await gh.getFile(ref, owned, prs[0].head))?.content).toContain("public bool Throttle()");
+    expect((await gh.getFile(ref, owned, prs[0].head))?.content).toContain("HANDWRITTEN v1");
 
     // Pre-sync adopted the external memory edit from git into the DB…
     expect(container.memoryRepo.byProject(project.id).map((m) => m.key)).toContain("auth.strategy");

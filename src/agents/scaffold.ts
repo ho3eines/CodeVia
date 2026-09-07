@@ -64,7 +64,7 @@ export function detectStack(project: Project): Stack {
   let backend: BackendKind = "node-ts";
   if (has(langs, "c#", "csharp") || has(fws, "dotnet", "aspnet")) backend = "csharp";
   else if (has(langs, "python") || has(fws, "django", "fastapi", "flask")) backend = "python";
-  else if (has(langs, "java", "kotlin") || has(fws, "spring")) backend = "java";
+  else if (langs.some((l) => l === "java" || l === "kotlin") || has(fws, "spring")) backend = "java";
   else if (has(langs, "go") || has(fws, "gin", "echo", "fiber")) backend = "go";
   else if (has(langs, "php") || has(fws, "laravel", "symfony")) backend = "php";
   else if (has(langs, "javascript") && !has(langs, "typescript")) backend = "node-js";

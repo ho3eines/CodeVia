@@ -495,14 +495,14 @@
     // background and the pill shows the state. Never throws into route().
     socket.on("connect_error", () => setLivePill(false));
     socket.on("run.updated", (ev) => {
-      if (ev.runId && location.hash.startsWith("#/runs")) refreshCurrent();
+      if (ev.runId && (location.hash.startsWith("#/runs") || /^#\/projects\/[^/]+\/(runs|tests)$/.test(location.hash))) refreshCurrent();
       if (ev.data && ev.data.status === "succeeded") toast("Run completed", ev.runId, "ok");
     });
     socket.on("step.updated", (ev) => {
       if (ev.runId && location.hash.includes("/console")) refreshCurrent();
     });
     socket.on("task.updated", (ev) => {
-      if (ev.taskId && location.hash.startsWith("#/tasks")) refreshCurrent();
+      if (ev.taskId && (location.hash.startsWith("#/tasks") || /^#\/projects\/[^/]+\/tasks$/.test(location.hash))) refreshCurrent();
     });
     socket.on("notification", (ev) => {
       const kind = ev && ev.data && ev.data.kind;
@@ -510,6 +510,12 @@
       if (kind && kind.startsWith("approval.") && (location.hash.startsWith("#/approvals") || location.hash.startsWith("#/dashboard"))) refreshCurrent();
       refreshBell();
     });
+  }
+
+  function verificationBadge(value) {
+    const states = { passed: ["ok", "CI passed"], failed: ["err", "CI failed"], unverified: ["warn", "Not verified"], simulated: ["warn", "Simulation · tests not executed"] };
+    const state = states[value];
+    return state ? `<span class="badge badge-${state[0]}">${state[1]}</span>` : "";
   }
 
   /* ---------- router ---------- */
@@ -1397,7 +1403,7 @@
       </div>
       <div class="grid-2 mt">
         <div class="card card-body"><div class="card-title">Test status <a href="#/projects/${esc(p.id)}/tests" class="sub">qa runs</a></div>
-          ${qaRuns.length ? `<div class="meter-row"><span class="lbl">QA runs</span><strong>${qaRuns.length}</strong></div><div class="meter-row"><span class="lbl">Passed</span><strong style="color:var(--ok)">${qaRuns.filter((r)=>r.status==="succeeded").length}</strong></div><div class="meter-row"><span class="lbl">Failed</span><strong style="color:var(--err)">${qaRuns.filter((r)=>r.status==="failed").length}</strong></div><div class="meter-row"><span class="lbl">Last run</span><span>${badge(qaRuns[0].status)} <a class="btn btn-ghost" href="#/runs/${qaRuns[0].id}/console">Console</a></span></div>` : emptyState("🧪", "No QA runs yet", "Run the QA agent or a workflow to test this project.")}
+          ${qaRuns.length ? `<div class="meter-row"><span class="lbl">QA runs</span><strong>${qaRuns.length}</strong></div><div class="meter-row"><span class="lbl">Passed</span><strong style="color:var(--ok)">${qaRuns.filter((r)=>r.verification==="passed").length}</strong></div><div class="meter-row"><span class="lbl">Failed</span><strong style="color:var(--err)">${qaRuns.filter((r)=>r.status==="failed").length}</strong></div><div class="meter-row"><span class="lbl">Last run</span><span>${badge(qaRuns[0].status)} <a class="btn btn-ghost" href="#/runs/${qaRuns[0].id}/console">Console</a></span></div>` : emptyState("🧪", "No QA runs yet", "Run the QA agent or a workflow to test this project.")}
         </div>
         <div class="card card-body"><div class="card-title">Recent errors <a href="#/projects/${esc(p.id)}/runs" class="sub">all runs</a></div>
           ${failedRuns.length ? failedRuns.map((r) => `<div class="list-row"><span>🔴</span><div><strong>${esc(r.agentType)}</strong><div class="sub mono">${esc((r.error || (r.steps||[]).find((s)=>s.status==="failed")?.detail || "run failed").slice(0,120))}</div></div><span class="spacer"></span><a class="btn btn-ghost" href="#/runs/${r.id}/console">Inspect</a><button class="btn btn-ghost" onclick="projectRunTask(${JSON.stringify(r.taskId)})">Retry</button></div>`).join("") : emptyState("✅", "No errors", "Failed runs will show up here with retry actions.")}
@@ -1414,7 +1420,7 @@
       <div class="card card-body mt">
         <div class="card-title">Recent Runs <a href="#/projects/${esc(p.id)}/runs" class="sub">view all</a></div>
         ${runs.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th><th></th></tr></thead><tbody>
-          ${runs.slice(0,10).map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("")}
+          ${runs.slice(0,10).map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)} ${verificationBadge(r.verification)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("")}
         </tbody></table></div>` : emptyState("▶️", "No runs yet", "Ask the AI or run an agent to see executions here.")}
       </div>`;
   });
@@ -1449,7 +1455,7 @@
     if (section === "agents") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.filter((a)=>a.enabled).length} enabled · ${data.length} total</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectCreateAgent(${JSON.stringify(p.id)})">＋ New Agent</button></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Model</th><th>Skills</th><th>Status</th><th></th></tr></thead><tbody>${data.map((a) => `<tr><td><a href="#/agents/${esc(a.id)}"><strong>${esc(a.name)}</strong></a><div class="sub">${esc(a.role)}</div></td><td class="mono">${esc(a.type)}</td><td class="mono">${esc(a.models?.primary || "—")}</td><td>${(a.skills || []).slice(0,4).map((s)=>`<span class="badge badge-muted">${esc(s)}</span>`).join(" ")}</td><td>${a.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</td><td style="white-space:nowrap"><button class="btn btn-ghost" onclick="projectToggleAgent(${JSON.stringify(p.id)}, ${JSON.stringify(a.id)}, ${JSON.stringify(!a.enabled)})">${a.enabled ? "Disable" : "Enable"}</button><button class="btn btn-ghost" onclick="projectRunAgentType(${JSON.stringify(p.id)}, ${JSON.stringify(a.type)})">Run</button><button class="btn btn-ghost" title="Delete agent" onclick="projectDeleteAgent(${JSON.stringify(p.id)}, ${JSON.stringify(a.id)})">🗑</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🤖", "No agents", "Run Detect & Agent.md to generate agents."));
     else if (section === "repositories") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Branch</th><th>Role</th><th>Config</th><th></th></tr></thead><tbody>${data.map((r) => `<tr><td class="mono">${r.htmlUrl ? `<a href="${esc(r.htmlUrl)}" target="_blank" rel="noopener">${esc(r.repo)}</a>` : esc(r.repo)}</td><td class="mono">${esc(r.branch)}</td><td>${esc(r.role)}</td><td>${r.isConfigRepo ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-muted">no</span>'}</td><td><button class="btn btn-ghost" onclick="projectEditRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">Edit</button>${data.length > 1 ? `<button class="btn btn-ghost" onclick="projectUnlinkRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">Unlink</button>` : ""}</td></tr>`).join("")}</tbody></table></div><div class="flex mt"><button class="btn btn-primary" onclick="projectAddRepo(${JSON.stringify(p.id)})">＋ Link repository</button></div>` : emptyState("🐙", "No repositories", "Link a repository to use GitHub as the source of truth.");
     else if (section === "tasks") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.filter((t)=>t.status==="running"||t.status==="queued").length} active · ${data.length} total</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectTask(${JSON.stringify(p.id)})">＋ New Task</button></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Task</th><th>Agent</th><th>Priority</th><th>Status</th><th>Correlation</th><th>Updated</th><th></th></tr></thead><tbody>${orderTasks(data).map((t) => `<tr><td>${t.parentTaskId ? '<span class="badge badge-muted">↳ sub</span> ' : ""}${t.input?.executionMode === "autonomous" ? '<span class="badge badge-ok">autonomous</span> ' : ""}<strong>${esc(t.title)}</strong><div class="sub">${esc((t.description || "").slice(0, 100))}</div></td><td class="mono">${esc(t.agentType || (t.workflowId ? "workflow" : "auto"))}</td><td>${t.priority ? `<span class="badge ${t.priority === "critical" ? "badge-err" : t.priority === "high" ? "badge-warn" : "badge-muted"}">${esc(t.priority)}</span>` : "—"}</td><td>${badge(t.status)}</td><td class="mono">${esc((t.correlationId || "").slice(0,12))}</td><td>${timeAgo(t.updatedAt)}</td><td style="white-space:nowrap"><button class="btn btn-ghost" onclick="projectViewTask(${JSON.stringify(t.id)})">View</button><button class="btn btn-ghost" onclick="projectTaskEdit(${JSON.stringify(t.id)})">Edit</button><button class="btn btn-ghost" onclick="projectRunTask(${JSON.stringify(t.id)})">Run</button><button class="btn btn-ghost" onclick="projectCancelTask(${JSON.stringify(t.id)})">Cancel</button><button class="btn btn-ghost" title="Delete task" onclick="projectTaskDelete(${JSON.stringify(t.id)})">🗑</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🧩", "No tasks", "Create a task or ask AI to queue work."));
-    else if (section === "runs" || section === "tests") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Model</th><th>Tokens</th><th>Cost</th><th>When</th><th></th></tr></thead><tbody>${data.map((r) => `<tr><td class="mono">${esc(r.id.slice(0,8))}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td class="mono">${esc(r.modelId || "—")}</td><td>${esc(r.totalTokens)}</td><td>${money(r.costUsd)}</td><td>${timeAgo(r.createdAt)}</td><td style="white-space:nowrap"><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a><button class="btn btn-ghost" title="Queue the parent task again" onclick="projectRunTask(${JSON.stringify(r.taskId)})">↻ Re-run</button>${r.status === "failed" || r.error ? `<button class="btn btn-ghost" title="Ask the debugging agent to investigate" onclick="projectDebugRun(${JSON.stringify(r.id)})">🐞 Debug</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️", section === "tests" ? "No QA runs" : "No runs", "Start an agent or workflow to create executions.");
+    else if (section === "runs" || section === "tests") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Model</th><th>Tokens</th><th>Cost</th><th>When</th><th></th></tr></thead><tbody>${data.map((r) => `<tr><td class="mono">${esc(r.id.slice(0,8))}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)} ${verificationBadge(r.verification)}</td><td class="mono">${esc(r.modelId || "—")}</td><td>${esc(r.totalTokens)}</td><td>${money(r.costUsd)}</td><td>${timeAgo(r.createdAt)}</td><td style="white-space:nowrap"><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a><button class="btn btn-ghost" title="Queue the parent task again" onclick="projectRunTask(${JSON.stringify(r.taskId)})">↻ Re-run</button>${r.status === "failed" || r.error ? `<button class="btn btn-ghost" title="Ask the debugging agent to investigate" onclick="projectDebugRun(${JSON.stringify(r.id)})">🐞 Debug</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️", section === "tests" ? "No QA runs" : "No runs", "Start an agent or workflow to create executions.");
     else if (section === "workflows") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.filter((w)=>w.enabled).length} enabled · ${data.length} total</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectWorkflowNew(${JSON.stringify(p.id)})">＋ New Workflow</button></div>` + (data.length ? data.map((w) => `<div class="list-row"><span>🔀</span><div><strong><a href="#/workflows/${esc(w.id)}">${esc(w.name)}</a></strong><div class="mono" style="color:var(--text-muted)">${esc(w.slug)} · ${w.nodes?.length || 0} nodes · v${w.version}</div></div><span class="spacer"></span>${w.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}<button class="btn btn-ghost" onclick="projectRunWorkflowId(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)})">Run</button><button class="btn btn-ghost" onclick="projectWorkflowToggle(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)}, ${JSON.stringify(!w.enabled)})">${w.enabled ? "Disable" : "Enable"}</button><button class="btn btn-ghost" title="Delete workflow" onclick="projectWorkflowDelete(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)})">🗑</button></div>`).join("") : emptyState("🔀", "No workflows", "Re-onboard the project to generate a default workflow."));
     else if (section === "skills") {
       const attached = new Set(data);
@@ -1504,7 +1510,7 @@
     };
   };
   window.projectAsk = (id) => {
-    openModal("Project Assistant — طبق پرامپ پروژه", `<div class="field"><label>درخواست</label><textarea class="textarea" id="ask-prompt" dir="auto" placeholder="مثلاً: پروژه را بررسی کن، بعد از آخرین Commit تست کامل Login را اجرا کن؛ اگر Backend بود درست کن و در نهایت PR بساز."></textarea><div class="field-hint">در حالت Autonomous، سیستم خودش Workflow/Agent مناسب را انتخاب می‌کند، Context پروژه و قوانین GitHub را inject می‌کند و عملیات حساس را به Approval می‌فرستد.</div></div><div class="grid-2"><div class="field"><label>Execution mode</label><select class="select" id="ask-mode"><option value="autonomous" selected>Autonomous task loop (research → build → test → fix)</option><option value="workflow">Autonomous workflow loop</option><option value="agent">Smart single-agent routing</option><option value="simulation">Simulation / dry-run only</option></select></div><div class="field"><label>Agent hint</label><select class="select" id="ask-agent"><option value="">Auto-detect</option><option value="backend-developer">Backend</option><option value="frontend-developer">Frontend</option><option value="uiux">UI/UX</option><option value="qa-test">QA/Test</option><option value="debugging">Debugging</option><option value="database">Database</option><option value="security">Security</option><option value="devops">DevOps</option><option value="system-architect">Architect</option><option value="research">Research</option><option value="code-reviewer">Code Reviewer</option><option value="documentation">Documentation</option></select></div></div><div class="flex"><button class="btn btn-primary" id="ask-go">Start</button><button class="btn" onclick="closeModal()">Cancel</button></div><div id="ask-result" class="mt"></div>`);
+    openModal("Project Assistant — طبق پرامپ پروژه", `<div class="field"><label>درخواست</label><textarea class="textarea" id="ask-prompt" dir="auto" placeholder="مثلاً: پروژه را بررسی کن، بعد از آخرین Commit تست کامل Login را اجرا کن؛ اگر Backend بود درست کن و در نهایت PR بساز."></textarea><div class="field-hint">در حالت Autonomous، سیستم خودش Workflow/Agent مناسب را انتخاب می‌کند، Context پروژه و قوانین GitHub را اعمال می‌کند و عملیات حساس را به Approval می‌فرستد. بک‌اند و فرانت‌اند روی شاخهٔ مشترک تسک کار می‌کنند؛ تست واقعی از GitHub CI تأیید می‌شود. Mock فقط شبیه‌سازی است.</div></div><div class="grid-2"><div class="field"><label>Execution mode</label><select class="select" id="ask-mode"><option value="autonomous" selected>Autonomous task loop (research → build → test → fix)</option><option value="workflow">Autonomous workflow loop</option><option value="agent">Smart single-agent routing</option><option value="simulation">Simulation / dry-run only</option></select></div><div class="field"><label>Agent hint</label><select class="select" id="ask-agent"><option value="">Auto-detect</option><option value="backend-developer">Backend</option><option value="frontend-developer">Frontend</option><option value="uiux">UI/UX</option><option value="qa-test">QA/Test</option><option value="debugging">Debugging</option><option value="database">Database</option><option value="security">Security</option><option value="devops">DevOps</option><option value="system-architect">Architect</option><option value="research">Research</option><option value="code-reviewer">Code Reviewer</option><option value="documentation">Documentation</option></select></div></div><div class="flex"><button class="btn btn-primary" id="ask-go">Start</button><button class="btn" onclick="closeModal()">Cancel</button></div><div id="ask-result" class="mt"></div>`);
     const inp = $("#ask-prompt");
     inp.addEventListener("input", () => applyTextDirection(inp, inp.value));
     $("#ask-go").onclick = async () => {
@@ -1535,7 +1541,7 @@
       if (!agentType) { toast("No agent", "Enable an agent for this project first", "err"); return; }
       try {
         const title = $("#pa-title").value.trim() || "Analyze project";
-        const r = await api(`/projects/${id}/ask`, { method: "POST", body: { title, description: $("#pa-desc").value.trim() || title, agentType } });
+        const r = await api(`/projects/${id}/ask`, { method: "POST", body: { title, description: $("#pa-desc").value.trim() || title, agentType, executionMode: "agent" } });
         closeModal(); toast("Agent run queued", `${agentType} · task ${r.task.id.slice(0, 8)}`, "ok"); refreshCurrent();
       } catch (e) { toast("Error", e.message, "err"); }
     };
@@ -1633,7 +1639,7 @@
     $("#prat-go").onclick = async () => {
       const title = $("#prat-title").value.trim() || `${agentType} task`;
       try {
-        const r = await api(`/projects/${id}/ask`, { method: "POST", body: { title, description: $("#prat-desc").value.trim() || title, agentType } });
+        const r = await api(`/projects/${id}/ask`, { method: "POST", body: { title, description: $("#prat-desc").value.trim() || title, agentType, executionMode: "agent" } });
         closeModal(); toast("Agent queued", `${agentType} · task ${r.task.id.slice(0, 8)}`, "ok"); refreshCurrent();
       } catch (e) { toast("Error", e.message, "err"); }
     };
@@ -1651,7 +1657,7 @@
     } catch (e) { toast("Error", e.message, "err"); }
   };
   window.projectRunTask = async (taskId) => {
-    try { const r = await api(`/tasks/${taskId}/run`, { method: "POST", body: {} }); toast("Task queued", r.jobId || taskId, "ok"); refreshCurrent(); }
+    try { const r = await api(`/tasks/${taskId}/run`, { method: "POST", body: {} }); toast(r.taskId && r.taskId !== taskId ? "Owning task queued — preserving the shared workflow" : "Task queued", r.taskId || taskId, "ok"); refreshCurrent(); }
     catch (e) { toast("Error", e.message, "err"); }
   };
   window.projectCancelTask = async (taskId) => {
@@ -2040,7 +2046,7 @@
         <div class="card stat"><div class="stat-label">Tokens</div><div class="stat-value">${Number(st.tokens || 0).toLocaleString()}</div></div>
         <div class="card stat"><div class="stat-label">Est. cost</div><div class="stat-value">${money(costTotal || st.costUsd)}</div><div class="stat-sub">${agentCosts.length} model calls</div></div>
       </div>
-      ${agentRuns.length ? `<div class="table-wrap mt"><table><thead><tr><th>Run</th><th>Status</th><th>Tokens</th><th>Cost</th><th>When</th><th></th></tr></thead><tbody>${agentRuns.slice(0, 8).map((r) => `<tr><td class="mono">${esc(r.id.slice(0, 8))}</td><td>${badge(r.status)}</td><td>${esc(r.totalTokens)}</td><td>${money(r.costUsd)}</td><td>${timeAgo(r.createdAt)}</td><td><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a></td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️", "No runs yet", "Run this agent from its project page.")}`;
+      ${agentRuns.length ? `<div class="table-wrap mt"><table><thead><tr><th>Run</th><th>Status</th><th>Tokens</th><th>Cost</th><th>When</th><th></th></tr></thead><tbody>${agentRuns.slice(0, 8).map((r) => `<tr><td class="mono">${esc(r.id.slice(0, 8))}</td><td>${badge(r.status)} ${verificationBadge(r.verification)}</td><td>${esc(r.totalTokens)}</td><td>${money(r.costUsd)}</td><td>${timeAgo(r.createdAt)}</td><td><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a></td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️", "No runs yet", "Run this agent from its project page.")}`;
     $("#content").appendChild(statsPanel);
     // Agent Builder: models / skills / tools / permissions / limits.
     const [allModels, allSkills, allTools] = await Promise.all([
@@ -3562,10 +3568,10 @@
 
   /* WORKFLOW DETAIL / BUILDER */
   const WF_NODE_TYPES = ["agent", "tool", "condition", "approval", "parallel", "trigger", "webhook", "telegram"];
-  const WF_AGENT_TYPES = ["orchestrator","business-analyst","research","system-architect","backend-developer","frontend-developer","uiux","database","devops","qa","security","code-review","documentation","debugging","refactoring","performance","release"];
+  const WF_AGENT_TYPES = ["orchestrator","project-manager","business-analyst","research","system-architect","backend-developer","frontend-developer","uiux","database","devops","qa-test","security","code-reviewer","documentation","debugging","refactoring","performance","release"];
   let wfDraft = null;
   function wfNodeConfigHelp(type) {
-    return { agent: "agentType (e.g. backend-developer), prompt", tool: "tool (name), input {…}", condition: "expression (JS-like, e.g. outputs.qa.ok === true)", approval: "message", parallel: "branches [node ids]", trigger: "event", webhook: "url", telegram: "chatId, text" }[type] || "";
+    return { agent: "agentType, input {…}; upstream deliverables are included", tool: "tool (name), input {…}; use {{ outputs.node.data.value }} references", condition: 'data-only expression, e.g. outputs.qa.status === "succeeded" (no eval)', approval: "message", parallel: "fan-out via outgoing edges; joins wait for all selected predecessors", trigger: "event", webhook: "url", telegram: "chatId, text" }[type] || "";
   }
   function wfRenderGraph(w) {
     const nodes = w.nodes || [], edges = w.edges || [];
@@ -3705,20 +3711,21 @@
     bindSearchPanel("run-search", list, runRows, "#run-tbody", "run", { emptyHtml: () => `<tr><td colspan="7">${emptyState("🔎", "No matching runs", "Try searching by run id, agent, model, status or correlation id.")}</td></tr>` });
   });
   function runRows(list) {
-    return list.map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("");
+    return list.map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)} ${verificationBadge(r.verification)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("");
   }
   on("/runs/:id/console", async (rest) => {
     const id = rest[0];
     const c = await api(`/runs/${id}/console`);
     $("#content").innerHTML = `
       <div class="overview"><div><h1>Run Console</h1><p class="mono">${esc(c.runId)}</p></div>
-        <div class="action-row">${badge(c.status)}<span class="pill">Model: ${esc(c.modelId || "—")}</span><a class="btn" href="#/projects/${esc(c.projectId)}/runs">← Project runs</a><button class="btn" onclick="projectRunTask(${JSON.stringify(c.taskId)})">↻ Retry task</button>${c.status === "failed" || c.error ? `<button class="btn btn-primary" onclick="projectDebugRun(${JSON.stringify(c.runId)})">🐞 Send to debugging agent</button>` : ""}</div></div>
+        <div class="action-row">${badge(c.status)} ${verificationBadge(c.verification)}<span class="pill">Model: ${esc(c.modelId || "—")}</span><a class="btn" href="#/projects/${esc(c.projectId)}/runs">← Project runs</a><button class="btn" onclick="projectRunTask(${JSON.stringify(c.taskId)})">↻ Retry task</button>${c.status === "failed" || c.error ? `<button class="btn btn-primary" onclick="projectDebugRun(${JSON.stringify(c.runId)})">🐞 Send to debugging agent</button>` : ""}</div></div>
       <div class="stat-grid">
         <div class="card stat"><div class="stat-label">Agent</div><div class="stat-value" style="font-size:16px">${esc(c.agent)}</div></div>
         <div class="card stat"><div class="stat-label">Tokens</div><div class="stat-value">${c.tokens.total}</div><div class="stat-sub">in ${c.tokens.input} · out ${c.tokens.output}</div></div>
         <div class="card stat"><div class="stat-label">Cost</div><div class="stat-value">${money(c.costUsd)}</div></div>
         <div class="card stat"><div class="stat-label">Duration</div><div class="stat-value">${c.durationMs}ms</div></div>
       </div>
+      ${c.summary ? `<div class="card card-body"><div class="card-title">Deliverable / evidence</div><pre style="white-space:pre-wrap">${esc(c.summary)}</pre></div>` : ""}
       <div class="card card-body"><div class="card-title">Execution Steps</div>
         <div class="steps">${(c.steps||[]).map((s) => `<div class="step ${s.status}">
           <div class="step-ico">${s.status==="succeeded"?"✓":s.status==="failed"?"✗":s.status==="running"?"▶":s.status==="skipped"?"⏭":"○"}</div>

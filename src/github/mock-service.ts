@@ -53,6 +53,13 @@ export class MockGitHubService implements IGitHubService {
   readonly kind = "mock" as const;
   private repos = new Map<string, MockRepo>();
   private counter = 1;
+  private snapshots = new WeakMap<MockRepo, Map<string, Map<string, GithubFile>>>();
+
+  private remember(r: MockRepo, sha: string, files: Map<string, GithubFile>): void {
+    let snapshots = this.snapshots.get(r);
+    if (!snapshots) { snapshots = new Map(); this.snapshots.set(r, snapshots); }
+    snapshots.set(sha, new Map(files));
+  }
   private readonly persistEnabled: boolean;
 
   constructor(opts: { seedDemoRepos?: boolean; persist?: boolean } = {}) {
@@ -177,6 +184,12 @@ export class MockGitHubService implements IGitHubService {
    */
   private tree(r: MockRepo, branch?: string): Map<string, GithubFile> {
     const name = branch || r.defaultBranch;
+    if (!r.branches.has(name)) {
+      const snapshot = this.snapshots.get(r)?.get(name);
+      if (snapshot) return snapshot;
+      const refBranch = [...r.branches.entries()].find(([, sha]) => sha === name)?.[0];
+      if (refBranch) return new Map(this.tree(r, refBranch));
+    }
     let t = r.trees.get(name);
     if (!t) {
       const base = r.trees.get(r.defaultBranch) ?? new Map<string, GithubFile>();
@@ -294,32 +307,39 @@ export class MockGitHubService implements IGitHubService {
   async createBranch(ref: GithubRepoRef, name: string, baseSha: string): Promise<GithubBranch> {
     const r = this.repo(ref);
     if (!r.branches.has(name)) {
+      const source = new Map(this.tree(r, baseSha));
       r.branches.set(name, baseSha);
       // The new branch starts as a copy of whichever branch the base sha
       // belongs to (default branch when the sha is unknown).
       const baseBranch = [...r.branches.entries()].find(([, sha]) => sha === baseSha)?.[0] ?? r.defaultBranch;
-      r.trees.set(name, new Map(this.tree(r, baseBranch)));
+      r.trees.set(name, source);
+      this.remember(r, baseSha, source);
     }
     this.persist();
     return { name, sha: baseSha };
   }
 
-  async commit(ref: GithubRepoRef, branch: string, message: string, files: GithubFile[]): Promise<GithubCommit> {
+  async commit(ref: GithubRepoRef, branch: string, message: string, files: GithubFile[], parentSha?: string): Promise<GithubCommit> {
     const r = this.repo(ref);
+    if (parentSha && r.branches.get(branch) !== parentSha) throw new Error("Repository changed after inspection");
     const tree = this.tree(r, branch);
+    const previousSha = r.branches.get(branch);
+    if (previousSha) this.remember(r, previousSha, tree);
     for (const f of files) tree.set(f.path, f);
-    const sha = this.sha(message + Date.now());
+    const sha = this.sha(message + Date.now() + this.counter++);
     r.branches.set(branch, sha);
+    this.remember(r, sha, tree);
     const commit: GithubCommit = { sha, message, author: "codevia-agent", date: new Date().toISOString() };
     r.commits.unshift(commit);
     this.persist();
     return commit;
   }
 
-  async createPullRequest(ref: GithubRepoRef, title: string, body: string, head: string, base: string): Promise<GithubPullRequest> {
+  async createPullRequest(ref: GithubRepoRef, title: string, body: string, head: string, base: string, opts: { draft?: boolean } = {}): Promise<GithubPullRequest> {
     const r = this.repo(ref);
     const pr: GithubPullRequest = {
       number: r.pulls.length + 1,
+      draft: opts.draft,
       title,
       state: "open",
       head,

@@ -11,6 +11,10 @@ export interface ToolContext {
   correlationId: string;
   /** Runtime workspace root (local execution sandbox). */
   workspaceRoot?: string;
+  /** Configured base branch; source tools must never write to it directly. */
+  baseBranch?: string;
+  /** Cooperative cancellation and budget check, also used after approval waits. */
+  checkActive?: () => void;
   /** Requests a human approval for a dangerous operation. */
   requestApproval?: (action: string, detail: Record<string, unknown>) => Promise<boolean>;
   /** Set by the caller when approval for this invocation was already granted (skip the dangerous-tool gate). */

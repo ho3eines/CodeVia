@@ -1,3 +1,4 @@
+import { decryptSecret } from "../auth/encrypted-secrets.js";
 import type { ChatRequest, ChatResponse, IModelProvider, ProviderModelInfo } from "./types.js";
 import type { ModelProvider } from "../domain/entities.js";
 import { buildGeminiChatEndpoint } from "./provider-urls.js";
@@ -15,7 +16,7 @@ export class GeminiProvider implements IModelProvider {
   }
 
   resolveApiKey(): string | undefined {
-    return this.config.secretRef ? process.env[this.config.secretRef] : undefined;
+    return decryptSecret(this.config.secretValueEnc, "provider-secret") ?? (this.config.secretRef ? process.env[this.config.secretRef] : undefined);
   }
 
   async health(): Promise<boolean> {
@@ -46,9 +47,10 @@ export class GeminiProvider implements IModelProvider {
       body: JSON.stringify({
         systemInstruction: system ? { parts: [{ text: system }] } : undefined,
         contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: req.omitTemperature
-          ? {}
-          : { temperature: req.temperature ?? this.config.defaultTemperature },
+        generationConfig: {
+          ...(req.omitTemperature ? {} : { temperature: req.temperature ?? this.config.defaultTemperature }),
+          maxOutputTokens: req.maxTokens ?? this.config.maxTokensDefault,
+        },
       }),
       signal: AbortSignal.timeout(this.config.timeoutMs),
     });
@@ -67,7 +69,7 @@ export class GeminiProvider implements IModelProvider {
     return {
       content,
       json: tryParse(content),
-      finishReason: "stop",
+      finishReason: json.candidates?.[0]?.finishReason ?? "stop",
       usage,
       modelId: req.modelId,
       providerId: this.id,

@@ -9,6 +9,7 @@ import type { ID, ISODate } from "../types.js";
 import { eventBus, generateCorrelationId } from "../events/bus.js";
 import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
+import { assertTaskActive } from "../agents/execution.js";
 
 /* ------------------------------------------------------------------ *
  * Human-in-the-loop approvals
@@ -143,6 +144,9 @@ export class ApprovalService {
       expiresAt: policy.autoApprove ? undefined : new Date(now.getTime() + policy.timeoutMs).toISOString(),
     };
 
+    const watchedTask = req.taskId ? this.deps.taskRepo?.findById(req.taskId)?.data : undefined;
+    if (watchedTask && this.deps.taskRepo) assertTaskActive(this.deps.taskRepo, watchedTask);
+
     if (policy.autoApprove) {
       req.status = "approved";
       req.decidedAt = req.requestedAt;
@@ -177,17 +181,7 @@ export class ApprovalService {
       metadata: { approvalId: req.id, action, taskId: req.taskId, runId: req.runId },
     });
     this.setTaskStatus(req.taskId, "waiting_for_approval");
-    live.emit({ type: "notification", data: { kind: "approval.required", approvalId: req.id, action, projectId: req.projectId } });
-    void eventBus.publish("approval.required", { approvalId: req.id, action, projectId: req.projectId, taskId: req.taskId }, { correlationId: req.correlationId, projectId: req.projectId });
-    if (this.deps.notify) {
-      try {
-        await this.deps.notify(req);
-      } catch (err) {
-        logger.warn("approval notify hook failed", { err: String(err), approvalId: req.id });
-      }
-    }
-
-    return new Promise<boolean>((resolve) => {
+    const pending = new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.waiters.delete(req.id);
         const current = this.get(req.id);
@@ -200,6 +194,58 @@ export class ApprovalService {
       timer.unref?.();
       this.waiters.set(req.id, { resolve, timer });
     });
+    // Close the cancellation race between checking the task and publishing the
+    // pending approval (including cancellation by a separate API process).
+    if (watchedTask && this.deps.taskRepo) {
+      try { assertTaskActive(this.deps.taskRepo, watchedTask); }
+      catch {
+        this.decide(req.id, "reject", { source: "system", user: "task-cancellation", note: "Task is no longer active" });
+        return pending;
+      }
+    }
+    live.emit({ type: "notification", data: { kind: "approval.required", approvalId: req.id, action, projectId: req.projectId } });
+    void eventBus.publish("approval.required", { approvalId: req.id, action, projectId: req.projectId, taskId: req.taskId }, { correlationId: req.correlationId, projectId: req.projectId });
+    // Register the waiter before exposing the request. Notification delivery
+    // must not delay an immediate decision or a task cancellation.
+    if (this.deps.notify) void Promise.resolve().then(() => this.deps.notify!(req)).catch((err) => {
+      logger.warn("approval notify hook failed", { err: String(err), approvalId: req.id });
+    });
+
+    return pending;
+  }
+
+  /** Unblock approvals owned by a cancelled task, including its descendants. */
+  cancelForTask(taskId: string): number {
+    const task = this.deps.taskRepo?.findById(taskId)?.data;
+    const children = new Map<string, string[]>();
+    if (task && this.deps.taskRepo) {
+      for (const { data: child } of this.deps.taskRepo.findMany({ projectId: task.projectId })) {
+        if (child.parentTaskId) children.set(child.parentTaskId, [...(children.get(child.parentTaskId) ?? []), child.id]);
+      }
+    }
+    const ids = new Set<string>();
+    const pending = [taskId];
+    while (pending.length) {
+      const id = pending.pop()!;
+      if (ids.has(id)) continue;
+      ids.add(id);
+      pending.push(...(children.get(id) ?? []));
+    }
+    for (const id of ids) {
+      const current = this.deps.taskRepo?.findById(id)?.data;
+      if (current && ["created", "queued", "running", "waiting_for_approval"].includes(current.status)) {
+        this.deps.taskRepo!.upsert({ ...current, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: current.projectId, parentId: current.parentTaskId });
+        live.emit({ type: "task.updated", taskId: id, data: { status: "cancelled" } });
+      }
+    }
+    let count = 0;
+    for (const request of this.list({ projectId: task?.projectId, status: "pending" })) {
+      if (request.taskId && ids.has(request.taskId)) {
+        this.decide(request.id, "reject", { source: "system", user: "task-cancellation", note: "Owning task was cancelled or deleted" });
+        count += 1;
+      }
+    }
+    return count;
   }
 
   /* ---------------- decide ---------------- */
@@ -267,6 +313,7 @@ export class ApprovalService {
     if (!rec) return;
     // Only flip a task that is actually in flight; never resurrect a finished one.
     if (status === "running" && rec.data.status !== "waiting_for_approval") return;
+    if (status === "waiting_for_approval" && ["succeeded", "failed", "cancelled"].includes(rec.data.status)) return;
     this.deps.taskRepo.upsert(
       { ...rec.data, status, approvalRequired: status === "waiting_for_approval" ? true : rec.data.approvalRequired, updatedAt: new Date().toISOString() },
       { projectId: rec.data.projectId, parentId: rec.data.parentTaskId },

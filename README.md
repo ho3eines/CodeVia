@@ -46,7 +46,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (374 tests)
+npm test            # unit + integration + end-to-end (462 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run typecheck   # strict TypeScript
 npm run build       # compile + copy static UI into dist/
@@ -54,6 +54,7 @@ npm start           # run the production build
 ```
 
 > Testing guide (step-by-step, incl. manual UI scenarios): [`TESTING.md`](TESTING.md).
+> Coding-agent execution, CI setup, draft PRs and simulation semantics: [`docs/AGENT_EXECUTION.md`](docs/AGENT_EXECUTION.md).
 
 ---
 

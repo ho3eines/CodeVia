@@ -41,7 +41,7 @@ export class ContextEngine {
   async build(opts: BuildContextOptions): Promise<BuildContextResult> {
     const { project, agent, task } = opts;
     const github = opts.github ?? resolveGitHubService();
-    const memory = opts.memory ?? memoryResolver.resolve({ repo: this.toRepoRef(project), force: "local" });
+    const memory = opts.memory ?? memoryResolver.resolve({ repo: this.toRepoRef(project), branch: project.branch, localRoot: `./data/memory/${project.id}`, github });
     const sources: ContextSource[] = [];
 
     // 1. Agent system + role
@@ -94,6 +94,7 @@ export class ContextEngine {
   private buildAgentSystem(agent: Agent): string {
     return [
       agent.systemPrompt,
+      agent.projectPrompt,
       agent.role,
       `You are the ${agent.name} agent for project context.`,
       `Max iterations: ${agent.maxIterations}. Timeout: ${agent.timeoutMs}ms.`,

@@ -110,3 +110,30 @@ export function resolveGitHubForUser(opts: {
 }
 
 export type { IGitHubService, GithubRepoRef } from "./types.js";
+
+/** Resolve the connection saved on a project for background work, without borrowing another user's token. */
+export function resolveGitHubForProject(opts: {
+  project: import("../domain/entities.js").Project;
+  kv: KvStore;
+  fallback: IGitHubService;
+}): IGitHubService {
+  const connection = opts.project.githubConnection;
+  if (!connection) return opts.fallback; // legacy installations
+  if (connection.kind === "user-oauth") {
+    const userId = connection.userId ?? opts.project.ownerId;
+    if (!userId || !getUserGitHubToken(opts.kv, userId)) {
+      throw new Error(`GitHub connection for project ${opts.project.name} needs to be reconnected by its owner`);
+    }
+    return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "project owner's GitHub connection", fetchImpl: userGitHubFetch });
+  }
+  if (connection.kind === "server-token") {
+    if (opts.fallback.kind === "real") return opts.fallback;
+    if (isServerGitHubEnabled()) return new RealGitHubService();
+    throw new Error(`Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`);
+  }
+  if (opts.fallback.kind === "mock") return opts.fallback;
+  let mock = projectMocks.get(opts.fallback);
+  if (!mock) { mock = new MockGitHubService(); projectMocks.set(opts.fallback, mock); }
+  return mock;
+}
+const projectMocks = new WeakMap<IGitHubService, MockGitHubService>();

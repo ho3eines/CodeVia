@@ -1,22 +1,10 @@
 import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
+import { ModelRouter, toCandidate, type TaskCategory } from "../ai/model-router.js";
+import type { Agent, Project, Task } from "../domain/entities.js";
+import type { CostRepository } from "../observability/repos.js";
+import { BudgetExceededError, TaskCancelledError, type ExecutionBudget } from "./execution.js";
 import { logger } from "../logger.js";
-
-/**
- * Real-AI access for the autonomous task loop.
- *
- * The deterministic agent plans (`defaultPlanFor`) stay the safety baseline:
- * they run with zero model cost and can never emit an unexecutable step. The
- * orchestrator uses this module to *upgrade* two decisions to real AI when a
- * non-mock provider is configured and active:
- *
- *   1. task breakdown (research output → implementer subtasks), and
- *   2. file content generation (implementer subtask → code written to git).
- *
- * When no real provider is available (or any call fails), every helper
- * returns `undefined` and the caller falls back to the deterministic path.
- * Nothing here ever throws for missing configuration.
- */
 
 export interface RealChat {
   chat(system: string, user: string, maxTokens?: number): Promise<string>;
@@ -28,44 +16,117 @@ export interface ChatDeps {
   modelRepo: ModelRepository;
   providerRepo: ProviderRepository;
   providerRegistry: ProviderRegistry;
-}
-
-/** First active (model, provider) pair backed by a real (non-mock) provider. */
-export function realChatFor(deps: ChatDeps): RealChat | undefined {
-  try {
-    for (const model of deps.modelRepo.listActive()) {
-      const provider = deps.providerRepo.findById(model.providerId)?.data;
-      if (!provider || !provider.active || provider.type === "mock") continue;
-      const runtime = deps.providerRegistry.get(provider.id) ?? deps.providerRegistry.resolve(provider);
-      if (!runtime) continue;
-      return {
-        providerName: provider.name,
-        modelLabel: model.modelId,
-        chat: async (system: string, user: string, maxTokens = 2000): Promise<string> => {
-          const res = await runtime.chat({
-            modelId: model.modelId,
-            messages: [
-              { role: "system", content: system },
-              { role: "user", content: user },
-            ],
-            temperature: 0.2,
-            maxTokens,
-          });
-          return res.content ?? "";
-        },
-      };
-    }
-  } catch (err) {
-    logger.warn("real AI lookup failed, staying deterministic", { err: String(err) });
-  }
-  return undefined;
+  modelRouter: ModelRouter;
+  costRepo: CostRepository;
+  project: Project;
+  agent: Agent;
+  task: Task;
+  /** ContextEngine output: task, configured prompts, skills, rules and memory. */
+  context: string;
+  category: TaskCategory;
+  budget: ExecutionBudget;
+  taskBudget?: ExecutionBudget;
+  checkActive: () => void;
+  /** Analysis/demo runs may use Mock; code generation never silently falls back to it. */
+  allowMock?: boolean;
 }
 
 /**
- * Tolerant JSON extraction from model output: accepts raw JSON, fenced code
- * blocks, or prose with an embedded object/array. Returns undefined when
- * nothing parseable is found.
+ * A routed, attributed model session for ONE agent. Code generation uses the
+ * very same prompt/model/limits as that agent's run, rather than the first
+ * globally-active provider. A configured real provider failing is an error,
+ * not permission to commit a placeholder implementation.
  */
+export function realChatFor(deps: ChatDeps): RealChat | undefined {
+  const models = deps.modelRepo.listActive().filter((m) => {
+    const p = deps.providerRepo.findById(m.providerId)?.data;
+    return p?.active && (deps.allowMock || p.type !== "mock");
+  });
+
+  const hasReal = models.some((m) => deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
+  // An explicit mock-only installation remains offline. With real models
+  // enabled, a failed real call must not be hidden by a trailing mock result.
+  let available = models.filter((m) => !hasReal || deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
+  const assigned = new Set([deps.agent.models.primary, deps.agent.models.secondary, deps.agent.models.specialized[deps.category as keyof Agent["models"]["specialized"]], ...deps.agent.models.fallbacks].filter(Boolean));
+  // Once real models are explicitly assigned, do not send project code to
+  // unrelated global providers just because the chosen model is unavailable.
+  const explicitModels = [...assigned].map((id) => deps.modelRepo.findById(id!)?.data);
+  const explicitReal = explicitModels.some((m) => m && deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
+  const missingAssignment = explicitModels.some((m) => !m);
+  if (explicitReal || missingAssignment) {
+    available = available.filter((m) => assigned.has(m.id) && deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
+    if (!available.length) throw new Error(`Assigned models for ${deps.agent.name} are missing or disabled; refusing unrelated providers or simulation`);
+  }
+  if (!available.length) return undefined;
+  const initial = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category);
+  if (!initial.length) throw new Error(`No active ${deps.category} model is available for ${deps.agent.name}`);
+  const session: RealChat = {
+    providerName: deps.providerRepo.findById(initial[0].providerId)!.data.name,
+    modelLabel: initial[0].modelId,
+    chat: async (instruction, user, maxTokens = 4000) => {
+      const messages = [
+        { role: "system" as const, content: `${deps.agent.systemPrompt}\n\n${instruction}\n\nReturn only the requested deliverable, never private reasoning.` },
+        { role: "user" as const, content: `${deps.context}\n\n--- Current operation ---\n${user}` },
+      ];
+      const inputEstimate = Math.ceil(messages.reduce((n, m) => n + m.content.length, 0) / 4);
+      const candidates = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category, { maxTokens: inputEstimate + 1 });
+      let lastError: unknown;
+      for (const candidate of candidates) {
+        deps.checkActive();
+        deps.budget.check();
+        deps.taskBudget?.check();
+        const model = deps.modelRepo.findById(candidate.id)?.data;
+        const config = model && deps.providerRepo.findById(model.providerId)?.data;
+        if (!model?.active || !config?.active) continue;
+        const remaining = Math.min(deps.budget.remainingTokens(), deps.taskBudget?.remainingTokens() ?? Infinity);
+        if (inputEstimate >= remaining) throw new BudgetExceededError(`request context needs about ${inputEstimate} tokens; ${remaining} remain`);
+        const outputLimit = Math.floor(Math.min(maxTokens, model.maxTokens ?? maxTokens, remaining - inputEstimate, model.contextWindow - inputEstimate));
+        if (outputLimit < 1) continue;
+        deps.taskBudget?.beginCall();
+        deps.budget.beginCall();
+        const started = Date.now();
+        try {
+          const response = await deps.providerRegistry.resolve(config).chat({
+            modelId: model.modelId,
+            messages,
+            temperature: model.temperature ?? 0.2,
+            omitTemperature: model.omitTemperature === true,
+            maxTokens: outputLimit,
+          });
+          const registeredPrice = (response.usage.inputTokens * model.inputCostPer1k + response.usage.outputTokens * model.outputCostPer1k) / 1000;
+          const costUsd = registeredPrice > 0 ? registeredPrice : response.costUsd ?? 0;
+          deps.costRepo.create({
+            providerId: config.id, modelId: model.id, projectId: deps.project.id,
+            agentId: deps.agent.id, taskId: deps.task.id, ...response.usage,
+            estimatedCostUsd: costUsd, durationMs: Date.now() - started,
+          });
+          const usage = { ...response.usage, costUsd, modelId: model.id };
+          // Record both ledgers even when one limit is exceeded.
+          let budgetError: unknown;
+          try { deps.budget.add(usage); } catch (err) { budgetError = err; }
+          try { deps.taskBudget?.add(usage); } catch (err) { budgetError ??= err; }
+          if (budgetError) throw budgetError;
+          deps.checkActive();
+          if (["length", "max_tokens", "MAX_TOKENS"].includes(response.finishReason)) {
+            throw new Error(`Model ${model.displayName} truncated its response; refusing an incomplete deliverable`);
+          }
+          if (!response.content?.trim()) throw new Error(`Model ${model.displayName} returned no content`);
+          session.providerName = config.name;
+          session.modelLabel = model.modelId;
+          return response.content;
+        } catch (err) {
+          if (err instanceof BudgetExceededError || err instanceof TaskCancelledError) throw err;
+          lastError = err;
+          logger.warn("agent model failed; trying configured fallback", { modelId: model.id, taskId: deps.task.id, err: String(err) });
+        }
+      }
+      throw new Error(`All ${deps.category} models failed for ${deps.agent.name}: ${String(lastError ?? "no model fits the context window")}`);
+    },
+  };
+  return session;
+}
+
+/** JSON extraction for structured model deliverables (raw, fenced, or embedded). */
 export function extractJson(text: string): unknown {
   const src = String(text ?? "").trim();
   if (!src) return undefined;
@@ -73,28 +134,13 @@ export function extractJson(text: string): unknown {
   const fence = src.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) candidates.unshift(fence[1].trim());
   for (const c of candidates) {
-    try {
-      return JSON.parse(c);
-    } catch {
-      /* try embedded */
-    }
-    const startObj = c.indexOf("{");
-    const startArr = c.indexOf("[");
-    let start = -1;
-    let end = -1;
-    if (startObj !== -1 && (startArr === -1 || startObj < startArr)) {
-      start = startObj;
-      end = c.lastIndexOf("}");
-    } else if (startArr !== -1) {
-      start = startArr;
-      end = c.lastIndexOf("]");
-    }
-    if (start !== -1 && end !== -1 && end > start) {
-      try {
-        return JSON.parse(c.slice(start, end + 1));
-      } catch {
-        /* not parseable */
-      }
+    try { return JSON.parse(c); } catch { /* try embedded */ }
+    const object = c.indexOf("{");
+    const array = c.indexOf("[");
+    const start = object !== -1 && (array === -1 || object < array) ? object : array;
+    const end = start === object ? c.lastIndexOf("}") : c.lastIndexOf("]");
+    if (start !== -1 && end > start) {
+      try { return JSON.parse(c.slice(start, end + 1)); } catch { /* no valid JSON */ }
     }
   }
   return undefined;

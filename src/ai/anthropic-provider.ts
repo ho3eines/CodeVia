@@ -1,3 +1,4 @@
+import { decryptSecret } from "../auth/encrypted-secrets.js";
 import type { ChatRequest, ChatResponse, IModelProvider, ProviderModelInfo } from "./types.js";
 import type { ModelProvider } from "../domain/entities.js";
 import { buildAnthropicChatEndpoint } from "./provider-urls.js";
@@ -15,7 +16,7 @@ export class AnthropicProvider implements IModelProvider {
   }
 
   resolveApiKey(): string | undefined {
-    return this.config.secretRef ? process.env[this.config.secretRef] : undefined;
+    return decryptSecret(this.config.secretValueEnc, "provider-secret") ?? (this.config.secretRef ? process.env[this.config.secretRef] : undefined);
   }
 
   async health(): Promise<boolean> {

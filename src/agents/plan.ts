@@ -2,6 +2,8 @@ import type { Agent, AgentType, Task } from "../domain/entities.js";
 
 export interface PlanStep {
   label: string;
+  /** Observable planning result for a non-tool step; never a fabricated test result. */
+  detail?: string;
   tool?: string;
   input?: Record<string, unknown>;
   /** Dangerous step that requires human approval before running. */
@@ -43,11 +45,9 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
   const canWrite = can("write_file", "github.write", "repository.write");
   const canPR = can("create_pull_request", "github.write");
   const canRemember = can("save_memory", "memory.write");
-  // NOTE: `run_tests` / `run_build` shell out to real commands. There is no
-  // isolated per-project execution workspace yet, so deterministic plans keep
-  // "Run tests" / "Run build" as plain (attested) steps instead of executing
-  // the platform's own commands. Explicit workflow tool-nodes may still call
-  // them with a proper command/cwd.
+  // Built-in build/test tools read GitHub CI evidence for a commit. They do
+  // not execute arbitrary commands on the CodeVia host.
+  const ciInput = { ref: task.input?.ref ?? task.input?.branch };
   // Memory writes need deterministic input (key + content); the plan derives
   // both from the task so the step can never fail on missing input.
   const remember = (type: string): PlanStep => ({
@@ -97,7 +97,7 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
           label: "Implement the change",
           ...(canWrite ? { tool: "write_file" } : {}),
         },
-        { label: "Run build" },
+        { label: "Verify build (GitHub CI)", ...(can("run_build", "github.read") ? { tool: "run_build", input: ciInput } : {}) },
       ];
       break;
     case "debugging":
@@ -112,7 +112,7 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
     case "qa-test":
       core = [
         { label: "Detect affected files", ...(readTool ? { tool: readTool } : {}) },
-        { label: "Run test suite" },
+        { label: "Run test suite", ...(can("run_tests", "github.read") ? { tool: "run_tests", input: ciInput } : {}) },
         { label: "Classify failures" },
       ];
       break;
@@ -126,7 +126,7 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
       core = [{ label: "Review architecture" }, { label: "Propose design" }];
       break;
     case "devops":
-      core = [{ label: "Run build" }, { label: "Review deployment configuration" }];
+      core = [{ label: "Verify build (GitHub CI)", ...(can("run_build", "github.read") ? { tool: "run_build", input: ciInput } : {}) }, { label: "Review deployment configuration" }];
       break;
     case "release":
       core = [
@@ -145,8 +145,8 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
   // finishes with a summary, persisted to memory when the agent is allowed to.
   const endSteps: PlanStep[] = canPR
     ? [
-        { label: "Run tests" },
-        { label: "Code review" },
+        { label: "Verify tests (GitHub CI)", ...(can("run_tests", "github.read") ? { tool: "run_tests", input: ciInput } : {}) },
+        { label: "Prepare for human code review" },
         { label: "Create pull request", tool: "create_pull_request", requiresApproval: true },
       ]
     : canRemember

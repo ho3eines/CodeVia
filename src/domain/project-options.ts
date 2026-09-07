@@ -352,7 +352,8 @@ export function agentTypesForProject(c: ProjectCapabilities): AgentType[] {
   // A real software project always needs these regardless of the stack.
   for (const a of ["system-architect", "backend-developer", "security", "documentation", "refactoring", "release"] as AgentType[]) implied.add(a);
   if (c.databases.some((d) => d !== "none")) implied.add("database");
-  if (c.platforms.some((p) => p === "web" || p.startsWith("mobile") || p === "desktop")) {
+  const hasUiFramework = c.frameworks.some((f) => ["react", "nextjs", "vue", "nuxt", "angular", "svelte", "blazor", "mudblazor", "flutter", "html"].includes(f));
+  if (hasUiFramework || c.platforms.some((p) => p === "web" || p.startsWith("mobile") || p === "desktop")) {
     implied.add("frontend-developer");
     implied.add("uiux");
   }

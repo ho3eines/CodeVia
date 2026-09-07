@@ -53,11 +53,12 @@ describe("defaultPlanFor executability (all 18 agent types)", () => {
     }
   });
 
-  it("never shells out to run_tests/run_build (no isolated workspace yet)", () => {
+  it("build/test steps request remote CI evidence and never pass host shell commands", () => {
     for (const type of types) {
-      const tools = defaultPlanFor(agent(type), task()).map((s) => s.tool).filter(Boolean);
-      expect(tools, type).not.toContain("run_tests");
-      expect(tools, type).not.toContain("run_build");
+      for (const step of defaultPlanFor(agent(type), task()).filter((s) => s.tool === "run_tests" || s.tool === "run_build")) {
+        expect(step.input).not.toHaveProperty("command");
+        expect(step.input).not.toHaveProperty("cwd");
+      }
     }
   });
 
