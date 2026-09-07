@@ -1,3 +1,4 @@
+import { buildDirectChatRequest, directChatText } from "./direct-chat.js";
 import type { ModelProvider } from "../domain/entities.js";
 import { decryptSecret } from "../auth/encrypted-secrets.js";
 import {
@@ -78,6 +79,10 @@ export function buildAllEndpoints(
   config: ModelProvider,
   apiKey?: string,
 ): { catalogUrl: string; chatUrl: string; urls: string[] } {
+  if (config.apiFormat === "custom") {
+    const chatUrl = buildChatEndpoint(config);
+    return { catalogUrl: "", chatUrl, urls: chatUrl ? [chatUrl] : [] };
+  }
   const cat = buildModelsEndpoint(config, apiKey);
   const chat = buildChatUrlForModel(config, "detect", apiKey);
   return {
@@ -167,6 +172,12 @@ export function providerTestNotReady(
   const keyPresent = !!resolveProviderKey(config);
   const readiness = providerReadiness(config);
   const eps = maskEndpoints(buildAllEndpoints(config, keyPresent ? resolveProviderKey(config) : undefined));
+  if (config.apiFormat === "custom") {
+    return { ok: false, keyPresent, checked: false, method: "POST", url: eps.chatUrl,
+      urls: eps.urls, chatUrl: eps.chatUrl, apiFormat: config.apiFormat,
+      message: `${readiness.reason ?? "Provider not ready"}. No request was sent — chat endpoint: ${eps.chatUrl}`,
+      hint: readiness.hint };
+  }
   return {
     ok: false,
     keyPresent,
@@ -215,6 +226,12 @@ export async function testProviderConnection(
   const eps = maskEndpoints(raw);
   if (!readiness.ready) {
     return providerTestNotReady(config, raw.catalogUrl);
+  }
+  if (config.apiFormat === "custom") {
+    return { ok: false, keyPresent, checked: false, chatChecked: false, apiFormat: config.apiFormat,
+      chatUrl: eps.chatUrl, urls: eps.urls,
+      message: "Custom chat has no model catalog configured. Connection has not been tested.",
+      hint: "Add a model ID manually, then use its chat test. Base URL must be the exact chat endpoint." };
   }
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = Math.min(opts.timeoutMs ?? 10_000, config.timeoutMs || 10_000);
@@ -320,6 +337,7 @@ function buildChatRequest(
   apiKey?: string,
   tuning: ModelTuning = {},
 ): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
+  if (config.apiFormat === "custom") return buildDirectChatRequest(config, modelId, [{ role: "user", content: message }], apiKey);
   // A model route may mandate a specific temperature (or reject the field
   // outright), so both the value and its presence are configurable per model.
   const temperature = tuning.temperature ?? 0;
@@ -358,7 +376,6 @@ function buildChatRequest(
       };
     }
     case "openai":
-    case "custom":
     default: {
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (apiKey) {
@@ -383,6 +400,7 @@ function buildChatRequest(
 /** Extract the reply text from a chat response body, per API format. */
 function extractChatReply(apiFormat: ModelProvider["apiFormat"], payload: unknown): string {
   if (!payload || typeof payload !== "object") return "";
+  if (apiFormat === "custom") return directChatText(payload);
   const obj = payload as Record<string, unknown>;
   try {
     switch (apiFormat) {
@@ -408,7 +426,6 @@ function extractChatReply(apiFormat: ModelProvider["apiFormat"], payload: unknow
         return String(message?.content ?? "").trim();
       }
       case "openai":
-      case "custom":
       default: {
         const choices = Array.isArray(obj.choices) ? (obj.choices as Array<Record<string, unknown>>) : [];
         const message = choices[0]?.message as Record<string, unknown> | undefined;
