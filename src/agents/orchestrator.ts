@@ -110,6 +110,60 @@ export function deterministicBreakdown(project: Project, task: Task): BreakdownI
   return items;
 }
 
+/** Duty line prepended to every implementer subtask so each unit's job is explicit. */
+export const IMPLEMENTER_DUTIES: Record<string, string> = {
+  "backend-developer":
+    "Your duty: implement the server-side work (APIs, services, business logic) for this subtask, commit the code, and open a PR.",
+  "frontend-developer":
+    "Your duty: implement the UI work (pages, components, client logic) for this subtask, commit the code, and open a PR.",
+  database:
+    "Your duty: implement the data work (schema, migrations, queries) for this subtask, commit it, and open a PR.",
+  uiux:
+    "Your duty: implement the UX/design work (layout, styles, user flows) for this subtask, commit it, and open a PR.",
+};
+
+export const QA_DUTY =
+  "Your duty: verify the implementation listed below against the research brief. Report every failure precisely (what, where, expected vs actual) so the fix agent can act on it.";
+
+/**
+ * Deterministic research brief (no-AI fallback): requirements distilled from
+ * the request, affected areas from keyword signals, owners from the
+ * deterministic breakdown, repo signals, and standing risks. The project
+ * definition selections are always embedded via the brief.
+ */
+export function deterministicBrief(project: Project, task: Task, repoFiles: string[], researchSummary: string): string {
+  const text = `${task.title} ${task.description}`;
+  const sentences = text
+    .split(/[.\n؛]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 3)
+    .slice(0, 6);
+  const lower = text.toLowerCase();
+  const areas: string[] = [];
+  if (/ui|ux|page|screen|design|style|رابط|صفحه|ظاهر/.test(lower)) areas.push("UI/pages");
+  if (/api|endpoint|server|service|backend/.test(lower)) areas.push("backend APIs/services");
+  if (/auth|login|permission|role/.test(lower)) areas.push("authentication/authorization");
+  if (/migration|schema|table|database|sql|مایگریشن|دیتابیس/.test(lower)) areas.push("database schema");
+  if (/test|qa|تست/.test(lower)) areas.push("test coverage");
+  if (areas.length === 0) areas.push("general implementation");
+  const owners = deterministicBreakdown(project, task).map((i) => i.agentType);
+  return [
+    `Research brief for "${task.title}" (deterministic — connect a real AI provider for model-written analysis).`,
+    ``,
+    `Requirements:`,
+    ...sentences.map((s) => `- ${s}`),
+    ``,
+    `Affected areas: ${areas.join(", ")}.`,
+    `Suggested owners: ${owners.join(", ")}.`,
+    `Repository signals: ${repoFiles.length} file(s) visible on ${project.branch}; research run observed:`,
+    ...researchSummary.split("\n").slice(0, 6).map((l) => `  ${l.slice(0, 140)}`),
+    ``,
+    projectBrief(project),
+    ``,
+    `Standing risks: secrets must stay out of git; merges/deploys/migrations need human approval; every change ships as a PR.`,
+  ].join("\n");
+}
+
 export class AutonomousOrchestrator {
   constructor(private readonly deps: AutonomousDeps) {}
 
@@ -129,6 +183,9 @@ export class AutonomousOrchestrator {
     const project = this.deps.projectRepo.findById(task.projectId)?.data;
     if (!project) throw new Error(`Project ${task.projectId} not found`);
 
+    // ---- Phase 0: preflight — every requirement checked before research ----
+    await this.preflight(project);
+
     const chat = this.deps.providerRegistry
       ? realChatFor({ modelRepo: this.deps.modelRepo, providerRepo: this.deps.providerRepo, providerRegistry: this.deps.providerRegistry })
       : undefined;
@@ -143,8 +200,16 @@ export class AutonomousOrchestrator {
     if (researchRun.status !== "succeeded") throw new Error(`Research failed: ${runError(researchRun)}`);
     const researchSummary = summarizeRun(researchRun);
 
+    // ---- Research brief: the research unit's analysis becomes the prompt ----
+    // that every downstream unit works from (definition selections included).
+    const brief = await this.researchBrief(chat, project, task, researchSummary);
+    this.deps.taskRepo.upsert(
+      { ...task, input: { ...(task.input ?? {}), researchBrief: brief.slice(0, 3000) }, updatedAt: new Date().toISOString() },
+      { projectId: task.projectId, parentId: task.parentTaskId },
+    );
+
     // ---- Phase 2: breakdown ------------------------------------------------
-    const breakdown = await this.breakdown(chat, project, task, researchSummary);
+    const breakdown = await this.breakdown(chat, project, task, brief);
     if (breakdown.length === 0) throw new Error("Breakdown produced no implementer subtasks");
 
     // ---- Phase 3: implement (code → git → PR) -------------------------------
@@ -152,9 +217,9 @@ export class AutonomousOrchestrator {
     const files: string[] = [];
     for (const item of breakdown) {
       const agent = this.needAgent(project.id, item.agentType);
-      const child = this.spawn(task, item.title, item.description, item.agentType);
+      const child = this.spawn(task, item.title, this.withDuty(item.agentType, item.description, brief), item.agentType);
       buildTaskIds.push(child.id);
-      const plan = await this.implementPlan(chat, project, agent, child, item, researchSummary);
+      const plan = await this.implementPlan(chat, project, agent, child, item, brief);
       files.push(...item.files);
       const run = await this.execute(child, agent, project, plan);
       this.mark(child, run.status === "succeeded" ? "succeeded" : "failed", runError(run));
@@ -168,7 +233,7 @@ export class AutonomousOrchestrator {
       const qaChild = this.spawn(
         task,
         fixLoops === 0 ? `Verify: ${task.title}`.slice(0, 120) : `Re-verify (attempt ${fixLoops + 1}): ${task.title}`.slice(0, 120),
-        `Verify the implementation of "${task.title}". Changed files:\n${files.map((f) => `- ${f}`).join("\n")}\n\nReport every failure precisely so the fix agent can act on it.`,
+        `${QA_DUTY}\n\nImplementation of "${task.title}". Changed files:\n${files.map((f) => `- ${f}`).join("\n")}\n\nResearch brief:\n${brief.slice(0, 1500)}`,
         "qa-test",
       );
       qaTaskIds.push(qaChild.id);
@@ -190,11 +255,11 @@ export class AutonomousOrchestrator {
       const fixChild = this.spawn(
         task,
         `Fix (attempt ${fixLoops}): ${task.title}`.slice(0, 120),
-        `QA verification failed for "${task.title}". Fix exactly these failures:\n\n${qaErrors}\n\nOriginal request: ${task.description}`,
+        this.withDuty(fixType, `QA verification failed for "${task.title}". Fix exactly these failures:\n\n${qaErrors}\n\nOriginal request: ${task.description}`, brief),
         fixType,
       );
       buildTaskIds.push(fixChild.id);
-      const fixPlan = await this.implementPlan(chat, project, fixAgent, fixChild, fixItem, researchSummary, qaErrors);
+      const fixPlan = await this.implementPlan(chat, project, fixAgent, fixChild, fixItem, brief, qaErrors);
       const fixRun = await this.execute(fixChild, fixAgent, project, fixPlan);
       this.mark(fixChild, fixRun.status === "succeeded" ? "succeeded" : "failed", runError(fixRun));
       if (fixRun.status !== "succeeded") throw new Error(`${fixAgent.name} fix failed: ${runError(fixRun)}`);
@@ -207,8 +272,68 @@ export class AutonomousOrchestrator {
 
   private needAgent(projectId: string, type: AgentType): Agent {
     const agent = this.deps.agentRepo.byType(projectId, type);
-    if (!agent) throw new Error(`No enabled agent of type ${type} in project ${projectId}`);
+    if (!agent || !agent.enabled) throw new Error(`No enabled agent of type ${type} in project ${projectId}`);
     return agent;
+  }
+
+  /**
+   * Preflight: check every loop requirement up front so a task fails fast
+   * with one clear checklist instead of dying mid-loop.
+   */
+  private async preflight(project: Project): Promise<void> {
+    const problems: string[] = [];
+    if (!project.configRepo || !project.configRepo.includes("/")) {
+      problems.push("project has no repository (owner/name) — link one first");
+    }
+    for (const type of ["research", "qa-test"] as AgentType[]) {
+      const a = this.deps.agentRepo.byType(project.id, type);
+      if (!a) problems.push(`missing agent: ${type} (re-run onboarding)`);
+      else if (!a.enabled) problems.push(`disabled agent: ${type} (enable it or re-run onboarding)`);
+    }
+    const builders = IMPLEMENTERS.filter((t) => {
+      const a = this.deps.agentRepo.byType(project.id, t);
+      return a && a.enabled;
+    });
+    if (builders.length === 0) {
+      problems.push(`no enabled implementer (${IMPLEMENTERS.join("/")}) — re-run onboarding`);
+    }
+    try {
+      const [owner, ...rest] = String(project.configRepo ?? "").split("/");
+      if (owner && rest.length > 0) await this.deps.github.listBranches({ owner, name: rest.join("/") });
+    } catch (err) {
+      problems.push(`GitHub unreachable for ${project.configRepo}: ${String(err).slice(0, 140)}`);
+    }
+    if (problems.length > 0) {
+      throw new Error(`Autonomous preflight failed:\n- ${problems.join("\n- ")}`);
+    }
+  }
+
+  /** Prepend the unit's duty line and attach the research brief. */
+  private withDuty(agentType: AgentType, body: string, brief: string): string {
+    const duty = IMPLEMENTER_DUTIES[agentType] ?? `Your duty: complete this ${agentType} subtask and report the result.`;
+    return `${duty}\n\nResearch brief:\n${brief.slice(0, 1800)}\n\nSubtask:\n${body}`.slice(0, 3000);
+  }
+
+  /**
+   * The research unit's analysis, built into the prompt every downstream
+   * unit works from. Real AI writes it when available; otherwise the
+   * deterministic brief (task + selections + repo signals) is used.
+   */
+  private async researchBrief(chat: RealChat | undefined, project: Project, task: Task, researchSummary: string): Promise<string> {
+    const files = await this.repoFiles(project).catch(() => [] as string[]);
+    if (chat) {
+      try {
+        const raw = await chat.chat(
+          "You are a senior business analyst writing implementation briefs. Reply with a concise structured brief, no fluff.",
+          `Task: ${task.title}\n${task.description}\n\nProject definition (from the project setup selections):\n${projectBrief(project)}\n\nResearch run findings:\n${researchSummary}\n\nRepository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nWrite the implementation brief: 1) Requirements (bullets) 2) Affected areas/files 3) Suggested subtasks with owner agent type (backend-developer/frontend-developer/database/uiux) 4) Risks. Keep it under 400 words.`,
+          1500,
+        );
+        if (raw.trim().length > 50) return raw.trim().slice(0, 3000);
+      } catch (err) {
+        logger.warn("AI research brief failed, using deterministic fallback", { taskId: task.id, err: String(err) });
+      }
+    }
+    return deterministicBrief(project, task, files, researchSummary);
   }
 
   private spawn(parent: Task, title: string, description: string, agentType: AgentType): Task {
@@ -240,13 +365,13 @@ export class AutonomousOrchestrator {
     live.emit({ type: "task.updated", taskId: child.id, data: { status } });
   }
 
-  private async breakdown(chat: RealChat | undefined, project: Project, task: Task, researchSummary: string): Promise<BreakdownItem[]> {
+  private async breakdown(chat: RealChat | undefined, project: Project, task: Task, brief: string): Promise<BreakdownItem[]> {
     if (chat) {
       try {
         const files = await this.repoFiles(project).catch(() => [] as string[]);
         const raw = await chat.chat(
           "You are a senior engineering manager breaking work into implementer subtasks. Reply with ONLY a JSON array.",
-          `Task: ${task.title}\n${task.description}\n\nResearch findings:\n${researchSummary}\n\nProject definition (from the project setup selections):\n${projectBrief(project)}\nRepository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nBreak this into 1-4 implementer subtasks. Allowed agentType values: ${IMPLEMENTERS.join(", ")}. Each item: {"agentType","title","description","files":[1-5 repo-relative paths to create/modify]}. Reply with ONLY the JSON array, no prose.`,
+          `Task: ${task.title}\n${task.description}\n\nResearch brief:\n${brief}\n\nProject definition (from the project setup selections):\n${projectBrief(project)}\nRepository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nBreak this into 1-4 implementer subtasks. Allowed agentType values: ${IMPLEMENTERS.join(", ")}. Each item: {"agentType","title","description","files":[1-5 repo-relative paths to create/modify]}. Reply with ONLY the JSON array, no prose.`,
           1500,
         );
         const parsed = extractJson(raw);
@@ -285,12 +410,12 @@ export class AutonomousOrchestrator {
     agent: Agent,
     child: Task,
     item: BreakdownItem,
-    researchSummary: string,
+    brief: string,
     fixContext?: string,
   ): Promise<PlanStep[]> {
     const plan = defaultPlanFor(agent, child);
     const target = cleanPath(item.files[0]) ?? `docs/tasks/${child.id}.md`;
-    const content = await this.fileContent(chat, project, agent, child, item, target, researchSummary, fixContext);
+    const content = await this.fileContent(chat, project, agent, child, item, target, brief, fixContext);
     const writer = plan.find((s) => s.tool === "write_file");
     if (!writer) throw new Error(`${agent.name} has no permitted write step — cannot implement`);
     writer.input = { path: target, content, message: `[${agent.name}] ${child.title}`.slice(0, 120) };
@@ -305,7 +430,7 @@ export class AutonomousOrchestrator {
           tool: "write_file",
           input: {
             path,
-            content: await this.fileContent(chat, project, agent, child, { ...item, files: [path] }, path, researchSummary, fixContext),
+            content: await this.fileContent(chat, project, agent, child, { ...item, files: [path] }, path, brief, fixContext),
             message: `[${agent.name}] ${child.title}`.slice(0, 120),
           },
         });
@@ -322,7 +447,7 @@ export class AutonomousOrchestrator {
     child: Task,
     item: BreakdownItem,
     target: string,
-    researchSummary: string,
+    brief: string,
     fixContext?: string,
   ): Promise<string> {
     if (chat) {
@@ -330,7 +455,7 @@ export class AutonomousOrchestrator {
         const files = await this.repoFiles(project).catch(() => [] as string[]);
         const raw = await chat.chat(
           `You are the ${agent.name} (${agent.role}). Output ONLY the file content, no fences, no explanations.`,
-          `Repository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nSubtask: ${item.title}\n${item.description}\n\nResearch findings:\n${researchSummary}\n${fixContext ? `\nQA failures to fix (address exactly these):\n${fixContext}\n` : ""}\nProject definition (from the project setup selections):\n${projectBrief(project)}\nWrite the complete content of "${target}" for project "${project.name}". Output ONLY the file content.`,
+          `Repository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nSubtask: ${item.title}\n${item.description}\n\nResearch brief:\n${brief}\n${fixContext ? `\nQA failures to fix (address exactly these):\n${fixContext}\n` : ""}\nProject definition (from the project setup selections):\n${projectBrief(project)}\nWrite the complete content of "${target}" for project "${project.name}". Output ONLY the file content.`,
           4000,
         );
         const cleaned = raw.replace(/^```[a-z]*\n/i, "").replace(/\n```$/i, "").trim();
@@ -347,8 +472,8 @@ export class AutonomousOrchestrator {
       `## Request`,
       item.description || "(no description)",
       ``,
-      `## Research`,
-      researchSummary.split("\n").slice(0, 12).join("\n"),
+      `## Research brief`,
+      brief.split("\n").slice(0, 24).join("\n"),
       ...(fixContext ? [``, `## QA feedback addressed`, fixContext.split("\n").slice(0, 12).join("\n")] : []),
       ``,
       `_Subtask ${child.id} · ${new Date().toISOString()}_`,

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Container } from "../app/container.js";
-import { AutonomousOrchestrator, deterministicBreakdown, type PhaseExecutor } from "../agents/orchestrator.js";
+import { AutonomousOrchestrator, deterministicBreakdown, deterministicBrief, type PhaseExecutor } from "../agents/orchestrator.js";
 import { extractJson } from "../agents/llm.js";
 import type { Agent, Project, Run, Task } from "../domain/entities.js";
 import { freshDb } from "./test-helpers.js";
@@ -58,6 +58,30 @@ describe("deterministicBreakdown", () => {
   it("targets one file per item", () => {
     const items = deterministicBreakdown(project, task("Add login API"));
     for (const i of items) expect(i.files.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("deterministicBrief", () => {
+  const project = {
+    id: "p1", name: "Shop", slug: "shop", description: "store", branch: "main", configRepo: "acme/shop",
+    repositories: [{ repo: "acme/shop", branch: "main", role: "primary", isConfigRepo: true }],
+    capabilities: {
+      platforms: ["web"], languages: ["csharp"], frameworks: ["dotnet"], databases: ["sqlserver"],
+      deploymentTargets: ["docker"], features: ["auth"], integrations: ["telegram"], agentTypes: [],
+    },
+    settings: {}, active: true, createdAt: "", updatedAt: "",
+  } as unknown as Project;
+  const task = { id: "t1", title: "Add login page", description: "Build the login screen. Validate input." } as Task;
+
+  it("distills requirements, areas, owners and embeds the definition selections", () => {
+    const brief = deterministicBrief(project, task, ["src/a.ts"], "- Understand request: succeeded");
+    expect(brief).toContain("Requirements:");
+    expect(brief).toContain("Affected areas:");
+    expect(brief).toContain("UI/pages");
+    expect(brief).toContain("Suggested owners: backend-developer, frontend-developer");
+    expect(brief).toContain("Platforms: web");
+    expect(brief).toContain("Key features: auth");
+    expect(brief).toContain("Standing risks:");
   });
 });
 
@@ -142,6 +166,28 @@ describe("AutonomousOrchestrator with stub executor", () => {
     expect(kids.filter((k) => k.agentType === "qa-test").length).toBe(3);
   });
 
+  it("fails the preflight checklist when research is unavailable", async () => {
+    const parent = await parentTask();
+    const research = container.agentRepo.byType(parent.projectId, "research")!;
+    container.agentRepo.upsert({ ...research, enabled: false }, { projectId: parent.projectId });
+    const orch = build((task) => stubRun(task, "succeeded"));
+    await expect(orch.run(parent.id)).rejects.toThrow(/preflight[\s\S]*research/);
+  });
+
+  it("specifies each unit's duty and attaches the research brief", async () => {
+    const parent = await parentTask();
+    const orch = build((task) => stubRun(task, "succeeded"));
+    await orch.run(parent.id);
+    const kids = container.taskRepo.findMany({ parentId: parent.id }).map((k) => k.data);
+    for (const k of kids) {
+      if (k.agentType === "research") continue;
+      expect(k.description, `${k.agentType} duty`).toContain("Your duty:");
+      expect(k.description, `${k.agentType} brief`).toContain("Research brief:");
+    }
+    const reloaded = container.taskRepo.findById(parent.id)!.data;
+    expect(String(reloaded.input.researchBrief ?? "")).toContain("Research brief for");
+  });
+
   it("fails fast when an implementer fails", async () => {
     const parent = await parentTask();
     const orch = build((task) => stubRun(task, task.agentType === "backend-developer" ? "failed" : "succeeded", task.agentType === "backend-developer" ? "Implement the change" : undefined));
@@ -180,6 +226,17 @@ describe("autonomous loop end-to-end (mock AI + mock GitHub)", () => {
     expect(types).toContain("frontend-developer");
     expect(types).toContain("qa-test");
     expect(kids.every((k) => k.status === "succeeded")).toBe(true);
+
+    // The research brief (with the definition selections) is stored on the
+    // parent and every unit's subtask states its duty explicitly.
+    const reloaded = container.taskRepo.findById(task.id)!.data;
+    expect(String(reloaded.input.researchBrief ?? "")).toContain("Research brief for");
+    expect(String(reloaded.input.researchBrief ?? "")).toContain("Project: E2E App");
+    for (const k of kids) {
+      if (k.agentType === "research") continue;
+      expect(k.description).toContain("Your duty:");
+      expect(k.description).toContain("Research brief:");
+    }
 
     // Every phase produced a successful run…
     const runs = container.runRepo.byProject(project.id);
