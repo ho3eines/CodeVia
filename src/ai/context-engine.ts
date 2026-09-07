@@ -3,6 +3,7 @@ import type { SkillRegistry } from "../skills/registry.js";
 import type { IGitHubService, GithubRepoRef } from "../github/types.js";
 import type { IMemoryStore } from "../memory/store.js";
 import { logger } from "../logger.js";
+import { projectBrief } from "../domain/project-brief.js";
 import { resolveGitHubService } from "../github/registry.js";
 import { memoryResolver } from "../memory/index.js";
 import type { MemoryType } from "../domain/entities.js";
@@ -226,14 +227,9 @@ export class ContextEngine {
   }
 
   private profileFromSettings(project: Project): string {
-    return [
-      `Language: ${project.primaryLanguage ?? "unknown"}`,
-      `Framework: ${project.framework ?? "unknown"}`,
-      `Database: ${project.database ?? "unknown"}`,
-      `Deployment: ${project.deploymentTarget ?? "unknown"}`,
-      `Branch: ${project.branch}`,
-      `Config repo: ${project.configRepo}`,
-    ].join("\n");
+    // The full project-definition selections (platforms, stack, features,
+    // integrations, roster, repos) — not just the four legacy scalar fields.
+    return projectBrief(project);
   }
 }
 

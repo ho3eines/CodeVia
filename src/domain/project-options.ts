@@ -186,7 +186,7 @@ export const REPOSITORY_ROLE_OPTIONS: Array<{ value: ProjectRepositoryRole; labe
 ];
 
 /** Agents every project always gets, regardless of the selection. */
-export const CORE_AGENT_TYPES: AgentType[] = ["orchestrator", "project-manager", "code-reviewer", "qa-test", "debugging"];
+export const CORE_AGENT_TYPES: AgentType[] = ["orchestrator", "project-manager", "research", "code-reviewer", "qa-test", "debugging"];
 
 export const ALL_AGENT_TYPES: AgentType[] = AGENT_TYPE_OPTIONS.map((a) => a.value);
 

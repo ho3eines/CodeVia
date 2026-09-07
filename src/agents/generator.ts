@@ -5,6 +5,7 @@ import type { ModelRepository } from "../ai/model-repo.js";
 import type { IModelProvider } from "../ai/types.js";
 import { logger } from "../logger.js";
 import { randomUUID } from "node:crypto";
+import { projectBriefLines } from "../domain/project-brief.js";
 
 /** Per-agent-type scaffolding: role, mission, skills, tools, permissions. */
 export interface AgentScaffold {
@@ -280,22 +281,10 @@ export class AgentGenerator {
 
   /** Human-readable multi-select profile for the system prompt. */
   private profileLines(project: Project): string[] {
-    const c = project.capabilities;
-    if (!c) {
-      return [`Tech: ${project.framework ?? "unknown"} / ${project.primaryLanguage ?? "unknown"} / ${project.database ?? "unknown"}`];
-    }
-    const line = (label: string, values: string[]): string | undefined => (values.length ? `${label}: ${values.join(", ")}` : undefined);
-    const repos = (project.repositories ?? []).map((r) => `${r.repo}@${r.branch} (${r.role})`);
-    return [
-      line("Platforms", c.platforms),
-      line("Languages", c.languages),
-      line("Frameworks", c.frameworks),
-      line("Databases", c.databases),
-      line("Deployment", c.deploymentTargets),
-      line("Key features", c.features),
-      line("Integrations", c.integrations),
-      repos.length > 1 ? `Repositories: ${repos.join("; ")}` : undefined,
-    ].filter((x): x is string => !!x);
+    const lines = projectBriefLines(project);
+    // The prompt already states the primary repository above; only repeat the
+    // repo list when the project links several repositories.
+    return (project.repositories ?? []).length > 1 ? lines : lines.filter((l) => !l.startsWith("Repositories:"));
   }
 
   private buildModels(defaultModelId: string | undefined, type: AgentType): Agent["models"] {

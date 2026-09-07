@@ -144,7 +144,7 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     const after = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{ type: string; enabled: boolean }>;
     expect(after).toHaveLength(18); // never deleted
     const enabled = after.filter((a) => a.enabled).map((a) => a.type).sort();
-    expect(enabled).toEqual(["code-reviewer", "debugging", "devops", "orchestrator", "project-manager", "qa-test"]);
+    expect(enabled).toEqual(["code-reviewer", "debugging", "devops", "orchestrator", "project-manager", "qa-test", "research"]);
   });
 
   it("rejects invalid input with real status codes", async () => {

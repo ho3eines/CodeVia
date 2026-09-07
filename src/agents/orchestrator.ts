@@ -11,6 +11,7 @@ import { isAgentType } from "./generator.js";
 import { realChatFor, extractJson, type RealChat } from "./llm.js";
 import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
+import { projectBrief } from "../domain/project-brief.js";
 
 /**
  * Autonomous task loop — the flow the project page promises:
@@ -245,7 +246,7 @@ export class AutonomousOrchestrator {
         const files = await this.repoFiles(project).catch(() => [] as string[]);
         const raw = await chat.chat(
           "You are a senior engineering manager breaking work into implementer subtasks. Reply with ONLY a JSON array.",
-          `Task: ${task.title}\n${task.description}\n\nResearch findings:\n${researchSummary}\n\nProject stack: ${describeStack(project)}.\nRepository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nBreak this into 1-4 implementer subtasks. Allowed agentType values: ${IMPLEMENTERS.join(", ")}. Each item: {"agentType","title","description","files":[1-5 repo-relative paths to create/modify]}. Reply with ONLY the JSON array, no prose.`,
+          `Task: ${task.title}\n${task.description}\n\nResearch findings:\n${researchSummary}\n\nProject definition (from the project setup selections):\n${projectBrief(project)}\nRepository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nBreak this into 1-4 implementer subtasks. Allowed agentType values: ${IMPLEMENTERS.join(", ")}. Each item: {"agentType","title","description","files":[1-5 repo-relative paths to create/modify]}. Reply with ONLY the JSON array, no prose.`,
           1500,
         );
         const parsed = extractJson(raw);
@@ -329,7 +330,7 @@ export class AutonomousOrchestrator {
         const files = await this.repoFiles(project).catch(() => [] as string[]);
         const raw = await chat.chat(
           `You are the ${agent.name} (${agent.role}). Output ONLY the file content, no fences, no explanations.`,
-          `Repository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nSubtask: ${item.title}\n${item.description}\n\nResearch findings:\n${researchSummary}\n${fixContext ? `\nQA failures to fix (address exactly these):\n${fixContext}\n` : ""}\nWrite the complete content of "${target}" for project "${project.name}" (${describeStack(project)}). Output ONLY the file content.`,
+          `Repository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nSubtask: ${item.title}\n${item.description}\n\nResearch findings:\n${researchSummary}\n${fixContext ? `\nQA failures to fix (address exactly these):\n${fixContext}\n` : ""}\nProject definition (from the project setup selections):\n${projectBrief(project)}\nWrite the complete content of "${target}" for project "${project.name}". Output ONLY the file content.`,
           4000,
         );
         const cleaned = raw.replace(/^```[a-z]*\n/i, "").replace(/\n```$/i, "").trim();
@@ -363,16 +364,7 @@ export class AutonomousOrchestrator {
   }
 }
 
-function describeStack(project: Project): string {
-  const c = project.capabilities as unknown as Record<string, string[]> | undefined;
-  const parts = [
-    ...(c?.languages ?? []),
-    ...(c?.frameworks ?? []),
-    ...(c?.databases ?? []),
-    ...(c?.platforms ?? []),
-  ].filter(Boolean);
-  return parts.length ? parts.join(", ") : "unknown stack";
-}
+
 
 function summarizeRun(run: Run): string {
   return run.steps.map((s) => `- ${s.label}: ${s.status}${s.detail ? ` — ${s.detail}` : ""}`).join("\n");
