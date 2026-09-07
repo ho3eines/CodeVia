@@ -131,6 +131,11 @@ export function resolveGitHubForProject(opts: {
     if (isServerGitHubEnabled()) return new RealGitHubService();
     throw new Error(`Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`);
   }
+  // `mock` was persisted while the platform ran in demo/simulation mode. Once a
+  // real server token is configured the stronger connection must win; otherwise
+  // every project action keeps talking to an isolated mock that never has the
+  // repository and users see "Mock repo not found" no matter what env is set.
+  if (opts.fallback.kind === "real") return opts.fallback;
   if (opts.fallback.kind === "mock") return opts.fallback;
   let mock = projectMocks.get(opts.fallback);
   if (!mock) { mock = new MockGitHubService(); projectMocks.set(opts.fallback, mock); }

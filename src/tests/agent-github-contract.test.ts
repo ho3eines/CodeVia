@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RealGitHubService } from "../github/real-service.js";
+import type { IGitHubService } from "../github/types.js";
 import { verifyGithubChecks } from "../tools/github-checks.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { CORE_TOOLS } from "../tools/core-tools.js";
@@ -146,6 +147,15 @@ describe("project-scoped connections", () => {
     await bound.listBranches(repo);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(() => resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "user-oauth", userId: "missing-owner" } }, kv: c.kv, fallback: c.github })).toThrow(/reconnected/);
+  });
+  it("promotes a stale stored mock connection to the configured real server service", () => {
+    const realFallback = { kind: "real" as const } as IGitHubService;
+    const bound = resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: realFallback });
+    expect(bound.kind).toBe("real");
+  });
+  it("keeps mock only while the server itself is mock", () => {
+    const bound = resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: c.github });
+    expect(bound.kind).toBe("mock");
   });
   it("rehydrates default provider adapters from persisted credentials on restart", async () => {
     const stored = c.providerRepo.findById("provider-openai")!.data;
