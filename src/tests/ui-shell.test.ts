@@ -488,7 +488,8 @@ describe("no-reload refresh behavior", () => {
   it("refreshCurrent is silent: it must not show the skeleton", async () => {
     const { win, go } = await boot();
     await go("#/providers");
-    const before = (win.document.querySelector("#content") as El).innerHTML ?? "";
+    const content = win.document.querySelector("#content") as unknown as { innerHTML: string };
+    const before = content.innerHTML ?? "";
     expect(before).toContain("provider-card"); // real content, not a skeleton
 
     // Spy on showSkeleton: a silent refresh must never call it. It is internal
@@ -496,7 +497,7 @@ describe("no-reload refresh behavior", () => {
     const p = win.refreshCurrent();
     expect(p && typeof p.then).toBe("function");
     await p;
-    const after = (win.document.querySelector("#content") as El).innerHTML ?? "";
+    const after = content.innerHTML ?? "";
     // Content was refreshed (fresh fetch) but no skeleton placeholder remained.
     expect(after).toContain("provider-card");
     expect(after).not.toContain("skeleton-line");
