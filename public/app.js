@@ -2853,13 +2853,15 @@
       <div class="chat-thread" id="chat-thread"></div>
       <div class="chat-meta" id="chat-meta"></div>
       <div class="chat-composer">
-        <textarea class="textarea" id="chat-input" rows="2" dir="auto" placeholder="پیام خود را بنویسید… / Send a natural message… (Enter to send, Shift+Enter for a new line)"></textarea>
-        <div class="flex" style="justify-content:space-between;align-items:center">
+        <div class="chat-composer-bar">
+          <textarea class="chat-input" id="chat-input" rows="1" dir="auto" placeholder="پیام خود را بنویسید… / Send a natural message…"></textarea>
+          <button class="chat-send-btn" id="chat-send" aria-label="Send" title="Send">➤</button>
+        </div>
+        <div class="chat-composer-actions">
           <span class="field-hint">Replies stream in token by token.</span>
           <div class="flex">
             <button class="btn btn-ghost" id="chat-clear">Clear</button>
             <button class="btn" id="chat-stop" hidden>■ Stop</button>
-            <button class="btn btn-primary" id="chat-send">Send ➤</button>
           </div>
         </div>
       </div>`;

@@ -696,27 +696,67 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
 .seg-btn:hover { color: var(--text); background: var(--glass); }
 .seg-btn.active { background: linear-gradient(135deg, var(--primary), var(--primary-strong)); color: #fff; }
 
-/* ---------- 25. Chat modal ---------- */
-.chat-modal { width: min(800px, 96vw); display: flex; flex-direction: column; }
-.chat-modal .modal-body { display: flex; flex-direction: column; gap: 10px; max-height: 74vh; }
-.chat-thread { flex: 1; min-height: 240px; max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px; }
+/* ---------- 25. Chat modal (iMessage-style) ----------
+   The composer stays pinned: the modal is a fixed-height flex column, the
+   thread is the only scrolling region, and the input bar + send button are
+   flex-shrink:0 at the bottom — like the iOS Messages input dock. */
+.chat-modal { width: min(800px, 96vw); display: flex; flex-direction: column; height: min(82vh, 720px); }
+.chat-modal .modal-body { display: flex; flex-direction: column; gap: 0; flex: 1; min-height: 0; max-height: none; overflow: hidden; padding: 0; }
+.chat-thread { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 7px; padding: 16px 14px 8px; }
 .chat-empty { color: var(--text-muted); font-size: 13px; text-align: center; margin: auto; padding: 30px 10px; }
-.chat-msg { max-width: 86%; padding: 11px 14px; border-radius: 15px; border: 1px solid var(--stroke); background: var(--glass); white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; font-size: 13px; line-height: 1.6; animation: slideDown .28s var(--ease); }
-.chat-msg.user { align-self: flex-end; background: linear-gradient(135deg, var(--primary), var(--primary-strong)); border-color: transparent; color: #fff; box-shadow: 0 6px 20px -9px var(--primary); }
-.chat-msg.assistant { align-self: flex-start; }
+.chat-msg {
+  max-width: 78%; padding: 10px 15px; border-radius: 18px; border: 0;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal;
+  font-size: 14.5px; line-height: 1.55; animation: slideDown .28s var(--ease);
+}
+.chat-msg.user {
+  align-self: flex-end;
+  background: linear-gradient(180deg, #0b93f6, #007aff);
+  color: #fff; border-bottom-right-radius: 6px;
+  box-shadow: 0 2px 8px -3px rgba(0, 90, 200, 0.55);
+}
+.chat-msg.assistant {
+  align-self: flex-start; background: #e9eaef; color: #161a2d;
+  border-bottom-left-radius: 6px;
+}
+[data-theme="dark"] .chat-msg.assistant { background: #26272e; color: #f0f2ff; }
 .chat-msg.rtl { direction: rtl; text-align: right; unicode-bidi: plaintext; }
 .chat-msg.ltr { direction: ltr; text-align: left; unicode-bidi: plaintext; }
-.chat-msg.rtl.assistant { align-self: flex-end; }
+.chat-msg.rtl.assistant { align-self: flex-end; border-bottom-left-radius: 18px; border-bottom-right-radius: 6px; }
+.chat-msg.rtl.user { border-bottom-left-radius: 6px; border-bottom-right-radius: 18px; }
 .chat-text[dir="rtl"] { direction: rtl; text-align: right; unicode-bidi: plaintext; }
 .chat-text[dir="ltr"] { direction: ltr; text-align: left; unicode-bidi: plaintext; }
 #chat-input[dir="rtl"] { direction: rtl; text-align: right; }
 #chat-input[dir="ltr"] { direction: ltr; text-align: left; }
-.chat-msg.err { border-color: color-mix(in srgb, var(--err) 48%, transparent); color: var(--err); }
-.chat-role { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; opacity: .7; margin-bottom: 3px; }
+.chat-msg.err { background: color-mix(in srgb, var(--err) 12%, var(--surface)); color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 45%, transparent); }
+.chat-role { display: none; }
 .chat-cursor { animation: chat-blink 1s steps(2, start) infinite; }
 @keyframes chat-blink { to { visibility: hidden; } }
-.chat-meta { font-size: 11px; color: var(--text-muted); word-break: break-all; }
-.chat-composer { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--stroke); padding-top: 11px; }
+.chat-meta { font-size: 11px; color: var(--text-muted); word-break: break-all; padding: 0 14px 4px; }
+/* Pinned input dock */
+.chat-composer { flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--stroke); padding: 10px 14px 12px; background: color-mix(in srgb, var(--surface) 82%, transparent); backdrop-filter: blur(10px); }
+.chat-composer-bar {
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 5px 6px 5px 14px; border-radius: 21px;
+  background: var(--glass-strong); border: 1px solid var(--stroke);
+}
+.chat-input {
+  flex: 1; min-width: 0; border: 0; background: transparent; resize: none;
+  color: var(--text); font: inherit; font-size: 14.5px; line-height: 1.5;
+  padding: 6px 0; max-height: 120px; outline: none;
+}
+.chat-send-btn {
+  width: 34px; height: 34px; border-radius: 50%; border: 0; flex: 0 0 auto;
+  background: linear-gradient(135deg, #0b93f6, #007aff); color: #fff;
+  font-size: 15px; cursor: pointer; display: grid; place-items: center;
+  transition: transform .18s var(--ease), opacity .2s, box-shadow .2s;
+  box-shadow: 0 3px 10px -3px rgba(0, 110, 255, 0.6);
+}
+.chat-send-btn:hover { transform: scale(1.06); }
+.chat-send-btn:active { transform: scale(.94); }
+.chat-send-btn:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
+.chat-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+[dir="rtl"] .chat-composer-bar { flex-direction: row-reverse; padding: 5px 14px 5px 6px; }
 
 .cap-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px 12px; }
 .cap-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); cursor: pointer; }
@@ -1074,9 +1114,11 @@ label.check input { accent-color: var(--primary); }
   }
   .modal-body { max-height: calc(100dvh - 64px); }
   /* Chat modal: the thread takes all remaining space, composer pinned below. */
-  .chat-modal .modal-body { max-height: calc(100dvh - 64px); }
-  .chat-thread { max-height: none; min-height: 0; flex: 1; }
-  .chat-msg { max-width: 94%; }
+  .chat-modal { height: 100vh; height: 100dvh; max-height: 100vh; max-height: 100dvh; }
+  .chat-modal .modal-body { flex: 1; min-height: 0; max-height: none; }
+  .chat-thread { max-height: none; min-height: 0; flex: 1; padding: 12px 10px 6px; }
+  .chat-msg { max-width: 86%; padding: 9px 13px; font-size: 14px; }
+  .chat-composer { padding: 8px 10px 10px; }
   .palette-list { max-height: calc(100dvh - 128px); }
 }
 
