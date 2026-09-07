@@ -148,14 +148,14 @@ describe("project-scoped connections", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(() => resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "user-oauth", userId: "missing-owner" } }, kv: c.kv, fallback: c.github })).toThrow(/reconnected/);
   });
-  it("promotes a stale stored mock connection to the configured real server service", () => {
-    const realFallback = { kind: "real" as const } as IGitHubService;
-    const bound = resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: realFallback });
-    expect(bound.kind).toBe("real");
-  });
-  it("keeps mock only while the server itself is mock", () => {
+  it("keeps mock only when neither a user login nor OAuth is configured", () => {
     const bound = resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: c.github });
     expect(bound.kind).toBe("mock");
+  });
+  it("does not substitute a real server fallback for a stale mock connection without a user token", () => {
+    const realFallback = { kind: "real" as const } as IGitHubService;
+    const bound = resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: realFallback });
+    expect(bound.kind).not.toBe("real");
   });
   it("uses the owner's real GitHub login even for a project saved with mock connection", async () => {
     storeUserGitHubToken(c.kv, "owner-a", "fake-project-token", { scopes: "repo", login: "owner-a" });
