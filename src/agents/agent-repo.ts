@@ -12,7 +12,7 @@ export class AgentRepository extends DocumentRepository<Agent> {
   create(data: Omit<Agent, "id" | "createdAt" | "updatedAt" | "version">): Agent {
     const now = new Date().toISOString();
     const agent: Agent = { ...data, id: randomUUID(), version: 1, createdAt: now, updatedAt: now };
-    this.upsert(agent);
+    this.upsert(agent, { projectId: agent.projectId });
     return agent;
   }
 

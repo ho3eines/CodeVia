@@ -89,6 +89,18 @@ export const DEFAULT_RULES: AutomationRule[] = [
   },
 ];
 
+/** Canonical state commits must not trigger an endless QA → memory → push loop. */
+export function isStateOnlyPush(body: Record<string, unknown>): boolean {
+  if (!Array.isArray(body.commits) || !body.commits.length) return false;
+  if (typeof body.size === "number" && body.size > body.commits.length) return false;
+  return body.commits.every((value) => {
+    const commit = value as Record<string, unknown>;
+    if (!commit || !["added", "modified", "removed"].every((k) => Array.isArray(commit[k]))) return false;
+    const paths = [...commit.added as unknown[], ...commit.modified as unknown[], ...commit.removed as unknown[]];
+    return paths.length > 0 && paths.every((path) => typeof path === "string" && path.startsWith("CodeVia/") && !path.split("/").includes(".."));
+  });
+}
+
 const SEEN_KEY = "github.automation.seenDeliveries";
 const SEEN_LIMIT = 500;
 
@@ -132,6 +144,11 @@ export class GithubAutomation {
       branch: branchOf(body),
       body,
     };
+    if (e.name === "github.push" && isStateOnlyPush(body)) {
+      for (const p of this.projectsFor(ctx.repo)) await this.deps.agentManager.readProject(p.id);
+      if (deliveryId) this.remember(deliveryId);
+      return [];
+    }
     const matching = this.rules.filter(
       (r) => r.event === e.name && (!r.actions || (ctx.action !== undefined && r.actions.includes(ctx.action))) && (!r.when || r.when(ctx)),
     );
@@ -140,6 +157,7 @@ export class GithubAutomation {
     const projects = this.projectsFor(ctx.repo);
     const created: Array<{ projectId: string; taskId: string; agentType: AgentType }> = [];
     for (const project of projects) {
+      await this.deps.agentManager.readProject(project.id);
       for (const rule of matching) {
         // Skip automations the project has no agent for (e.g. a docs-only project without a release agent).
         const agent = this.deps.agentRepo.byType(project.id, rule.agentType);

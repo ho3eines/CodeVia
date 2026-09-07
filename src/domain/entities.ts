@@ -114,7 +114,11 @@ export interface Model {
  * Skill
  * ------------------------------------------------------------------ */
 export interface Skill {
+  /** Cache-only optimistic read stamp; never exported to the repository. */
+  repositoryRevision?: string;
   id: ID;
+  /** Project-local repository definition; absent only for marketplace templates. */
+  projectId?: ID;
   slug: string;
   name: string;
   description: string;
@@ -129,6 +133,16 @@ export interface Skill {
   builtIn: boolean;
   createdAt: ISODate;
   updatedAt: ISODate;
+}
+
+/** The exact skill knowledge and task-local guidance used in a run. */
+export interface AssignedSkill {
+  slug: string;
+  name: string;
+  version: string;
+  instructions: string;
+  guidance: string;
+  source: "agent" | "project" | "task" | "dependency";
 }
 
 /* ------------------------------------------------------------------ *
@@ -152,7 +166,7 @@ export interface ProjectRepositoryLink {
   repo: string;
   branch: string;
   role: ProjectRepositoryRole;
-  /** Whether `.ai-engineering/` (agents, prompts, memory…) lives in this repo. */
+  /** Whether the canonical `CodeVia/` folder lives in this repo. */
   isConfigRepo?: boolean;
   private?: boolean;
   defaultBranch?: string;
@@ -187,6 +201,8 @@ export interface ProjectCapabilities {
 }
 
 export interface Project {
+  /** Cache-only optimistic read stamp; never exported to the repository. */
+  repositoryRevision?: string;
   id: ID;
   /**
    * Platform user who owns this project. Empty/undefined means "shared" — legacy
@@ -197,7 +213,7 @@ export interface Project {
   slug: string;
   name: string;
   description: string;
-  /** Root .ai-engineering repo (GitHub) that acts as source of truth (= primary repository). */
+  /** Repository containing canonical CodeVia project state. */
   configRepo: string;
   branch: string;
   /** All repositories linked to the project (the first / `isConfigRepo` one mirrors `configRepo`). */
@@ -217,6 +233,8 @@ export interface Project {
   telegramChatId?: string;
   memoryRepo?: string;
   settings: ProjectSettings;
+  /** Persisted CodeVia schema/provenance, never a flag allowing DB fallback. */
+  repositoryState?: { version: 2; generation: "ai" | "simulation" | "imported"; initializedAt: ISODate; modelId?: ID };
   active: boolean;
   createdAt: ISODate;
   updatedAt: ISODate;
@@ -227,6 +245,8 @@ export interface ProjectSettings {
   notifications: string[];
   rules: string[];
   skills: string[];
+  /** Last automatic selection, so onboarding preserves manual attachments. */
+  generatedSkills?: string[];
   workflows: string[];
   budget: Budget;
   permissions: Record<Permission, boolean>;
@@ -273,6 +293,8 @@ export interface AgentModelConfig {
 }
 
 export interface Agent {
+  /** Cache-only optimistic read stamp; never exported to the repository. */
+  repositoryRevision?: string;
   id: ID;
   projectId: ID;
   type: AgentType;
@@ -285,6 +307,8 @@ export interface Agent {
   systemPrompt: string;
   projectPrompt?: string;
   skills: string[];
+  /** Baseline generated from the project profile (manual changes are preserved). */
+  generatedSkills?: string[];
   tools: string[];
   permissions: string[];
   models: AgentModelConfig;
@@ -327,6 +351,8 @@ export interface WorkflowEdge {
 }
 
 export interface Workflow {
+  /** Cache-only optimistic read stamp; never exported to the repository. */
+  repositoryRevision?: string;
   id: ID;
   projectId: ID;
   name: string;
@@ -386,6 +412,8 @@ export interface Run {
   agentType: AgentType;
   status: RunStatus;
   steps: RunStep[];
+  /** Snapshot of base skill versions and task-local adaptations actually used. */
+  skills?: AssignedSkill[];
   /** Final deliverable/analysis, never a reasoning trace. */
   summary?: string;
   verification?: "passed" | "failed" | "unverified" | "simulated";
@@ -415,6 +443,8 @@ export interface ConversationMessage {
 }
 
 export interface Conversation {
+  /** Cache-only optimistic read stamp; never exported to the repository. */
+  repositoryRevision?: string;
   id: ID;
   projectId: ID;
   userId: ID;

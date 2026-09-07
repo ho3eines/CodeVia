@@ -17,6 +17,8 @@ export interface ToolCallSpec {
 }
 
 export interface ChatRequest {
+  /** Local cancellation/deadline; never included in the provider JSON payload. */
+  signal?: AbortSignal;
   modelId: ID;
   messages: ChatMessage[];
   temperature?: number;

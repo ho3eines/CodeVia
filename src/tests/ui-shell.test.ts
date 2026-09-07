@@ -108,6 +108,32 @@ describe("UI shell", () => {
     }
   }, 60000);
 
+  it("shows the planned owners, criteria and task-local skills in task details and run evidence", async () => {
+    const project = await container.agentManager.createProject({ name: "Skill Trace UI", description: "Store", configRepo: "acme/skill-trace-ui", capabilities: { platforms: ["web"], languages: ["typescript"], frameworks: ["react"] } });
+    const task = container.agentManager.createTask({ projectId: project.id, title: "Add login page and API", description: "Session login", input: { executionMode: "autonomous" } });
+    await container.agentManager.runTask(task.id);
+    const child = container.taskRepo.findMany({ parentId: task.id }).find((r) => r.data.agentType === "frontend-developer")!.data;
+    const { win, go, errors } = await boot();
+    await win.projectViewTask(task.id);
+    expect(win.document.querySelector(".task-plan").textContent).toContain("frontend-developer");
+    expect(win.document.querySelector("#modal-body").textContent).toContain("Skills");
+    const childButton = [...win.document.querySelectorAll("#modal-body button")].find((el: any) => el.getAttribute("onclick")?.includes(child.id)) as any;
+    expect(childButton.getAttribute("onclick")).toBe(`projectViewTask(${JSON.stringify(child.id)})`);
+    await win.projectViewTask(child.id);
+    const modal = win.document.querySelector("#modal-body");
+    expect(modal.textContent).toContain(child.assignedAgentId);
+    expect(modal.querySelector(".task-criteria").textContent).toContain("Acceptance criteria");
+    expect(modal.querySelector(".task-skills").textContent).toContain("React");
+    expect(modal.querySelector(".task-skills").textContent).toContain("Task application");
+    expect(modal.querySelector(".task-skills").textContent).not.toContain("Blazor");
+    win.closeModal();
+    const run = container.runRepo.byTask(child.id)[0];
+    const content = await go(`#/runs/${run.id}/console`);
+    expect(content.querySelector(".task-skills")?.textContent).toContain("Base instructions");
+    expect(errors).toEqual([]);
+    win.close();
+  }, 30000);
+
   it("auto-detects Persian text direction in the model chat", async () => {
     const { win, go, settle } = await boot();
     await go("#/models");

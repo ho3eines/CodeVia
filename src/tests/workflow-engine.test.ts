@@ -173,6 +173,7 @@ describe("workflow implementation integration (Mock GitHub, not real CI)", () =>
     const graph = workflow([node("backend", "agent", { agentType: "backend-developer" }), node("frontend", "agent", { agentType: "frontend-developer" }), node("qa", "agent", { agentType: "qa-test" })], [link("backend", "frontend"), link("frontend", "qa")]);
     c.workflowRepo.upsert(graph, { projectId: project.id });
     c.taskRepo.upsert({ ...task, workflowId: graph.id }, { projectId: project.id });
+    await c.agentManager.syncProjectState(project.id);
     const result = await c.agentManager.runTask(task.id);
     expect(result.status).toBe("succeeded");
     expect(result.result?.verification).toBe("simulated");

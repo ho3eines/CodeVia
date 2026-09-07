@@ -40,9 +40,11 @@ export function projectBriefLines(project: Project): string[] {
 export function projectBrief(project: Project): string {
   return [
     `Project: ${project.name} (${project.slug})`,
-    project.description ? `Definition: ${project.description.slice(0, 300)}` : undefined,
+    project.description ? `Definition: ${project.description}` : undefined,
     `Repository: ${project.configRepo} @ ${project.branch}`,
     ...projectBriefLines(project),
+    project.settings?.environment ? `Environment: ${project.settings.environment}` : undefined,
+    project.settings?.skills?.length ? `Project skills: ${project.settings.skills.join(", ")}` : undefined,
   ]
     .filter((x): x is string => !!x)
     .join("\n");

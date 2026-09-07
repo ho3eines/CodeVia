@@ -1,4 +1,4 @@
-import type { Agent, Project, Task } from "../domain/entities.js";
+import type { Agent, AssignedSkill, Project, Task } from "../domain/entities.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import type { IGitHubService, GithubRepoRef } from "../github/types.js";
 import type { IMemoryStore } from "../memory/store.js";
@@ -7,6 +7,7 @@ import { projectBrief } from "../domain/project-brief.js";
 import { resolveGitHubService } from "../github/registry.js";
 import { memoryResolver } from "../memory/index.js";
 import type { MemoryType } from "../domain/entities.js";
+import { compileAssignedSkills } from "../skills/assignment.js";
 
 export interface ContextSource {
   label: string;
@@ -28,6 +29,7 @@ export interface BuildContextResult {
   context: string;
   sources: ContextSource[];
   tokens: number;
+  skills: AssignedSkill[];
 }
 
 /**
@@ -41,7 +43,7 @@ export class ContextEngine {
   async build(opts: BuildContextOptions): Promise<BuildContextResult> {
     const { project, agent, task } = opts;
     const github = opts.github ?? resolveGitHubService();
-    const memory = opts.memory ?? memoryResolver.resolve({ repo: this.toRepoRef(project), branch: project.branch, localRoot: `./data/memory/${project.id}`, github });
+    const memory = opts.memory ?? memoryResolver.resolve({ project, repo: this.toRepoRef(project), branch: project.branch, localRoot: `./data/memory/${project.id}`, github });
     const sources: ContextSource[] = [];
 
     // 1. Agent system + role
@@ -53,9 +55,9 @@ export class ContextEngine {
     if (task) sources.push({ label: "task-request", content: this.buildTaskRequest(project, task) });
 
     // 3. Skills
-    const skills = opts.skills;
-    if (skills) {
-      const compiled = skills.compile(agent.skills);
+    const selection = opts.skills?.forTask(project, agent, task);
+    if (selection) {
+      const compiled = compileAssignedSkills(selection.assignments);
       if (compiled) sources.push({ label: "skills", content: compiled });
     }
 
@@ -88,7 +90,7 @@ export class ContextEngine {
 
     const tokens = Math.ceil(context.length / 4);
     logger.debug("context built", { sources: sources.map((s) => s.label), tokens });
-    return { context, sources, tokens };
+    return { context, sources, tokens, skills: selection?.assignments ?? [] };
   }
 
   private buildAgentSystem(agent: Agent): string {
@@ -102,7 +104,9 @@ export class ContextEngine {
   }
 
   private buildTaskRequest(project: Project, task: Task): string {
-    const input = Object.keys(task.input ?? {}).length ? `\nInput JSON:\n${JSON.stringify(task.input, null, 2)}` : "";
+    // The skill snapshot is rendered in its own source, not repeated as input.
+    const { skillAssignments: _snapshot, ...taskInput } = task.input ?? {};
+    const input = Object.keys(taskInput).length ? `\nInput JSON:\n${JSON.stringify(taskInput, null, 2)}` : "";
     return [
       `Project: ${project.name} (${project.slug})`,
       `Task: ${task.title}`,
@@ -110,7 +114,7 @@ export class ContextEngine {
       input,
       "",
       "Operating contract:",
-      "- Treat GitHub and the project's .ai-engineering directory as the persistent source of truth.",
+      "- Treat GitHub and the project's CodeVia/ directory as the persistent source of truth.",
       "- Inspect repository context before proposing or making code/config changes; never make blind changes.",
       "- Do not expose chain-of-thought; return action summaries, decisions, tool results, risks, and next steps only.",
       "- Never write plaintext secrets. Use secret references such as OPENAI_API_KEY or TELEGRAM_BOT_TOKEN.",

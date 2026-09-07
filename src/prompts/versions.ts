@@ -11,11 +11,13 @@ import type { ID, ISODate } from "../types.js";
  * Every change to an agent's system/project prompt produces an immutable
  * PromptVersion (v1, v2, …). Versions can be compared (line diff), restored
  * (which creates a new version — history is never rewritten) and cloned.
- * The GitHub config repo remains the durable store (`prompts/agents/*.md`);
+ * The GitHub config repo remains the durable store (`CodeVia/prompts/history/*.md`);
  * this repository is the queryable index/cache.
  * ------------------------------------------------------------------ */
 
 export interface PromptVersion {
+  /** Cache-only revision of the repository ledger, never exported. */
+  repositoryRevision?: string;
   id: ID;
   agentId: ID;
   projectId: ID;
@@ -41,6 +43,10 @@ export class PromptVersionRepository extends DocumentRepository<PromptVersion> {
       .sort((a, b) => a.version - b.version);
   }
 
+  byProject(projectId: string): PromptVersion[] {
+    return this.findMany({ projectId }).map((r) => r.data);
+  }
+
   latest(agentId: string): PromptVersion | undefined {
     const all = this.forAgent(agentId);
     return all[all.length - 1];
@@ -51,25 +57,25 @@ export class PromptVersionRepository extends DocumentRepository<PromptVersion> {
    * text is identical to the latest snapshot so re-saving is idempotent.
    */
   snapshot(agent: Agent, meta: { source: string; note?: string; derivedFrom?: number }): PromptVersion {
-    const prev = this.latest(agent.id);
-    if (prev && prev.systemPrompt === agent.systemPrompt && (prev.projectPrompt ?? "") === (agent.projectPrompt ?? "")) {
-      return prev;
-    }
-    const v: PromptVersion = {
-      id: randomUUID(),
-      agentId: agent.id,
-      projectId: agent.projectId,
-      version: (prev?.version ?? 0) + 1,
-      systemPrompt: agent.systemPrompt,
-      projectPrompt: agent.projectPrompt,
-      source: meta.source,
-      note: meta.note,
-      derivedFrom: meta.derivedFrom,
-      createdAt: new Date().toISOString(),
-    };
-    this.upsert(v, { projectId: agent.projectId, parentId: agent.id });
-    return v;
+    const version = this.draft(agent, meta);
+    this.upsert(version, { projectId: agent.projectId, parentId: agent.id });
+    return version;
   }
+
+  /** Prepare a version without acknowledging a DB write before Git accepts it. */
+  draft(agent: Agent, meta: { source: string; note?: string; derivedFrom?: number }, history = this.forAgent(agent.id)): PromptVersion {
+    if (history.some((v) => v.agentId !== agent.id || v.projectId !== agent.projectId)) throw new Error("Prompt history crosses project/agent boundaries");
+    const prev = [...history].sort((a, b) => b.version - a.version)[0];
+    if (prev && prev.systemPrompt === agent.systemPrompt && (prev.projectPrompt ?? "") === (agent.projectPrompt ?? "")) return prev;
+    return {
+      id: randomUUID(), agentId: agent.id, projectId: agent.projectId,
+      repositoryRevision: prev?.repositoryRevision ?? agent.repositoryRevision,
+      version: (prev?.version ?? 0) + 1, systemPrompt: agent.systemPrompt,
+      projectPrompt: agent.projectPrompt, source: meta.source,
+      note: meta.note, derivedFrom: meta.derivedFrom, createdAt: new Date().toISOString(),
+    };
+  }
+
 }
 
 export function getPromptVersionRepo(): PromptVersionRepository {

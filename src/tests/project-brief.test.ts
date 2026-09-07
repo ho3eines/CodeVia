@@ -154,7 +154,7 @@ describe("definition selections → prompts API", () => {
     return agents.find((a) => a.type === "research")?.systemPrompt ?? "";
   }
 
-  it("builds agent prompts from the creation selections and refreshes them on edit", async () => {
+  it("builds initial prompts from selections and preserves them when current project context changes", async () => {
     const srv = await boot();
     const created = await srv.inject({
       method: "POST",
@@ -182,7 +182,7 @@ describe("definition selections → prompts API", () => {
     expect(before).toContain("Key features: auth");
     expect(before).toContain("Integrations: telegram");
 
-    // Editing the definition re-onboards and rebuilds the prompts.
+    // Editing project context must not overwrite the persisted agent prompt.
     const patched = await srv.inject({
       method: "PATCH",
       url: `/projects/${id}`,
@@ -191,7 +191,9 @@ describe("definition selections → prompts API", () => {
     expect(patched.statusCode).toBe(200);
 
     const after = await researchPrompt(srv, id);
-    expect(after).toContain("Key features: auth, payments");
-    expect(after).toContain("Platforms: web, mobile");
+    expect(after).toBe(before);
+    const current = (await srv.inject({ method: "GET", url: `/projects/${id}` })).json();
+    expect(current.capabilities.features).toEqual(["auth", "payments"]);
+    expect(current.capabilities.platforms).toEqual(["web", "mobile"]);
   });
 });

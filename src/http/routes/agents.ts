@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { Agent, AgentType } from "../../domain/entities.js";
@@ -6,12 +7,26 @@ import { hydrateProject } from "../../domain/project-options.js";
 import { diffLines, diffSummary } from "../../prompts/versions.js";
 import { resolveRequestUser } from "../auth.js";
 
+function validateAgentEdit(agent: Agent): void {
+  try {
+    const strings = z.array(z.string()).max(1024);
+    z.object({ id: z.string(), projectId: z.string(), name: z.string(), systemPrompt: z.string(), projectPrompt: z.string().optional(), skills: strings, tools: strings, permissions: strings, memorySources: strings, enabled: z.boolean(), version: z.number().int().positive(), maxIterations: z.number().finite().nonnegative(), timeoutMs: z.number().finite().nonnegative(), tokenBudget: z.number().finite().nonnegative(), models: z.object({ primary: z.string(), secondary: z.string().optional(), fallbacks: strings, specialized: z.record(z.string()) }) }).parse(agent);
+  } catch (error) { throw Object.assign(new Error(`Invalid agent definition: ${String(error)}`), { statusCode: 422 }); }
+}
+
 export function registerAgentRoutes(app: FastifyInstance, container: Container): void {
-  /** Mirror the roster into CodeVia/agents/*.md (best-effort). */
-  const syncRoster = async (projectId: string): Promise<void> => {
+  /** Persist user edits; a Git failure is an error, never a saved response. */
+  const syncRoster = async (projectId: string, agent: Agent): Promise<void> => {
     const p = container.projectRepo.findById(projectId)?.data;
     if (!p) return;
-    await container.projectFiles.syncAgents(p, container.agentRepo.byProject(projectId));
+    const versions = container.promptVersionRepo.forAgent(agent.id);
+    try { await container.projectFiles.syncAgents(p, [agent], versions); }
+    catch (error) {
+      // Do not keep unpublished prompt versions as if Git had accepted them.
+      // A read failure still propagates; it is never permission to use a cache.
+      try { await container.projectFiles.restore(p); } catch { /* original save error is authoritative */ }
+      throw error;
+    }
   };
 
   app.get("/agents", { schema: { tags: ["agents"] } }, async () => {
@@ -49,26 +64,29 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     const type: AgentType = body.type;
     const scaffold = scaffoldFor(type);
     const project = hydrateProject(projectRec.data);
+    await container.projectFiles.ensurePromptHistory(project);
     const nonEmptyStrings = (v: unknown): string[] | undefined =>
-      Array.isArray(v) && v.length ? v.map((x) => String(x)) : undefined;
+      Array.isArray(v) ? v.map((x) => String(x)) : undefined;
     // Omitted skills/tools/permissions/models fall back to the type scaffold so
     // a hand-created agent is executable immediately (same defaults as onboarding).
     const generator = new AgentGenerator(container.agentRepo, container.skillRepo, container.modelRepo);
     const systemPrompt =
-      typeof body.systemPrompt === "string" && body.systemPrompt.trim()
+      typeof body.systemPrompt === "string"
         ? body.systemPrompt
         : generator.promptFor(type, project);
-    const agent = container.agentRepo.create({
+    const generatedSkills = container.skillsRegistry.forTask(project, { type, name: scaffold.role, skills: scaffold.skills }).skills;
+    let agent = container.agentRepo.create({
       projectId,
       type,
       name: String(body.name ?? scaffold.role),
       slug: String(body.slug ?? type),
       role: String(body.role ?? scaffold.role),
       description: String(body.description ?? scaffold.mission),
-      configPath: (body.configPath as string | undefined) ?? `CodeVia/agents/${type}.md`,
+      configPath: body.configPath as string | undefined,
       systemPrompt,
       projectPrompt: (body.projectPrompt as string | undefined) ?? project.description,
-      skills: nonEmptyStrings(body.skills) ?? [...scaffold.skills],
+      skills: nonEmptyStrings(body.skills) ?? generatedSkills,
+      generatedSkills,
       tools: nonEmptyStrings(body.tools) ?? [...scaffold.tools],
       permissions: nonEmptyStrings(body.permissions) ?? [...scaffold.permissions],
       models: (body.models as Agent["models"] | undefined) ?? generator.modelsFor(project.defaultModelId, type),
@@ -78,6 +96,14 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
       memorySources: nonEmptyStrings(body.memorySources) ?? ["project", type],
       enabled: body.enabled !== false,
     });
+    validateAgentEdit(agent);
+    if (body.systemPrompt === undefined) agent = await container.agentManager.authorDefinition(project, agent, "agent");
+    agent.configPath = container.projectFiles.agentPath(agent);
+    if (container.agentRepo.byProject(projectId).some((a) => a.id !== agent.id && container.projectFiles.agentPath(a) === agent.configPath)) {
+      container.agentRepo.deleteById(agent.id);
+      throw Object.assign(new Error("An agent already owns this CodeVia file"), { statusCode: 409 });
+    }
+    container.agentRepo.upsert(agent, { projectId });
     container.promptVersionRepo.snapshot(agent, { source: "web:create" });
     container.auditRepo.record({
       action: "agent.created",
@@ -88,7 +114,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
       correlationId: `agent-${agent.id}-${Date.now()}`,
       metadata: { type },
     });
-    await syncRoster(projectId);
+    await syncRoster(projectId, agent);
     reply.code(201);
     return agent;
   });
@@ -103,9 +129,15 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
   app.patch("/agents/:id", { schema: { tags: ["agents"] } }, async (req) => {
     const { id } = req.params as { id: string };
     const body = req.body as Record<string, unknown>;
-    const r = container.agentRepo.findById(id);
+    let r = container.agentRepo.findById(id);
     if (!r) return { error: "agent not found" };
-    const updated: Agent = { ...r.data, ...body, id, version: r.data.version + 1, updatedAt: new Date().toISOString() } as Agent;
+    await ensureBaseline(r.data);
+    r = container.agentRepo.findById(id);
+    if (!r) return { error: "agent not found" };
+    if (body.projectId !== undefined && body.projectId !== r.data.projectId) throw Object.assign(new Error("Cannot move an agent across projects"), { statusCode: 400 });
+    if (body.configPath !== undefined && body.configPath !== r.data.configPath) throw Object.assign(new Error("Rename the definition in the repository and refresh instead"), { statusCode: 400 });
+    const updated: Agent = { ...r.data, ...body, id, projectId: r.data.projectId, version: r.data.version + 1, updatedAt: new Date().toISOString() } as Agent;
+    validateAgentEdit(updated);
     container.agentRepo.upsert(updated, { projectId: updated.projectId });
     if (updated.systemPrompt !== r.data.systemPrompt || (updated.projectPrompt ?? "") !== (r.data.projectPrompt ?? "")) {
       // Make sure the pre-edit text exists as a version so the first edit is diffable.
@@ -123,16 +155,15 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
         metadata: { version: container.promptVersionRepo.latest(id)?.version },
       });
     }
-    await syncRoster(updated.projectId);
+    await syncRoster(updated.projectId, updated);
     return updated;
   });
 
   /* ---------------- Prompt versioning ---------------- */
 
-  const ensureBaseline = (agent: Agent) => {
-    if (container.promptVersionRepo.forAgent(agent.id).length === 0) {
-      container.promptVersionRepo.snapshot(agent, { source: "baseline" });
-    }
+  const ensureBaseline = async (agent: Agent) => {
+    const p = container.projectRepo.findById(agent.projectId)?.data;
+    if (p) await container.projectFiles.ensurePromptHistory(p);
   };
 
   app.get("/agents/:id/prompt-versions", { schema: { tags: ["agents"] } }, async (req, reply) => {
@@ -142,7 +173,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
       reply.code(404);
       return { error: "agent not found" };
     }
-    ensureBaseline(r.data);
+    await ensureBaseline(r.data);
     return container.promptVersionRepo.forAgent(id).map((v) => ({
       ...v,
       current: v.systemPrompt === r.data.systemPrompt && (v.projectPrompt ?? "") === (r.data.projectPrompt ?? ""),
@@ -157,7 +188,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
       reply.code(404);
       return { error: "agent not found" };
     }
-    ensureBaseline(r.data);
+    await ensureBaseline(r.data);
     const versions = container.promptVersionRepo.forAgent(id);
     const pick = (v: string | undefined, fallback: number) => versions.find((x) => x.version === Number(v ?? fallback));
     const from = pick(q.from, Math.max(1, versions.length - 1));
@@ -179,12 +210,13 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
       reply.code(404);
       return { error: "agent not found" };
     }
+    await ensureBaseline(r.data);
     const target = container.promptVersionRepo.forAgent(id).find((v) => v.version === Number(version));
     if (!target) {
       reply.code(404);
       return { error: "version not found" };
     }
-    ensureBaseline(r.data);
+    await ensureBaseline(r.data);
     const restored: Agent = {
       ...r.data,
       systemPrompt: target.systemPrompt,
@@ -203,19 +235,24 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
       correlationId: `prompt-${id}-${Date.now()}`,
       metadata: { from: target.version, version: snap.version },
     });
+    await syncRoster(restored.projectId, restored);
     return { agent: restored, version: snap };
   });
 
   app.post("/agents/:id/prompt-versions/:version/clone", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id, version } = req.params as { id: string; version: string };
     const body = (req.body ?? {}) as { targetAgentId?: string };
+    const sourceAgent = container.agentRepo.findById(id)?.data;
+    if (sourceAgent) await ensureBaseline(sourceAgent);
+    const targetAgent = container.agentRepo.findById(body.targetAgentId ?? id)?.data;
+    if (targetAgent && targetAgent.id !== id) await ensureBaseline(targetAgent);
     const source = container.promptVersionRepo.forAgent(id).find((v) => v.version === Number(version));
     const targetRec = container.agentRepo.findById(body.targetAgentId ?? id);
     if (!source || !targetRec) {
       reply.code(404);
       return { error: "version or target agent not found" };
     }
-    ensureBaseline(targetRec.data);
+    await ensureBaseline(targetRec.data);
     const target: Agent = {
       ...targetRec.data,
       systemPrompt: source.systemPrompt,
@@ -225,6 +262,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     };
     container.agentRepo.upsert(target, { projectId: target.projectId });
     const snap = container.promptVersionRepo.snapshot(target, { source: "clone", derivedFrom: source.version, note: `Cloned from ${id} v${source.version}` });
+    await syncRoster(target.projectId, target);
     return { agent: target, version: snap };
   });
 
@@ -232,9 +270,10 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
     if (!r) return { error: "agent not found" };
+    await ensureBaseline(r.data);
     const a = { ...r.data, enabled: true, updatedAt: new Date().toISOString() };
     container.agentRepo.upsert(a, { projectId: a.projectId });
-    await syncRoster(a.projectId);
+    await syncRoster(a.projectId, a);
     return a;
   });
 
@@ -242,9 +281,10 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
     if (!r) return { error: "agent not found" };
+    await ensureBaseline(r.data);
     const a = { ...r.data, enabled: false, updatedAt: new Date().toISOString() };
     container.agentRepo.upsert(a, { projectId: a.projectId });
-    await syncRoster(a.projectId);
+    await syncRoster(a.projectId, a);
     return a;
   });
 
@@ -260,8 +300,11 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
   app.delete("/agents/:id", { schema: { tags: ["agents"] } }, async (req) => {
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
-    container.agentRepo.deleteById(id);
-    if (r) await syncRoster(r.data.projectId);
+    if (r) {
+      const p = container.projectRepo.findById(r.data.projectId)?.data;
+      if (p) await container.projectFiles.tombstone(p, container.projectFiles.agentPath(r.data));
+      container.agentRepo.deleteById(id);
+    }
     return { ok: true };
   });
 }

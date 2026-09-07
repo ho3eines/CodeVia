@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
 import { randomUUID } from "node:crypto";
+import type { Conversation } from "../../domain/entities.js";
 import type { ConversationMessage } from "../../domain/entities.js";
 
 const SUMMARY_SYSTEM_PROMPT =
@@ -47,6 +48,12 @@ async function summarizeConversation(
 }
 
 export function registerConversationRoutes(app: FastifyInstance, container: Container): void {
+  const persist = async (conv: Conversation | undefined) => {
+    if (!conv) return;
+    const p = container.projectRepo.findById(conv.projectId)?.data;
+    if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    await container.projectFiles.syncConversation(p, conv);
+  };
   app.get("/conversations", { schema: { tags: ["conversations"] } }, async (req) => {
     const q = req.query as { projectId?: string };
     let convs = container.conversationRepo.findMany();
@@ -65,6 +72,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       modelId: b.modelId as string | undefined,
       activeAgentId: b.activeAgentId as string | undefined,
     });
+    await persist(conv);
     return conv;
   });
 
@@ -86,11 +94,11 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     // Auto-summarize when a conversation grows long (AI Context Compression).
     // Re-summarise every 20 messages so the summary stays current.
     if (updated && updated.messages.length >= 20 && updated.messages.length % 20 === 0) {
-      void summarizeConversation(container, updated)
-        .then((r) => container.conversationRepo.updateSummary(id, r.summary))
-        .catch(() => undefined);
+      const r = await summarizeConversation(container, updated);
+      container.conversationRepo.updateSummary(id, r.summary);
     }
-    return updated ?? { error: "conversation not found" };
+    await persist(container.conversationRepo.findById(id)?.data);
+    return container.conversationRepo.findById(id)?.data ?? { error: "conversation not found" };
   });
 
   app.post("/conversations/:id/summarize", { schema: { tags: ["conversations"] } }, async (req) => {
@@ -100,11 +108,15 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     if (conv.data.messages.length === 0) return { summary: "", method: "heuristic" };
     const result = await summarizeConversation(container, conv.data);
     container.conversationRepo.updateSummary(id, result.summary);
+    await persist(container.conversationRepo.findById(id)?.data);
     return result;
   });
 
   app.delete("/conversations/:id", { schema: { tags: ["conversations"] } }, async (req) => {
     const { id } = req.params as { id: string };
+    const conv = container.conversationRepo.findById(id)?.data;
+    const p = conv && container.projectRepo.findById(conv.projectId)?.data;
+    if (p) await container.projectFiles.tombstone(p, container.projectFiles.pathFor(p, "conversation", id));
     container.conversationRepo.deleteById(id);
     return { ok: true };
   });

@@ -105,6 +105,8 @@ describe("Telegram bot (project-aware, keyboard-driven)", () => {
     const tasks = container.taskRepo.byProject(project.id);
     expect(tasks.length).toBe(before + 1);
     expect(tasks[0].title).toBe("Add pagination to the API");
+    expect(tasks[0].input.executionMode).toBe("autonomous");
+    expect(tasks[0].workflowId).toBeUndefined();
     // A job must have been enqueued so the worker actually runs the task.
     const jobs = container.db.all<{ id: string; type: string; status: string }>("SELECT id, type, status FROM jobs WHERE type = 'agent.run'");
     expect(jobs.length).toBeGreaterThanOrEqual(1);
@@ -176,6 +178,7 @@ describe("Telegram bot — real-world command handling", () => {
       message: { chat: { id: 888 }, from: { id: 123 }, text: "چرا لاگین بعد از آخرین کامیت خراب شده؟" },
     });
     expect(container.taskRepo.findMany().length).toBe(before + 1);
+    expect(container.taskRepo.findMany()[0].data.input.executionMode).toBe("autonomous");
     const sent = lastSent();
     expect(sent.text).toContain("Task created & queued");
   });

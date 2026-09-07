@@ -1,7 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { AgentType, Project, ProjectGithubConnection, ProjectRepositoryLink } from "../../domain/entities.js";
-import { skillsForCapabilities } from "../../domain/project-options.js";
 import {
   configRepoOf,
   getProjectOptionCatalog,
@@ -17,6 +16,8 @@ import { resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken } from "../../auth/github-tokens.js";
 import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
+import { isAgentType } from "../../agents/generator.js";
+import { IMPLEMENTERS } from "../../agents/implementation.js";
 
 function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
   reply.code(status);
@@ -34,11 +35,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const r = container.projectRepo.findById(id);
     return r ? hydrateProject(r.data) : undefined;
   };
-  const save = (p: Project): Project => {
-    const next = hydrateProject({ ...p, updatedAt: new Date().toISOString() });
-    container.projectRepo.upsert(next, { key: next.slug });
-    return next;
-  };
+  const save = (p: Project): Promise<Project> => container.agentManager.saveProject(p);
 
   // Option catalog for the multi-select project form (platforms, languages, …).
   app.get("/projects/options", { schema: { tags: ["projects"] } }, async () => {
@@ -109,18 +106,8 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
         tech: Array.isArray(body.tech) ? (body.tech as string[]) : [],
       });
 
-      // Compute skills from the selected capabilities
-      const skills = skillsForCapabilities(project.capabilities);
-
-      // Attach skills to the project settings
-      project.settings = {
-        ...project.settings,
-        skills: skills ?? [],
-      };
-
-      // Persist the updated project (including skills)
-      const updated = save({ ...project, id: project.id });
-      project = updated;
+      // Onboarding already resolved skills from selections, repository signals
+      // and manual attachments and synced that exact state to GitHub.
 
       const agents = container.agentRepo.byProject(project.id).filter((a) => a.enabled).length;
       reply.code(201);
@@ -165,7 +152,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     }
     if (typeof body.telegramChatId === "string") patch.telegramChatId = body.telegramChatId || undefined;
     if (typeof body.active === "boolean") patch.active = body.active;
-    if (body.settings && typeof body.settings === "object") patch.settings = { ...p.settings, ...(body.settings as Partial<Project["settings"]>) };
+    if (body.settings && typeof body.settings === "object") {
+      const settings = body.settings as Partial<Project["settings"]>;
+      patch.settings = { ...p.settings, ...settings, budget: { ...p.settings.budget, ...settings.budget }, permissions: { ...p.settings.permissions, ...settings.permissions }, metadata: { ...p.settings.metadata, ...settings.metadata } };
+    }
     if (body.capabilities && typeof body.capabilities === "object") {
       patch.capabilities = normalizeCapabilities({ ...p.capabilities, ...(body.capabilities as Record<string, unknown>) });
       Object.assign(patch, legacyFieldsFromCapabilities(patch.capabilities));
@@ -182,7 +172,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       const cfg = configRepoOf(p.repositories);
       patch.repositories = p.repositories.map((r) => (r === cfg ? { ...r, repo, branch } : r));
     }
-    const updated = save({ ...p, ...patch, id });
+    const updated = await save({ ...p, ...patch, id });
     container.auditRepo.record({
       action: "project.updated",
       projectId: id,
@@ -196,7 +186,6 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     // want to stage stack changes before regenerating the roster.
     const rerun = body.reonboard === true || (body.reonboard !== false && patch.capabilities !== undefined);
     if (rerun) await container.agentManager.onboardProject(id, []);
-    else await container.agentManager.syncProjectState(id);
     return load(id) ?? updated;
   });
 
@@ -586,10 +575,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       .map((s) => String(s).trim())
       .filter(Boolean);
     if (!slugs.length) return fail(reply, 400, "Skill slug is required");
-    const unknown = slugs.filter((s) => !container.skillRepo.findBySlug(s));
+    if (slugs.some((slug) => container.projectFiles.isTombstoned(p, `CodeVia/skills/${slug}.md`))) return fail(reply, 409, "This skill was intentionally removed. Create its definition explicitly before attaching it again.");
+    const unknown = slugs.filter((s) => !container.skillRepo.findBySlug(s, id) && !container.skillRepo.findBySlug(s));
     if (unknown.length) return fail(reply, 404, `Unknown skill(s): ${unknown.join(", ")}`);
-    const next = save({ ...p, settings: { ...p.settings, skills: [...new Set([...p.settings.skills, ...slugs])] } });
-    await container.agentManager.syncProjectState(id);
+    const next = await save({ ...p, settings: { ...p.settings, skills: [...new Set([...p.settings.skills, ...slugs])], generatedSkills: p.settings.generatedSkills?.filter((slug) => !slugs.includes(slug)) } });
     return next.settings.skills;
   });
 
@@ -597,8 +586,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id, slug } = req.params as { id: string; slug: string };
     const p = load(id);
     if (!p) return fail(reply, 404, "project not found");
-    const next = save({ ...p, settings: { ...p.settings, skills: p.settings.skills.filter((s) => s !== slug) } });
-    await container.agentManager.syncProjectState(id);
+    const next = await save({ ...p, settings: { ...p.settings, skills: p.settings.skills.filter((s) => s !== slug) } });
     return next.settings.skills;
   });
 
@@ -616,15 +604,23 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const body = (req.body ?? {}) as Record<string, unknown>;
     const project = load(id);
     if (!project) return fail(reply, 404, "project not found");
-    const title = String(body.title ?? "AI request");
-    const description = String(body.description ?? body.prompt ?? title);
-    const executionMode = body.executionMode === "agent" || body.executionMode === "simulation" || body.executionMode === "autonomous" ? body.executionMode : "workflow";
+    const description = String(body.description ?? body.prompt ?? body.title ?? "").trim();
+    if (!description) return fail(reply, 400, "A non-empty project request is required");
+    const title = String(body.title ?? description.slice(0, 120)).trim() || description.slice(0, 120);
+    if (body.executionMode !== undefined && !["agent", "simulation", "workflow", "autonomous"].includes(String(body.executionMode))) return fail(reply, 400, "Unknown execution mode");
+    const executionMode = body.executionMode === "agent" || body.executionMode === "simulation" || body.executionMode === "workflow" ? body.executionMode : body.executionMode === undefined && body.workflowId ? "workflow" : "autonomous";
+    if (body.agentType !== undefined && !isAgentType(body.agentType)) return fail(reply, 400, "Unknown agent type");
+    if (executionMode === "autonomous" && body.agentType && !IMPLEMENTERS.includes(body.agentType as AgentType)) return fail(reply, 400, "Autonomous agent hints must name an implementation specialist. Use executionMode: agent for research, QA or other read-only agents.");
     const routedAgentType = (body.agentType as AgentType | undefined) ?? container.agentRouter.route(`${title} ${description}`);
     const workflowId = typeof body.workflowId === "string" && body.workflowId
       ? body.workflowId
       : executionMode === "workflow"
         ? workflowForIntent(id, `${title} ${description}`)
         : undefined;
+    if (workflowId) {
+      const workflow = container.workflowRepo.findById(workflowId)?.data;
+      if (!workflow?.enabled || workflow.projectId !== id) return fail(reply, 400, "Workflow must be enabled and belong to this project");
+    }
     if (executionMode === "simulation") {
       const agent = container.agentRepo.byType(id, routedAgentType);
       const plan = agent ? defaultPlanFor(agent, {
@@ -681,7 +677,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const body = (req.body ?? {}) as { rules?: string[]; keepDiscovered?: boolean };
     const manual = Array.isArray(body.rules) ? body.rules.map((r) => String(r).trim()).filter(Boolean) : [];
     const discovered = body.keepDiscovered === false ? [] : p.settings.rules.filter((r) => r.startsWith(DISCOVERED_RULE_TAG));
-    const next = save({ ...p, settings: { ...p.settings, rules: [...manual, ...discovered] } });
+    const next = await save({ ...p, settings: { ...p.settings, rules: [...manual, ...discovered] } });
     container.auditRepo.record({ action: "project.rules.updated", projectId: id, result: "success", source: "web", correlationId: `rules-${id}-${Date.now()}`, metadata: { manual: manual.length, discovered: discovered.length } });
     return { rules: next.settings.rules.length, manual: manual.length, discovered: discovered.length };
   });
@@ -730,7 +726,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p) return fail(reply, 404, "project not found");
-    return p.repositories.map((r) => ({ ...r, path: r.isConfigRepo ? ".ai-engineering" : undefined }));
+    return p.repositories.map((r) => ({ ...r, path: r.isConfigRepo ? "CodeVia" : undefined }));
   });
 
   // Link a repository (picked from the connected GitHub account) to a project.
@@ -754,7 +750,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     };
     let repos = existing ? p.repositories.map((r) => (r === existing ? { ...r, ...link } : r)) : [...p.repositories, link as ProjectRepositoryLink];
     if (link.isConfigRepo) repos = repos.map((r) => ({ ...r, isConfigRepo: r.repo.toLowerCase() === repo.toLowerCase() }));
-    const updated = save({ ...p, repositories: normalizeRepositories(repos) });
+    const updated = await save({ ...p, repositories: normalizeRepositories(repos) });
     if (container.github.kind === "mock") await container.agentManager.onboardProject(id, []);
     return updated;
   });

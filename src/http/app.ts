@@ -34,6 +34,7 @@ import { registerBackupRoutes } from "./routes/backup.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { authMiddleware } from "./auth.js";
+import { registerProjectStateHook } from "./project-state-hook.js";
 import { getEnv } from "../config/env.js";
 
 export interface BuildServerResult {
@@ -291,6 +292,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     await authMiddleware({ container })(request, reply);
   });
 
+  registerProjectStateHook(app, container);
   return { app, io };
 }
 

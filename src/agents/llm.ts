@@ -5,9 +5,12 @@ import type { Agent, Project, Task } from "../domain/entities.js";
 import type { CostRepository } from "../observability/repos.js";
 import { BudgetExceededError, TaskCancelledError, type ExecutionBudget } from "./execution.js";
 import { logger } from "../logger.js";
+import { projectBrief } from "../domain/project-brief.js";
 
 export interface RealChat {
   chat(system: string, user: string, maxTokens?: number): Promise<string>;
+  /** Refresh only the task context when a single-agent plan refines its skills. */
+  setContext(context: string): void;
   providerName: string;
   modelLabel: string;
 }
@@ -26,6 +29,7 @@ export interface ChatDeps {
   category: TaskCategory;
   budget: ExecutionBudget;
   taskBudget?: ExecutionBudget;
+  signal?: AbortSignal;
   checkActive: () => void;
   /** Analysis/demo runs may use Mock; code generation never silently falls back to it. */
   allowMock?: boolean;
@@ -61,11 +65,19 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
   const initial = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category);
   if (!initial.length) throw new Error(`No active ${deps.category} model is available for ${deps.agent.name}`);
   const session: RealChat = {
+    setContext: (context) => { deps.context = context; },
     providerName: deps.providerRepo.findById(initial[0].providerId)!.data.name,
     modelLabel: initial[0].modelId,
     chat: async (instruction, user, maxTokens = 4000) => {
       const messages = [
-        { role: "system" as const, content: `${deps.agent.systemPrompt}\n\n${instruction}\n\nReturn only the requested deliverable, never private reasoning.` },
+        { role: "system" as const, content: [
+          deps.agent.systemPrompt,
+          instruction,
+          `Current project settings (authoritative over stale generated prompt defaults):\n${projectBrief(deps.project)}`,
+          deps.project.settings.rules.length ? `Project rules:\n${deps.project.settings.rules.join("\n\n")}` : "",
+          `Allowed tools: ${deps.agent.tools.join(", ")}. Skills are knowledge only; they never grant new tools or bypass approvals.`,
+          "Return only the requested deliverable, never private reasoning.",
+        ].filter(Boolean).join("\n\n") },
         { role: "user" as const, content: `${deps.context}\n\n--- Current operation ---\n${user}` },
       ];
       const inputEstimate = Math.ceil(messages.reduce((n, m) => n + m.content.length, 0) / 4);
@@ -88,6 +100,7 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
         try {
           const response = await deps.providerRegistry.resolve(config).chat({
             modelId: model.modelId,
+            signal: deps.signal,
             messages,
             temperature: model.temperature ?? 0.2,
             omitTemperature: model.omitTemperature === true,
@@ -115,6 +128,7 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
           session.modelLabel = model.modelId;
           return response.content;
         } catch (err) {
+          deps.signal?.throwIfAborted();
           if (err instanceof BudgetExceededError || err instanceof TaskCancelledError) throw err;
           lastError = err;
           logger.warn("agent model failed; trying configured fallback", { modelId: model.id, taskId: deps.task.id, err: String(err) });

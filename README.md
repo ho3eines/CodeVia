@@ -1,14 +1,16 @@
 # CodeVia — AI Engineering Agent Platform
 
-A **production-ready, multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled** AI engineering platform. CodeVia acts as a real **AI Engineering Organization** for each of your software projects — with specialized agents for research, architecture, backend/frontend development, UI/UX, database, DevOps, QA, security, code review, documentation, debugging, refactoring, performance, and release.
+A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled** AI engineering platform under active development. CodeVia provides agent definitions and execution paths for research, architecture, backend/frontend development, UI/UX, database, DevOps, QA, security, code review, documentation, debugging, refactoring, performance, and release; not all roles have a complete autonomous implementation.
 
-> **GitHub is the source of truth.** Persistent project data lives in the project repository under **`CodeVia/`** (`project.md` manifest, `agents/`, `skills.md`, `tasks/`, managed `memory.md`) plus workflow files under `.ai-engineering/`. The database is used only for runtime state, cache, index, search, queue, and cost/usage metrics — and can be rehydrated anytime with “Pull from GitHub”.
+> **Readiness warning (2026-09-07):** the [historical completeness audit](docs/PIPELINE_AUDIT.md) reproduced 18 targeted gaps before the repository-first work. This update addresses project-state persistence/reuse; it is **not** a complete security, QA or queue-recovery remediation. Authentication/authorization and realtime limitations still make public or sensitive multi-user deployment unsafe.
+
+> **Repository-backed project knowledge — not yet complete.** The platform stores full skills, agents/prompts and prompt history, rules, memory, workflows, tasks, runs and conversations under **`CodeVia/`**. Standard initialization/reuse and many restore paths are tested, but the [current repository-state audit](docs/REPOSITORY_STATE_AUDIT.md) reproduces **8 remaining gaps** in actual context consumption, terminal history, deletion/copy, legacy migration and error handling. Do not assume every path is repository-authoritative yet. Credentials, accounts and live queue state remain local; keep a database backup, particularly before migrating legacy projects. See the [format and usage guide](docs/REPOSITORY_STATE.md).
 
 ---
 
 ## ✨ Highlights
 
-- 🔀 **Multi-project / multi-tenant** — every project has its own agents, models, skills, memory, prompts, workflows, permissions and Telegram chat.
+- 🔀 **Multi-project organization** — project-scoped agents, model assignments, skills, memory, prompts, workflows and Telegram chats. Tenant authorization is incomplete; see the readiness warning above.
 - 🤖 **18 built-in agent types** generated automatically from your project description (**AI Agent Generator**).
 - 🧠 **Provider-agnostic model system** — OpenAI, Anthropic, Gemini, Azure OpenAI, OpenRouter, Ollama, custom OpenAI-compatible + a built-in **Mock AI provider** so the whole platform runs offline.
 - 🎯 **Intelligent Model Router** — picks a model per task by capability, budget, cost, latency, context size; auto-falls back A → B → C on failure.
@@ -17,7 +19,7 @@ A **production-ready, multi-project, GitHub-centric, multi-agent, multi-model, T
 - 🏃 **Background Worker + Queue** — agent executions never block the UI/API thread; retries, exponential backoff, dead-letter, idempotency.
 - 📱 **Telegram bot** — project-aware inline keyboards, natural-language requests (فارسی included) and human approval via Telegram. It receives updates over a **webhook when one is reachable, long polling otherwise**, so a bot token alone is enough — no ngrok, no public URL, and `/ping` tells you exactly which path is live.
 - 📊 **Observability** — AI Run Console (observable steps, never chain-of-thought), cost tracking, agent dashboards, audit log, notifications, system health.
-- 🔐 **Security-first** — secrets are **references** (env vars / secret manager) only; RBAC, webhook signature validation, request-gated dangerous operations, audit trail.
+- 🔐 **Security building blocks** — secret references, OAuth login, role definitions, webhook signature validation, approval controls and audit events. Enforcement is incomplete; these are not an end-to-end security guarantee.
 - 🐳 **Dockerized + Railway-ready** — multi-stage Dockerfile, health/readiness/liveness endpoints, `railway.json`, `docker-compose.yml`, `.env.example`.
 
 ---
@@ -35,7 +37,7 @@ npm run dev
 open http://localhost:8080
 ```
 
-The platform seeds built-in **skills**, **providers** and **mock models** on boot. Create a project and it will automatically generate an agent roster, skills and a workflow.
+The platform seeds built-in **skills**, **providers** and **mock models** on boot. Create a project and it first reads `CodeVia/` from its connected repository. Existing material is reused; only missing definitions are authored. Real repositories need an active model to generate missing material; offline Mock scaffolds are labelled simulation.
 
 ### Seed a demo project (optional)
 
@@ -46,7 +48,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (462 tests)
+npm test            # unit + integration + end-to-end (493 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run typecheck   # strict TypeScript
 npm run build       # compile + copy static UI into dist/

@@ -2,7 +2,7 @@ import type { AgentType, Project } from "../domain/entities.js";
 import type { MemoryRepository } from "../domain/repos.js";
 import type { IGitHubService } from "../github/types.js";
 import { detectStack, type Stack } from "./scaffold.js";
-import { matter, parseMatter, CONTEXT_FILE } from "../github/project-files.js";
+import { matter, parseMatter, CONTEXT_FILE, RUNTIME_CONTEXT_FILE } from "../github/project-files.js";
 import type { ProjectFilesService } from "../github/project-files.js";
 
 /**
@@ -124,7 +124,7 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
   empty.tree = allPaths.filter((p) => !p.startsWith("CodeVia/"));
 
   // Entity registry from the persisted context file (best-effort).
-  empty.registry = parseRegistry(await getFile(CONTEXT_FILE));
+  empty.registry = parseRegistry(await getFile(RUNTIME_CONTEXT_FILE) ?? await getFile(CONTEXT_FILE));
 
   // Manifest / architecture-defining files, in priority order.
   const ranked = empty.tree
@@ -366,12 +366,8 @@ export async function syncProjectContext(opts: {
   entries?: Array<{ entity: string; path: string; agentType: string; subtaskId: string; at: string }>;
 }): Promise<boolean> {
   if (!opts.files) return false;
-  try {
-    const pack = await buildContextPack({ github: opts.github, project: opts.project, memoryRepo: opts.memoryRepo });
-    const existing = parseRegistry(await opts.files.readContext(opts.project));
-    pack.registry = mergeRegistry(existing, opts.entries ?? []);
-    return await opts.files.syncContext(opts.project, renderContextMarkdown(opts.project, pack));
-  } catch {
-    return false;
-  }
+  const pack = await buildContextPack({ github: opts.github, project: opts.project, memoryRepo: opts.memoryRepo, strict: true });
+  const existing = parseRegistry(await opts.files.readContext(opts.project));
+  pack.registry = mergeRegistry(existing, opts.entries ?? []);
+  return opts.files.syncContext(opts.project, renderContextMarkdown(opts.project, pack));
 }

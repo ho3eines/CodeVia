@@ -71,6 +71,7 @@ describe("grounded implementation pipeline", () => {
     const agent = c.agentRepo.byType(p.id, "backend-developer")!;
     c.agentRepo.upsert({ ...agent, systemPrompt: "AGENT_RULE_KEEP_EXISTING", projectPrompt: "PROJECT_PROMPT_SENTINEL", models: { primary: preferred.id, fallbacks: [], specialized: { coding: preferred.id } } }, { projectId: p.id });
     c.projectRepo.upsert({ ...p, settings: { ...p.settings, rules: ["PROJECT_RULE_USE_SESSION_SERVICE"] } }, { key: p.slug });
+    await c.agentManager.syncProjectState(p.id);
     const t = task(false);
     const done = await c.agentManager.runTask(t.id);
     expect(done.status).toBe("succeeded");
@@ -179,6 +180,7 @@ describe("grounded implementation pipeline", () => {
     Object.defineProperty(gh, "kind", { value: "real", configurable: true });
     Object.assign(gh, { getChecks: async () => [] });
     c.projectRepo.upsert({ ...p, settings: { ...p.settings, metadata: { ciWaitMs: 0 } } }, { key: p.slug });
+    await c.agentManager.syncProjectState(p.id);
     const t = task();
     await expect(c.agentManager.runTask(t.id)).rejects.toThrow(/Not verified/);
     expect(c.taskRepo.findById(t.id)?.data.status).toBe("failed");
@@ -251,6 +253,7 @@ describe("grounded implementation pipeline", () => {
     c.modelRepo.upsert({ ...selected, active: false });
     const agent = c.agentRepo.byType(p.id, "backend-developer")!;
     c.agentRepo.upsert({ ...agent, models: { primary: selected.id, fallbacks: [], specialized: {} } }, { projectId: p.id });
+    await c.agentManager.syncProjectState(p.id);
     await expect(c.agentManager.runTask(task(false).id)).rejects.toThrow(/missing or disabled/);
     expect(requests).toHaveLength(0);
   });

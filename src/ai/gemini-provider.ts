@@ -52,7 +52,7 @@ export class GeminiProvider implements IModelProvider {
           maxOutputTokens: req.maxTokens ?? this.config.maxTokensDefault,
         },
       }),
-      signal: AbortSignal.timeout(this.config.timeoutMs),
+      signal: req.signal ? AbortSignal.any([req.signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");

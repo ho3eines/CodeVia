@@ -88,7 +88,7 @@ export class OpenAICompatibleProvider implements IModelProvider {
         ...(this.config.authType === "api-key" && key ? { "api-key": key } : {}),
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.config.timeoutMs),
+      signal: req.signal ? AbortSignal.any([req.signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs),
     });
 
     if (!res.ok) {

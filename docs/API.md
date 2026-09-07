@@ -34,7 +34,7 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | DELETE | `/projects/:id` | Delete |
 | GET | `/projects/:id/agents` / `skills` / `memory` / `workflows` / `tasks` / `runs` / `tests` | Sub-resources |
 | GET | `/projects/:id/issues` / `pull-requests` | Issues / PRs across **all** linked repositories (`?repo=owner/name` to filter); each item carries `repo` |
-| POST | `/projects/:id/ask` | Natural-language AI action → task + queued job (`agentType` optional) |
+| POST | `/projects/:id/ask` | Natural-language request (`prompt` or `description`, optional `title`) → task + queued job. Default `executionMode: "autonomous"` runs research → structured tasks/skills → implementation → QA/fix. Explicit `agent`, `workflow`, `simulation` modes remain supported. `agentType` in autonomous mode must be an enabled implementation specialist; use `agent` mode for read-only roles. |
 | POST | `/projects/:id/onboard` | Re-run onboarding (re-detects stack **and re-discovers project rules**) |
 | GET | `/projects/:id/rules` | Project rules injected into every agent prompt: `{index, category, discovered, text}` — `discovered` blocks come from README / CONTRIBUTING / CODEOWNERS / `.editorconfig` / `Directory.Build.*` / `*.csproj` / `package.json` / Dockerfile / CI / `.ai-engineering/rules/*.md` |
 | PUT | `/projects/:id/rules` | Replace the **manual** rules (`rules: string[]`); discovered rules are kept unless `keepDiscovered:false` |
@@ -105,7 +105,11 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | POST | `/tasks/:id/run` | Queue a run |
 | POST | `/tasks/:id/cancel` | Cancel — queued jobs are dropped, running plans stop between steps; final tasks return `alreadyFinal` |
 | GET | `/runs`, `/runs/:id` | Runs |
-| GET | `/runs/:id/console` | **AI Run Console** (observable steps, results — never chain-of-thought) |
+| GET | `/runs/:id/console` | **AI Run Console**: observable steps, results, verification and `skills[]` snapshots (`slug`, `name`, `version`, `instructions`, task-local `guidance`, `source`) — never chain-of-thought |
+
+Autonomous parents retain `input.researchBrief` and `input.breakdown`. Each planned item has a stable plan `id`, `taskId`, `assignedAgentId`, `agentType`, `repository`, `files`, `dependsOn` (plan ids), `acceptanceCriteria`, `skills` (root slugs) and optional `skillInstructions`. The executable child stores `assignedAgentId`, task-id dependencies in `input.dependsOn`, its criteria and a `skillAssignments` snapshot. All planned children exist before the first implementation write; unexecuted children are cancelled if the owning task stops.
+
+Plans are bounded to 12 tasks / 5 files per task and validated as an acyclic graph. Skill roots must exist, be enabled and compatible with the owner and project profile; dependencies are resolved transitively. Task guidance supplements base instructions and never changes shared skills or grants tool permissions. See [agent execution](AGENT_EXECUTION.md) for the full contract and simulation semantics.
 
 ## Memory
 

@@ -31,7 +31,7 @@ afterEach(async () => {
 
 const ctxFor = (over: Partial<ToolContext>, agentPerms: string[]): ToolContext => {
   const project = container.projectRepo.findMany()[0]?.data;
-  const agent = container.agentRepo.findMany()[0]?.data;
+  const agent = container.agentRepo.byType(project!.id, "release");
   return {
     project: project!,
     agent: { ...agent!, permissions: agentPerms as never },
@@ -119,6 +119,7 @@ describe("project import — preview, create, merge", () => {
       enabled: true,
     });
     expect(wf.id).toBeTruthy();
+    await container.agentManager.syncProjectState(src.id);
     const exported = (await app!.inject({ method: "GET", url: `/projects/${src.id}/export` })).json();
     expect(exported.agents.length).toBeGreaterThan(0);
     expect(exported.workflows.map((w: { slug: string }) => w.slug)).toEqual(expect.arrayContaining(["autonomous-development-loop", "bug-diagnosis-loop", "ship"]));
@@ -130,8 +131,11 @@ describe("project import — preview, create, merge", () => {
     expect(preview.conflicts.some((c: { kind: string }) => c.kind === "project")).toBe(true); // slug taken → rename
     expect(container.projectRepo.findMany().length).toBe(before);
 
-    const created = (await app!.inject({ method: "POST", url: "/settings/import", payload: exported })).json();
-    expect(created.ok).toBe(true);
+    const clone = structuredClone(exported);
+    clone.project.configRepo = "acme/imported-source";
+    clone.project.repositories = [{ repo: "acme/imported-source", branch: "main", role: "primary", isConfigRepo: true }];
+    const created = (await app!.inject({ method: "POST", url: "/settings/import", payload: clone })).json();
+    expect(created.ok, JSON.stringify(created)).toBe(true);
     expect(created.projectId).not.toBe(src.id);
     const newWfs = container.workflowRepo.byProject(created.projectId);
     expect(newWfs.map((w) => w.slug)).toEqual(expect.arrayContaining(["autonomous-development-loop", "bug-diagnosis-loop", "ship"]));

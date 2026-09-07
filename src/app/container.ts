@@ -55,6 +55,7 @@ export class Container {
   readonly memoryRepo = getMemoryRepo();
   readonly telegramAccountRepo = getTelegramAccountRepo();
   readonly agentRepo = getAgentRepo();
+  readonly promptVersionRepo = getPromptVersionRepo();
   readonly runRepo = getRunRepo();
   readonly costRepo = getCostRepo();
   readonly auditRepo = getAuditRepo();
@@ -79,13 +80,12 @@ export class Container {
   readonly github: IGitHubService = resolveGitHubService();
   readonly githubForProject = (project: Project): IGitHubService => resolveGitHubForProject({ project, kv: this.kv, fallback: this.github });
   /** Project folder (CodeVia/*) sync between the database and the project repo. Shares the platform github instance. */
-  readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github, githubForProject: this.githubForProject });
+  readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github, githubForProject: this.githubForProject, repositories: { projectRepo: this.projectRepo, agentRepo: this.agentRepo, taskRepo: this.taskRepo, memoryRepo: this.memoryRepo, skillRepo: this.skillRepo, workflowRepo: this.workflowRepo, runRepo: this.runRepo, conversationRepo: this.conversationRepo, promptVersionRepo: this.promptVersionRepo }, transaction: (fn) => this.db.tx(fn) });
   readonly telegram = resolveTelegramService();
   readonly memoryResolver: MemoryResolver = memoryResolver;
   readonly agentRouter = new AgentRouter();
 
   readonly approvalRepo = getApprovalRepo();
-  readonly promptVersionRepo = getPromptVersionRepo();
   /**
    * Human-in-the-loop approvals. Policy (auto vs. wait-for-human) lives in the
    * KV store; pending requests are surfaced in the web UI and pushed to the
@@ -129,6 +129,7 @@ export class Container {
       requestApproval: (a, d) => this.approvalChannel(a, d),
       memoryRepo: this.memoryRepo,
       projectFiles: this.projectFiles,
+      refresh: async (id) => ({ project: await this.agentManager.refreshProject(id), agents: this.agentRepo.byProject(id) }),
       checkActive: (task) => assertTaskActive(this.taskRepo, task),
     });
     this.workflowEngine = new WorkflowEngine({
@@ -142,6 +143,7 @@ export class Container {
     });
     const agentGenerator = new AgentGenerator(this.agentRepo, this.skillRepo, this.modelRepo);
     this.agentManager = new AgentManager({
+      promptVersionRepo: this.promptVersionRepo,
       projectRepo: this.projectRepo,
       taskRepo: this.taskRepo,
       workflowRepo: this.workflowRepo,
@@ -161,6 +163,7 @@ export class Container {
       githubForProject: this.githubForProject,
       providerRegistry: this.providerRegistry,
       memoryRepo: this.memoryRepo,
+      conversationRepo: this.conversationRepo,
       projectFiles: this.projectFiles,
     });
     this.worker = new Worker({

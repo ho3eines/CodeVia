@@ -124,7 +124,7 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     const linked = (await srv.inject({ method: "POST", url: `/projects/${p.id}/repositories`, payload: { repo: "acme/accounting", role: "library" } })).json();
     expect(linked.repositories.map((r: { repo: string }) => r.repo)).toEqual(["acme/storefront", "acme/mobile-app", "acme/accounting"]);
     const moved = (await srv.inject({ method: "PATCH", url: `/projects/${p.id}/repositories/acme/accounting`, payload: { isConfigRepo: true, branch: "release" } })).json();
-    expect(moved.configRepo).toBe("acme/accounting");
+    expect(moved.configRepo, JSON.stringify(moved)).toBe("acme/accounting");
     expect(moved.branch).toBe("release");
     expect(moved.repositories.filter((r: { isConfigRepo: boolean }) => r.isConfigRepo)).toHaveLength(1);
     const removed = await srv.inject({ method: "DELETE", url: `/projects/${p.id}/repositories/acme/mobile-app` });
@@ -134,7 +134,7 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     expect(bad.statusCode).toBe(404);
   });
 
-  it("re-onboards when capabilities change via PATCH and disables agents outside the roster", async () => {
+  it("preserves existing agents and their enablement when project capabilities change", async () => {
     const srv = await boot();
     const p = (await srv.inject({ method: "POST", url: "/projects", payload: { name: "Roster", configRepo: "acme/roster" } })).json();
     const before = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{ enabled: boolean }>;
@@ -144,7 +144,9 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     const after = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{ type: string; enabled: boolean }>;
     expect(after).toHaveLength(18); // never deleted
     const enabled = after.filter((a) => a.enabled).map((a) => a.type).sort();
-    expect(enabled).toEqual(["code-reviewer", "debugging", "devops", "orchestrator", "project-manager", "qa-test", "research"]);
+    expect(enabled).toHaveLength(18);
+    const current = (await srv.inject({ method: "GET", url: `/projects/${p.id}` })).json();
+    expect(current.capabilities.agentTypes).toEqual(["devops"]);
   });
 
   it("rejects invalid input with real status codes", async () => {

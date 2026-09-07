@@ -1,4 +1,4 @@
-import type { AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task, Workflow, WorkflowNode } from "../domain/entities.js";
+import type { Agent, Skill, AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task, Workflow, WorkflowNode } from "../domain/entities.js";
 import {
   agentTypesForProject,
   canonicalOption,
@@ -10,7 +10,7 @@ import {
   optionLabel,
   skillsForCapabilities,
 } from "../domain/project-options.js";
-import type { MemoryRepository, ProjectRepository, TaskRepository, WorkflowRepository } from "../domain/repos.js";
+import type { ConversationRepository, MemoryRepository, ProjectRepository, TaskRepository, WorkflowRepository } from "../domain/repos.js";
 import type { ProjectFilesService } from "../github/project-files.js";
 import type { AgentRepository } from "./agent-repo.js";
 import type { RunRepository, CostRepository, AuditRepository, NotificationRepository } from "../observability/repos.js";
@@ -22,7 +22,9 @@ import type { WorkflowEngine } from "../workflow/engine.js";
 import type { AgentRouter } from "./router.js";
 import { AutonomousOrchestrator } from "./orchestrator.js";
 import type { AgentGenerator } from "./generator.js";
-import type { SkillRepository } from "../skills/registry.js";
+import { ProjectStateCoordinator } from "./project-state.js";
+import { ProjectStateGenerator } from "./state-generator.js";
+import { SkillRegistry, type SkillRepository } from "../skills/registry.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
 import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { IGitHubService } from "../github/types.js";
@@ -90,6 +92,7 @@ export interface CreateTaskInput {
 }
 
 export interface AgentManagerDeps {
+  promptVersionRepo?: import("../prompts/versions.js").PromptVersionRepository;
   projectRepo: ProjectRepository;
   taskRepo: TaskRepository;
   workflowRepo: WorkflowRepository;
@@ -111,6 +114,7 @@ export interface AgentManagerDeps {
   providerRegistry?: ProviderRegistry;
   /** DB memory index (optional — needed for the CodeVia/memory.md sync). */
   memoryRepo?: MemoryRepository;
+  conversationRepo?: ConversationRepository;
   /** Project folder sync (optional — CodeVia/* files in the project repo). */
   projectFiles?: ProjectFilesService;
 }
@@ -126,6 +130,34 @@ export class AgentManager {
   private githubFor(project: Project): IGitHubService { return this.deps.githubForProject?.(project) ?? this.deps.github; }
   constructor(private readonly deps: AgentManagerDeps) {
     this.agentRouter = deps.agentRouter;
+    if (deps.projectFiles && deps.memoryRepo && deps.providerRegistry) this.state = new ProjectStateCoordinator({
+      projectRepo: deps.projectRepo, agentRepo: deps.agentRepo, taskRepo: deps.taskRepo, memoryRepo: deps.memoryRepo,
+      skillRepo: deps.skillsRepo, workflowRepo: deps.workflowRepo, runRepo: deps.runRepo,
+      files: deps.projectFiles, generator: deps.agentGenerator,
+      ai: new ProjectStateGenerator({ modelRepo: deps.modelRepo, providerRepo: deps.providerRepo, providerRegistry: deps.providerRegistry, costRepo: deps.costRepo }),
+      github: (p) => this.githubFor(p),
+      inspect: async (p) => {
+        const detected = await this.inspectRepository(p);
+        const capabilities = this.mergeDetectedCapabilities(p.capabilities, detected.capabilities);
+        return hydrateProject({ ...p, capabilities, ...legacyFieldsFromCapabilities(capabilities) });
+      },
+    });
+  }
+  private readonly state?: ProjectStateCoordinator;
+
+  async readProject(projectId: string): Promise<Project> {
+    const p = this.deps.projectRepo.findById(projectId)?.data;
+    if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    await this.deps.projectFiles?.restore(p);
+    return hydrateProject(this.deps.projectRepo.findById(projectId)!.data);
+  }
+
+  /** Execution entry points hydrate then initialize missing definitions. */
+  async refreshProject(projectId: string): Promise<Project> {
+    if (this.state) await this.state.ensure(projectId);
+    const p = this.deps.projectRepo.findById(projectId)?.data;
+    if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    return hydrateProject(p);
   }
 
   /* ---------------- Project onboarding ---------------- */
@@ -137,6 +169,7 @@ export class AgentManager {
     if (!cfg) {
       throw Object.assign(new Error("A GitHub repository (owner/name) is required — pick one from the connected account"), { statusCode: 400 });
     }
+    if (this.deps.projectRepo.findMany().some(({ data: p }) => p.configRepo === cfg.repo && p.branch === cfg.branch)) throw Object.assign(new Error("This repository/branch is already linked. Reuse that project or select an independent repository/branch."), { statusCode: 409 });
     const capabilities = normalizeCapabilities(input.capabilities, {
       primaryLanguage: input.primaryLanguage,
       framework: input.framework,
@@ -199,80 +232,79 @@ export class AgentManager {
     return final ? hydrateProject(final) : project;
   }
 
-  /** Online onboarding: analyze repo, generate agents/skills/workflows/rules. */
-  async onboardProject(projectId: string, tech: string[] = []): Promise<{ agents: number; skills: number; seeded: number }> {
+  /** Restore first; author and commit ONLY missing definitions. Never regenerate existing agents. */
+  async onboardProject(projectId: string, _tech: string[] = []): Promise<{ agents: number; skills: number; seeded: number }> {
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!stored) throw new Error(`Project ${projectId} not found`);
-    const project = hydrateProject(stored);
-    // In mock mode, seed a starter .ai-engineering repo so the platform can be
-    // exercised end-to-end without real GitHub credentials.
-    this.ensureMockRepo(project);
-
-    // Analyse the linked repositories (real or mock): detect stack, ensure
-    // Agent.md, and surface the detected skill/agent hints to onboarding.
-    const detected = await this.inspectRepository(project);
-    const mergedCapabilities = this.mergeDetectedCapabilities(project.capabilities, detected.capabilities);
-    const refreshed = hydrateProject({
-      ...project,
-      capabilities: mergedCapabilities,
-      ...legacyFieldsFromCapabilities(mergedCapabilities),
-    });
-
-    await this.ensureAgentMd(refreshed, detected.files);
-    const agentTypes = agentTypesForProject(refreshed.capabilities);
-    const agents = this.deps.agentGenerator.generate(refreshed, { defaultModelId: refreshed.defaultModelId, tech, agentTypes });
-    const seeded = this.deps.skillsRepo.seedBuiltIns();
-    // Attach relevant skills to the project settings: skills implied by the
-    // selected capabilities + detected stack + keyword matches on the text.
-    const implied = skillsForCapabilities(refreshed.capabilities);
-    const known = new Set(this.deps.skillsRepo.findMany().map((r) => r.data.slug));
-    const relevant = this.deps.skillsRepo
-      .findMany()
-      .filter((r) => this.skillsRelevant(r.data.slug, tech, refreshed) || detected.skills.has(r.data.slug))
-      .map((r) => r.data.slug);
-    const skills = [...new Set([...implied.filter((s) => known.has(s)), ...relevant])];
-    // Automatic rules discovery: README/CONTRIBUTING/CODEOWNERS/.editorconfig/
-    // build files → project rules injected into every agent prompt. User-authored
-    // rules (anything not tagged as discovered) are preserved.
-    const discovered = rulesToStrings(await discoverProjectRules(this.githubFor(refreshed), refreshed, detected.files)).map((r) => `${DISCOVERED_RULE_TAG}\n${r}`);
-    const manual = refreshed.settings.rules.filter((r) => !r.startsWith(DISCOVERED_RULE_TAG));
-    const rules = [...manual, ...discovered];
-    const updatedProject = { ...refreshed, settings: { ...refreshed.settings, skills, rules } };
-    this.deps.projectRepo.upsert(updatedProject, { key: refreshed.slug });
-    this.ensureDefaultWorkflows(updatedProject);
-    logger.info(`onboarded project ${projectId}`, {
-      agents: agents.length,
-      agentTypes: agentTypes.length,
-      skills: skills.length,
-      rules: discovered.length,
-      detected: { languages: detected.capabilities.languages, frameworks: detected.capabilities.frameworks, databases: detected.capabilities.databases },
-    });
-    // Persist the roster + skills + manifest into the project's own repo folder
-    // so a rehydrate ("Pull from GitHub") never needs to re-generate them.
-    await this.syncProjectState(projectId);
-    // `skills` = skills attached to the project (what the UI reports);
-    // `seeded` = newly-seeded built-in catalog entries (0 after the first run).
-    return { agents: agents.length, skills: skills.length, seeded };
+    this.ensureMockRepo(hydrateProject(stored));
+    const p = await this.refreshProject(projectId);
+    return { agents: this.deps.agentRepo.byProject(projectId).length, skills: p.settings.skills.length, seeded: 0 };
   }
 
-  /** Best-effort: mirror DB state into CodeVia/* files (never throws). */
-  async syncProjectState(projectId: string): Promise<boolean> {
-    try {
-      const files = this.deps.projectFiles;
-      if (!files) return false;
-      const stored = this.deps.projectRepo.findById(projectId)?.data;
-      if (!stored) return false;
-      const project = hydrateProject(stored);
-      return await files.syncAll(project, {
-        agents: this.deps.agentRepo.byProject(projectId),
-        tasks: this.deps.taskRepo.byProject(projectId),
-        memory: this.deps.memoryRepo?.byProject(projectId) ?? [],
-        skillCatalog: this.deps.skillsRepo.findMany().map((r) => ({ slug: r.data.slug, description: (r.data as { description?: string }).description })),
-      });
-    } catch (err) {
-      logger.warn("syncProjectState failed", { projectId, err: String(err) });
-      return false;
+  /** AI fills new, omitted instructions; explicit user-authored text is never replaced. */
+  async authorDefinition<T extends Agent | Skill>(project: Project, value: T, kind: "agent" | "skill"): Promise<T> {
+    if (!this.deps.providerRegistry) throw new Error("AI provider registry is unavailable");
+    const generator = new ProjectStateGenerator({ modelRepo: this.deps.modelRepo, providerRepo: this.deps.providerRepo, providerRegistry: this.deps.providerRegistry, costRepo: this.deps.costRepo });
+    const reference = this.deps.agentRepo.byType(project.id, "research") ?? this.deps.agentGenerator.generate(project, { agentTypes: ["research"], persist: false })[0];
+    const author = { ...reference, models: project.defaultModelId ? { primary: project.defaultModelId, fallbacks: [], specialized: {} } : kind === "agent" ? (value as Agent).models : reference.models };
+    const result = await generator.generate(project, { agents: kind === "agent" ? [value as Agent] : [], skills: kind === "skill" ? [value as Skill] : [], workflows: [] }, author, project.description, this.githubFor(project).kind === "mock");
+    return (kind === "agent" ? result.draft.agents[0] : result.draft.skills[0]) as T;
+  }
+
+  /** A user edit is acknowledged only after the repository accepts it. */
+  async saveProject(input: Project): Promise<Project> {
+    const old = this.deps.projectRepo.findById(input.id)?.data;
+    const next = hydrateProject({ ...input, updatedAt: new Date().toISOString() });
+    if (!old) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    let targetRevision: string | undefined;
+    if (next.configRepo !== old.configRepo || next.branch !== old.branch) {
+      // Connection changes are explicit. Existing destination state wins; absent state
+      // is migrated from the current project, never generated over another folder.
+      this.ensureMockRepo(next);
+      const snapshot = await this.deps.projectFiles?.pull(next);
+      targetRevision = snapshot?.sha;
+      next.repositoryRevision = targetRevision;
+      if (snapshot?.manifest) {
+        this.deps.projectRepo.upsert(next, { key: next.slug });
+        try {
+          await this.deps.projectFiles!.restore(next, undefined, { snapshot });
+          return hydrateProject(this.deps.projectRepo.findById(next.id)!.data);
+        } catch (error) { this.deps.projectRepo.upsert(old, { key: old.slug }); throw error; }
+      }
     }
+    this.deps.projectRepo.upsert(next, { key: next.slug });
+    try { await this.syncProjectState(next.id, targetRevision); }
+    catch (error) { this.deps.projectRepo.upsert(old, { key: old.slug }); throw error; }
+    return next;
+  }
+
+  /** Explicit user save/export. Runtime completion must use syncRuntimeState instead. */
+  async syncProjectState(projectId: string, targetRevision?: string): Promise<boolean> {
+    const files = this.deps.projectFiles;
+    const stored = this.deps.projectRepo.findById(projectId)?.data;
+    if (!files || !stored) return false;
+    const p = hydrateProject(stored);
+    const agents = this.deps.agentRepo.byProject(projectId).map((a) => targetRevision ? { ...a, repositoryRevision: targetRevision } : a);
+    const catalog = new Map(this.deps.skillsRepo.byProject(projectId).map((s) => [s.slug, s]));
+    const visiting = new Set<string>();
+    const include = (slug: string) => {
+      if (visiting.has(slug)) return; visiting.add(slug);
+      if (files.isTombstoned(p, `CodeVia/skills/${slug}.md`)) return;
+      const skill = catalog.get(slug) ?? this.deps.skillsRepo.findBySlug(slug);
+      if (!skill) throw new Error(`No definition for skill ${slug}; initialize missing repository state first`);
+      catalog.set(slug, skill);
+      for (const dependency of skill.dependencies) include(dependency);
+    };
+    for (const slug of [...p.settings.skills, ...agents.flatMap((a) => a.skills)]) include(slug);
+    return files.syncAll(p, { promptVersions: this.deps.promptVersionRepo?.byProject(projectId).map((v) => targetRevision ? { ...v, repositoryRevision: targetRevision } : v), agents, tasks: this.deps.taskRepo.byProject(projectId), memory: this.deps.memoryRepo?.byProject(projectId) ?? [], skillCatalog: [...catalog.values()].map((s) => targetRevision ? { ...s, repositoryRevision: targetRevision } : s), workflows: this.deps.workflowRepo.byProject(projectId).map((w) => targetRevision ? { ...w, repositoryRevision: targetRevision } : w), runs: this.deps.runRepo.byProject(projectId), conversations: this.deps.conversationRepo?.findMany({ projectId }).map((r) => targetRevision ? { ...r.data, repositoryRevision: targetRevision } : r.data) });
+  }
+
+  /** Save observed execution history without rewriting prompts, skills, rules or memory. */
+  private async syncRuntimeState(projectId: string): Promise<void> {
+    const p = this.deps.projectRepo.findById(projectId)?.data;
+    if (!p || !this.deps.projectFiles) return;
+    for (const task of this.deps.taskRepo.byProject(projectId)) await this.deps.projectFiles.syncTask(p, task);
+    for (const run of this.deps.runRepo.byProject(projectId)) await this.deps.projectFiles.syncRun(p, run);
   }
 
   /** Best-effort: mirror one task into CodeVia/tasks/<id>.md (never throws). */
@@ -537,9 +569,6 @@ export class AgentManager {
       if (link.isConfigRepo) {
         starter.push(
           { path: "Agent.md", content: this.buildAgentMd(project, starter.map((f) => f.path)) },
-          { path: ".ai-engineering/project.yaml", content: this.projectYaml(project) },
-          { path: ".ai-engineering/rules/coding.md", content: "# Coding Rules\n- Follow existing conventions.\n- No secrets in code.\n" },
-          { path: ".ai-engineering/rules/git.md", content: "# Git Rules\n- Feature branches, conventional commits, PRs.\n" },
         );
       }
       mock.seedRepo(owner, name, { files: starter, branch: link.branch, description: project.description });
@@ -665,8 +694,7 @@ export class AgentManager {
   private async executeTask(taskId: string): Promise<Task> {
     const task = this.deps.taskRepo.findById(taskId)?.data;
     if (!task) throw new Error(`Task ${taskId} not found`);
-    const project = this.deps.projectRepo.findById(task.projectId)?.data;
-    if (!project) throw new Error(`Project ${task.projectId} not found`);
+    const project = await this.refreshProject(task.projectId);
 
     assertTaskActive(this.deps.taskRepo, task);
     this.deps.taskRepo.upsert({ ...task, status: "running", error: undefined }, { projectId: task.projectId, parentId: task.parentTaskId });
@@ -686,13 +714,14 @@ export class AgentManager {
           modelRepo: this.deps.modelRepo,
           providerRepo: this.deps.providerRepo,
           providerRegistry: this.deps.providerRegistry,
+          skillsRegistry: new SkillRegistry(this.deps.skillsRepo),
           files: this.deps.projectFiles,
           memoryRepo: this.deps.memoryRepo,
         });
         const summary = await orchestrator.run(taskId);
         assertTaskActive(this.deps.taskRepo, task);
         const current = this.deps.taskRepo.findById(taskId)!.data;
-        this.deps.taskRepo.upsert({ ...current, result: { ...summary } }, { projectId: task.projectId, parentId: task.parentTaskId });
+        this.deps.taskRepo.upsert({ ...current, result: { ...current.result, ...summary } }, { projectId: task.projectId, parentId: task.parentTaskId });
       } else if (task.workflowId) {
         const workflow = this.deps.workflowRepo.findById(task.workflowId)?.data;
         if (!workflow) throw new Error(`Workflow ${task.workflowId} not found`);
@@ -721,7 +750,7 @@ export class AgentManager {
       const done: Task = { ...prev, status: "succeeded", error: undefined, updatedAt: new Date().toISOString() };
       this.deps.taskRepo.upsert(done, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "succeeded" } });
-      await this.syncProjectState(task.projectId);
+      await this.syncRuntimeState(task.projectId);
       return done;
     } catch (err) {
       const failed = this.deps.taskRepo.findById(taskId)?.data!;
@@ -730,13 +759,13 @@ export class AgentManager {
         logger.info("runTask cancelled", { taskId });
         this.deps.taskRepo.upsert({ ...failed, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
         live.emit({ type: "task.updated", taskId, data: { status: "cancelled" } });
-        await this.syncProjectState(task.projectId);
+        await this.syncRuntimeState(task.projectId);
         return this.deps.taskRepo.findById(taskId)!.data;
       }
       logger.error("runTask failed", { taskId, err: String(err) });
       this.deps.taskRepo.upsert({ ...failed, status: "failed", error: String(err), updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "failed", error: String(err) } });
-      await this.syncProjectState(task.projectId);
+      await this.syncRuntimeState(task.projectId);
       throw err;
     }
   }
@@ -747,10 +776,11 @@ export class AgentManager {
     if (!agent) {
       throw new Error(`No enabled agent of type ${type} in project ${project.id}`);
     }
+    this.deps.taskRepo.upsert({ ...this.deps.taskRepo.findById(task.id)!.data, assignedAgentId: agent.id }, { projectId: task.projectId, parentId: task.parentTaskId });
     const run = await this.deps.agentRunner.run({ task, agent, project, repository: isWriter(type) ? repositoryForAgent(project, type) : undefined });
     assertTaskActive(this.deps.taskRepo, task);
     const current = this.deps.taskRepo.findById(task.id)!.data;
-    this.deps.taskRepo.upsert({ ...current, result: { runId: run.id, summary: run.summary, verification: run.verification, artifacts: run.steps.filter((s) => ["write_file", "create_pull_request"].includes(s.tool ?? "")).map((s) => s.data) } }, { projectId: task.projectId, parentId: task.parentTaskId });
+    this.deps.taskRepo.upsert({ ...current, result: { runId: run.id, summary: run.summary, verification: run.verification, skills: run.skills, artifacts: run.steps.filter((s) => ["write_file", "create_pull_request"].includes(s.tool ?? "")).map((s) => s.data) } }, { projectId: task.projectId, parentId: task.parentTaskId });
     if (run.status !== "succeeded") {
       throw Object.assign(new Error(run.error ?? `${agent.name} failed`), { retryable: false });
     }

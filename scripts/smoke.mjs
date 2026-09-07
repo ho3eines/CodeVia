@@ -217,8 +217,8 @@ async function main() {
     const v2c = v2.json?.content ?? "";
     check("follow-up extends merged work (no overwrite)", v2c.includes("Existing implementation preserved") && v2c.includes(be1.id), `${v2c.length} chars`);
     check("follow-up adds its own TODOs", v2c.toLowerCase().includes("throttle"), `${v2c.length} chars`);
-    const ctxFile = await api(`/projects/${pid}/file?path=${encodeURIComponent("CodeVia/context.md")}`);
-    check("CodeVia/context.md tracks the entity", ctxFile.status === 200 && ctxFile.json.content.includes("LoginController.cs"), `status=${ctxFile.status}`);
+    const ctxFile = await api(`/projects/${pid}/file?path=${encodeURIComponent("CodeVia/runtime/context.md")}`);
+    check("CodeVia/runtime/context.md tracks the entity", ctxFile.status === 200 && ctxFile.json.content.includes("LoginController.cs"), `status=${ctxFile.status}`);
 
     // Restart persistence: same DB + snapshot, zero re-onboard
     await stopServer();
