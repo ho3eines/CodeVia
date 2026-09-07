@@ -35,6 +35,9 @@ export interface WorkerDeps {
  * dead-letter after maxAttempts, and idempotent processing by correlation id.
  */
 export class Worker {
+  private stopCurrent?: () => void;
+  private readonly active = new Set<string>();
+
   constructor(private readonly deps: WorkerDeps) {}
 
   async process(id: string): Promise<void> {
@@ -71,16 +74,64 @@ export class Worker {
     }
   }
 
-  /** Poll loop for the standalone worker process. */
+  /** Poll loop for the in-process worker. It also repairs rows orphaned by a restart. */
   async start(pollMs = 1000): Promise<() => void> {
-    const interval = setInterval(async () => {
-      const jobs = this.deps.queue.claim(3);
-      for (const job of jobs) {
-        void this.process(job.id);
+    if (this.stopCurrent) return this.stopCurrent;
+
+    const recovered = this.deps.queue.recoverInterruptedExecutions();
+    for (const job of recovered.retrying) this.reconcileRecoveredTask(job, false);
+    for (const job of recovered.dead) this.reconcileRecoveredTask(job, true);
+    if (recovered.retrying.length || recovered.dead.length) {
+      this.deps.logger.warn("recovered interrupted execution jobs", {
+        retrying: recovered.retrying.length,
+        dead: recovered.dead.length,
+      });
+    }
+
+    // Keep a real concurrency ceiling. The old interval claimed three more rows
+    // every second even while prior jobs were still running, so a slow model
+    // call could cause an unbounded number of concurrent executions.
+    const tick = () => {
+      try {
+        const capacity = Math.max(0, 3 - this.active.size);
+        if (!capacity) return;
+        const jobs = this.deps.queue.claim(capacity);
+        for (const job of jobs) {
+          this.active.add(job.id);
+          void this.process(job.id)
+            .catch((err) => this.deps.logger.error(`worker could not finalize job ${job.id}`, { err: String(err) }))
+            .finally(() => this.active.delete(job.id));
+        }
+      } catch (err) {
+        // A transient DB error must not kill the timer callback silently.
+        this.deps.logger.error("worker poll failed", { err: String(err) });
       }
-    }, pollMs);
+    };
+
+    // Consume already-queued work during startup rather than waiting for the
+    // first timer interval. This also makes worker health visible immediately.
+    tick();
+    const interval = setInterval(tick, pollMs);
+    const stop = () => {
+      clearInterval(interval);
+      if (this.stopCurrent === stop) this.stopCurrent = undefined;
+    };
+    this.stopCurrent = stop;
     this.deps.logger.info(`worker started (poll ${pollMs}ms)`);
-    return () => clearInterval(interval);
+    return stop;
+  }
+
+  private reconcileRecoveredTask(job: Job, exhausted: boolean): void {
+    const taskId = String(job.payload.taskId ?? "");
+    const task = taskId ? this.deps.taskRepo.findById(taskId)?.data : undefined;
+    if (!task || ["succeeded", "failed", "cancelled"].includes(task.status)) return;
+    const updated = {
+      ...task,
+      status: exhausted ? "failed" as const : "queued" as const,
+      error: exhausted ? job.error : undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    this.deps.taskRepo.upsert(updated, { projectId: task.projectId, parentId: task.parentTaskId });
   }
 
   private async handle(job: Job): Promise<void> {

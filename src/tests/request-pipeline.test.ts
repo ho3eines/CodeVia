@@ -86,6 +86,8 @@ it("defaults API requests to research → planned owners/skills → execution, p
   expect(executionMode).toBe("autonomous");
   expect(workflowId).toBeUndefined();
   expect(jobId).toBeTruthy();
+  expect(task.status).toBe("queued");
+  expect(c.taskRepo.findById(task.id)?.data.status).toBe("queued");
   expect(task.input.executionMode).toBe("autonomous");
   let observedDispatch = false;
   beforeCode = () => {

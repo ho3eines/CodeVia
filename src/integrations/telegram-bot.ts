@@ -846,6 +846,10 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       input: { executionMode: "autonomous", source: "telegram" },
     });
     const job = this.deps.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
+    this.deps.taskRepo.upsert(
+      { ...task, status: "queued", updatedAt: new Date().toISOString() },
+      { projectId: task.projectId, parentId: task.parentTaskId },
+    );
     return {
       text: [
         `🛠 Task created & queued.`,
