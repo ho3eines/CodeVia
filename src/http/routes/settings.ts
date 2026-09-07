@@ -9,13 +9,20 @@ import {
   saveGitHubAdminSettings,
   type SaveGitHubAdminSettingsInput,
 } from "../../auth/admin-settings.js";
+import { resolveGitHubForUser } from "../../github/registry.js";
+import { resolveRequestUser } from "../auth.js";
 
 export function registerSettingsRoutes(app: FastifyInstance, container: Container): void {
-  app.get("/settings", { schema: { tags: ["settings"] } }, async () => {
+  app.get("/settings", { schema: { tags: ["settings"] } }, async (req) => {
+    const { user, authenticated } = resolveRequestUser(req, container);
+    const gh = resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github });
     return {
       environment: getEnv().NODE_ENV,
       simulationMode: getEnv().ENABLE_SIMULATION_MODE,
-      githubConnected: container.github.kind === "real",
+      // True when *this* caller has a working GitHub credential — their own
+      // OAuth token counts, not just a server-wide GITHUB_TOKEN.
+      githubConnected: gh.source !== "mock",
+      githubSource: gh.source,
       // "connected" must mean *the bot can receive messages*, not just that a
       // token exists — that difference is what made "it's configured but silent"
       // impossible to see. `receiving` tells you which transport is live.

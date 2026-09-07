@@ -5,7 +5,7 @@ import { Container } from "../app/container.js";
 import { buildServer } from "../http/app.js";
 import { signSession } from "../auth/github-oauth.js";
 import { storeUserGitHubToken } from "../auth/github-tokens.js";
-import { setUserGitHubFetchForTest, resolveGitHubForProject } from "../github/registry.js";
+import { setUserGitHubFetchForTest, resolveGitHubForProject, adoptStrandedProjects } from "../github/registry.js";
 import type { Project } from "../domain/entities.js";
 import { freshDb } from "./test-helpers.js";
 
@@ -188,5 +188,134 @@ describe("each user acts as their own GitHub identity", () => {
 
     const after = container.projectRepo.findById("p4")?.data;
     expect(after?.githubConnection).toMatchObject({ kind: "user-oauth", userId: bob.id, login: "bob" });
+  });
+});
+
+describe("stranded projects are handed to a connected user", () => {
+  const mkProject = (over: Partial<Project>): Project =>
+    ({
+      id: "x",
+      ownerId: "user-demo",
+      name: "P",
+      slug: "p",
+      description: "",
+      status: "active",
+      configRepo: "o/r",
+      branch: "main",
+      repositories: [{ repo: "o/r", branch: "main" }],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      ...over,
+    }) as unknown as Project;
+
+  it("adopts mock and token-less projects but never a live one", async () => {
+    await boot();
+    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "A", email: "a@e.com" }).user;
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "B", email: "b@e.com" }).user;
+    storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
+    storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
+
+    const legacyMock = mkProject({ id: "m1", githubConnection: { kind: "mock" } });
+    const noConnection = mkProject({ id: "m2", githubConnection: undefined });
+    const goneUser = mkProject({ id: "m3", githubConnection: { kind: "user-oauth", userId: "vanished", login: "ghost" } });
+    const aliceLive = mkProject({ id: "m4", ownerId: alice.id, githubConnection: { kind: "user-oauth", userId: alice.id, login: "alice" } });
+
+    const saved: Project[] = [];
+    const adopted = adoptStrandedProjects({
+      kv: container.kv,
+      projects: [legacyMock, noConnection, goneUser, aliceLive],
+      save: (p) => void saved.push(p),
+      userId: bob.id,
+      login: "bob",
+    });
+
+    // Alice is still connected, so her project is untouched.
+    expect(adopted).toEqual(["m1", "m2", "m3"]);
+    expect(saved.map((p) => p.id)).toEqual(["m1", "m2", "m3"]);
+    expect(aliceLive.githubConnection).toMatchObject({ userId: alice.id });
+    for (const p of [legacyMock, noConnection, goneUser]) {
+      expect(p.githubConnection).toMatchObject({ kind: "user-oauth", userId: bob.id, login: "bob" });
+    }
+  });
+
+  it("leaves server-token projects alone while the server token is configured", async () => {
+    process.env.GITHUB_TOKEN = "ghs_server";
+    process.env.GITHUB_ENABLED = "true";
+    getEnvFresh();
+    await boot();
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "B", email: "b@e.com" }).user;
+    storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
+
+    const serverProject = mkProject({ id: "s1", githubConnection: { kind: "server-token" } });
+    const adopted = adoptStrandedProjects({ kv: container.kv, projects: [serverProject], save: () => {}, userId: bob.id, login: "bob" });
+    expect(adopted).toEqual([]);
+    expect(serverProject.githubConnection).toMatchObject({ kind: "server-token" });
+  });
+});
+
+describe("status endpoints reflect the caller's own credential", () => {
+  it("reports connected for an OAuth user even without a server GITHUB_TOKEN", async () => {
+    const srv = await boot();
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "B", email: "b@e.com" }).user;
+    storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
+    setUserGitHubFetchForTest(multiUserGitHub({ "tok-bob": { login: "bob", repos: ["bob/only"] } }));
+    const cookie = `cv_session=${signSession(bob.id)}`;
+
+    const settings = (await srv.inject({ method: "GET", url: "/settings", headers: { cookie } })).json();
+    expect(settings.githubConnected).toBe(true);
+    expect(settings.githubSource).toBe("user-oauth");
+
+    const health = (await srv.inject({ method: "GET", url: "/admin/health", headers: { cookie } })).json();
+    expect(health.github.status).toBe("connected");
+    expect(health.github.source).toBe("user-oauth");
+  });
+
+  it("still reports mock for a caller with no GitHub credential at all", async () => {
+    const srv = await boot();
+    const settings = (await srv.inject({ method: "GET", url: "/settings" })).json();
+    expect(settings.githubConnected).toBe(false);
+    expect(settings.githubSource).toBe("mock");
+  });
+});
+
+describe("background jobs use the project's connection, not the platform mock", () => {
+  it("runs a github.op job with the project owner's token, not the platform mock", async () => {
+    await boot();
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "B", email: "b@e.com" }).user;
+    storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
+
+    // Record which credential the background op actually presents.
+    const seen: Array<{ url: string; auth: string }> = [];
+    setUserGitHubFetchForTest((async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      seen.push({ url, auth: new Headers(init?.headers).get("authorization") ?? "" });
+      if (url.includes("/issues")) return new Response(JSON.stringify({ number: 7, title: "t", state: "open", html_url: "u" }), { status: 201 });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch);
+
+    container.projectRepo.upsert({
+      id: "w1",
+      ownerId: bob.id,
+      name: "Worker",
+      slug: "worker",
+      description: "",
+      status: "active",
+      configRepo: "bob/only",
+      branch: "main",
+      repositories: [{ repo: "bob/only", branch: "main" }],
+      githubConnection: { kind: "user-oauth", userId: bob.id, login: "bob" },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as unknown as Project);
+
+    // The platform-wide service is the mock — a mock would never issue a request.
+    expect(container.github.kind).toBe("mock");
+
+    const job = container.queue.enqueue("github.op", { op: "create_issue", projectId: "w1", repo: "bob/only", title: "From worker", body: "b" });
+    await container.worker.process(job.id);
+
+    expect(container.queue.getById(job.id)?.status).toBe("succeeded");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((r) => r.auth === "Bearer tok-bob")).toBe(true);
   });
 });

@@ -23,6 +23,12 @@ export interface TelegramBotDeps {
   runRepo: RunRepository;
   agentManager: AgentManager;
   github: IGitHubService;
+  /**
+   * Per-project GitHub connection. The bot knows which platform user it belongs
+   * to (`userId`), so project views authenticate as that user instead of the
+   * platform-wide service — which is the mock unless a server token is set.
+   */
+  githubForProject?: (project: Project, requestUserId?: string) => IGitHubService;
   modelRepo?: ModelRepository;
   skillRepo?: SkillRepository;
   memoryRepo?: MemoryRepository;
@@ -752,9 +758,15 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     return { text, keyboard: this.projectKeyboard(p) };
   }
 
+  /** GitHub service for a project, as the platform user this bot belongs to. */
+  private githubFor(p?: Project): IGitHubService {
+    if (p && this.deps.githubForProject) return this.deps.githubForProject(p, this.deps.userId);
+    return this.deps.github;
+  }
+
   private async githubView(p: Project | undefined): Promise<View> {
     if (!p) {
-      const viewer = await this.safeGithub(() => this.deps.github.getViewer());
+      const viewer = await this.safeGithub(() => this.githubFor().getViewer());
       return {
         text: `📦 *GitHub*\n\n${viewer ? `👤 ${viewer.login ?? viewer.name ?? "user"}` : "ℹ️ GitHub not configured / mock mode."}\n\nLink a project to see its repos.`,
         keyboard: this.homeKeyboard(),
@@ -864,7 +876,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
 
   private async issuesView(p: Project): Promise<View> {
     const ref = p.repositories[0]?.repo ?? p.configRepo;
-    const issues = ref ? await this.safeGithub(() => this.deps.github.listIssues({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" })) : undefined;
+    const issues = ref ? await this.safeGithub(() => this.githubFor(p).listIssues({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" })) : undefined;
     const open = (issues ?? []).filter((i) => i.state !== "closed").slice(0, 10);
     const text = open.length
       ? [`🐙 *Issues — ${p.name}*`, "", ...open.map((i) => `#${i.number} ${i.title.slice(0, 70)}`)].join("\n")
@@ -874,7 +886,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
 
   private async prsView(p: Project): Promise<View> {
     const ref = p.repositories[0]?.repo ?? p.configRepo;
-    const prs = ref ? await this.safeGithub(() => this.deps.github.listPullRequests({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" })) : undefined;
+    const prs = ref ? await this.safeGithub(() => this.githubFor(p).listPullRequests({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" })) : undefined;
     const open = (prs ?? []).filter((r) => r.state !== "closed" && r.state !== "merged").slice(0, 10);
     const text = open.length
       ? [`🔀 *Pull requests — ${p.name}*`, "", ...open.map((r) => `#${r.number} ${r.title.slice(0, 60)} · \`${r.head}\``)].join("\n")

@@ -197,3 +197,44 @@ export function resolveGitHubForProject(opts: {
   return mock;
 }
 const projectMocks = new WeakMap<IGitHubService, MockGitHubService>();
+
+/**
+ * Re-bind projects that no longer have a usable GitHub identity onto `userId`.
+ *
+ * Projects created before GitHub login existed were stored with the pre-login
+ * `user-demo` owner and `kind: "mock"`. Interactive requests are repaired the
+ * moment their owner opens them, but a project nobody opens stays stranded and
+ * its scheduled/worker runs keep failing (or silently seed a mock repo). Doing
+ * this once at login clears the whole backlog.
+ *
+ * Only genuinely stranded projects are touched: a connection that still
+ * resolves to a decryptable token is left with its current owner, so this can
+ * never take a live project away from another user.
+ *
+ * Returns the ids that were adopted.
+ */
+export function adoptStrandedProjects(opts: {
+  kv: KvStore;
+  projects: Array<import("../domain/entities.js").Project>;
+  save: (project: import("../domain/entities.js").Project) => void;
+  userId: string;
+  login?: string;
+}): string[] {
+  const adopted: string[] = [];
+  for (const project of opts.projects) {
+    const connection = project.githubConnection;
+    // A working user-oauth connection belongs to someone else — never steal it.
+    if (connection?.kind === "user-oauth" && connection.userId && getUserGitHubToken(opts.kv, connection.userId)) continue;
+    // A server-token project keeps working as long as the server token is set.
+    if (connection?.kind === "server-token" && isServerGitHubEnabled()) continue;
+    project.githubConnection = { kind: "user-oauth", userId: opts.userId, login: opts.login };
+    try {
+      opts.save(project);
+      adopted.push(project.id);
+    } catch (err) {
+      logger.warn(`could not adopt project ${project.id}: ${String(err).slice(0, 200)}`);
+    }
+  }
+  if (adopted.length) logger.info(`adopted ${adopted.length} stranded GitHub project(s) onto ${opts.login ?? opts.userId}`);
+  return adopted;
+}

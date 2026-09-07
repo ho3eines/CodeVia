@@ -752,7 +752,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       updatedAt: now,
     };
     const plan = defaultPlanFor(agent, task);
-    const context = await container.contextEngine.build({ project: p, agent, task, skills: container.skillsRegistry, github: container.github }).catch(() => undefined);
+    const context = await container.contextEngine.build({ project: p, agent, task, skills: container.skillsRegistry, github: githubForProject(req, p) }).catch(() => undefined);
     const tools = plan.filter((s) => s.tool).map((s) => container.toolRegistry.get(s.tool!)).filter(Boolean);
     return {
       simulation: true,
@@ -797,7 +797,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     let repos = existing ? p.repositories.map((r) => (r === existing ? { ...r, ...link } : r)) : [...p.repositories, link as ProjectRepositoryLink];
     if (link.isConfigRepo) repos = repos.map((r) => ({ ...r, isConfigRepo: r.repo.toLowerCase() === repo.toLowerCase() }));
     const updated = await save({ ...p, repositories: normalizeRepositories(repos) });
-    if (container.github.kind === "mock") await container.agentManager.onboardProject(id, []);
+    // Seed the demo structure only when this project really has no real
+    // connection — not merely because the platform-wide service is the mock.
+    if (githubForProject(req, p).kind === "mock") await container.agentManager.onboardProject(id, []);
     return updated;
   });
 
