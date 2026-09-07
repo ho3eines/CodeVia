@@ -581,4 +581,14 @@ describe("link styling", () => {
     expect(css).toMatch(/\na \{[^}]*text-decoration:\s*none/);
     expect(css).toMatch(/\na:hover \{[^}]*text-decoration:\s*underline/);
   });
+
+  it("meter rows never overflow: long status badges wrap inside the row", () => {
+    // Regression: .meter-row .val had min-width:62px and badges were
+    // white-space:nowrap, so "missing — set GITHUB_CLIENT_SECRET in env"
+    // pushed the admin row (and the modal) past the viewport edge.
+    const css = readFileSync(resolve(process.cwd(), "public", "app.css"), "utf8");
+    expect(css).toMatch(/\.meter-row \.val \{[^}]*min-width:\s*0/);
+    expect(css).toMatch(/\.meter-row \.val \{[^}]*overflow-wrap:\s*anywhere/);
+    expect(css).toMatch(/\.meter-row \.val \.badge \{[^}]*white-space:\s*normal/);
+  });
 });

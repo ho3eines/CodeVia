@@ -367,7 +367,8 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .meter-row .lbl { width: 122px; color: var(--text-muted); font-size: 12px; flex: 0 0 auto; }
 .meter-row .bar { flex: 1; height: 8px; background: var(--glass); border: 1px solid var(--stroke); border-radius: 999px; overflow: hidden; }
 .meter-row .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--primary), var(--accent)); border-radius: 999px; transition: width .6s var(--ease); }
-.meter-row .val { min-width: 62px; text-align: end; font-family: var(--mono); font-size: 12px; }
+.meter-row .val { min-width: 0; text-align: end; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; word-break: normal; }
+.meter-row .val .badge { white-space: normal; text-align: end; max-width: 100%; }
 
 /* ---------- 10. Forms ---------- */
 .field { margin-bottom: 15px; }
@@ -1124,6 +1125,9 @@ label.check input { accent-color: var(--primary); }
 
 @media (max-width: 560px) {
   .content { padding: 14px 12px 44px; }
+  .meter-row { flex-wrap: wrap; gap: 4px 11px; }
+  .meter-row .lbl { width: auto; min-width: 122px; }
+  .meter-row .val { text-align: start; flex: 1 1 auto; }
   .topbar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .table-wrap { -webkit-overflow-scrolling: touch; }
   .sidebar { width: min(300px, 84vw); }
