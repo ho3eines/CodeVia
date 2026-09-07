@@ -10,16 +10,19 @@ import {
   optionLabel,
   skillsForCapabilities,
 } from "../domain/project-options.js";
-import type { ProjectRepository, TaskRepository, WorkflowRepository } from "../domain/repos.js";
+import type { MemoryRepository, ProjectRepository, TaskRepository, WorkflowRepository } from "../domain/repos.js";
+import type { ProjectFilesService } from "../github/project-files.js";
 import type { AgentRepository } from "./agent-repo.js";
 import type { RunRepository, CostRepository, AuditRepository, NotificationRepository } from "../observability/repos.js";
 import type { AgentRunner } from "./runner.js";
 import { TaskCancelledError } from "./runner.js";
 import type { WorkflowEngine } from "../workflow/engine.js";
 import type { AgentRouter } from "./router.js";
+import { AutonomousOrchestrator } from "./orchestrator.js";
 import type { AgentGenerator } from "./generator.js";
 import type { SkillRepository } from "../skills/registry.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
+import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { IGitHubService } from "../github/types.js";
 import { parseRepoFullName } from "../github/types.js";
 import type { Permission } from "../types.js";
@@ -77,6 +80,7 @@ export interface CreateTaskInput {
   projectId: string;
   title: string;
   description?: string;
+  priority?: Task["priority"];
   agentType?: AgentType;
   workflowId?: string;
   input?: Record<string, unknown>;
@@ -100,6 +104,12 @@ export interface AgentManagerDeps {
   modelRepo: ModelRepository;
   providerRepo: ProviderRepository;
   github: IGitHubService;
+  /** Real-AI access for the autonomous task loop (optional — loop stays deterministic without it). */
+  providerRegistry?: ProviderRegistry;
+  /** DB memory index (optional — needed for the CodeVia/memory.md sync). */
+  memoryRepo?: MemoryRepository;
+  /** Project folder sync (optional — CodeVia/* files in the project repo). */
+  projectFiles?: ProjectFilesService;
 }
 
 /**
@@ -185,7 +195,7 @@ export class AgentManager {
   }
 
   /** Online onboarding: analyze repo, generate agents/skills/workflows/rules. */
-  async onboardProject(projectId: string, tech: string[] = []): Promise<{ agents: number; skills: number }> {
+  async onboardProject(projectId: string, tech: string[] = []): Promise<{ agents: number; skills: number; seeded: number }> {
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!stored) throw new Error(`Project ${projectId} not found`);
     const project = hydrateProject(stored);
@@ -232,7 +242,46 @@ export class AgentManager {
       rules: discovered.length,
       detected: { languages: detected.capabilities.languages, frameworks: detected.capabilities.frameworks, databases: detected.capabilities.databases },
     });
-    return { agents: agents.length, skills: seeded };
+    // Persist the roster + skills + manifest into the project's own repo folder
+    // so a rehydrate ("Pull from GitHub") never needs to re-generate them.
+    await this.syncProjectState(projectId);
+    // `skills` = skills attached to the project (what the UI reports);
+    // `seeded` = newly-seeded built-in catalog entries (0 after the first run).
+    return { agents: agents.length, skills: skills.length, seeded };
+  }
+
+  /** Best-effort: mirror DB state into CodeVia/* files (never throws). */
+  async syncProjectState(projectId: string): Promise<boolean> {
+    try {
+      const files = this.deps.projectFiles;
+      if (!files) return false;
+      const stored = this.deps.projectRepo.findById(projectId)?.data;
+      if (!stored) return false;
+      const project = hydrateProject(stored);
+      return await files.syncAll(project, {
+        agents: this.deps.agentRepo.byProject(projectId),
+        tasks: this.deps.taskRepo.byProject(projectId),
+        memory: this.deps.memoryRepo?.byProject(projectId) ?? [],
+        skillCatalog: this.deps.skillsRepo.findMany().map((r) => ({ slug: r.data.slug, description: (r.data as { description?: string }).description })),
+      });
+    } catch (err) {
+      logger.warn("syncProjectState failed", { projectId, err: String(err) });
+      return false;
+    }
+  }
+
+  /** Best-effort: mirror one task into CodeVia/tasks/<id>.md (never throws). */
+  async syncTaskFile(projectId: string, task: Task): Promise<boolean> {
+    try {
+      const files = this.deps.projectFiles;
+      if (!files) return false;
+      const stored = this.deps.projectRepo.findById(projectId)?.data;
+      if (!stored) return false;
+      return await files.syncTask(hydrateProject(stored), task);
+    } catch (err) {
+      logger.warn("syncTaskFile failed", { projectId, taskId: task.id, err: String(err) });
+      return false;
+    }
   }
 
   /**
@@ -579,6 +628,7 @@ export class AgentManager {
       parentTaskId: input.parentTaskId,
       title: input.title,
       description: input.description ?? "",
+      priority: input.priority ?? "medium",
       status: "created",
       agentType: input.agentType,
       correlationId: generateCorrelationId(),
@@ -588,6 +638,8 @@ export class AgentManager {
     };
     this.deps.taskRepo.upsert(task, { projectId: input.projectId, parentId: input.parentTaskId });
     void eventBus.publish("task.created", { taskId: task.id, projectId: input.projectId }, { correlationId: task.correlationId, projectId: input.projectId });
+    // Fire-and-forget: the task file appears in the repo folder (createTask stays sync).
+    void this.syncTaskFile(input.projectId, task);
     return task;
   }
 
@@ -602,10 +654,37 @@ export class AgentManager {
     live.emit({ type: "task.updated", taskId, data: { status: "running" } });
 
     try {
-      if (task.workflowId) {
+      if ((task.input as Record<string, unknown> | undefined)?.executionMode === "autonomous" && !task.workflowId) {
+        // Autonomous task loop: research → breakdown → implement → QA gate → fix loop.
+        const orchestrator = new AutonomousOrchestrator({
+          projectRepo: this.deps.projectRepo,
+          taskRepo: this.deps.taskRepo,
+          agentRepo: this.deps.agentRepo,
+          agentRunner: this.deps.agentRunner,
+          agentRouter: this.agentRouter,
+          github: this.deps.github,
+          modelRepo: this.deps.modelRepo,
+          providerRepo: this.deps.providerRepo,
+          providerRegistry: this.deps.providerRegistry,
+          files: this.deps.projectFiles,
+        });
+        await orchestrator.run(taskId);
+      } else if (task.workflowId) {
         const workflow = this.deps.workflowRepo.findById(task.workflowId)?.data;
         if (!workflow) throw new Error(`Workflow ${task.workflowId} not found`);
-        await this.deps.workflowEngine.run(workflow, project, task, task.input);
+        const result = await this.deps.workflowEngine.run(workflow, project, task, task.input);
+        if (result.status === "waiting_for_approval") {
+          const waiting: Task = { ...this.deps.taskRepo.findById(taskId)!.data, status: "waiting_for_approval", approvalRequired: true, updatedAt: new Date().toISOString() };
+          this.deps.taskRepo.upsert(waiting, { projectId: task.projectId, parentId: task.parentTaskId });
+          live.emit({ type: "task.updated", taskId, data: { status: "waiting_for_approval" } });
+          return waiting;
+        }
+        if (result.status === "failed") {
+          const failedNodes = result.trace.filter((t) => t.status === "failed").map((t) => t.node);
+          throw new Error(
+            `Workflow "${workflow.name}" failed${failedNodes.length ? ` at: ${failedNodes.join(", ")}` : ""}`,
+          );
+        }
       } else {
         await this.routeAndRun(task, project);
       }
@@ -614,6 +693,7 @@ export class AgentManager {
       const done: Task = { ...prev, status: "succeeded", updatedAt: new Date().toISOString() };
       this.deps.taskRepo.upsert(done, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "succeeded" } });
+      await this.syncProjectState(task.projectId);
       return done;
     } catch (err) {
       const failed = this.deps.taskRepo.findById(taskId)?.data!;
@@ -621,11 +701,13 @@ export class AgentManager {
         logger.info("runTask cancelled", { taskId });
         this.deps.taskRepo.upsert({ ...failed, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
         live.emit({ type: "task.updated", taskId, data: { status: "cancelled" } });
+        await this.syncProjectState(task.projectId);
         return this.deps.taskRepo.findById(taskId)!.data;
       }
       logger.error("runTask failed", { taskId, err: String(err) });
       this.deps.taskRepo.upsert({ ...failed, status: "failed", error: String(err) }, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "failed", error: String(err) } });
+      await this.syncProjectState(task.projectId);
       throw err;
     }
   }

@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "smoke": "node scripts/smoke.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
     "seed": "tsx src/db/seed.ts",
     "mock:telegram": "node scripts/mock-telegram-api.mjs"

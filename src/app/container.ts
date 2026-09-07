@@ -28,6 +28,7 @@ import { WorkflowEngine } from "../workflow/engine.js";
 import { Worker } from "../workers/worker.js";
 import { logger } from "../logger.js";
 import type { IGitHubService } from "../github/types.js";
+import { ProjectFilesService } from "../github/project-files.js";
 import { BackupService } from "../backup/service.js";
 import { BackupScheduler } from "../backup/scheduler.js";
 import { ApprovalService, getApprovalRepo, type ApprovalRequest } from "../approvals/service.js";
@@ -75,6 +76,8 @@ export class Container {
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
   readonly github: IGitHubService = resolveGitHubService();
+  /** Project folder (CodeVia/*) sync between the database and the project repo. Shares the platform github instance. */
+  readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github });
   readonly telegram = resolveTelegramService();
   readonly memoryResolver: MemoryResolver = memoryResolver;
   readonly agentRouter = new AgentRouter();
@@ -121,6 +124,8 @@ export class Container {
       contextEngine: this.contextEngine,
       github: this.github,
       requestApproval: (a, d) => this.approvalChannel(a, d),
+      memoryRepo: this.memoryRepo,
+      projectFiles: this.projectFiles,
       isCancelled: (taskId) => this.taskRepo.findById(taskId)?.data.status === "cancelled",
     });
     this.workflowEngine = new WorkflowEngine({
@@ -148,6 +153,9 @@ export class Container {
       modelRepo: this.modelRepo,
       providerRepo: this.providerRepo,
       github: this.github,
+      providerRegistry: this.providerRegistry,
+      memoryRepo: this.memoryRepo,
+      projectFiles: this.projectFiles,
     });
     this.worker = new Worker({
       queue: this.queue,
