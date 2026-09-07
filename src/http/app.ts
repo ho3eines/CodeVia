@@ -174,11 +174,18 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     logger.debug("client connected", { socketId: socket.id, userId: user.id, authenticated: socket.data.authenticated === true });
     socket.on("disconnect", () => logger.debug("client disconnected", { socketId: socket.id }));
 
-    const mayAccess = (projectId: string): boolean => {
+    // HTTP routes stay permissive for the demo user (single-user installs see
+    // everything), but realtime push is stricter: an anonymous socket only
+    // joins shared/legacy rooms, never a real user's private project. This
+    // keeps event delivery auth-scoped even in demo mode.
+    const mayJoin = (projectId: string): boolean => {
       if (!projectId) return false;
       const p = container.projectRepo.findById(projectId)?.data;
-      return !!p && canAccessProject(user, p);
+      if (!p) return false;
+      if (socket.data.authenticated !== true) return !p.ownerId || p.ownerId === "user-demo";
+      return canAccessProject(user, p);
     };
+    const mayAccess = mayJoin;
     const projectIdOf = (payload: unknown): string => {
       const pid = (payload as { projectId?: unknown } | undefined)?.projectId;
       return typeof pid === "string" ? pid.trim() : "";
@@ -198,7 +205,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     socket.on("subscribe_all", (_payload: unknown, ack?: (result: unknown) => void) => {
       let joined = 0;
       for (const rec of container.projectRepo.findMany()) {
-        if (canAccessProject(user, rec.data)) {
+        if (mayJoin(rec.data.id)) {
           void socket.join(projectRoom(rec.data.id));
           joined += 1;
         }

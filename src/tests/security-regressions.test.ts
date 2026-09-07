@@ -108,7 +108,12 @@ describe("A01 — caller-supplied identity headers are not proof of identity", (
   });
 
   it("x-user-id no longer contributes to identity in demo mode either", async () => {
+    // Pure demo mode: auth off and NO OAuth configured (an unauthenticated
+    // mock-connection project creation would otherwise be rejected by the
+    // "OAuth configured but nobody logged in yet" guard).
     setEnv("REQUIRE_AUTH", "false");
+    setEnv("GITHUB_CLIENT_ID", undefined);
+    setEnv("GITHUB_CLIENT_SECRET", undefined);
     const srv = await boot();
     const created = await srv.inject({
       method: "POST",
