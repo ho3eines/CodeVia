@@ -5,12 +5,15 @@ import { buildServer } from "../http/app.js";
 import type { Project } from "../domain/entities.js";
 import { getEnvFresh } from "../config/env.js";
 import { storeUserGitHubToken } from "../auth/github-tokens.js";
+import { signSession } from "../auth/github-oauth.js";
 import { setUserGitHubFetchForTest } from "../github/registry.js";
 import type { MockGitHubService } from "../github/mock-service.js";
 import { freshDb } from "./test-helpers.js";
 
 let fx: ReturnType<typeof freshDb>;
 let c: Container;
+/** Session headers for the project's owner (see beforeEach). */
+let asOwner: Record<string, string> = {};
 let project: Project;
 let app: FastifyInstance | undefined;
 let fetcher: ReturnType<typeof vi.fn<typeof fetch>>;
@@ -28,9 +31,14 @@ beforeEach(async () => {
   const snapshot = await c.projectFiles.pull(project);
   const files = new Map(snapshot.contents);
   files.set(remoteFile, "Only the project's OAuth repository contains this file.\n");
-  project = { ...project, ownerId: "owner-a", githubConnection: { kind: "mock" } };
+  // (A02) projects are ownership-checked: hand this one to a real user, then
+  // browse with that owner's signed session — the unauthenticated demo user
+  // must get 404, the owner must ride their own OAuth connection.
+  const owner = c.userRepo.upsertGitHubUser({ id: 77, login: "owner-a", name: "Owner A", email: "owner-a@x.test" }).user;
+  project = { ...project, ownerId: owner.id, githubConnection: { kind: "mock" } };
   c.projectRepo.upsert(project, { key: project.slug });
-  storeUserGitHubToken(c.kv, "owner-a", "test-only-project-oauth-token");
+  storeUserGitHubToken(c.kv, owner.id, "test-only-project-oauth-token");
+  asOwner = { cookie: `cv_session=${signSession(owner.id)}` };
 
   // Exercise the real REST adapter with a fake transport, not live GitHub.
   // A successful read must use the owner's OAuth token, never the mock copy.
@@ -64,7 +72,7 @@ afterEach(async () => {
 describe("project-owned GitHub file browsing", () => {
   it("lists files through the promoted OAuth connection and honors the requested branch", async () => {
     const fallback = vi.spyOn(c.github, "listFiles");
-    const res = await app!.inject({ method: "GET", url: `/projects/${project.id}/files?branch=feature` });
+    const res = await app!.inject({ method: "GET", url: `/projects/${project.id}/files?branch=feature`, headers: asOwner });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toContainEqual(expect.objectContaining({ path: remoteFile }));
     expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/contents/CodeVia?ref=feature"))).toBe(true);
@@ -73,7 +81,7 @@ describe("project-owned GitHub file browsing", () => {
 
   it("reads file content through the same connection used for canonical state", async () => {
     const fallback = vi.spyOn(c.github, "getFile");
-    const res = await app!.inject({ method: "GET", url: `/projects/${project.id}/file?path=${remoteFile}&branch=feature` });
+    const res = await app!.inject({ method: "GET", url: `/projects/${project.id}/file?path=${remoteFile}&branch=feature`, headers: asOwner });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toMatchObject({ path: remoteFile, content: "Only the project's OAuth repository contains this file.\n", sha: "remote-blob" });
     expect(fetcher.mock.calls.some(([url]) => String(url).endsWith(`/contents/${remoteFile}?ref=feature`))).toBe(true);
