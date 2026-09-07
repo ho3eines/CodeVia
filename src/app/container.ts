@@ -5,7 +5,7 @@ import { getKv } from "../db/kv.js";
 import { getProjectRepo, getTaskRepo, getWorkflowRepo, getConversationRepo, getMemoryRepo } from "../domain/repos.js";
 import { getTelegramAccountRepo, type TelegramAccount } from "../domain/telegram.js";
 import { getUserRepo } from "../auth/users.js";
-import type { ModelProvider } from "../domain/entities.js";
+import type { ModelProvider, Project } from "../domain/entities.js";
 import { getAgentRepo } from "../agents/agent-repo.js";
 import { getRunRepo, getCostRepo, getAuditRepo, getNotificationRepo } from "../observability/repos.js";
 import { getSkillRepo, SkillRegistry } from "../skills/registry.js";
@@ -14,7 +14,7 @@ import { providerRegistry, ProviderRegistry } from "../ai/provider-registry.js";
 import { modelRouter, ModelRouter } from "../ai/model-router.js";
 import { contextEngine, ContextEngine } from "../ai/context-engine.js";
 import { toolRegistry, ToolRegistry } from "../tools/registry.js";
-import { resolveGitHubService } from "../github/registry.js";
+import { resolveGitHubService, resolveGitHubForProject } from "../github/registry.js";
 import { resolveTelegramService } from "../integrations/telegram.js";
 import { TelegramBot } from "../integrations/telegram-bot.js";
 import { TelegramRuntime, type TelegramMode, type TelegramRuntimeStatus } from "../integrations/telegram-runtime.js";
@@ -22,6 +22,7 @@ import { getEnv } from "../config/env.js";
 import { memoryResolver, MemoryResolver } from "../memory/index.js";
 import { AgentRouter } from "../agents/router.js";
 import { AgentRunner } from "../agents/runner.js";
+import { assertTaskActive } from "../agents/execution.js";
 import { AgentGenerator } from "../agents/generator.js";
 import { AgentManager } from "../agents/manager.js";
 import { WorkflowEngine } from "../workflow/engine.js";
@@ -76,8 +77,9 @@ export class Container {
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
   readonly github: IGitHubService = resolveGitHubService();
+  readonly githubForProject = (project: Project): IGitHubService => resolveGitHubForProject({ project, kv: this.kv, fallback: this.github });
   /** Project folder (CodeVia/*) sync between the database and the project repo. Shares the platform github instance. */
-  readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github });
+  readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github, githubForProject: this.githubForProject });
   readonly telegram = resolveTelegramService();
   readonly memoryResolver: MemoryResolver = memoryResolver;
   readonly agentRouter = new AgentRouter();
@@ -123,17 +125,20 @@ export class Container {
       modelRouter: this.modelRouter,
       contextEngine: this.contextEngine,
       github: this.github,
+      githubForProject: this.githubForProject,
       requestApproval: (a, d) => this.approvalChannel(a, d),
       memoryRepo: this.memoryRepo,
       projectFiles: this.projectFiles,
-      isCancelled: (taskId) => this.taskRepo.findById(taskId)?.data.status === "cancelled",
+      checkActive: (task) => assertTaskActive(this.taskRepo, task),
     });
     this.workflowEngine = new WorkflowEngine({
       agentRepo: this.agentRepo,
       agentRunner: this.agentRunner,
       toolRegistry: this.toolRegistry,
       github: this.github,
+      githubForProject: this.githubForProject,
       requestApproval: (a, d) => this.approvalChannel(a, d),
+      checkActive: (task) => assertTaskActive(this.taskRepo, task),
     });
     const agentGenerator = new AgentGenerator(this.agentRepo, this.skillRepo, this.modelRepo);
     this.agentManager = new AgentManager({
@@ -153,6 +158,7 @@ export class Container {
       modelRepo: this.modelRepo,
       providerRepo: this.providerRepo,
       github: this.github,
+      githubForProject: this.githubForProject,
       providerRegistry: this.providerRegistry,
       memoryRepo: this.memoryRepo,
       projectFiles: this.projectFiles,
@@ -248,6 +254,12 @@ export class Container {
     await this.providerRegistry.bootDefault();
     // Persist the default providers so the API/UI can list/manage them.
     this.seedDefaultProviders();
+    // Boot defaults must not shadow persisted provider URLs/keys/tuning after
+    // a restart. Runtime adapters are rebuilt from the stored configurations.
+    for (const { data: provider } of this.providerRepo.findMany()) {
+      this.providerRegistry.invalidate(provider.id);
+      this.providerRegistry.resolve(provider);
+    }
     // Load the mock provider + default models into the registry for routing.
     this.seedDefaultModels();
     logger.info("container seeded");

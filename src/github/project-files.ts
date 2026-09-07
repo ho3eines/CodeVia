@@ -159,6 +159,7 @@ export function renderAgentFile(agent: Agent): string {
       tokenBudget: agent.tokenBudget,
       memorySources: agent.memorySources,
       systemPrompt: agent.systemPrompt,
+      projectPrompt: agent.projectPrompt,
       updatedAt: new Date().toISOString(),
     },
     [
@@ -219,6 +220,8 @@ export function renderTaskFile(task: Task): string {
       parentTaskId: task.parentTaskId ?? null,
       priority: task.priority ?? null,
       error: task.error ?? null,
+      input: Object.fromEntries(["executionMode", "agentHint", "branch", "ref", "files", "breakdown"].filter((key) => task.input?.[key] !== undefined).map((key) => [key, task.input[key]])),
+      result: task.result,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
     },
@@ -267,7 +270,7 @@ export interface ParsedAgent {
   id: string; type: string; name: string; role: string; description: string; enabled: boolean;
   version: number; tools: string[]; permissions: string[]; skills: string[];
   models: Agent["models"]; maxIterations: number; timeoutMs: number; tokenBudget: number;
-  memorySources: string[]; systemPrompt: string;
+  memorySources: string[]; systemPrompt: string; projectPrompt?: string;
 }
 
 export function parseAgentFile(content: string): ParsedAgent | undefined {
@@ -282,6 +285,7 @@ export function parseAgentFile(content: string): ParsedAgent | undefined {
     maxIterations: num(data.maxIterations, 5), timeoutMs: num(data.timeoutMs, 120000),
     tokenBudget: num(data.tokenBudget, 20000), memorySources: arr(data.memorySources),
     systemPrompt: str(data.systemPrompt),
+    projectPrompt: typeof data.projectPrompt === "string" ? data.projectPrompt : undefined,
   };
 }
 
@@ -289,6 +293,7 @@ export interface ParsedTask {
   id: string; title: string; status: Task["status"]; agentType?: string; parentTaskId?: string;
   priority?: Task["priority"]; error?: string; description: string; researchBrief?: string;
   createdAt: string; updatedAt: string;
+  input?: Record<string, unknown>; result?: Record<string, unknown>;
 }
 
 export function parseTaskFile(content: string): ParsedTask | undefined {
@@ -304,6 +309,8 @@ export function parseTaskFile(content: string): ParsedTask | undefined {
     error: str(data.error) || undefined,
     description: sections["Request"] && sections["Request"] !== "_(no description)_" ? sections["Request"] : "",
     researchBrief: sections["Research brief"] || undefined,
+    input: data.input && typeof data.input === "object" && !Array.isArray(data.input) ? data.input as Record<string, unknown> : undefined,
+    result: data.result && typeof data.result === "object" && !Array.isArray(data.result) ? data.result as Record<string, unknown> : undefined,
     createdAt: str(data.createdAt) || new Date().toISOString(),
     updatedAt: str(data.updatedAt) || new Date().toISOString(),
   };
@@ -354,6 +361,7 @@ export function parseMemoryFile(content: string): ParsedMemoryEntry[] {
 
 export interface ProjectFilesDeps {
   github: IGitHubService;
+  githubForProject?: (project: Project) => IGitHubService;
 }
 
 export interface PullSummary {
@@ -365,7 +373,10 @@ export interface PullSummary {
 }
 
 export class ProjectFilesService {
+  private pendingWrites = new Map<string, Promise<boolean>>();
   constructor(private readonly deps: ProjectFilesDeps) {}
+
+  private github(project: Project): IGitHubService { return this.deps.githubForProject?.(project) ?? this.deps.github; }
 
   private ref(project: Project): GithubRepoRef {
     const [owner, ...rest] = String(project.configRepo ?? "").split("/");
@@ -373,9 +384,17 @@ export class ProjectFilesService {
   }
 
   private async commitSafe(project: Project, message: string, files: GithubFile[]): Promise<boolean> {
+    const key = `${project.configRepo}@${project.branch}`;
+    const previous = this.pendingWrites.get(key) ?? Promise.resolve(true);
+    const next = previous.catch(() => false).then(() => this.commitNow(project, message, files));
+    this.pendingWrites.set(key, next);
+    try { return await next; } finally { if (this.pendingWrites.get(key) === next) this.pendingWrites.delete(key); }
+  }
+
+  private async commitNow(project: Project, message: string, files: GithubFile[]): Promise<boolean> {
     try {
       if (!project.configRepo || !project.configRepo.includes("/")) return false;
-      await this.deps.github.commit(this.ref(project), project.branch || "main", message, files);
+      await this.github(project).commit(this.ref(project), project.branch || "main", message, files);
       return true;
     } catch (err) {
       logger.warn("project files sync failed", { projectId: project.id, message, err: String(err) });
@@ -385,7 +404,7 @@ export class ProjectFilesService {
 
   private async readSafe(project: Project, path: string): Promise<string | undefined> {
     try {
-      const file = await this.deps.github.getFile(this.ref(project), path, project.branch);
+      const file = await this.github(project).getFile(this.ref(project), path, project.branch);
       return file?.content;
     } catch {
       return undefined;
@@ -439,9 +458,9 @@ export class ProjectFilesService {
   async pull(project: Project): Promise<{ manifest?: Record<string, unknown>; agents: ParsedAgent[]; tasks: ParsedTask[]; memory: ParsedMemoryEntry[]; skills: string[]; files: string[] }> {
     const out = { manifest: undefined as Record<string, unknown> | undefined, agents: [] as ParsedAgent[], tasks: [] as ParsedTask[], memory: [] as ParsedMemoryEntry[], skills: [] as string[], files: [] as string[] };
     try {
-      const entries = await this.deps.github.listFiles(this.ref(project), project.branch, CODEVIA_DIR).catch(() => [] as Array<{ path: string }>);
+      const entries = await this.github(project).listFiles(this.ref(project), project.branch, CODEVIA_DIR).catch(() => [] as Array<{ path: string }>);
       // listFiles(path) support varies — fall back to a full tree scan.
-      const tree = entries.length ? entries : await this.deps.github.listFiles(this.ref(project), project.branch).catch(() => [] as Array<{ path: string }>);
+      const tree = entries.length ? entries : await this.github(project).listFiles(this.ref(project), project.branch).catch(() => [] as Array<{ path: string }>);
       const hits = tree.map((e) => e.path).filter((p) => p === PROJECT_FILE || p === SKILLS_FILE || p === MEMORY_FILE || p.startsWith(`${AGENTS_DIR}/`) || p.startsWith(`${TASKS_DIR}/`));
       out.files = hits;
       for (const path of hits) {
@@ -491,7 +510,7 @@ export class ProjectFilesService {
             version: Math.max(existing.version, a.version), tools: a.tools, permissions: a.permissions as never,
             skills: a.skills, models: a.models, maxIterations: a.maxIterations, timeoutMs: a.timeoutMs,
             tokenBudget: a.tokenBudget, memorySources: a.memorySources, systemPrompt: a.systemPrompt || existing.systemPrompt,
-            projectPrompt: existing.projectPrompt, updatedAt: now,
+            projectPrompt: a.projectPrompt ?? existing.projectPrompt, updatedAt: now,
           },
           { projectId: project.id },
         );
@@ -500,7 +519,7 @@ export class ProjectFilesService {
           {
             id: a.id, projectId: project.id, type: a.type as Agent["type"], name: a.name, slug: a.type,
             role: a.role, description: a.description, configPath: `${AGENTS_DIR}/${a.type}.md`,
-            systemPrompt: a.systemPrompt, projectPrompt: project.description, skills: a.skills,
+            systemPrompt: a.systemPrompt, projectPrompt: a.projectPrompt ?? project.description, skills: a.skills,
             tools: a.tools, permissions: a.permissions as never, models: a.models,
             maxIterations: a.maxIterations, timeoutMs: a.timeoutMs, tokenBudget: a.tokenBudget,
             memorySources: a.memorySources, enabled: a.enabled, version: a.version,
@@ -513,14 +532,14 @@ export class ProjectFilesService {
 
     for (const t of opts.includeTasks === false ? [] : pulled.tasks) {
       const existing = repos.taskRepo.findById(t.id)?.data;
-      const input = { ...(existing?.input ?? {}), ...(t.researchBrief ? { researchBrief: t.researchBrief } : {}) };
+      const input = { ...(existing?.input ?? {}), ...(t.input ?? {}), ...(t.researchBrief ? { researchBrief: t.researchBrief } : {}) };
       repos.taskRepo.upsert(
         {
           id: t.id, projectId: project.id, parentTaskId: t.parentTaskId, title: t.title,
           description: t.description, priority: t.priority ?? existing?.priority ?? "medium",
           status: t.status, agentType: (t.agentType as Task["agentType"]) ?? existing?.agentType,
           correlationId: existing?.correlationId ?? `restored-${Date.now()}`,
-          input, error: t.error,
+          input, result: t.result ?? existing?.result, error: t.error,
           createdAt: existing?.createdAt ?? t.createdAt, updatedAt: now,
         },
         { projectId: project.id, parentId: t.parentTaskId },

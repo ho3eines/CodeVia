@@ -33,6 +33,7 @@ export class ToolRegistry implements IToolRegistry {
   }
 
   isAllowed(tool: ToolDefinition, agent: Agent): boolean {
+    if (!agent.tools.includes(tool.name)) return false;
     if (tool.permissions.length === 0) return true;
     const perms = new Set(agent.permissions);
     // `repository.write` / `github.write` are interchangeable in the matrix.
@@ -59,16 +60,26 @@ export class ToolRegistry implements IToolRegistry {
       });
       return { ok: false, output: `Permission denied: ${name} requires one of [${tool.permissions.join(", ")}]`, data: { denied: true } };
     }
+    const projectPermissions = ctx.project.settings?.permissions as Record<string, boolean | undefined> | undefined;
+    const deniedByProject = tool.permissions.some((permission) => {
+      const key = permission.replace(/^github\./, "repository.");
+      return projectPermissions?.[key] === false;
+    });
+    if (deniedByProject) return { ok: false, output: `Project policy denies ${name}`, data: { denied: true } };
     // Dangerous tools always pass through the approval policy unless the caller
     // already obtained approval for this exact step (`ctx.approved`).
-    if (tool.dangerous && !ctx.approved && ctx.requestApproval) {
+    ctx.checkActive?.();
+    if (tool.dangerous && !ctx.approved) {
+      if (!ctx.requestApproval) return { ok: false, output: `No approval channel configured for ${name}`, requiresApproval: true };
       const approved = await ctx.requestApproval(`${tool.name}: ${tool.description}`, { tool: tool.name, input: summarizeInput(input) });
       if (!approved) {
         return { ok: false, output: `Approval rejected for ${name}`, requiresApproval: true, data: { rejected: true } };
       }
     }
+    ctx.checkActive?.();
     try {
       const result = await withTimeout(tool.execute(ctx, input), tool.timeoutMs, name);
+      ctx.checkActive?.();
       logger.info(`tool ${name} executed`, {
         ok: result.ok,
         projectId: ctx.project.id,

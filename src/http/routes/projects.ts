@@ -312,9 +312,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
 
   /** GitHub service for a project: the linking user's token when available, else the platform default. */
   const githubForProject = (req: Parameters<typeof resolveRequestUser>[0], p: Project) => {
+    if (p.githubConnection) return container.githubForProject(p);
     const { user, authenticated } = resolveRequestUser(req, container);
-    const userId = p.githubConnection?.kind === "user-oauth" ? p.githubConnection.userId ?? user.id : user.id;
-    return resolveGitHubForUser({ kv: container.kv, userId, authenticated: authenticated || !!p.githubConnection?.userId, fallback: container.github }).service;
+    return resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github }).service;
   };
 
   app.get("/projects/:id/issues", { schema: { tags: ["projects"] } }, async (req) => {
@@ -647,7 +647,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       description,
       agentType: workflowId || executionMode === "autonomous" ? undefined : routedAgentType,
       workflowId,
-      input: { ...(body.input as Record<string, unknown> | undefined ?? {}), routedAgentType, executionMode },
+      input: { ...(body.input as Record<string, unknown> | undefined ?? {}), routedAgentType, agentHint: body.agentType, executionMode },
     });
     const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
     return { task, jobId: job.id, routedAgentType, workflowId, executionMode };

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { live } from "../../realtime/live.js";
+import { executionTask } from "../../agents/execution.js";
 import type { Container } from "../../app/container.js";
 
 export function registerTaskRoutes(app: FastifyInstance, container: Container): void {
@@ -45,7 +46,7 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       patch.priority = b.priority as "low" | "medium" | "high" | "critical";
     }
     if (typeof b.agentType === "string") patch.agentType = b.agentType as never;
-    if (typeof b.workflowId === "string" || b.workflowId === undefined) {
+    if (Object.hasOwn(b, "workflowId") && (typeof b.workflowId === "string" || b.workflowId === null)) {
       patch.workflowId = (b.workflowId as string | undefined) || undefined;
     }
     const updated = { ...rec.data, ...patch, id, updatedAt: new Date().toISOString() };
@@ -60,16 +61,20 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       reply.code(404);
       return { error: "task not found" };
     }
+    container.approvals.cancelForTask(id);
     container.taskRepo.deleteById(id);
     return { ok: true };
   });
 
-  app.post("/tasks/:id/run", { schema: { tags: ["tasks"] } }, async (req) => {
+  app.post("/tasks/:id/run", { schema: { tags: ["tasks"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const task = container.taskRepo.findById(id);
-    if (!task) return { error: "task not found" };
-    const job = container.queue.enqueue("agent.run", { taskId: id }, { correlationId: task.data.correlationId });
-    return { taskId: id, jobId: job.id };
+    if (!container.taskRepo.findById(id)) return reply.code(404).send({ error: "task not found" });
+    let task;
+    try { task = executionTask(container.taskRepo, id); } catch (err) { return reply.code(409).send({ error: String(err) }); }
+    if (["running", "queued", "waiting_for_approval"].includes(task.status) || container.agentManager.isTaskRunning(task.id) || container.queue.hasRunningTask(task.id)) return reply.code(409).send({ error: "Owning task is already in flight", taskId: task.id });
+    container.taskRepo.upsert({ ...task, status: "queued", error: undefined, updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
+    const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
+    return { taskId: task.id, requestedTaskId: id, jobId: job.id };
   });
 
   app.post("/tasks/:id/cancel", { schema: { tags: ["tasks"] } }, async (req) => {
@@ -83,6 +88,7 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     // observes the status between steps and stops cooperatively.
     const updated = { ...t.data, status: "cancelled" as const, updatedAt: new Date().toISOString() };
     container.taskRepo.upsert(updated, { projectId: updated.projectId, parentId: updated.parentTaskId });
+    container.approvals.cancelForTask(id);
     live.emit({ type: "task.updated", taskId: id, data: { status: "cancelled" } });
     return updated;
   });
@@ -120,6 +126,8 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       durationMs: r.data.durationMs,
       steps: r.data.steps,
       error: r.data.error,
+      summary: r.data.summary,
+      verification: r.data.verification,
     };
   });
 }

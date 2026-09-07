@@ -16,6 +16,8 @@ import type { AgentRepository } from "./agent-repo.js";
 import type { RunRepository, CostRepository, AuditRepository, NotificationRepository } from "../observability/repos.js";
 import type { AgentRunner } from "./runner.js";
 import { TaskCancelledError } from "./runner.js";
+import { assertTaskActive, executionTask } from "./execution.js";
+import { isWriter, repositoryForAgent } from "./implementation.js";
 import type { WorkflowEngine } from "../workflow/engine.js";
 import type { AgentRouter } from "./router.js";
 import { AutonomousOrchestrator } from "./orchestrator.js";
@@ -104,6 +106,7 @@ export interface AgentManagerDeps {
   modelRepo: ModelRepository;
   providerRepo: ProviderRepository;
   github: IGitHubService;
+  githubForProject?: (project: Project) => IGitHubService;
   /** Real-AI access for the autonomous task loop (optional — loop stays deterministic without it). */
   providerRegistry?: ProviderRegistry;
   /** DB memory index (optional — needed for the CodeVia/memory.md sync). */
@@ -119,6 +122,8 @@ export interface AgentManagerDeps {
  */
 export class AgentManager {
   private readonly agentRouter: AgentRouter;
+  private readonly inFlight = new Map<string, Promise<Task>>();
+  private githubFor(project: Project): IGitHubService { return this.deps.githubForProject?.(project) ?? this.deps.github; }
   constructor(private readonly deps: AgentManagerDeps) {
     this.agentRouter = deps.agentRouter;
   }
@@ -229,7 +234,7 @@ export class AgentManager {
     // Automatic rules discovery: README/CONTRIBUTING/CODEOWNERS/.editorconfig/
     // build files → project rules injected into every agent prompt. User-authored
     // rules (anything not tagged as discovered) are preserved.
-    const discovered = rulesToStrings(await discoverProjectRules(this.deps.github, refreshed, detected.files)).map((r) => `${DISCOVERED_RULE_TAG}\n${r}`);
+    const discovered = rulesToStrings(await discoverProjectRules(this.githubFor(refreshed), refreshed, detected.files)).map((r) => `${DISCOVERED_RULE_TAG}\n${r}`);
     const manual = refreshed.settings.rules.filter((r) => !r.startsWith(DISCOVERED_RULE_TAG));
     const rules = [...manual, ...discovered];
     const updatedProject = { ...refreshed, settings: { ...refreshed.settings, skills, rules } };
@@ -323,8 +328,8 @@ export class AgentManager {
       return workflow;
     };
     const created = [
-      create("autonomous-development-loop", "Autonomous Development Loop", "Research → architecture → implementation → QA → security → code review → human approval.", ["research", "business-analyst", "system-architect", "backend-developer", "frontend-developer", "uiux", "qa-test", "security", "code-reviewer", "documentation"]),
-      create("bug-diagnosis-loop", "Bug Diagnosis Loop", "Issue/test failure → diagnosis → responsible agent → QA → review → approval.", ["qa-test", "debugging", "backend-developer", "frontend-developer", "uiux", "database", "qa-test", "code-reviewer"]),
+      create("autonomous-development-loop", "Autonomous Development Loop", "Research → architecture → implementation → QA → security → code review → human approval.", ["research", "business-analyst", "system-architect", "backend-developer", "frontend-developer", "uiux", "documentation", "qa-test", "security", "code-reviewer"]),
+      create("bug-diagnosis-loop", "Bug Diagnosis Loop", "Issue/test failure → diagnosis → responsible agent → QA → review → approval.", ["debugging", "database", "backend-developer", "frontend-developer", "uiux", "qa-test", "code-reviewer"]),
     ].filter(Boolean) as Workflow[];
     if (created.length) {
       const current = this.deps.projectRepo.findById(project.id)?.data ?? project;
@@ -347,7 +352,7 @@ export class AgentManager {
       const ref = parseRepoFullName(link.repo);
       if (!ref) continue;
       try {
-        const entries = await this.deps.github.listFiles(ref, link.branch);
+        const entries = await this.githubFor(project).listFiles(ref, link.branch);
         files.push(...entries.map((e) => e.path));
         fetched += entries.length;
         if (fetched >= 6000) break;
@@ -359,18 +364,20 @@ export class AgentManager {
     const read = async (paths: string[]): Promise<string[]> => {
       const out: string[] = [];
       for (const p of paths.slice(0, 24)) {
-        const ref = parseRepoFullName(project.repositories[0]?.repo ?? project.configRepo);
-        if (!ref) continue;
-        try {
-          const f = await this.deps.github.getFile(ref, p, project.branch);
-          if (f) out.push(f.content);
-        } catch { /* ignore individual misses */ }
+        for (const link of project.repositories) {
+          const ref = parseRepoFullName(link.repo);
+          if (!ref) continue;
+          try {
+            const f = await this.githubFor(project).getFile(ref, p, link.branch);
+            if (f) { out.push(f.content); break; }
+          } catch { /* ignore individual misses during advisory onboarding */ }
+        }
       }
       return out;
     };
 
     // Files that commonly define the stack.
-    const configFiles = low.filter((p) => /^appsettings(\.[^/]+)?\.json$/.test(p) || /\.(csproj|fsproj|vbp)$/.test(p) || /^package\.json$/.test(p) || /^go\.mod$/.test(p) || /^pyproject\.toml$/.test(p) || /^requirements\.txt$/.test(p) || p.endsWith(".sql"));
+    const configFiles = files.filter((path) => { const p = path.split("/").pop()!.toLowerCase(); return /^appsettings(\.[^/]+)?\.json$/.test(p) || /\.(csproj|fsproj|vbp)$/.test(p) || /^package\.json$/.test(p) || /^go\.mod$/.test(p) || /^pyproject\.toml$/.test(p) || /^requirements\.txt$/.test(p) || p.endsWith(".sql"); });
     const contents = await read(configFiles);
     const combined = `${contents.join("\n").toLowerCase()}\n${files.join("\n").toLowerCase()}\n${project.description} ${project.name}`;
 
@@ -396,7 +403,7 @@ export class AgentManager {
       [/\.sql$/, "sql"],
       [/\.sh$|\.ps1$/, "shell"],
     ];
-    for (const [re, lang] of languageRules) if (re.test(combined)) languages.push(lang);
+    for (const [re, lang] of languageRules) if (new RegExp(re.source, "im").test(combined)) languages.push(lang);
 
     const frameworkRules: Array<[RegExp, string]> = [
       [/\basp\.net|aspnetcore|mvc\b/, "aspnetcore"],
@@ -413,7 +420,7 @@ export class AgentManager {
       [/\bflutter\b|\.dart$/, "flutter"],
       [/\.tailwind|tailwindcss\b/, "tailwind"],
     ];
-    for (const [re, fw] of frameworkRules) if (re.test(combined)) frameworks.push(fw);
+    for (const [re, fw] of frameworkRules) if (new RegExp(re.source, "im").test(combined)) frameworks.push(fw);
 
     const databaseRules: Array<[RegExp, string]> = [
       [/\bsqlserver\b|microsoft\.data\.sqlclient|system\.data\.sqlclient|server=|user id=.*sql/, "sqlserver"],
@@ -461,10 +468,9 @@ export class AgentManager {
     const path = "Agent.md";
     const body = this.buildAgentMd(project, detectedFiles);
     try {
-      const existing = await this.deps.github.getFile(ref, path, cfg.branch);
+      const existing = await this.githubFor(project).getFile(ref, path, cfg.branch);
       if (existing && this.agentMdLooksCurrent(existing.content, project.capabilities)) return;
-      const parentSha = existing?.sha ?? undefined;
-      await this.deps.github.commit(ref, cfg.branch, `docs: ensure Agent.md for ${project.name}`, [{ path, content: body }], parentSha);
+      await this.githubFor(project).commit(ref, cfg.branch, `docs: ensure Agent.md for ${project.name}`, [{ path, content: body }]);
       logger.info("Agent.md ensured", { repo: cfg.repo, branch: cfg.branch });
     } catch (err) {
       logger.warn("could not create/update Agent.md", { repo: cfg.repo, err: String(err) });
@@ -518,8 +524,9 @@ export class AgentManager {
 
   /** Seed a mock repository with a starter .ai-engineering structure for demos. */
   private ensureMockRepo(project: Project): void {
-    if (this.deps.github.kind !== "mock") return;
-    const mock = this.deps.github as unknown as {
+    const github = this.githubFor(project);
+    if (github.kind !== "mock") return;
+    const mock = github as unknown as {
       seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string; description?: string }): { owner: string; name: string };
     };
     for (const link of project.repositories.length ? project.repositories : [{ repo: project.configRepo, branch: project.branch, isConfigRepo: true }]) {
@@ -644,13 +651,25 @@ export class AgentManager {
   }
 
   /** Execute a task by routing to the right agent or running a workflow. */
-  async runTask(taskId: string): Promise<Task> {
+  isTaskRunning(taskId: string): boolean { return this.inFlight.has(taskId); }
+
+  runTask(taskId: string): Promise<Task> {
+    try { taskId = executionTask(this.deps.taskRepo, taskId).id; } catch (err) { return Promise.reject(err); }
+    const existing = this.inFlight.get(taskId);
+    if (existing) return existing;
+    const pending = this.executeTask(taskId).finally(() => this.inFlight.delete(taskId));
+    this.inFlight.set(taskId, pending);
+    return pending;
+  }
+
+  private async executeTask(taskId: string): Promise<Task> {
     const task = this.deps.taskRepo.findById(taskId)?.data;
     if (!task) throw new Error(`Task ${taskId} not found`);
     const project = this.deps.projectRepo.findById(task.projectId)?.data;
     if (!project) throw new Error(`Project ${task.projectId} not found`);
 
-    this.deps.taskRepo.upsert({ ...task, status: "running" }, { projectId: task.projectId, parentId: task.parentTaskId });
+    assertTaskActive(this.deps.taskRepo, task);
+    this.deps.taskRepo.upsert({ ...task, status: "running", error: undefined }, { projectId: task.projectId, parentId: task.parentTaskId });
     live.emit({ type: "task.updated", taskId, data: { status: "running" } });
 
     try {
@@ -662,18 +681,26 @@ export class AgentManager {
           agentRepo: this.deps.agentRepo,
           agentRunner: this.deps.agentRunner,
           agentRouter: this.agentRouter,
-          github: this.deps.github,
+          github: this.githubFor(project),
+          githubForProject: this.deps.githubForProject,
           modelRepo: this.deps.modelRepo,
           providerRepo: this.deps.providerRepo,
           providerRegistry: this.deps.providerRegistry,
           files: this.deps.projectFiles,
           memoryRepo: this.deps.memoryRepo,
         });
-        await orchestrator.run(taskId);
+        const summary = await orchestrator.run(taskId);
+        assertTaskActive(this.deps.taskRepo, task);
+        const current = this.deps.taskRepo.findById(taskId)!.data;
+        this.deps.taskRepo.upsert({ ...current, result: { ...summary } }, { projectId: task.projectId, parentId: task.parentTaskId });
       } else if (task.workflowId) {
         const workflow = this.deps.workflowRepo.findById(task.workflowId)?.data;
         if (!workflow) throw new Error(`Workflow ${task.workflowId} not found`);
         const result = await this.deps.workflowEngine.run(workflow, project, task, task.input);
+        const current = this.deps.taskRepo.findById(taskId)?.data;
+        if (!current) throw new TaskCancelledError(taskId);
+        this.deps.taskRepo.upsert({ ...current, result: { ...result } }, { projectId: task.projectId, parentId: task.parentTaskId });
+        if (result.status === "cancelled") throw new TaskCancelledError(taskId);
         if (result.status === "waiting_for_approval") {
           const waiting: Task = { ...this.deps.taskRepo.findById(taskId)!.data, status: "waiting_for_approval", approvalRequired: true, updatedAt: new Date().toISOString() };
           this.deps.taskRepo.upsert(waiting, { projectId: task.projectId, parentId: task.parentTaskId });
@@ -682,22 +709,23 @@ export class AgentManager {
         }
         if (result.status === "failed") {
           const failedNodes = result.trace.filter((t) => t.status === "failed").map((t) => t.node);
-          throw new Error(
-            `Workflow "${workflow.name}" failed${failedNodes.length ? ` at: ${failedNodes.join(", ")}` : ""}`,
-          );
+          throw Object.assign(new Error(
+            `Workflow "${workflow.name}" failed${failedNodes.length ? ` at: ${failedNodes.join(", ")}` : ""}${result.error ? `: ${result.error}` : ""}`,
+          ), { retryable: false });
         }
       } else {
         await this.routeAndRun(task, project);
       }
       const prev = this.deps.taskRepo.findById(taskId)?.data!;
       if (prev.status === "cancelled") throw new TaskCancelledError(taskId);
-      const done: Task = { ...prev, status: "succeeded", updatedAt: new Date().toISOString() };
+      const done: Task = { ...prev, status: "succeeded", error: undefined, updatedAt: new Date().toISOString() };
       this.deps.taskRepo.upsert(done, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "succeeded" } });
       await this.syncProjectState(task.projectId);
       return done;
     } catch (err) {
       const failed = this.deps.taskRepo.findById(taskId)?.data!;
+      if (!failed) throw err;
       if (err instanceof TaskCancelledError || failed.status === "cancelled") {
         logger.info("runTask cancelled", { taskId });
         this.deps.taskRepo.upsert({ ...failed, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
@@ -706,7 +734,7 @@ export class AgentManager {
         return this.deps.taskRepo.findById(taskId)!.data;
       }
       logger.error("runTask failed", { taskId, err: String(err) });
-      this.deps.taskRepo.upsert({ ...failed, status: "failed", error: String(err) }, { projectId: task.projectId, parentId: task.parentTaskId });
+      this.deps.taskRepo.upsert({ ...failed, status: "failed", error: String(err), updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
       live.emit({ type: "task.updated", taskId, data: { status: "failed", error: String(err) } });
       await this.syncProjectState(task.projectId);
       throw err;
@@ -719,39 +747,12 @@ export class AgentManager {
     if (!agent) {
       throw new Error(`No enabled agent of type ${type} in project ${project.id}`);
     }
-    await this.deps.agentRunner.run({ task, agent, project, workspaceRoot: process.cwd() });
-
-    // Self-healing loop: if the routed agent is QA and we can route failures,
-    // we re-task to the designated downstream agent. (Bounded to one hop.)
-    if (type === "qa-test" && this.shouldHeal(task)) {
-      const downstream = this.agentRouter.route("debug " + task.description);
-      const debugAgent = this.deps.agentRepo.byType(project.id, downstream);
-      if (debugAgent) {
-        const subtask = this.createTask({
-          projectId: project.id,
-          title: `Diagnose: ${task.title}`,
-          description: task.description,
-          agentType: downstream,
-          parentTaskId: task.id,
-          input: task.input,
-        });
-        await this.deps.agentRunner.run({ task: subtask, agent: debugAgent, project });
-      }
-    }
-  }
-
-  private shouldHeal(task: Task): boolean {
-    const text = `${task.title} ${task.description}`.toLowerCase();
-    return /test|fail|bug|error/.test(text);
-  }
-
-  /* ---------------- Budget enforcement ---------------- */
-
-  private enforceBudget(project: Project): void {
-    const budget = project.settings.budget;
-    const totals = this.deps.costRepo.totals({ projectId: project.id });
-    if (budget.maxCostUsdPerRun > 0 && totals.costUsd > budget.maxCostUsdPerRun) {
-      throw new Error(`Budget exceeded: cost $${totals.costUsd.toFixed(2)} > $${budget.maxCostUsdPerRun}`);
+    const run = await this.deps.agentRunner.run({ task, agent, project, repository: isWriter(type) ? repositoryForAgent(project, type) : undefined });
+    assertTaskActive(this.deps.taskRepo, task);
+    const current = this.deps.taskRepo.findById(task.id)!.data;
+    this.deps.taskRepo.upsert({ ...current, result: { runId: run.id, summary: run.summary, verification: run.verification, artifacts: run.steps.filter((s) => ["write_file", "create_pull_request"].includes(s.tool ?? "")).map((s) => s.data) } }, { projectId: task.projectId, parentId: task.parentTaskId });
+    if (run.status !== "succeeded") {
+      throw Object.assign(new Error(run.error ?? `${agent.name} failed`), { retryable: false });
     }
   }
 

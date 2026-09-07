@@ -70,14 +70,14 @@ export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
     role: "UI/UX Agent",
     mission: "Review existing UI and design system, find UX problems, propose and implement UI improvements, keep accessibility and responsive design in mind.",
     skills: ["ui-design", "ux", "react", "blazor"],
-    tools: ["read_file", "write_file", "create_branch", "create_pull_request"],
+    tools: ["read_file", "write_file", "run_tests", "create_branch", "create_pull_request"],
     permissions: ["github.read", "github.write", "memory.write"],
   },
   database: {
     role: "Database Agent",
     mission: "Design and review schema, indexes, and migrations. Never run a destructive migration without approval.",
     skills: ["sqlserver", "postgresql"],
-    tools: ["list_branches", "read_file", "write_file", "create_branch", "create_pull_request"],
+    tools: ["list_branches", "read_file", "write_file", "run_tests", "create_branch", "create_pull_request"],
     permissions: ["github.read", "github.write"],
   },
   devops: {
@@ -112,7 +112,7 @@ export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
     role: "Documentation Agent",
     mission: "Keep architecture, API, setup, and README documentation up to date alongside code changes.",
     skills: [],
-    tools: ["read_file", "write_file", "create_branch", "create_pull_request"],
+    tools: ["read_file", "write_file", "run_tests", "create_branch", "create_pull_request"],
     permissions: ["github.read", "github.write"],
   },
   debugging: {
@@ -133,7 +133,7 @@ export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
     role: "Performance Agent",
     mission: "Profile and optimize hot paths, caching, and queries; measure before and after.",
     skills: ["performance"],
-    tools: ["read_file", "write_file", "run_build", "create_branch", "create_pull_request"],
+    tools: ["read_file", "write_file", "run_build", "run_tests", "create_branch", "create_pull_request"],
     permissions: ["github.read", "github.write"],
   },
   release: {

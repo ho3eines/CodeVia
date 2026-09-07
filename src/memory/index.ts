@@ -14,6 +14,8 @@ export interface MemoryResolverConfig {
   /** Local root path for the fallback store (dev/test/simulation). */
   localRoot?: string;
   force?: MemoryStoreKind;
+  /** Use the same project-scoped GitHub connection as the agent run. */
+  github?: IGitHubService;
 }
 
 /**
@@ -24,7 +26,7 @@ export interface MemoryResolverConfig {
 export class MemoryResolver {
   resolve(config: MemoryResolverConfig = {}): IMemoryStore {
     const force = config.force ?? (getEnv().ENABLE_SIMULATION_MODE ? undefined : undefined);
-    const github: IGitHubService = resolveGitHubService();
+    const github: IGitHubService = config.github ?? resolveGitHubService();
     if (config.repo && github.kind === "real" && force !== "local") {
       logger.debug(`memory store: github (${config.repo.owner}/${config.repo.name})`);
       return new GitHubMemoryStore(github, config.repo, config.branch ?? "main");

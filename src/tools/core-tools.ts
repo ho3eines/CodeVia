@@ -1,23 +1,11 @@
-import { spawn } from "node:child_process";
 import type { ToolContext, ToolDefinition, ToolResult } from "./types.js";
 import type { MemoryRecord } from "../memory/store.js";
+import { verifyGithubChecks } from "./github-checks.js";
+import { cleanRepoPath } from "../agents/implementation.js";
 
 /** Coerce an input value to string. */
 function str(v: unknown): string {
   return v == null ? "" : String(v);
-}
-
-/** Run a shell command in the workspace root, capturing output. */
-function runCommand(cmd: string, cwd?: string): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, { cwd, shell: true, env: process.env });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-    child.on("error", (err) => resolve({ code: 1, stdout: "", stderr: String(err) }));
-  });
 }
 
 export function toRepoRef(value: unknown): { owner: string; name: string } {
@@ -67,7 +55,10 @@ export const readFileTool: ToolDefinition = {
   permissions: ["github.read"],
   timeoutMs: 15000,
   async execute(ctx: ToolContext, input) {
-    const repo = toRepoRef(ctx.project.configRepo);
+    const repoName = str(input.repo) || ctx.project.configRepo;
+    if (repoName !== ctx.project.configRepo && !ctx.project.repositories?.some((r) => r.repo === repoName)) return { ok: false, output: "Repository is not linked to this project" };
+    const repo = toRepoRef(repoName);
+    const branch = str(input.branch) || ctx.project.branch;
     let path = str(input.path);
     if (!path) {
       // Default inspection (used by deterministic agent plans): prefer the
@@ -75,17 +66,17 @@ export const readFileTool: ToolDefinition = {
       // something meaningful instead of failing on a missing path.
       const candidates = ["Agent.md", "README.md", ".ai-engineering/project.yaml", "package.json"];
       for (const candidate of candidates) {
-        const hit = await ctx.github.getFile(repo, candidate, ctx.project.branch).catch(() => undefined);
+        const hit = await ctx.github.getFile(repo, candidate, branch);
         if (hit) {
           return { ok: true, output: hit.content.slice(0, 8000), data: { path: candidate, sha: hit.sha } };
         }
       }
-      const entries = await ctx.github.listFiles(repo, ctx.project.branch).catch(() => []);
+      const entries = await ctx.github.listFiles(repo, branch);
       const first = entries.find((e) => e.type === "blob");
       if (!first) return { ok: true, output: "Repository is empty — nothing to read yet.", data: { empty: true } };
       path = first.path;
     }
-    const file = await ctx.github.getFile(repo, path, ctx.project.branch);
+    const file = await ctx.github.getFile(repo, path, branch);
     if (!file) return { ok: false, output: `File not found: ${path}` };
     return { ok: true, output: file.content.slice(0, 8000), data: { path, sha: file.sha } };
   },
@@ -103,13 +94,26 @@ export const writeFileTool: ToolDefinition = {
   timeoutMs: 20000,
   async execute(ctx: ToolContext, input) {
     const repo = toRepoRef(ctx.project.configRepo);
-    const branch = str(input.branch) || ctx.project.branch;
-    const path = str(input.path) || `src/${ctx.agent.slug}.md`;
-    const content = str(input.content) || `# ${ctx.agent.name} — ${new Date().toISOString()}\n\nGenerated change note.`;
-    const message = str(input.message) || `[${ctx.agent.name}] update ${path}`;
-    const commit = await ctx.github.commit(repo, branch, message, [{ path, content }]);
-    ctx.logger.info("write_file committed", { path, sha: commit.sha, projectId: ctx.project.id });
-    return { ok: true, output: `Committed ${commit.sha.slice(0, 7)} to ${branch}`, data: { sha: commit.sha } };
+    const branch = str(input.branch);
+    if (!branch || branch === (ctx.baseBranch ?? ctx.project.branch)) return { ok: false, output: "write_file requires an explicit feature branch; base-branch writes are forbidden" };
+    const rawFiles = Array.isArray(input.files) ? input.files : [{ path: input.path, content: input.content }];
+    if (!rawFiles.length || rawFiles.length > 5) return { ok: false, output: "write_file requires 1–5 files" };
+    const files = rawFiles.map((f: unknown) => {
+      const value = f as { path?: unknown; content?: unknown };
+      const path = cleanRepoPath(value?.path);
+      if (typeof value?.content !== "string") throw new Error(`Explicit content is required for ${path}`);
+      return { path, content: value.content };
+    });
+    if (new Set(files.map((f) => f.path)).size !== files.length) return { ok: false, output: "Duplicate write paths" };
+    const head = (await ctx.github.listBranches(repo)).find((b) => b.name === branch);
+    if (!head) return { ok: false, output: `Feature branch ${branch} does not exist` };
+    const expectedHead = str(input.expectedHead) || head.sha;
+    if (head.sha !== expectedHead) return { ok: false, output: "Repository changed after inspection; refusing to overwrite newer work" };
+    ctx.checkActive?.();
+    const message = str(input.message) || `[${ctx.agent.name}] update ${files.map((f) => f.path).join(", ")}`;
+    const commit = await ctx.github.commit(repo, branch, message, files, expectedHead);
+    ctx.logger.info("write_file committed", { paths: files.map((f) => f.path), sha: commit.sha, projectId: ctx.project.id });
+    return { ok: true, output: `Committed ${files.length} file(s), ${commit.sha.slice(0, 7)} to ${branch}`, data: { sha: commit.sha, branch, paths: files.map((f) => f.path) } };
   },
 };
 
@@ -138,46 +142,32 @@ export const createPullRequestTool: ToolDefinition = {
         breaking: Array.isArray(input.breaking) ? (input.breaking as string[]) : undefined,
         correlationId: ctx.correlationId,
       });
-    const head = str(input.head) || `agent-${ctx.agent.slug}`;
-    const base = str(input.base) || ctx.project.branch;
-    const pr = await ctx.github.createPullRequest(repo, title, body, head, base);
+    const head = str(input.head);
+    const base = str(input.base) || ctx.baseBranch || ctx.project.branch;
+    if (!head || head === base) return { ok: false, output: "A pull request requires an explicit feature branch head different from base" };
+    const branches = await ctx.github.listBranches(repo);
+    if (!branches.some((b) => b.name === head) || !branches.some((b) => b.name === base)) return { ok: false, output: "PR head or base branch does not exist" };
+    const existing = (await ctx.github.listPullRequests(repo)).find((p) => p.head === head && p.base === base && p.state === "open");
+    const pr = existing ?? await ctx.github.createPullRequest(repo, title, body, head, base, { draft: input.draft === true });
     ctx.logger.info("PR created", { number: pr.number, projectId: ctx.project.id });
-    return { ok: true, output: `PR #${pr.number} created`, data: { number: pr.number, url: pr.htmlUrl } };
+    return { ok: true, output: `PR #${pr.number} created`, data: { number: pr.number, url: pr.htmlUrl, head, base } };
   },
 };
 
 export const runTestsTool: ToolDefinition = {
   name: "run_tests",
-  description: "Run the project test command in the isolated workspace.",
+  description: "Verify the exact branch commit using GitHub CI checks (never run shell commands on the platform).",
   dangerous: false,
-  inputSchema: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" } } },
+  inputSchema: { type: "object", properties: { repo: { type: "string" }, ref: { type: "string" }, waitMs: { type: "number" } } },
   permissions: ["github.read"],
   timeoutMs: 120000,
-  async execute(ctx: ToolContext, input) {
-    const cmd = str(input.command ?? "npm test");
-    const cwd = str(input.cwd ?? ctx.workspaceRoot);
-    const res = await runCommand(cmd, cwd || undefined);
-    return {
-      ok: res.code === 0,
-      output: `${res.stdout}\n${res.stderr}`.trim(),
-      data: { code: res.code },
-    };
-  },
+  execute: verifyGithubChecks,
 };
 
 export const runBuildTool: ToolDefinition = {
+  ...runTestsTool,
   name: "run_build",
-  description: "Run the project build command in the isolated workspace.",
-  dangerous: false,
-  inputSchema: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" } } },
-  permissions: ["github.read"],
-  timeoutMs: 120000,
-  async execute(ctx: ToolContext, input) {
-    const cmd = str(input.command ?? "npm run build");
-    const cwd = str(input.cwd ?? ctx.workspaceRoot);
-    const res = await runCommand(cmd, cwd || undefined);
-    return { ok: res.code === 0, output: `${res.stdout}\n${res.stderr}`.trim(), data: { code: res.code } };
-  },
+  description: "Verify the project build through GitHub CI for an exact branch commit.",
 };
 
 export const searchTool: ToolDefinition = {
@@ -270,9 +260,11 @@ export const createBranchTool: ToolDefinition = {
     const from = str(input.from) || ctx.project.branch;
     const name = str(input.name) || `agent/${ctx.agent.slug}/${ctx.correlationId.replace(/[^a-z0-9]/gi, "").slice(-8)}`;
     const branches = await ctx.github.listBranches(repo);
-    const base = branches.find((b) => b.name === from) ?? branches[0];
+    const base = branches.find((b) => b.name === from);
     if (!base) return { ok: false, output: `Base branch ${from} not found` };
-    const created = await ctx.github.createBranch(repo, name, base.sha);
+    if (name === from) return { ok: false, output: "Working branch must differ from the base branch" };
+    const existing = branches.find((b) => b.name === name);
+    const created = existing ?? await ctx.github.createBranch(repo, name, str(input.sha) || base.sha);
     return { ok: true, output: `Branch ${created.name} created from ${base.name}`, data: { branch: created.name, sha: created.sha } };
   },
 };
@@ -322,10 +314,10 @@ export function buildPullRequestBody(opts: {
     list(opts.tests, "No automated test run recorded for this change."),
     ``,
     `## Risks`,
-    list(opts.risks, "Low — scoped change, reviewed by the agent before opening this PR."),
+    list(opts.risks, "Not assessed — human review is required."),
     ``,
     `## Breaking Changes`,
-    list(opts.breaking, "None."),
+    list(opts.breaking, "Not assessed."),
     ``,
     `---`,
     `_Generated by the **${opts.agentName}** agent on CodeVia${opts.correlationId ? ` · correlation \`${opts.correlationId}\`` : ""}._`,

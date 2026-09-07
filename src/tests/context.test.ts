@@ -194,7 +194,7 @@ describe("continuity end-to-end (mock AI + mock GitHub)", () => {
     const kids1 = container.taskRepo.findMany({ parentId: t1.id }).map((k) => k.data);
     const be1 = kids1.find((k) => k.agentType === "backend-developer")!;
     const target = "src/ShopApp.Api/Controllers/LoginController.cs";
-    const pr1 = (await gh.listPullRequests(ref)).find((x) => x.head.includes("backend"))!;
+    const pr1 = (await gh.listPullRequests(ref)).find((x) => x.head === `agent-task-${t1.id.replace(/^task-/, "")}`)!;
     const v1 = (await gh.getFile(ref, target, pr1.head))?.content ?? "";
     expect(v1).toContain("class LoginController");
     expect(v1).toContain(be1.id);
@@ -210,7 +210,7 @@ describe("continuity end-to-end (mock AI + mock GitHub)", () => {
     expect((await container.agentManager.runTask(t2.id)).status).toBe("succeeded");
     const kids2 = container.taskRepo.findMany({ parentId: t2.id }).map((k) => k.data);
     const be2 = kids2.find((k) => k.agentType === "backend-developer")!;
-    const pr2 = (await gh.listPullRequests(ref)).find((x) => x.head.endsWith(be2.id.replace(/^task-/, "")))!;
+    const pr2 = (await gh.listPullRequests(ref)).find((x) => x.head === `agent-task-${t2.id.replace(/^task-/, "")}`)!;
     const v2 = (await gh.getFile(ref, target, pr2.head))?.content ?? "";
 
     // Prior work preserved, new subtask appended as TODOs — not a rewrite.

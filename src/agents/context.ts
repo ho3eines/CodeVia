@@ -82,6 +82,8 @@ export interface PackOptions {
   /** Lowercase entity route (e.g. "login") for entity matching. */
   entityRoute?: string;
   branch?: string;
+  /** Code generation must distinguish a missing file from an unreadable repository. */
+  strict?: boolean;
 }
 
 export async function buildContextPack(opts: PackOptions): Promise<ContextPack> {
@@ -105,19 +107,21 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
   const getFile = async (path: string): Promise<string | undefined> => {
     try {
       return (await github.getFile(ref, path, branch))?.content;
-    } catch {
+    } catch (err) {
+      if (opts.strict) throw err;
       return undefined;
     }
   };
 
   let allPaths: string[] = [];
   try {
-    allPaths = (await github.listFiles(ref, branch)).map((e) => e.path).filter((p) => !p.startsWith(".git/")).slice(0, 400);
-  } catch {
+    allPaths = (await github.listFiles(ref, branch)).filter((e) => e.type === "blob").map((e) => e.path).filter((p) => !p.startsWith(".git/"));
+  } catch (err) {
+    if (opts.strict) throw err;
     return empty;
   }
   empty.totalFiles = allPaths.length;
-  empty.tree = allPaths.filter((p) => !p.startsWith("CodeVia/")).slice(0, 150);
+  empty.tree = allPaths.filter((p) => !p.startsWith("CodeVia/"));
 
   // Entity registry from the persisted context file (best-effort).
   empty.registry = parseRegistry(await getFile(CONTEXT_FILE));
@@ -301,6 +305,9 @@ type CommentStyle = { line: string } | { block: [string, string] };
 
 function commentStyleFor(path: string): CommentStyle {
   const base = path.split("/").pop() ?? path;
+  if (/\.(json|ipynb)$/.test(base)) throw new Error(`Cannot add simulation comments to ${path}; configure a real coding model`);
+  if (/\.(css|scss|less)$/.test(base)) return { block: ["/*", "*/"] };
+  if (/\.(razor|cshtml)$/.test(base)) return { block: ["@*", "*@"] };
   if (/\.(html|vue|svelte)$/.test(base)) return { block: ["<!--", "-->"] };
   if (/\.(sql)$/.test(base)) return { line: "--" };
   if (/\.(py|sh|bash|zsh|ya?ml|toml|ini|cfg)$/.test(base) || base === "Dockerfile") return { line: "#" };
@@ -308,8 +315,9 @@ function commentStyleFor(path: string): CommentStyle {
 }
 
 function commentBlock(style: CommentStyle, lines: string[]): string {
-  if ("block" in style) return [`${style.block[0]}`, ...lines, `${style.block[1]}`].join("\n");
-  return lines.map((l) => (l ? `${style.line} ${l}` : style.line)).join("\n");
+  const safeLines = lines.flatMap((line) => line.split(/\r?\n/));
+  if ("block" in style) return [style.block[0], ...safeLines.map((l) => l.split(style.block[1]).join(style.block[1].split("").join(" "))), style.block[1]].join("\n");
+  return safeLines.map((l) => (l ? `${style.line} ${l}` : style.line)).join("\n");
 }
 
 export interface ExtensionInput {
@@ -336,7 +344,16 @@ export function extendContent(input: ExtensionInput): string {
     ...input.todos.map((t) => `TODO: ${t}`),
   ]);
   const foot = commentBlock(style, [`TODO (${input.subtaskId}): ${input.taskTitle}`, ...input.todos.map((t) => `- ${t}`)]);
-  return `${head}\n${input.existing.trimEnd()}\n\n${foot}\n`;
+  // Keep executable-file headers at byte zero. Never truncate existing code.
+  if (input.existing.startsWith("#!")) {
+    const nl = input.existing.indexOf("\n");
+    if (nl >= 0) return `${input.existing.slice(0, nl + 1)}${head}\n${input.existing.slice(nl + 1)}\n${foot}\n`;
+  }
+  if (/\.php$/i.test(input.path)) {
+    if (!input.existing.startsWith("<?php") || input.existing.includes("?>")) throw new Error("Mixed PHP templates require a real coding model");
+    return `<?php\n${head}\n${input.existing.slice(5)}\n${foot}\n`;
+  }
+  return `${head}\n${input.existing}\n${foot}\n`;
 }
 
 /* ---------------- persist the context file ---------------- */

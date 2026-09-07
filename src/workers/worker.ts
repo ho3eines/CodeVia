@@ -45,7 +45,7 @@ export class Worker {
       const max = job.maxAttempts ?? 3;
       const message = String(err);
       this.deps.logger.warn(`job ${job.id} failed (attempt ${attempts}/${max})`, { err: message });
-      if (attempts >= max) {
+      if (attempts >= max || (err as { retryable?: boolean }).retryable === false) {
         this.deps.queue.update(id, { status: "dead", attempts, error: message, finishedAt: new Date().toISOString() });
         await this.deps.notificationRepo.create({
           severity: "error",
@@ -88,7 +88,7 @@ export class Worker {
           this.deps.logger.warn(`job ${job.id}: task ${taskId} no longer exists — dropping`);
           break;
         }
-        if (current.status === "cancelled") {
+        if (current.status === "cancelled" || current.status === "succeeded") {
           this.deps.logger.info(`job ${job.id}: task ${taskId} cancelled before start — skipping`);
           break;
         }

@@ -184,7 +184,7 @@ async function main() {
     const commits = (await api(`/projects/${pid}/commits?limit=20`)).json ?? [];
     check("implementers committed to git", commits.length >= 3, `${commits.length} commits`);
     const prs = (await api(`/projects/${pid}/pull-requests`)).json ?? [];
-    check("implementers opened PRs", prs.length >= 2, `${prs.length} PRs`);
+    check("implementers share one review PR", prs.length === 1, `${prs.length} PRs`);
     const mem = (await api(`/projects/${pid}/memory`)).json ?? [];
     check("research + QA saved memory", mem.length >= 2, `${mem.length} entries`);
     const taskFiles = ((await api(`/projects/${pid}/files?path=CodeVia/tasks`)).json ?? []).map((f) => f.path);
@@ -198,7 +198,7 @@ async function main() {
 
     // Continuity: merged work is extended, never overwritten
     const prsAll = (await api(`/projects/${pid}/pull-requests`)).json ?? [];
-    const bePr = prsAll.find((p) => p.head.includes("backend"));
+    const bePr = prsAll.find((p) => p.head.startsWith("agent-task-"));
     check("backend PR exists to merge", !!bePr);
     const be1 = kids.find((k) => k.agentType === "backend-developer");
     const mg = await api(`/projects/${pid}/pull-requests/${bePr.number}/merge`, { method: "POST", body: {} });

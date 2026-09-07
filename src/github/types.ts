@@ -44,8 +44,16 @@ export interface GithubCommit {
   date: string;
 }
 
+export interface GithubCheck {
+  name: string;
+  status: "pending" | "success" | "failure" | "skipped";
+  detail?: string;
+  url?: string;
+}
+
 export interface GithubPullRequest {
   number: number;
+  draft?: boolean;
   title: string;
   state: string;
   head: string;
@@ -115,7 +123,9 @@ export interface IGitHubService {
     files: GithubFile[],
     parentSha?: string,
   ): Promise<GithubCommit>;
-  createPullRequest(repo: GithubRepoRef, title: string, body: string, head: string, base: string): Promise<GithubPullRequest>;
+  createPullRequest(repo: GithubRepoRef, title: string, body: string, head: string, base: string, opts?: { draft?: boolean }): Promise<GithubPullRequest>;
+  /** CI evidence for the exact committed SHA. Legacy adapters without this cannot attest tests. */
+  getChecks?(repo: GithubRepoRef, sha: string): Promise<GithubCheck[]>;
   updatePullRequest(repo: GithubRepoRef, number: number, patch: Partial<{ title: string; body: string; state: string }>): Promise<GithubPullRequest>;
   createIssue(repo: GithubRepoRef, title: string, body: string): Promise<GithubIssue>;
   commentOnIssue(repo: GithubRepoRef, number: number, body: string): Promise<void>;

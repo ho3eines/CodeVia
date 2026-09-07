@@ -90,7 +90,7 @@ describe("tool registry — permission matrix, approval gate, timeout", () => {
     const project = container.projectRepo.findMany()[0]!.data;
     const memory = container.memoryResolver.resolve({ force: "local", localRoot: `./data/test-memory-${Date.now()}` });
     await memory.append({ type: "decision", key: "use-postgres", content: "We picked PostgreSQL for the ledger", tags: [], refs: [], scope: "project" });
-    const res = await container.toolRegistry.execute("search", ctxFor({ memory, project }, ["memory.read", "github.read"]), { query: "postgres" });
+    const res = await container.toolRegistry.execute("search", ctxFor({ memory, project, agent: container.agentRepo.byType(project.id, "research")! }, ["memory.read", "github.read"]), { query: "postgres" });
     expect(res.ok).toBe(true);
     expect(res.output).toMatch(/\[memory:decision\] use-postgres/);
   });

@@ -45,30 +45,27 @@ export class JobQueue {
 
   /** Claim a batch of pending jobs (oldest first by created_at). */
   claim(limit = 5): Job[] {
-    // Select the due jobs first, then flip exactly those ids to running. Only the
-    // freshly-claimed rows are returned — a job that is still running from a
-    // previous poll (e.g. blocked on a human approval) must never be handed out
-    // again, otherwise the worker would start it twice.
+    if (!Number.isFinite(limit) || limit <= 0) return [];
     const now = nowIso();
-    const due = this.db.all(
-      `SELECT id FROM jobs
-       WHERE (status = 'pending' OR (status = 'retrying' AND scheduled_at <= :now))
-         AND (scheduled_at IS NULL OR scheduled_at <= :now)
-       ORDER BY created_at ASC
-       LIMIT :limit`,
-      { now, limit },
-    ) as Array<{ id: string }>;
-    const claimed: Job[] = [];
-    for (const { id } of due) {
-      this.db.run(
-        `UPDATE jobs SET status = 'running', started_at = :started_at, updated_at = :updated_at
-         WHERE id = :id AND status IN ('pending', 'retrying')`,
-        { started_at: now, updated_at: now, id },
-      );
-      const job = this.getById(id);
-      if (job && job.status === "running") claimed.push(job);
-    }
-    return claimed;
+    // One UPDATE…RETURNING statement owns the claim. A SELECT followed by an
+    // UPDATE can return another worker's already-running row after losing the race.
+    const rows = this.db.all(
+      `UPDATE jobs SET status = 'running', started_at = :now, updated_at = :now
+       WHERE id IN (
+         SELECT id FROM jobs
+         WHERE status IN ('pending', 'retrying')
+           AND (scheduled_at IS NULL OR scheduled_at <= :now)
+         ORDER BY created_at ASC LIMIT :limit
+       ) AND status IN ('pending', 'retrying')
+       RETURNING *`,
+      { now, limit: Math.min(100, Math.floor(limit)) },
+    ) as Record<string, unknown>[];
+    return rows.map((row) => this.mapJob(row)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  /** A cancelled execution may still be unwinding; do not overwrite its cancellation by retrying early. */
+  hasRunningTask(taskId: string): boolean {
+    return !!this.db.get(`SELECT id FROM jobs WHERE status = 'running' AND type IN ('agent.run', 'workflow.run') AND json_extract(payload, '$.taskId') = :taskId LIMIT 1`, { taskId });
   }
 
   update(id: string, patch: Partial<Pick<Job, "status" | "attempts" | "error" | "finishedAt">>): Job | undefined {

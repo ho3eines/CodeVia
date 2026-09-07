@@ -5,6 +5,7 @@ import type {
   GithubViewer,
   GithubBranch,
   GithubCommit,
+  GithubCheck,
   GithubPullRequest,
   GithubIssue,
   GithubRelease,
@@ -91,7 +92,7 @@ export class RealGitHubService implements IGitHubService {
       if (res.status === 401 || res.status === 403) {
         throw new GitHubAuthError(`GitHub ${res.status} (${this.label}) ${url}: ${text}`, res.status);
       }
-      throw new Error(`GitHub ${res.status} ${url}: ${text}`);
+      throw Object.assign(new Error(`GitHub ${res.status} ${url}: ${text}`), { status: res.status });
     }
     return res;
   }
@@ -161,13 +162,14 @@ export class RealGitHubService implements IGitHubService {
     const q = branch ? `?ref=${encodeURIComponent(branch)}` : "";
     const walk = async (dir: string): Promise<void> => {
       const urlPath = dir ? dir.replace(/^\/+|\/+$/g, "") : "";
-      const res = await this.request(`/repos/${repo.owner}/${repo.name}/contents/${urlPath}${q}`);
+      const res = await this.request(`/repos/${repo.owner}/${repo.name}/contents/${urlPath.split("/").map(encodeURIComponent).join("/")}${q}`);
       const body = (await res.json()) as Array<{ path: string; type: string; size?: number }>;
       for (const item of body ?? []) {
         if (seen.has(item.path)) continue;
         seen.add(item.path);
-        out.push({ path: item.path, type: item.type === "tree" ? "tree" : "blob", size: item.size });
-        if (item.type === "tree" && out.length < 8000) await walk(item.path);
+        const directory = item.type === "dir" || item.type === "tree";
+        out.push({ path: item.path, type: directory ? "tree" : "blob", size: item.size });
+        if (directory && out.length < 8000) await walk(item.path);
         if (out.length >= 8000) return;
       }
     };
@@ -242,12 +244,11 @@ export class RealGitHubService implements IGitHubService {
   async getFile(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFile | undefined> {
     try {
       const q = branch ? `?ref=${encodeURIComponent(branch)}` : "";
-      const res = await this.json<{ content: string; sha: string }>(`/repos/${repo.owner}/${repo.name}/contents/${path}${q}`);
+      const res = await this.json<{ content: string; sha: string }>(`/repos/${repo.owner}/${repo.name}/contents/${path.split("/").map(encodeURIComponent).join("/")}${q}`);
       return { path, content: Buffer.from(res.content, "base64").toString("utf8"), sha: res.sha };
     } catch (err) {
-      if (err instanceof GitHubAuthError) throw err;
-      logger.debug(`GitHub getFile missing: ${path}`, { err: String(err) });
-      return undefined;
+      if ((err as { status?: number }).status === 404) return undefined;
+      throw err;
     }
   }
 
@@ -269,8 +270,10 @@ export class RealGitHubService implements IGitHubService {
     const branchData = (await this.json<{ commit: { sha: string } }>(
       `/repos/${repo.owner}/${repo.name}/branches/${encodeURIComponent(branch)}`,
     )) as { commit: { sha: string } } | undefined;
-    const sha = parentSha ?? branchData?.commit.sha;
+    const sha = branchData?.commit.sha;
     if (!sha) throw new Error("Cannot commit: branch has no HEAD sha");
+    if (parentSha && parentSha !== sha) throw new Error("Repository changed after inspection; refusing to overwrite newer work. Retry with fresh context.");
+    const parent = await this.json<{ tree: { sha: string } }>(`/repos/${repo.owner}/${repo.name}/git/commits/${sha}`);
 
     const tree = files.map((f) => ({
       path: f.path,
@@ -280,7 +283,7 @@ export class RealGitHubService implements IGitHubService {
     }));
     const treeRes = await this.json<{ sha: string }>(`/repos/${repo.owner}/${repo.name}/git/trees`, {
       method: "POST",
-      body: JSON.stringify({ base_tree: sha, tree }),
+      body: JSON.stringify({ base_tree: parent.tree.sha, tree }),
     });
     const commitRes = await this.json<{ sha: string }>(`/repos/${repo.owner}/${repo.name}/git/commits`, {
       method: "POST",
@@ -293,7 +296,7 @@ export class RealGitHubService implements IGitHubService {
     return { sha: commitRes.sha, message, author: "codevia-agent", date: new Date().toISOString() };
   }
 
-  async createPullRequest(repo: GithubRepoRef, title: string, body: string, head: string, base: string): Promise<GithubPullRequest> {
+  async createPullRequest(repo: GithubRepoRef, title: string, body: string, head: string, base: string, opts: { draft?: boolean } = {}): Promise<GithubPullRequest> {
     const res = await this.json<{
       number: number;
       title: string;
@@ -304,10 +307,11 @@ export class RealGitHubService implements IGitHubService {
       created_at: string;
     }>(`/repos/${repo.owner}/${repo.name}/pulls`, {
       method: "POST",
-      body: JSON.stringify({ title, body, head, base }),
+      body: JSON.stringify({ title, body, head, base, draft: opts.draft ?? false }),
     });
     return {
       number: res.number,
+      draft: opts.draft ?? false,
       title: res.title,
       state: res.state,
       head: res.head.ref,
@@ -315,6 +319,24 @@ export class RealGitHubService implements IGitHubService {
       htmlUrl: res.html_url,
       createdAt: res.created_at,
     };
+  }
+
+  async getChecks(repo: GithubRepoRef, sha: string): Promise<GithubCheck[]> {
+    const prefix = `/repos/${repo.owner}/${repo.name}/commits/${encodeURIComponent(sha)}`;
+    const [checks, statuses] = await Promise.all([
+      this.json<{ total_count: number; check_runs: Array<{ name: string; status: string; conclusion?: string; html_url?: string; output?: { title?: string; summary?: string } }> }>(`${prefix}/check-runs?per_page=100&filter=latest`),
+      this.json<{ total_count: number; statuses: Array<{ context: string; state: string; description?: string; target_url?: string }> }>(`${prefix}/status?per_page=100`),
+    ]);
+    if (checks.total_count > 100 || statuses.total_count > 100) throw new Error("CI check list is incomplete (more than 100 checks); refusing partial verification");
+    return [
+      ...checks.check_runs.map((c): GithubCheck => ({
+        name: c.name,
+        status: c.status !== "completed" ? "pending" : c.conclusion === "success" ? "success" : ["skipped", "neutral"].includes(c.conclusion ?? "") ? "skipped" : "failure",
+        detail: [c.output?.title, c.output?.summary].filter(Boolean).join("\n").slice(0, 4000),
+        url: c.html_url,
+      })),
+      ...statuses.statuses.map((c): GithubCheck => ({ name: c.context, status: c.state === "success" ? "success" : c.state === "pending" ? "pending" : "failure", detail: c.description, url: c.target_url })),
+    ];
   }
 
   async mergePullRequest(repo: GithubRepoRef, number: number, opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string } = {}): Promise<{ merged: boolean; sha?: string; message?: string }> {
