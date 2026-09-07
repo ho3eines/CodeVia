@@ -148,16 +148,45 @@ export class AgentManager {
   async readProject(projectId: string): Promise<Project> {
     const p = this.deps.projectRepo.findById(projectId)?.data;
     if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    // Simulation mode may need the repository rebuilt before the first canonical
+    // read; keep the DB state as the source while a mock repo is being recreated.
+    await this.ensureProjectRepo(projectId);
     await this.deps.projectFiles?.restore(p);
     return hydrateProject(this.deps.projectRepo.findById(projectId)!.data);
   }
 
   /** Execution entry points hydrate then initialize missing definitions. */
   async refreshProject(projectId: string): Promise<Project> {
+    await this.ensureProjectRepo(projectId);
     if (this.state) await this.state.ensure(projectId);
     const p = this.deps.projectRepo.findById(projectId)?.data;
     if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
     return hydrateProject(p);
+  }
+
+  /**
+   * When Simulation/Mock mode is used, a missing configured repository must not
+   * brick the project. Seed the missing mock repo(s), then mirror the current
+   * database definitions into it so actions on the project keep working. This is
+   * mock-only: a real GitHub outage still fails closed instead of substituting
+   * cache for the repository.
+   */
+  private async ensureProjectRepo(projectId: string): Promise<void> {
+    const stored = this.deps.projectRepo.findById(projectId)?.data;
+    if (!stored || !this.deps.projectFiles) return;
+    const project = hydrateProject(stored);
+    const github = this.githubFor(project);
+    if (github.kind !== "mock") return;
+    const existing = new Set((await github.listRepositories({ limit: 1000 })).map((r) => r.fullName.toLowerCase()));
+    // Losing an auxiliary repo must never make the database authoritative over
+    // an intact config repo. The file service seeds those extra repos on read.
+    if (existing.has(project.configRepo.toLowerCase())) return;
+    if (project.repositoryState || this.deps.agentRepo.byProject(projectId).length) {
+      // This mode rechecks absence of CodeVia state under the repository lock.
+      // A concurrently recovered repo wins; normal saves still check conflicts.
+      // Keep memory/skills/history even when the saved roster is intentionally empty.
+      await this.syncProjectState(projectId, undefined, { recoverMissingMock: true });
+    }
   }
 
   /* ---------------- Project onboarding ---------------- */
@@ -236,7 +265,10 @@ export class AgentManager {
   async onboardProject(projectId: string, _tech: string[] = []): Promise<{ agents: number; skills: number; seeded: number }> {
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!stored) throw new Error(`Project ${projectId} not found`);
-    this.ensureMockRepo(hydrateProject(stored));
+    // Preserve restored definitions before starter seeding makes a lost mock
+    // repository look like an existing (empty) canonical repository.
+    await this.ensureProjectRepo(projectId);
+    await this.ensureMockRepo(hydrateProject(stored));
     const p = await this.refreshProject(projectId);
     return { agents: this.deps.agentRepo.byProject(projectId).length, skills: p.settings.skills.length, seeded: 0 };
   }
@@ -260,7 +292,7 @@ export class AgentManager {
     if (next.configRepo !== old.configRepo || next.branch !== old.branch) {
       // Connection changes are explicit. Existing destination state wins; absent state
       // is migrated from the current project, never generated over another folder.
-      this.ensureMockRepo(next);
+      await this.ensureMockRepo(next);
       const snapshot = await this.deps.projectFiles?.pull(next);
       targetRevision = snapshot?.sha;
       next.repositoryRevision = targetRevision;
@@ -279,7 +311,7 @@ export class AgentManager {
   }
 
   /** Explicit user save/export. Runtime completion must use syncRuntimeState instead. */
-  async syncProjectState(projectId: string, targetRevision?: string): Promise<boolean> {
+  async syncProjectState(projectId: string, targetRevision?: string, opts: { recoverMissingMock?: boolean } = {}): Promise<boolean> {
     const files = this.deps.projectFiles;
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!files || !stored) return false;
@@ -296,7 +328,7 @@ export class AgentManager {
       for (const dependency of skill.dependencies) include(dependency);
     };
     for (const slug of [...p.settings.skills, ...agents.flatMap((a) => a.skills)]) include(slug);
-    return files.syncAll(p, { promptVersions: this.deps.promptVersionRepo?.byProject(projectId).map((v) => targetRevision ? { ...v, repositoryRevision: targetRevision } : v), agents, tasks: this.deps.taskRepo.byProject(projectId), memory: this.deps.memoryRepo?.byProject(projectId) ?? [], skillCatalog: [...catalog.values()].map((s) => targetRevision ? { ...s, repositoryRevision: targetRevision } : s), workflows: this.deps.workflowRepo.byProject(projectId).map((w) => targetRevision ? { ...w, repositoryRevision: targetRevision } : w), runs: this.deps.runRepo.byProject(projectId), conversations: this.deps.conversationRepo?.findMany({ projectId }).map((r) => targetRevision ? { ...r.data, repositoryRevision: targetRevision } : r.data) });
+    return files.syncAll(p, { promptVersions: this.deps.promptVersionRepo?.byProject(projectId).map((v) => targetRevision ? { ...v, repositoryRevision: targetRevision } : v), agents, tasks: this.deps.taskRepo.byProject(projectId), memory: this.deps.memoryRepo?.byProject(projectId) ?? [], skillCatalog: [...catalog.values()].map((s) => targetRevision ? { ...s, repositoryRevision: targetRevision } : s), workflows: this.deps.workflowRepo.byProject(projectId).map((w) => targetRevision ? { ...w, repositoryRevision: targetRevision } : w), runs: this.deps.runRepo.byProject(projectId), conversations: this.deps.conversationRepo?.findMany({ projectId }).map((r) => targetRevision ? { ...r.data, repositoryRevision: targetRevision } : r.data) }, opts);
   }
 
   /** Save observed execution history without rewriting prompts, skills, rules or memory. */
@@ -554,16 +586,28 @@ export class AgentManager {
     ].join("\n");
   }
 
-  /** Seed a mock repository with a starter .ai-engineering structure for demos. */
-  private ensureMockRepo(project: Project): void {
+  /**
+   * Seed a mock repository with a starter .ai-engineering structure for demos.
+   * Returns true when at least one linked simulated repository had to be created.
+   * Production connections are never created by the platform.
+   */
+  private async ensureMockRepo(project: Project): Promise<boolean> {
     const github = this.githubFor(project);
-    if (github.kind !== "mock") return;
+    if (github.kind !== "mock") return false;
     const mock = github as unknown as {
       seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string; description?: string }): { owner: string; name: string };
     };
-    for (const link of project.repositories.length ? project.repositories : [{ repo: project.configRepo, branch: project.branch, isConfigRepo: true }]) {
+    const links: Array<{ repo: string; branch: string; isConfigRepo?: boolean }> = project.repositories.length
+      ? project.repositories.map((r) => ({ repo: r.repo, branch: r.branch, isConfigRepo: r.isConfigRepo }))
+      : [{ repo: project.configRepo, branch: project.branch, isConfigRepo: true }];
+    const existing = new Set((await github.listRepositories({ limit: 1000 })).map((r) => r.fullName.toLowerCase()));
+    let seeded = false;
+    for (const link of links) {
       const [owner, ...rest] = link.repo.split("/");
       const name = rest.join("/") || "repo";
+      if (!owner || !name) continue;
+      const exists = existing.has(`${owner}/${name}`.toLowerCase());
+      if (!exists) seeded = true;
       const starter = [{ path: "README.md", content: `# ${project.name}\n\n${project.description}\n` }];
       starter.push(...this.mockStackFiles(project));
       if (link.isConfigRepo) {
@@ -571,9 +615,12 @@ export class AgentManager {
           { path: "Agent.md", content: this.buildAgentMd(project, starter.map((f) => f.path)) },
         );
       }
+      // seedRepo merges missing files into an existing simulated repo, so demo
+      // repositories get the same starter/stack signals as newly created ones.
       mock.seedRepo(owner, name, { files: starter, branch: link.branch, description: project.description });
-      logger.debug(`seeded mock repo ${link.repo}`);
+      if (!exists) logger.debug(`seeded mock repo ${link.repo}`);
     }
+    return seeded;
   }
 
   /** Representative files used by MockGitHubService so repo inspection works offline. */

@@ -181,7 +181,41 @@ with escaped text; a custom provider/tool that writes its own messages must do t
 
 ## "Mock repo not found"
 
-Happens if a task runs against a repo the mock hasn't seen. Creating a project via the API/UI seeds a starter `.ai-engineering/` repo automatically; re-onboard via `POST /projects/:id/onboard`.
+This exact error comes from the **mock adapter**, not from real GitHub. It
+usually means a restored/migrated project references a repository missing from
+its simulated GitHub snapshot.
+
+- **Offline/simulation:** opening the project creates missing simulated repos
+  on their configured branches. If the config repo was lost, saved database
+  definitions and history are recovered before the canonical read, including
+  disabled/customized agents and projects with an empty roster. An absent
+  auxiliary repo does not authorize overwriting an intact config repo; recovery
+  rechecks that `CodeVia/` is empty under the repository lock. Projects with no
+  saved definitions can use **Load / fill missing** (`POST /projects/:id/onboard`)
+  to initialize them. Repeated reads do not regenerate existing definitions.
+- **GitHub OAuth:** a project saved with `githubConnection.kind = "mock"` uses
+  the stored OAuth token of its connection user, or its owner when no connection
+  user is set. Log in again as that user if the token is absent/undecryptable.
+  Another user's sole token must not replace a known owner's connection. Only a
+  legacy project with neither identity may use the sole stored token; multiple
+  tokens are never guessed between.
+- `GITHUB_CLIENT_ID` (environment or Admin settings) and `GITHUB_CLIENT_SECRET`
+  configure the **login flow**. The app secret is not an API token: completing
+  login stores the actual per-user repository credential. With OAuth configured
+  but no applicable user token, project actions ask for login rather than
+  silently using mock data. **`GITHUB_TOKEN` is not required for this OAuth path**;
+  explicitly saved `server-token` connections retain their separate behavior.
+
+Project state and the **Files** view use the same project connection. The startup
+`Using MockGitHubService` log and `/admin/health` describe the platform default,
+not necessarily an individual project's OAuth connection; they can remain mock
+while that project's GitHub operations are real.
+
+Real GitHub 401/404/503 failures deliberately **fail closed**: no replacement mock
+repository is created and cached definitions are not substituted. Check the
+connected account's repository access, branch and login, then retry. If the exact
+mock error persists, check the deployed version and the affected project's saved
+connection instead of treating the OAuth app secret as a repository credential.
 
 ## Tests fail to run (Vite can't resolve `node:sqlite`)
 

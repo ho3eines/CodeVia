@@ -4,7 +4,8 @@ import type { IGitHubService } from "./types.js";
 import { getEnv } from "../config/env.js";
 import { logger } from "../logger.js";
 import type { KvStore } from "../db/kv.js";
-import { getUserGitHubToken, hasRepoScope } from "../auth/github-tokens.js";
+import { getUserGitHubToken, hasRepoScope, GITHUB_TOKEN_KV_PREFIX } from "../auth/github-tokens.js";
+import { getEffectiveOAuthConfig } from "../auth/admin-settings.js";
 
 /** A configured GitHub connection bound to a project. */
 export interface GithubConnection {
@@ -111,6 +112,31 @@ export function resolveGitHubForUser(opts: {
 
 export type { IGitHubService, GithubRepoRef } from "./types.js";
 
+/**
+ * Find a logged-in GitHub user token for a project without requiring
+ * GITHUB_TOKEN. The OAuth login exchanges GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET
+ * for a real user access token and stores it per user, so this is the intended
+ * "use the OAuth credentials" path — not the server PAT.
+ *
+ * An explicit connection user is authoritative; otherwise use the project
+ * owner. A missing/undecryptable token for either identity must NOT select a
+ * different user's token. Only legacy projects with neither identity may use
+ * the sole stored user token for backwards compatibility.
+ * Returns the userId when a decryptable token exists, otherwise undefined.
+ */
+export function resolveProjectUserIdWithGitHubToken(kv: KvStore, project: import("../domain/entities.js").Project, allowSoleUser = true): string | undefined {
+  const explicit = project.githubConnection?.userId || project.ownerId;
+  if (explicit) return getUserGitHubToken(kv, explicit) ? explicit : undefined;
+  if (!allowSoleUser) return undefined;
+  const stored = kv.all();
+  const userKeys = Object.keys(stored).filter((k) => k.startsWith(GITHUB_TOKEN_KV_PREFIX));
+  if (userKeys.length === 1) {
+    const userId = userKeys[0].slice(GITHUB_TOKEN_KV_PREFIX.length);
+    return getUserGitHubToken(kv, userId) ? userId : undefined;
+  }
+  return undefined;
+}
+
 /** Resolve the connection saved on a project for background work, without borrowing another user's token. */
 export function resolveGitHubForProject(opts: {
   project: import("../domain/entities.js").Project;
@@ -120,18 +146,31 @@ export function resolveGitHubForProject(opts: {
   const connection = opts.project.githubConnection;
   if (!connection) return opts.fallback; // legacy installations
   if (connection.kind === "user-oauth") {
-    const userId = connection.userId ?? opts.project.ownerId;
-    if (!userId || !getUserGitHubToken(opts.kv, userId)) {
+    const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
+    if (!userId) {
       throw new Error(`GitHub connection for project ${opts.project.name} needs to be reconnected by its owner`);
     }
-    return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "project owner's GitHub connection", fetchImpl: userGitHubFetch });
+    return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
   }
   if (connection.kind === "server-token") {
     if (opts.fallback.kind === "real") return opts.fallback;
     if (isServerGitHubEnabled()) return new RealGitHubService();
     throw new Error(`Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`);
   }
-  if (opts.fallback.kind === "mock") return opts.fallback;
+  // `mock` was persisted while the platform ran in demo/simulation mode. Use the
+  // real OAuth user token obtained from GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET
+  // login; never reach for GITHUB_TOKEN here. If login is configured but no user
+  // token exists yet, fail with an actionable message instead of silent mock.
+  if (connection.kind === "mock") {
+    const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project);
+    if (userId) {
+      return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
+    }
+    if (getEffectiveOAuthConfig(opts.kv)) {
+      throw new Error(`GitHub OAuth is configured, but no user token is stored for project ${opts.project.name}. Log in with GitHub once; then project actions use your repository access without GITHUB_TOKEN.`);
+    }
+    if (opts.fallback.kind === "mock") return opts.fallback;
+  }
   let mock = projectMocks.get(opts.fallback);
   if (!mock) { mock = new MockGitHubService(); projectMocks.set(opts.fallback, mock); }
   return mock;

@@ -237,6 +237,101 @@ describe("fail-closed repository boundary", () => {
     await expect(c.projectFiles.writeFiles(p, [{ path: "CodeVia/leak.md", content: `ghp_${"a".repeat(36)}` }], "No secrets")).rejects.toThrow(/credential material/);
     expect(await gh.getFile(ref(), "CodeVia/leak.md", p.branch)).toBeUndefined();
   });
+
+  it("rebuilds a missing mock repository from current definitions instead of returning Mock repo not found", async () => {
+    // Simulate an imported/legacy project whose repository was never seen by the
+    // mock. Read/API actions must recover it from the database, not brick the UI.
+    const legacy: Project = {
+      ...p,
+      id: "legacy-missing-repo",
+      slug: "legacy-missing-repo",
+      configRepo: "ho3eines/Projects",
+      branch: "main",
+      repositories: [{ repo: "ho3eines/Projects", branch: "main", role: "primary", isConfigRepo: true }],
+      repositoryState: p.repositoryState,
+    };
+    c.projectRepo.upsert(legacy, { key: legacy.slug });
+    const source = c.agentRepo.byType(p.id, "research")!;
+    const restored = { ...source, id: "agent-research-legacy-missing", projectId: legacy.id, configPath: "CodeVia/agents/research.md", repositoryRevision: undefined };
+    c.agentRepo.upsert(restored, { projectId: legacy.id });
+    for (const skill of c.skillRepo.byProject(p.id)) {
+      c.skillRepo.upsert({ ...skill, id: localId(legacy.id, "skill", skill.slug), projectId: legacy.id }, { key: skill.slug, projectId: legacy.id });
+    }
+
+    await c.agentManager.readProject(legacy.id);
+    expect(c.agentRepo.findById(restored.id)?.data.name).toBe(source.name);
+    expect(c.agentRepo.findById(restored.id)?.data.systemPrompt).toBe(source.systemPrompt);
+    expect((await gh.listFiles({ owner: "ho3eines", name: "Projects" }, "main")).some((f) => f.path === "CodeVia/agents/research.md")).toBe(true);
+
+    const srv = await server();
+    const list = await srv.inject({ method: "GET", url: `/projects/${legacy.id}/agents` });
+    expect(list.statusCode).toBe(200);
+    expect((list.json() as Array<{ id: string }>).some((a) => a.id === restored.id)).toBe(true);
+  });
+});
+
+describe("mock recovery safeguards", () => {
+  async function loseMockSnapshot() {
+    c.githubAutomation.stop();
+    // Keep the restored database, but start with a fresh in-memory GitHub.
+    c = new Container(); await c.ensureSeed();
+    gh = c.github as MockGitHubService;
+  }
+
+  it("does not overwrite canonical edits when only a linked mock repository is missing", async () => {
+    const research = c.agentRepo.byType(p.id, "research")!;
+    const linked: Project = { ...p, repositories: [...p.repositories, { repo: "acme/missing-linked", branch: "develop", role: "other" }] };
+    c.projectRepo.upsert(linked, { key: linked.slug });
+    await edit(PROJECT_FILE, renderProjectFile(linked, c.agentRepo.byProject(p.id), [], []));
+    const human = renderAgentFile({ ...research, systemPrompt: "New canonical prompt; never overwrite with the cache." });
+    await edit(research.configPath!, human);
+    const commit = vi.spyOn(gh, "commit");
+
+    await c.agentManager.readProject(p.id);
+
+    expect(await get(research.configPath!)).toBe(human);
+    expect(c.agentRepo.findById(research.id)!.data.systemPrompt).toContain("New canonical prompt");
+    expect(commit).not.toHaveBeenCalled();
+    expect(await gh.listBranches({ owner: "acme", name: "missing-linked" })).toEqual([expect.objectContaining({ name: "develop" })]);
+  });
+
+  it("rechecks canonical contents before bootstrapping after a stale repository listing", async () => {
+    const research = c.agentRepo.byType(p.id, "research")!;
+    const human = renderAgentFile({ ...research, systemPrompt: "The repository appeared before recovery acquired the lock." });
+    await edit(research.configPath!, human);
+    // Another read/recovery can create the repo after the absence check. The
+    // inventory is not permission to replace its now-authoritative contents.
+    vi.spyOn(gh, "listRepositories").mockResolvedValueOnce([]);
+    const commit = vi.spyOn(gh, "commit");
+    await c.agentManager.readProject(p.id);
+    expect(await get(research.configPath!)).toBe(human);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("preserves customized disabled agents when explicit onboarding recovers a lost mock snapshot", async () => {
+    const research = c.agentRepo.byType(p.id, "research")!;
+    await c.projectFiles.syncAgents(p, [{ ...research, enabled: false, systemPrompt: "Recovered user-authored prompt", version: 17 }]);
+    await loseMockSnapshot();
+
+    await c.agentManager.onboardProject(p.id);
+
+    expect(c.agentRepo.findById(research.id)!.data).toMatchObject({ enabled: false, systemPrompt: "Recovered user-authored prompt", version: 17 });
+    expect(await get(research.configPath!)).toContain("Recovered user-authored prompt");
+  });
+
+  it("preserves cached memory and skills even when a restored project has no agents", async () => {
+    for (const agent of c.agentRepo.byProject(p.id)) c.agentRepo.deleteById(agent.id);
+    const entry = memory(); c.memoryRepo.upsert(entry, { projectId: p.id, key: entry.key });
+    const skillCount = c.skillRepo.byProject(p.id).length;
+    await loseMockSnapshot();
+
+    await c.agentManager.readProject(p.id);
+
+    expect(c.agentRepo.byProject(p.id)).toEqual([]);
+    expect(c.memoryRepo.byProject(p.id)).toEqual([entry]);
+    expect(c.skillRepo.byProject(p.id)).toHaveLength(skillCount);
+    expect(await get(MEMORY_FILE)).toContain("Keep this entire section.");
+  });
 });
 
 describe("missing-only AI generation", () => {
