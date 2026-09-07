@@ -44,7 +44,7 @@ afterAll(async () => {
 });
 
 /** Minimal structural stand-ins — tsconfig uses the Node lib, not DOM. */
-type El = { textContent: string | null; querySelectorAll(sel: string): { length: number } & Iterable<El>; querySelector(sel: string): El | null; hidden: boolean; dataset: Record<string, string | undefined>; click(): void; hasAttribute(a: string): boolean; getAttribute(a: string): string | null; dispatchEvent(e: unknown): boolean };
+type El = { className: string; textContent: string | null; querySelectorAll(sel: string): { length: number } & Iterable<El>; querySelector(sel: string): El | null; hidden: boolean; dataset: Record<string, string | undefined>; click(): void; hasAttribute(a: string): boolean; getAttribute(a: string): string | null; dispatchEvent(e: unknown): boolean };
 
 /** Boot the SPA in jsdom and return helpers to drive it. */
 async function boot() {
@@ -196,6 +196,44 @@ describe("UI shell", () => {
     expect(userBubble.getAttribute("dir")).toBe("rtl");
     expect((userBubble.querySelector(".chat-text") as El).getAttribute("dir")).toBe("rtl");
     expect(userBubble.textContent).toContain("سلام");
+  }, 30000);
+
+  it("keeps the AI bubble on the left (text right-aligned) and the send button clear of the right edge", async () => {
+    const { win, go, settle } = await boot();
+    await go("#/models");
+    const models = await fetch(`${baseUrl}/models`).then((r) => r.json() as Promise<Array<{ id: string; providerId: string }>>);
+    const mock = models.find((m) => m.providerId === "provider-mock") ?? models[0];
+    win.openModelChat(mock.id);
+    const input = win.document.querySelector("#chat-input") as any;
+    input.value = "سلام، لطفاً وضعیت پروژه را بررسی کن";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    (win.document.querySelector("#chat-send") as El).click();
+    await settle(1200);
+
+    // Assistant bubble: pinned to the left side (iMessage style) while the
+    // Persian text inside stays right-aligned.
+    const assistant = win.document.querySelector(".chat-msg.assistant") as El;
+    expect(assistant).toBeTruthy();
+    // jsdom does not compute flex alignment from the stylesheet, so assert the
+    // bubble side from the class contract: assistant stays flex-start (left),
+    // user flex-end (right). The RTL class keeps Persian text right-aligned.
+    expect(assistant.className).toContain("assistant");
+
+    const user = win.document.querySelector(".chat-msg.user") as El;
+    expect(user.className).toContain("user");
+    expect(user.className).toContain("rtl");
+
+    // Stylesheet contract: assistant bubbles are pinned left, the composer bar
+    // keeps the send button clear of the right edge (away from the scrollbar).
+    const css = readFileSync(resolve(process.cwd(), "public", "app.css"), "utf8");
+    const alignRule = css.match(/\.chat-msg\.assistant\s*{[^}]*align-self:\s*flex-start/);
+    expect(alignRule).toBeTruthy();
+    const userAlign = css.match(/\.chat-msg\.user\s*{[^}]*align-self:\s*flex-end/);
+    expect(userAlign).toBeTruthy();
+    const barPad = css.match(/\.chat-composer-bar\s*{[^}]*padding:\s*[^;]*/);
+    expect(barPad![0]).toMatch(/5px 12px/);
+    const sendMargin = css.match(/\.chat-send-btn\s*{[^}]*margin-right:\s*2px/);
+    expect(sendMargin).toBeTruthy();
   }, 30000);
 
   it("draws SVG dashboard charts and opens the analytics modal", async () => {
