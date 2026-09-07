@@ -469,10 +469,15 @@ export class ProjectFilesService {
   /**
    * Restore the database from the repo folder (agents, tasks, memory, skills,
    * definition). Last-write-wins by file content; returns per-collection counts.
+   *
+   * Pass `{ includeTasks: false }` for the pre-run sync: live tasks are owned
+   * by the run itself, so only configuration-ish state (agents, memory,
+   * skills, definition) is refreshed from git before work starts.
    */
   async restore(
     project: Project,
     repos: { projectRepo: ProjectRepository; agentRepo: AgentRepository; taskRepo: TaskRepository; memoryRepo: MemoryRepository },
+    opts: { includeTasks?: boolean } = {},
   ): Promise<PullSummary> {
     const pulled = await this.pull(project);
     const now = new Date().toISOString();
@@ -506,7 +511,7 @@ export class ProjectFilesService {
       }
     }
 
-    for (const t of pulled.tasks) {
+    for (const t of opts.includeTasks === false ? [] : pulled.tasks) {
       const existing = repos.taskRepo.findById(t.id)?.data;
       const input = { ...(existing?.input ?? {}), ...(t.researchBrief ? { researchBrief: t.researchBrief } : {}) };
       repos.taskRepo.upsert(
@@ -555,6 +560,6 @@ export class ProjectFilesService {
       );
     }
 
-    return { agents: pulled.agents.length, tasks: pulled.tasks.length, memory: pulled.memory.length, skills: pulled.skills, files: pulled.files };
+    return { agents: pulled.agents.length, tasks: opts.includeTasks === false ? 0 : pulled.tasks.length, memory: pulled.memory.length, skills: pulled.skills, files: pulled.files };
   }
 }

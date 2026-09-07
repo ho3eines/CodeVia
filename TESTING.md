@@ -51,7 +51,7 @@ npm run dev
    curl 'http://localhost:8080/projects/<id>/files?path=CodeVia'
    curl 'http://localhost:8080/projects/<id>/file?path=CodeVia/project.md'
    ```
-4. **حلقه خودگردان:** Ask AI → حالت `Autonomous task loop` (پیش‌فرض) → بنویس «Add login page and API» → Start.
+4. **حلقه خودگردان:** Ask AI → حالت `Autonomous task loop` (پیش‌فرض) → بنویس «Add login page and API» → Start. فلو گیت‌ـمحور است: اول از گیت سینک می‌کند (ایجنت‌ها/حافظه/تعریف — نه تسک‌های زنده)، بعد روی همان فایل‌ها تغییر می‌زند (فقط بخش‌های ناموجود ساخته می‌شوند)، کامیت می‌کند و آخر دوباره به گیت سینک می‌کند.
 5. **تسک‌بندی:** تب Tasks → زیر تسک والد ساب‌تسک‌ها را با بج `↳ sub` ببین (Research، Implement backend/frontend، Verify).
 6. **جزئیات تسک:** View روی تسک والد → research brief + جدول ساب‌تسک‌ها + وضعیت هر واحد.
 7. **گیت:** تب‌های Commits و Pull Requests — هر مجری روی برنچ خودش (`agent-<نقش>-<id>`) کد واقعی (اسکافلد معتبر در استک پروژه، مثلاً `LoginController.cs` یا `LoginPage.tsx`) + یادداشت تغییر کامیت می‌کند و PR باز می‌کند. با دکمه **Merge** کد را به main بیاور.

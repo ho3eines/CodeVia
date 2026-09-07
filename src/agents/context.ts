@@ -32,10 +32,24 @@ export interface RelatedFile {
 
 export interface RegistryEntry {
   entity: string;
+  /** Most recently claimed path (kept for backward compatibility). */
   path: string;
+  /** Owner file per implementer type — backend/frontend/database never collide. */
+  paths?: Partial<Record<string, string>>;
   agentType: string;
   subtaskId: string;
   at: string;
+}
+
+/** Owner file of an entity for one implementer (legacy single-path aware). */
+export function registryPathFor(
+  registry: Record<string, RegistryEntry> | undefined,
+  agentType: string,
+  entity: string,
+): string | undefined {
+  const e = registry?.[entity];
+  if (!e) return undefined;
+  return e.paths?.[agentType] ?? (e.agentType === agentType ? e.path : undefined) ?? undefined;
 }
 
 export interface ContextPack {
@@ -156,10 +170,19 @@ export function parseRegistry(markdown: string | undefined): Record<string, Regi
   for (const [entity, v] of Object.entries(obj as Record<string, unknown>)) {
     const e = v as Record<string, unknown>;
     if (typeof e?.path === "string" && e.path) {
+      const paths: Partial<Record<string, string>> = {};
+      if (e.paths && typeof e.paths === "object") {
+        for (const [k, p] of Object.entries(e.paths as Record<string, unknown>)) {
+          if (typeof p === "string" && p) paths[k] = p;
+        }
+      }
+      const agentType = typeof e.agentType === "string" ? e.agentType : "";
+      if (agentType && !paths[agentType]) paths[agentType] = e.path;
       out[entity] = {
         entity,
         path: e.path,
-        agentType: typeof e.agentType === "string" ? e.agentType : "",
+        paths,
+        agentType,
         subtaskId: typeof e.subtaskId === "string" ? e.subtaskId : "",
         at: typeof e.at === "string" ? e.at : "",
       };
@@ -176,12 +199,19 @@ function tryJson(raw: string): unknown {
   }
 }
 
+function shortType(t: string): string {
+  return t.replace("-developer", "").replace("qa-test", "qa");
+}
+
 export function mergeRegistry(
   existing: Record<string, RegistryEntry>,
   entries: Array<{ entity: string; path: string; agentType: string; subtaskId: string; at: string }>,
 ): Record<string, RegistryEntry> {
   const out = { ...existing };
-  for (const e of entries) out[e.entity] = { ...e };
+  for (const e of entries) {
+    const prev = out[e.entity];
+    out[e.entity] = { ...e, paths: { ...(prev?.paths ?? {}), [e.agentType]: e.path } };
+  }
   return out;
 }
 
@@ -207,7 +237,13 @@ export function renderContextMarkdown(project: Project, pack: ContextPack): stri
     `## Entity registry`,
     registryLines.length === 0
       ? `(nothing implemented yet — first implementer run fills this in)`
-      : registryLines.map((r) => `- ${r.entity} → \`${r.path}\` (${r.agentType || "agent"} · ${r.subtaskId || "?"} · ${r.at || "?"})`).join("\n"),
+      : registryLines
+          .map((r) => {
+            const owners = Object.entries(r.paths ?? {});
+            const where = owners.length ? owners.map(([t, p]) => `${shortType(t)}: \`${p}\``).join(" · ") : `\`${r.path}\``;
+            return `- ${r.entity} → ${where} (last: ${r.subtaskId || "?"} · ${r.at || "?"})`;
+          })
+          .join("\n"),
     ``,
     `## Recent memory`,
     pack.memory.length === 0
@@ -242,7 +278,11 @@ export function renderPromptContext(pack: ContextPack, target: string): string {
   const reg = Object.values(pack.registry);
   if (reg.length > 0) {
     lines.push(`Already implemented (reuse/extend these files, never duplicate them):`);
-    lines.push(...reg.map((r) => `- ${r.entity} → ${r.path}`));
+    for (const r of reg) {
+      const owners = Object.entries(r.paths ?? {});
+      if (owners.length) for (const [t, p] of owners) lines.push(`- ${r.entity} [${t}] → ${p}`);
+      else lines.push(`- ${r.entity} → ${r.path}`);
+    }
   }
   for (const c of [...pack.related, ...pack.configs].slice(0, 6)) {
     lines.push(`--- ${c.path} ---`);

@@ -14,13 +14,14 @@ import { logger } from "../logger.js";
 import { projectBrief } from "../domain/project-brief.js";
 import type { ProjectFilesService } from "../github/project-files.js";
 import { slugify, scaffoldFor, notePathFor, changeNote, entityFor, detectStack } from "./scaffold.js";
-import { buildContextPack, syncProjectContext, renderPromptContext, extendContent, type ContextPack } from "./context.js";
+import { buildContextPack, syncProjectContext, renderPromptContext, extendContent, registryPathFor, type ContextPack, type RegistryEntry } from "./context.js";
 
 /**
  * Autonomous task loop — the flow the project page promises:
  *
- *   task → research → breakdown → backend/frontend implement (code → git)
- *        → QA verifies → on failure back to implementers (bounded) → done
+ *   pre-sync from git → task → research → breakdown → backend/frontend
+ *   implement (code → git) → QA verifies → on failure back to implementers
+ *   (bounded) → post-sync to git → done
  *
  * Two intelligence levels:
  * - Real AI (a non-mock provider is active): task breakdown and file contents
@@ -89,16 +90,19 @@ const cleanPath = (p: string): string | undefined => {
   return v;
 };
 
-export function deterministicBreakdown(project: Project, task: Task): BreakdownItem[] {
+export function deterministicBreakdown(project: Project, task: Task, registry?: Record<string, RegistryEntry>): BreakdownItem[] {
   const text = `${task.title} ${task.description}`.toLowerCase();
   const uiLike = /ui|ux|page|screen|frontend|react|vue|angular|mobile|design|style|css|rtl|layout|رابط|صفحه|ظاهر|موبایل|راست/.test(text);
   const schemaLike = /migration|schema|database|sql|table|column|مایگریشن|دیتابیس|اسکیما|جدول/.test(text);
   const slug = slugify(task.title);
-  // Each implementer writes its scaffolded source file first, with the
-  // change note committed next to it for traceability.
+  const entity = entityFor(task.title, task.description).pascal;
+  // Each implementer writes its source file first (the already-owned file
+  // when this entity was implemented before — never a parallel duplicate),
+  // with the change note committed next to it for traceability.
   const filesFor = (agentType: AgentType, short: string): string[] => {
-    const scaffold = scaffoldFor({ agentType, project, task, childId: task.id, brief: "" });
-    const files = scaffold ? [scaffold.path] : [];
+    const owned = registryPathFor(registry, agentType, entity);
+    const scaffold = owned ? undefined : scaffoldFor({ agentType, project, task, childId: task.id, brief: "" });
+    const files = [owned ?? scaffold?.path].filter((p): p is string => !!p);
     files.push(notePathFor(task.id, short, slug));
     return files;
   };
@@ -206,6 +210,30 @@ export class AutonomousOrchestrator {
     // ---- Phase 0: preflight — every requirement checked before research ----
     await this.preflight(project);
 
+    // ---- Pre-sync: git is the source of truth. Refresh configuration-ish
+    // state (agents, memory, skills, definition — never live tasks) from the
+    // CodeVia/ folder so the run starts from the latest committed state.
+    // Post-sync happens at the end of the run (context) + on task terminal
+    // states (full state) via the caller.
+    if (this.deps.files && this.deps.memoryRepo) {
+      try {
+        const pre = await this.deps.files.restore(
+          project,
+          { projectRepo: this.deps.projectRepo, agentRepo: this.deps.agentRepo, taskRepo: this.deps.taskRepo, memoryRepo: this.deps.memoryRepo },
+          { includeTasks: false },
+        );
+        logger.info("autonomous loop pre-synced from git", { taskId, ...pre, files: undefined });
+      } catch (err) {
+        logger.warn("autonomous loop pre-sync failed, continuing with local state", { taskId, err: String(err) });
+      }
+    }
+
+    // Base context pack: repo tree + manifests + registry + memory, read once
+    // per loop and shared by the brief, the breakdown and every implementer.
+    const basePack = await buildContextPack({ github: this.deps.github, project, memoryRepo: this.deps.memoryRepo }).catch(
+      () => undefined,
+    );
+
     const chat = this.deps.providerRegistry
       ? realChatFor({ modelRepo: this.deps.modelRepo, providerRepo: this.deps.providerRepo, providerRegistry: this.deps.providerRegistry })
       : undefined;
@@ -222,14 +250,14 @@ export class AutonomousOrchestrator {
 
     // ---- Research brief: the research unit's analysis becomes the prompt ----
     // that every downstream unit works from (definition selections included).
-    const brief = await this.researchBrief(chat, project, task, researchSummary);
+    const brief = await this.researchBrief(chat, project, task, researchSummary, basePack);
     this.deps.taskRepo.upsert(
       { ...task, input: { ...(task.input ?? {}), researchBrief: brief.slice(0, 3000) }, updatedAt: new Date().toISOString() },
       { projectId: task.projectId, parentId: task.parentTaskId },
     );
 
     // ---- Phase 2: breakdown ------------------------------------------------
-    const breakdown = await this.breakdown(chat, project, task, brief);
+    const breakdown = await this.breakdown(chat, project, task, brief, basePack);
     if (breakdown.length === 0) throw new Error("Breakdown produced no implementer subtasks");
 
     // ---- Phase 3: implement (code → git → PR) -------------------------------
@@ -363,8 +391,8 @@ export class AutonomousOrchestrator {
    * unit works from. Real AI writes it when available; otherwise the
    * deterministic brief (task + selections + repo signals) is used.
    */
-  private async researchBrief(chat: RealChat | undefined, project: Project, task: Task, researchSummary: string): Promise<string> {
-    const files = await this.repoFiles(project).catch(() => [] as string[]);
+  private async researchBrief(chat: RealChat | undefined, project: Project, task: Task, researchSummary: string, pack?: ContextPack): Promise<string> {
+    const files = pack?.tree ?? (await this.repoFiles(project).catch(() => [] as string[]));
     if (chat) {
       try {
         const raw = await chat.chat(
@@ -413,13 +441,17 @@ export class AutonomousOrchestrator {
     }
   }
 
-  private async breakdown(chat: RealChat | undefined, project: Project, task: Task, brief: string): Promise<BreakdownItem[]> {
+  private async breakdown(chat: RealChat | undefined, project: Project, task: Task, brief: string, pack?: ContextPack): Promise<BreakdownItem[]> {
     if (chat) {
       try {
-        const files = await this.repoFiles(project).catch(() => [] as string[]);
+        const files = pack?.tree ?? (await this.repoFiles(project).catch(() => [] as string[]));
+        const owned = Object.values(pack?.registry ?? {});
+        const ownedLines = owned.flatMap((r) =>
+          Object.entries(r.paths ?? {}).map(([t, p]) => `- ${r.entity} [${t}] → ${p}`),
+        );
         const raw = await chat.chat(
           "You are a senior engineering manager breaking work into implementer subtasks. Reply with ONLY a JSON array.",
-          `Task: ${task.title}\n${task.description}\n\nResearch brief:\n${brief}\n\nProject definition (from the project setup selections):\n${projectBrief(project)}\nRepository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n\nBreak this into 1-4 implementer subtasks. Allowed agentType values: ${IMPLEMENTERS.join(", ")}. Each item: {"agentType","title","description","files":[1-5 repo-relative paths to create/modify]}. Reply with ONLY the JSON array, no prose.`,
+          `Task: ${task.title}\n${task.description}\n\nResearch brief:\n${brief}\n\nProject definition (from the project setup selections):\n${projectBrief(project)}\nRepository files (sample):\n${files.slice(0, 40).join("\n") || "(unknown)"}\n${ownedLines.length ? `\nAlready implemented — when the work touches one of these entities, REUSE its exact file (it will be extended, not rewritten). Only propose NEW files for parts that do not exist yet:\n${ownedLines.join("\n")}\n` : ""}\nBreak this into 1-4 implementer subtasks. Allowed agentType values: ${IMPLEMENTERS.join(", ")}. Each item: {"agentType","title","description","files":[1-5 repo-relative paths to create/modify]}. Reply with ONLY the JSON array, no prose.`,
           1500,
         );
         const parsed = extractJson(raw);
@@ -430,13 +462,24 @@ export class AutonomousOrchestrator {
           if (!isAgentType(rec.agentType) || !IMPLEMENTERS.includes(rec.agentType)) continue;
           const title = String(rec.title ?? "").trim();
           if (!title) continue;
-          const files = (Array.isArray(rec.files) ? rec.files : []).map((f) => cleanPath(String(f))).filter(Boolean).slice(0, 5) as string[];
+          const itemFiles = (Array.isArray(rec.files) ? rec.files : []).map((f) => cleanPath(String(f))).filter(Boolean).slice(0, 5) as string[];
           valid.push({
             agentType: rec.agentType,
             title: title.slice(0, 120),
             description: String(rec.description ?? task.description),
-            files: files.length ? files : [`docs/tasks/${task.id}-${rec.agentType}.md`],
+            files: itemFiles.length ? itemFiles : [`docs/tasks/${task.id}-${rec.agentType}.md`],
           });
+        }
+        // Continuity guard: even if the model invents a parallel path for an
+        // already-owned entity, the primary file is remapped to the owned one
+        // (the invented duplicate is dropped) so changes land on the same
+        // file. Only genuinely new parts keep new paths.
+        for (const v of valid) {
+          const ownedPath = registryPathFor(pack?.registry, v.agentType, entityFor(v.title, v.description).pascal);
+          if (ownedPath && v.files[0] !== ownedPath) {
+            logger.info("breakdown remapped to owned file", { taskId: task.id, from: v.files[0], to: ownedPath });
+            v.files = [ownedPath, ...v.files.slice(1).filter((f) => f !== ownedPath)].slice(0, 5);
+          }
         }
         if (valid.length > 0) return valid;
         logger.warn("AI breakdown unusable, using deterministic fallback", { taskId: task.id });
@@ -444,7 +487,7 @@ export class AutonomousOrchestrator {
         logger.warn("AI breakdown failed, using deterministic fallback", { taskId: task.id, err: String(err) });
       }
     }
-    return deterministicBreakdown(project, task);
+    return deterministicBreakdown(project, task, pack?.registry);
   }
 
   /**
