@@ -121,6 +121,7 @@ export class Container {
       contextEngine: this.contextEngine,
       github: this.github,
       requestApproval: (a, d) => this.approvalChannel(a, d),
+      memoryRepo: this.memoryRepo,
       isCancelled: (taskId) => this.taskRepo.findById(taskId)?.data.status === "cancelled",
     });
     this.workflowEngine = new WorkflowEngine({
@@ -148,6 +149,7 @@ export class Container {
       modelRepo: this.modelRepo,
       providerRepo: this.providerRepo,
       github: this.github,
+      providerRegistry: this.providerRegistry,
     });
     this.worker = new Worker({
       queue: this.queue,

@@ -13,9 +13,12 @@ import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
 import { defaultPlanFor, type PlanStep } from "./plan.js";
 import { generateCorrelationId } from "../events/bus.js";
+import { randomUUID } from "node:crypto";
 import { memoryResolver } from "../memory/index.js";
 import type { IMemoryStore } from "../memory/store.js";
 import { toRepoRef } from "../tools/core-tools.js";
+import type { MemoryRepository } from "../domain/repos.js";
+import type { MemoryScope, MemoryType } from "../domain/entities.js";
 
 export interface AgentRunnerDeps {
   runRepo: RunRepository;
@@ -31,6 +34,8 @@ export interface AgentRunnerDeps {
   requestApproval?: (action: string, detail: Record<string, unknown>) => Promise<boolean>;
   /** Override memory resolution (tests). Defaults to the project's GitHub/local store. */
   memoryFor?: (project: Project) => IMemoryStore;
+  /** DB index for memory: successful save_memory steps are mirrored here so the UI/API can list them. */
+  memoryRepo?: MemoryRepository;
   /** Cooperative cancellation: polled between steps (POST /tasks/:id/cancel). */
   isCancelled?: (taskId: string) => boolean;
 }
@@ -322,6 +327,7 @@ export class AgentRunner {
         );
         ok = result.ok;
         detail = result.output.slice(0, 400);
+        if (ok && step.tool === "save_memory") this.indexMemory(task, agent, project, step.input, result.data);
       }
 
       stepRecord.status = ok ? "succeeded" : "failed";
@@ -342,5 +348,56 @@ export class AgentRunner {
     }
     void task;
     return steps;
+  }
+
+  /**
+   * Mirror a successful `save_memory` tool call into the DB-backed memory
+   * index (the file/GitHub store stays the source of truth; the DB is the
+   * searchable index the UI and /memory API read).
+   */
+  private indexMemory(
+    task: Task,
+    agent: Agent,
+    project: Project,
+    input: Record<string, unknown> | undefined,
+    data: Record<string, unknown> | undefined,
+  ): void {
+    try {
+      const repo = this.deps.memoryRepo;
+      if (!repo) return;
+      const key = String(data?.key ?? input?.key ?? `${agent.slug}/${task.id}`);
+      const content = String(input?.content ?? "").slice(0, 4000);
+      if (!content) return;
+      const type = String(data?.type ?? input?.type ?? "knowledge") as MemoryType;
+      const tags = Array.isArray(input?.tags) ? (input.tags as string[]) : [agent.type];
+      const existing = repo.findMany({ projectId: project.id, key })[0]?.data;
+      const now = new Date().toISOString();
+      if (existing) {
+        repo.upsert(
+          { ...existing, type, content, tags, version: existing.version + 1, updatedAt: now },
+          { projectId: project.id, key },
+        );
+      } else {
+        repo.upsert(
+          {
+            id: randomUUID(),
+            projectId: project.id,
+            scope: "project" as MemoryScope,
+            type,
+            key,
+            content,
+            tags,
+            refs: [task.id],
+            source: `agent:${agent.type}`,
+            version: 1,
+            createdAt: now,
+            updatedAt: now,
+          },
+          { projectId: project.id, key },
+        );
+      }
+    } catch (err) {
+      logger.warn("memory DB index failed", { projectId: project.id, err: String(err) });
+    }
   }
 }

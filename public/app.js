@@ -508,6 +508,7 @@
       const kind = ev && ev.data && ev.data.kind;
       if (kind === "approval.required") toast("Approval required", ev.data.action || "", "warn");
       if (kind && kind.startsWith("approval.") && (location.hash.startsWith("#/approvals") || location.hash.startsWith("#/dashboard"))) refreshCurrent();
+      refreshBell();
     });
   }
 
@@ -612,7 +613,48 @@
     }
     // Keep the top-bar login/user slot in sync with the refreshed state.
     renderUserSlot();
+    refreshBell();
   }
+  async function refreshBell() {
+    const btn = $("#bell-btn"), count = $("#bell-count");
+    if (!btn || !count) return;
+    try {
+      const [notes, approvals] = await Promise.all([
+        api("/notifications").catch(() => []),
+        api("/approvals").catch(() => []),
+      ]);
+      const unread = notes.filter((n) => !n.read).length;
+      const pending = approvals.filter((a) => a.status === "pending").length;
+      const total = unread + pending;
+      count.hidden = total === 0;
+      count.textContent = total > 99 ? "99+" : String(total);
+      btn.title = `${unread} unread notification(s) · ${pending} pending approval(s)`;
+    } catch (_) { /* offline — leave the bell as is */ }
+  }
+  window.openBell = async () => {
+    openModal("Notifications & Approvals", `<div class="repo-empty">Loading…</div>`, { wide: true });
+    const [notes, approvals] = await Promise.all([
+      api("/notifications").catch(() => []),
+      api("/approvals").catch(() => []),
+    ]);
+    const pending = approvals.filter((a) => a.status === "pending");
+    const sevIcon = (s) => s === "error" ? "🔴" : s === "warning" ? "🟠" : s === "success" ? "🟢" : "🔵";
+    $("#modal-body").innerHTML = `
+      <div class="card-title">Pending approvals <span class="sub">${pending.length}</span></div>
+      ${pending.length ? pending.slice(0, 8).map((a) => `<div class="list-row"><span>🛑</span><div><strong>${esc(a.action)}</strong><div class="sub mono">${esc(a.id)}${a.projectId ? " · " + esc(String(a.projectId).slice(0, 12)) : ""} · ${timeAgo(a.requestedAt)}</div></div><span class="spacer"></span><button class="btn btn-primary" onclick="bellDecide(${JSON.stringify(a.id)}, 'approve')">Approve</button><button class="btn" onclick="bellDecide(${JSON.stringify(a.id)}, 'reject')">Reject</button></div>`).join("") : emptyState("✅", "Nothing waiting", "Dangerous steps pause here when auto-approve is off.")}
+      <div class="card-title mt">Notifications <span class="sub">${notes.filter((n) => !n.read).length} unread</span></div>
+      ${notes.length ? notes.slice(0, 20).map((n) => `<div class="list-row" style="${n.read ? "opacity:.65" : ""}"><span>${sevIcon(n.severity)}</span><div><strong>${esc(n.title)}</strong><div style="font-size:12px">${esc(n.message || "")}</div><div class="sub">${timeAgo(n.createdAt)}</div></div><span class="spacer"></span>${n.read ? "" : `<button class="btn btn-ghost" onclick="bellMarkRead(${JSON.stringify(n.id)})">Mark read</button>`}</div>`).join("") : emptyState("🔔", "No notifications", "")}
+      <div class="flex mt"><a class="btn" href="#/approvals" onclick="closeModal()">All approvals</a><a class="btn" href="#/logs" onclick="closeModal()">All logs</a><button class="btn" onclick="closeModal()">Close</button></div>`;
+  };
+  window.bellMarkRead = async (nid) => {
+    try { await api(`/notifications/${nid}/read`, { method: "POST", body: {} }); } catch (_) {}
+    openBell(); refreshBell();
+  };
+  window.bellDecide = async (aid, decision) => {
+    try { await api(`/approvals/${aid}/${decision}`, { method: "POST", body: {} }); toast(decision === "approve" ? "Approved" : "Rejected", aid, decision === "approve" ? "ok" : "warn"); }
+    catch (e) { toast("Failed", e.message, "err"); }
+    openBell(); refreshBell(); refreshCurrent();
+  };
   const titleMap = {
     "/dashboard": "Dashboard", "/projects": "Projects", "/agents": "Agents", "/models": "Models",
     "/providers": "Providers", "/skills": "Skills", "/workflows": "Workflows", "/tasks": "Tasks",
@@ -622,6 +664,7 @@
     "/projects/:id/skills": "Project Skills", "/projects/:id/repositories": "Project Repositories", "/projects/:id/workflows": "Project Workflows",
     "/projects/:id/tasks": "Project Tasks", "/projects/:id/runs": "Project Runs", "/projects/:id/tests": "Project Tests",
     "/projects/:id/issues": "Project Issues", "/projects/:id/pull-requests": "Project Pull Requests",
+    "/projects/:id/commits": "Project Commits", "/projects/:id/conversations": "Project Conversations",
     "/agents/:id": "Agent", "/workflows/:id": "Workflow",
     "/runs/:id/console": "Run Console", "/conversations/:id": "Conversation",
   };
@@ -638,6 +681,7 @@
   // callbacks.
   window.refreshCurrent = refreshCurrent;
   $("#cmd-palette-btn")?.addEventListener("click", () => openPalette());
+  $("#bell-btn")?.addEventListener("click", () => openBell());
 
   /* ---------- Command Palette ---------- */
   const commands = [
@@ -769,11 +813,13 @@
   on("/dashboard", async () => {
     // The dashboard aggregates a few endpoints; each is optional so a partial
     // outage degrades one widget instead of blanking the whole page.
-    const [d, runsRaw, usage, providers] = await Promise.all([
+    const [d, runsRaw, usage, providers, ghStatus, tgStatus] = await Promise.all([
       api("/dashboard"),
       api("/runs").catch(() => []),
       api("/admin/usage").catch(() => null),
       api("/providers").catch(() => []),
+      api("/integrations/github/status").catch(() => null),
+      api("/integrations/telegram/status").catch(() => null),
     ]);
     const runs = Array.isArray(runsRaw) ? runsRaw : (runsRaw?.items || []);
     const q = d.queue || {};
@@ -793,6 +839,11 @@
     const agentCounts = Object.entries(runs.reduce((acc, r) => { acc[r.agentType] = (acc[r.agentType] || 0) + 1; return acc; }, {}))
       .sort((a, b) => b[1] - a[1]).slice(0, 6).map(([label, value]) => ({ label, value }));
     const readyProviders = providers.filter((p) => p.readiness?.ready !== false && p.active).length;
+    const ghOk = !!(ghStatus && (ghStatus.connected || ghStatus.source === "user-oauth"));
+    const tgOk = !!(tgStatus && (tgStatus.ready || tgStatus.connected || tgStatus.configured));
+    const provOk = providers.filter((p) => p.active).length > 0;
+    const projOk = d.totalProjects > 0;
+    const checkItem = (ok, icon, title, sub, link) => `<a class="list-row" href="${link}"><span>${ok ? "✅" : "○"}</span><div><strong>${icon} ${title}</strong><div class="sub">${sub}</div></div><span class="spacer"></span>${ok ? '<span class="badge badge-ok">done</span>' : '<span class="badge badge-warn">setup</span>'}</a>`;
 
     const statCard = (label, value, sub, icon, spark) => `<div class="card stat">
       <span class="stat-icon">${icon}</span>
@@ -823,7 +874,13 @@
         </a>
       </div>
 
-      <div class="grid-2">
+      ${(!ghOk || !tgOk || !provOk || !projOk) ? `<div class="card card-body mt"><div class="card-title">Setup checklist <span class="sub">get the platform fully operational</span></div>
+        ${checkItem(ghOk, "🐙", "Connect GitHub", ghStatus ? `${ghStatus.repoCount || 0} repos visible · ${esc(ghStatus.source || "mock")}` : "GitHub is the source of truth for projects", "#/github")}
+        ${checkItem(tgOk, "📱", "Connect Telegram", tgStatus ? `transport: ${esc(tgStatus.transport || tgStatus.mode || "off")}` : "Approvals and control from chat", "#/telegram")}
+        ${checkItem(provOk, "🧠", "Configure AI providers", `${providers.filter((p) => p.active).length} active · mock works offline`, "#/providers")}
+        ${checkItem(projOk, "📁", "Create your first project", "Auto-generates agents, skills and workflows", "#/projects")}
+      </div>` : ""}
+      <div class="grid-2 mt">
         <div class="card card-body">
           <div class="card-title">Run activity <span class="sub">last 7 days · ${trend.reduce((s, t) => s + t.value, 0)} runs</span></div>
           ${lineChart(trend.map((t) => t.value), { labels: trend.map((t) => t.label), color: "#7c6cff" })}
@@ -1216,6 +1273,8 @@
     ["tests", "Tests", "/tests"],
     ["issues", "Issues", "/issues"],
     ["pull-requests", "Pull Requests", "/pull-requests"],
+    ["commits", "Commits", "/commits"],
+    ["conversations", "Conversations", "/conversations"],
   ];
   function projectSectionNav(id, active = "overview") {
     return `<div class="tabs project-tabs">${PROJECT_SECTIONS.map(([key, label, suffix]) => {
@@ -1249,7 +1308,7 @@
   on("/projects/:id", async (rest) => {
     const id = rest[0];
     const p = await api("/projects/" + id);
-    const [agents, tasks, runs, workflows, catalog, issues, prs] = await Promise.all([
+    const [agents, tasks, runs, workflows, catalog, issues, prs, memEntries, commits, spend] = await Promise.all([
       api(`/projects/${id}/agents`).catch(() => []),
       api(`/projects/${id}/tasks`).catch(() => []),
       api(`/projects/${id}/runs`).catch(() => []),
@@ -1257,7 +1316,17 @@
       loadOptionCatalog().catch(() => null),
       api(`/projects/${id}/issues`).catch(() => []),
       api(`/projects/${id}/pull-requests`).catch(() => []),
+      api(`/memory?projectId=${id}`).catch(() => []),
+      api(`/projects/${id}/commits?limit=8`).catch(() => []),
+      api(`/costs/summary?projectId=${id}`).catch(() => null),
     ]);
+    const qaRuns = runs.filter((r) => r.agentType === "qa-test");
+    const failedRuns = runs.filter((r) => r.status === "failed" || r.error).slice(0, 5);
+    const decisions = (Array.isArray(memEntries) ? memEntries : []).filter((m) => m.type === "decision").slice(0, 5);
+    const activity = [
+      ...runs.slice(0, 15).map((r) => ({ kind: "▶ run", title: `${r.agentType}`, status: r.status, at: r.createdAt, link: `#/runs/${r.id}/console` })),
+      ...tasks.slice(0, 15).map((t) => ({ kind: "🧩 task", title: t.title, status: t.status, at: t.updatedAt, link: `#/projects/${id}/tasks` })),
+    ].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 10);
     const caps = p.capabilities || {};
     const repos = p.repositories || [{ repo: p.configRepo, branch: p.branch, role: "primary", isConfigRepo: true }];
     const capRows = CAPABILITY_GROUPS.map(([k, label]) => {
@@ -1274,6 +1343,8 @@
         <div class="card stat"><div class="stat-label">Agents</div><div class="stat-value">${agents.filter((a) => a.enabled).length}<span class="stat-sub"> / ${agents.length}</span></div></div>
         <div class="card stat"><div class="stat-label">Tasks</div><div class="stat-value">${tasks.length}</div><div class="stat-sub">${tasks.filter((t)=>t.status === "running").length} running</div></div>
         <div class="card stat"><div class="stat-label">Runs</div><div class="stat-value">${runs.length}</div><div class="stat-sub">${runs.filter((r)=>r.status === "failed").length} failed</div></div>
+        <div class="card stat"><div class="stat-label">Open issues</div><div class="stat-value">${issues.length}</div><div class="stat-sub"><a href="#/projects/${esc(p.id)}/issues">view all</a></div></div>
+        <div class="card stat"><div class="stat-label">Open PRs</div><div class="stat-value">${prs.length}</div><div class="stat-sub"><a href="#/projects/${esc(p.id)}/pull-requests">view all</a></div></div>
       </div>
       <div class="grid-2">
         <div class="card card-body">
@@ -1305,9 +1376,11 @@
         </div>
       </div>
       <div class="grid-2 mt">
-        <div class="card card-body"><div class="card-title">GitHub activity <a href="#/projects/${esc(p.id)}/issues" class="sub">issues</a> · <a href="#/projects/${esc(p.id)}/pull-requests" class="sub">PRs</a></div>
+        <div class="card card-body"><div class="card-title">GitHub activity <a href="#/projects/${esc(p.id)}/issues" class="sub">issues</a> · <a href="#/projects/${esc(p.id)}/pull-requests" class="sub">PRs</a> · <a href="#/projects/${esc(p.id)}/commits" class="sub">commits</a></div>
           <div class="meter-row"><span class="lbl">Open issues</span><strong>${issues.length}</strong></div>
           <div class="meter-row"><span class="lbl">Open PRs</span><strong>${prs.length}</strong></div>
+          <div class="meter-row"><span class="lbl">Recent commits</span><strong>${commits.length}</strong></div>
+          ${commits.slice(0,3).map((c) => `<div class="meter-row"><span class="mono" style="color:var(--text-muted)">${esc(String(c.sha||"").slice(0,7))}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(String(c.message||"").split("\n")[0])}</span></div>`).join("")}
           <div class="flex mt"><button class="btn" onclick="location.hash='#/projects/${esc(p.id)}/tests'">🧪 Tests</button><button class="btn" onclick="location.hash='#/projects/${esc(p.id)}/runs'">▶ Runs</button></div>
         </div>
         <div class="card card-body"><div class="card-title">Budget guardrails <a class="sub" href="#" onclick="projectEdit(${JSON.stringify(p.id)});return false">edit</a></div>
@@ -1315,6 +1388,26 @@
           <div class="meter-row"><span class="lbl">Max calls/run</span><span class="mono">${esc(p.settings?.budget?.maxCallsPerRun ?? "—")}</span></div>
           <div class="meter-row"><span class="lbl">Max cost/run</span><span class="mono">${money(p.settings?.budget?.maxCostUsdPerRun)}</span></div>
           <div class="meter-row"><span class="lbl">Max duration</span><span class="mono">${esc(p.settings?.budget?.maxDurationMs ?? "—")} ms</span></div>
+          <div class="card-title mt">Spend <span class="sub">this project · all time</span></div>
+          <div class="meter-row"><span class="lbl">Model calls</span><strong>${spend ? spend.calls : "—"}</strong></div>
+          <div class="meter-row"><span class="lbl">Tokens</span><strong>${spend ? Number(spend.tokens||0).toLocaleString() : "—"}</strong></div>
+          <div class="meter-row"><span class="lbl">Est. cost</span><strong>${spend ? money(spend.costUsd) : "—"}</strong></div>
+        </div>
+      </div>
+      <div class="grid-2 mt">
+        <div class="card card-body"><div class="card-title">Test status <a href="#/projects/${esc(p.id)}/tests" class="sub">qa runs</a></div>
+          ${qaRuns.length ? `<div class="meter-row"><span class="lbl">QA runs</span><strong>${qaRuns.length}</strong></div><div class="meter-row"><span class="lbl">Passed</span><strong style="color:var(--ok)">${qaRuns.filter((r)=>r.status==="succeeded").length}</strong></div><div class="meter-row"><span class="lbl">Failed</span><strong style="color:var(--err)">${qaRuns.filter((r)=>r.status==="failed").length}</strong></div><div class="meter-row"><span class="lbl">Last run</span><span>${badge(qaRuns[0].status)} <a class="btn btn-ghost" href="#/runs/${qaRuns[0].id}/console">Console</a></span></div>` : emptyState("🧪", "No QA runs yet", "Run the QA agent or a workflow to test this project.")}
+        </div>
+        <div class="card card-body"><div class="card-title">Recent errors <a href="#/projects/${esc(p.id)}/runs" class="sub">all runs</a></div>
+          ${failedRuns.length ? failedRuns.map((r) => `<div class="list-row"><span>🔴</span><div><strong>${esc(r.agentType)}</strong><div class="sub mono">${esc((r.error || (r.steps||[]).find((s)=>s.status==="failed")?.detail || "run failed").slice(0,120))}</div></div><span class="spacer"></span><a class="btn btn-ghost" href="#/runs/${r.id}/console">Inspect</a><button class="btn btn-ghost" onclick="projectRunTask(${JSON.stringify(r.taskId)})">Retry</button></div>`).join("") : emptyState("✅", "No errors", "Failed runs will show up here with retry actions.")}
+        </div>
+      </div>
+      <div class="grid-2 mt">
+        <div class="card card-body"><div class="card-title">Recent decisions <a href="#/projects/${esc(p.id)}/memory" class="sub">memory</a></div>
+          ${decisions.length ? decisions.map((m) => `<div class="list-row"><span>🧭</span><div><strong>${esc(m.key)}</strong><p>${esc((m.content||"").slice(0,140))}</p></div></div>`).join("") : emptyState("🧭", "No decisions logged", "Key decisions are stored in project memory.")}
+        </div>
+        <div class="card card-body"><div class="card-title">AI activity <span class="sub">latest runs & tasks</span></div>
+          ${activity.length ? `<div class="activity-feed">${activity.map((a) => `<a class="activity-item" href="${esc(a.link)}"><span class="activity-dot"></span><div class="activity-body"><strong>${esc(a.kind)} · ${esc(a.title).slice(0,60)}</strong><span>${timeAgo(a.at)} · ${esc(a.status)}</span></div></a>`).join("")}</div>` : emptyState("⚡", "No activity yet", "Ask the AI something to get started.")}
         </div>
       </div>
       <div class="card card-body mt">
@@ -1325,23 +1418,58 @@
       </div>`;
   });
 
+  // Autonomous-loop subtasks (research/build/verify/fix) render grouped under their parent.
+  function orderTasks(tasks) {
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    const roots = tasks.filter((t) => !t.parentTaskId || !byId.has(t.parentTaskId));
+    const kids = new Map();
+    for (const t of tasks) {
+      if (t.parentTaskId && byId.has(t.parentTaskId)) {
+        if (!kids.has(t.parentTaskId)) kids.set(t.parentTaskId, []);
+        kids.get(t.parentTaskId).push(t);
+      }
+    }
+    const out = [];
+    for (const r of roots) {
+      out.push(r);
+      for (const k of (kids.get(r.id) || []).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) out.push(k);
+    }
+    return out;
+  }
+
   async function renderProjectResource(id, section) {
     const p = await api("/projects/" + id);
-    const data = await api(`/projects/${id}/${section}`).catch(() => []);
+    const data = section === "conversations"
+      ? await api(`/conversations?projectId=${id}`).catch(() => [])
+      : await api(`/projects/${id}/${section}`).catch(() => []);
+    const skillCatalog = section === "skills" ? await api("/skills").catch(() => []) : [];
     const title = PROJECT_SECTIONS.find((x) => x[0] === section)?.[1] || section;
     let html = "";
-    if (section === "agents") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Model</th><th>Skills</th><th>Status</th><th></th></tr></thead><tbody>${data.map((a) => `<tr><td><a href="#/agents/${esc(a.id)}"><strong>${esc(a.name)}</strong></a><div class="sub">${esc(a.role)}</div></td><td class="mono">${esc(a.type)}</td><td class="mono">${esc(a.models?.primary || "—")}</td><td>${(a.skills || []).slice(0,4).map((s)=>`<span class="badge badge-muted">${esc(s)}</span>`).join(" ")}</td><td>${a.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</td><td><button class="btn btn-ghost" onclick="projectToggleAgent(${JSON.stringify(p.id)}, ${JSON.stringify(a.id)}, ${JSON.stringify(!a.enabled)})">${a.enabled ? "Disable" : "Enable"}</button><button class="btn btn-ghost" onclick="projectRunAgentType(${JSON.stringify(p.id)}, ${JSON.stringify(a.type)})">Run</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🤖", "No agents", "Run Detect & Agent.md to generate agents.");
+    if (section === "agents") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.filter((a)=>a.enabled).length} enabled · ${data.length} total</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectCreateAgent(${JSON.stringify(p.id)})">＋ New Agent</button></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Model</th><th>Skills</th><th>Status</th><th></th></tr></thead><tbody>${data.map((a) => `<tr><td><a href="#/agents/${esc(a.id)}"><strong>${esc(a.name)}</strong></a><div class="sub">${esc(a.role)}</div></td><td class="mono">${esc(a.type)}</td><td class="mono">${esc(a.models?.primary || "—")}</td><td>${(a.skills || []).slice(0,4).map((s)=>`<span class="badge badge-muted">${esc(s)}</span>`).join(" ")}</td><td>${a.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</td><td style="white-space:nowrap"><button class="btn btn-ghost" onclick="projectToggleAgent(${JSON.stringify(p.id)}, ${JSON.stringify(a.id)}, ${JSON.stringify(!a.enabled)})">${a.enabled ? "Disable" : "Enable"}</button><button class="btn btn-ghost" onclick="projectRunAgentType(${JSON.stringify(p.id)}, ${JSON.stringify(a.type)})">Run</button><button class="btn btn-ghost" title="Delete agent" onclick="projectDeleteAgent(${JSON.stringify(p.id)}, ${JSON.stringify(a.id)})">🗑</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🤖", "No agents", "Run Detect & Agent.md to generate agents."));
     else if (section === "repositories") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Branch</th><th>Role</th><th>Config</th><th></th></tr></thead><tbody>${data.map((r) => `<tr><td class="mono">${r.htmlUrl ? `<a href="${esc(r.htmlUrl)}" target="_blank" rel="noopener">${esc(r.repo)}</a>` : esc(r.repo)}</td><td class="mono">${esc(r.branch)}</td><td>${esc(r.role)}</td><td>${r.isConfigRepo ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-muted">no</span>'}</td><td><button class="btn btn-ghost" onclick="projectEditRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">Edit</button>${data.length > 1 ? `<button class="btn btn-ghost" onclick="projectUnlinkRepo(${JSON.stringify(p.id)}, ${JSON.stringify(r.repo)})">Unlink</button>` : ""}</td></tr>`).join("")}</tbody></table></div><div class="flex mt"><button class="btn btn-primary" onclick="projectAddRepo(${JSON.stringify(p.id)})">＋ Link repository</button></div>` : emptyState("🐙", "No repositories", "Link a repository to use GitHub as the source of truth.");
-    else if (section === "tasks") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Task</th><th>Agent</th><th>Status</th><th>Correlation</th><th>Updated</th><th></th></tr></thead><tbody>${data.map((t) => `<tr><td><strong>${esc(t.title)}</strong><div class="sub">${esc((t.description || "").slice(0, 100))}</div></td><td class="mono">${esc(t.agentType || "auto")}</td><td>${badge(t.status)}</td><td class="mono">${esc((t.correlationId || "").slice(0,12))}</td><td>${timeAgo(t.updatedAt)}</td><td><button class="btn btn-ghost" onclick="projectViewTask(${JSON.stringify(t.id)})">View</button><button class="btn btn-ghost" onclick="projectRunTask(${JSON.stringify(t.id)})">Run</button><button class="btn btn-ghost" onclick="projectCancelTask(${JSON.stringify(t.id)})">Cancel</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🧩", "No tasks", "Create a task or ask AI to queue work.");
-    else if (section === "runs" || section === "tests") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody>${data.map((r) => `<tr><td class="mono">${esc(r.id.slice(0,8))}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td class="mono">${esc(r.modelId || "—")}</td><td>${esc(r.totalTokens)}</td><td>${money(r.costUsd)}</td><td><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a></td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️", section === "tests" ? "No QA runs" : "No runs", "Start an agent or workflow to create executions.");
-    else if (section === "workflows") html = data.length ? data.map((w) => `<div class="list-row"><span>🔀</span><div><strong><a href="#/workflows/${esc(w.id)}">${esc(w.name)}</a></strong><div class="mono" style="color:var(--text-muted)">${esc(w.slug)} · ${w.nodes?.length || 0} nodes · v${w.version}</div></div><span class="spacer"></span>${w.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}<button class="btn btn-ghost" onclick="projectRunWorkflowId(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)})">Run</button></div>`).join("") : emptyState("🔀", "No workflows", "Re-onboard the project to generate a default workflow.");
-    else if (section === "skills") html = data.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px">${data.map((x)=>`<span class="badge badge-info">${esc(x)}</span>`).join("")}</div><div class="flex mt"><a class="btn" href="#/skills">Open Skill Marketplace</a><button class="btn" onclick="projectEdit(${JSON.stringify(p.id)})">Edit Project Stack</button></div>` : emptyState("🛠️", "No skills", "Skills are generated from project capabilities.");
-    else if (section === "memory") html = data.length ? data.map((m) => `<div class="list-row"><span>🗂️</span><div><strong>${esc(m.key)}</strong><div class="sub">${esc(m.type)} · v${esc(m.version)} · ${esc((m.tags || []).join(", "))}</div><p>${esc((m.content || "").slice(0,180))}</p></div></div>`).join("") : emptyState("🗂️", "No memory yet", "Agent summaries and decisions will appear here.");
-    else if (section === "issues" || section === "pull-requests") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Repo</th><th>#</th><th>Title</th><th>Status</th><th></th></tr></thead><tbody>${data.map((x) => `<tr><td class="mono">${esc(x.repo)}</td><td class="mono">#${esc(x.number)}</td><td>${esc(x.title)}</td><td>${badge(x.state || x.status || "open")}</td><td>${x.htmlUrl ? `<a class="btn btn-ghost" href="${esc(x.htmlUrl)}" target="_blank" rel="noopener">Open</a>` : ""}</td></tr>`).join("")}</tbody></table></div>` : emptyState(section === "issues" ? "⭕" : "⑂", section === "issues" ? "No open issues" : "No open pull requests", "GitHub data is loaded per linked repository.");
+    else if (section === "tasks") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.filter((t)=>t.status==="running"||t.status==="queued").length} active · ${data.length} total</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectTask(${JSON.stringify(p.id)})">＋ New Task</button></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Task</th><th>Agent</th><th>Priority</th><th>Status</th><th>Correlation</th><th>Updated</th><th></th></tr></thead><tbody>${orderTasks(data).map((t) => `<tr><td>${t.parentTaskId ? '<span class="badge badge-muted">↳ sub</span> ' : ""}${t.input?.executionMode === "autonomous" ? '<span class="badge badge-ok">autonomous</span> ' : ""}<strong>${esc(t.title)}</strong><div class="sub">${esc((t.description || "").slice(0, 100))}</div></td><td class="mono">${esc(t.agentType || (t.workflowId ? "workflow" : "auto"))}</td><td>${t.priority ? `<span class="badge ${t.priority === "critical" ? "badge-err" : t.priority === "high" ? "badge-warn" : "badge-muted"}">${esc(t.priority)}</span>` : "—"}</td><td>${badge(t.status)}</td><td class="mono">${esc((t.correlationId || "").slice(0,12))}</td><td>${timeAgo(t.updatedAt)}</td><td style="white-space:nowrap"><button class="btn btn-ghost" onclick="projectViewTask(${JSON.stringify(t.id)})">View</button><button class="btn btn-ghost" onclick="projectTaskEdit(${JSON.stringify(t.id)})">Edit</button><button class="btn btn-ghost" onclick="projectRunTask(${JSON.stringify(t.id)})">Run</button><button class="btn btn-ghost" onclick="projectCancelTask(${JSON.stringify(t.id)})">Cancel</button><button class="btn btn-ghost" title="Delete task" onclick="projectTaskDelete(${JSON.stringify(t.id)})">🗑</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🧩", "No tasks", "Create a task or ask AI to queue work."));
+    else if (section === "runs" || section === "tests") html = data.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Model</th><th>Tokens</th><th>Cost</th><th>When</th><th></th></tr></thead><tbody>${data.map((r) => `<tr><td class="mono">${esc(r.id.slice(0,8))}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td class="mono">${esc(r.modelId || "—")}</td><td>${esc(r.totalTokens)}</td><td>${money(r.costUsd)}</td><td>${timeAgo(r.createdAt)}</td><td style="white-space:nowrap"><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a><button class="btn btn-ghost" title="Queue the parent task again" onclick="projectRunTask(${JSON.stringify(r.taskId)})">↻ Re-run</button>${r.status === "failed" || r.error ? `<button class="btn btn-ghost" title="Ask the debugging agent to investigate" onclick="projectDebugRun(${JSON.stringify(r.id)})">🐞 Debug</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️", section === "tests" ? "No QA runs" : "No runs", "Start an agent or workflow to create executions.");
+    else if (section === "workflows") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.filter((w)=>w.enabled).length} enabled · ${data.length} total</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectWorkflowNew(${JSON.stringify(p.id)})">＋ New Workflow</button></div>` + (data.length ? data.map((w) => `<div class="list-row"><span>🔀</span><div><strong><a href="#/workflows/${esc(w.id)}">${esc(w.name)}</a></strong><div class="mono" style="color:var(--text-muted)">${esc(w.slug)} · ${w.nodes?.length || 0} nodes · v${w.version}</div></div><span class="spacer"></span>${w.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}<button class="btn btn-ghost" onclick="projectRunWorkflowId(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)})">Run</button><button class="btn btn-ghost" onclick="projectWorkflowToggle(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)}, ${JSON.stringify(!w.enabled)})">${w.enabled ? "Disable" : "Enable"}</button><button class="btn btn-ghost" title="Delete workflow" onclick="projectWorkflowDelete(${JSON.stringify(p.id)}, ${JSON.stringify(w.id)})">🗑</button></div>`).join("") : emptyState("🔀", "No workflows", "Re-onboard the project to generate a default workflow."));
+    else if (section === "skills") {
+      const attached = new Set(data);
+      const available = skillCatalog.filter((s) => !attached.has(s.slug));
+      html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.length} attached to this project</span><span class="spacer"></span><a class="btn" href="#/skills">Marketplace</a><button class="btn" onclick="projectEdit(${JSON.stringify(p.id)})">Edit Stack</button></div>`
+        + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Skill</th><th>Category</th><th>Version</th><th></th></tr></thead><tbody>${data.map((slug) => { const s = skillCatalog.find((x) => x.slug === slug); return `<tr><td><strong>${esc(s?.name || slug)}</strong><div class="sub mono">${esc(slug)}</div></td><td>${esc(s?.category || "—")}</td><td class="mono">${esc(s?.version || "—")}</td><td style="text-align:right"><button class="btn btn-ghost" onclick="projectSkillDetach(${JSON.stringify(p.id)}, ${JSON.stringify(slug)})">Detach</button></td></tr>`; }).join("")}</tbody></table></div>` : emptyState("🛠️", "No skills attached", "Attach skills below or re-run onboarding."))
+        + `<div class="card-title mt">Attach a skill</div><div class="flex"><select class="select" id="skill-attach-sel" style="flex:1">${available.map((s) => `<option value="${esc(s.slug)}">${esc(s.name)} (${esc(s.slug)})</option>`).join("") || '<option value="">(everything is already attached)</option>'}</select><button class="btn btn-primary" onclick="projectSkillAttach(${JSON.stringify(p.id)})">Attach</button></div>`;
+    }
+    else if (section === "memory") {
+      const types = ["all","architecture","business","technical","decision","bug","knowledge","lesson","conversation"];
+      html = `<div class="flex" style="margin-bottom:10px"><select class="select" id="mem-filter" onchange="projectMemoryFilter(this.value)">${types.map((t) => `<option value="${t}">${t === "all" ? "All types" : t}</option>`).join("")}</select><span class="sub">${data.length} entries</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectMemoryNew(${JSON.stringify(p.id)})">＋ New Entry</button></div>`
+        + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Content</th><th>Tags</th><th></th></tr></thead><tbody id="mem-tbody">${data.map((m) => `<tr data-mtype="${esc(m.type)}"><td><strong>${esc(m.key)}</strong><div class="sub">v${esc(m.version)} · ${esc(m.scope)}</div></td><td><span class="badge badge-info">${esc(m.type)}</span></td><td style="max-width:340px">${esc((m.content || "").slice(0,160))}${(m.content||"").length > 160 ? "…" : ""}</td><td>${(m.tags||[]).map((t)=>`<span class="badge badge-muted">${esc(t)}</span>`).join(" ")}</td><td style="white-space:nowrap"><button class="btn btn-ghost" onclick="projectMemoryEdit(${JSON.stringify(m.id)})">Edit</button><button class="btn btn-ghost" title="Delete entry" onclick="projectMemoryDelete(${JSON.stringify(m.id)})">🗑</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🗂️", "No memory yet", "Agent summaries and decisions will appear here."));
+    }
+    else if (section === "issues") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.length} issues across linked repos</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectIssueNew(${JSON.stringify(p.id)})">＋ New Issue</button></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Repo</th><th>#</th><th>Title</th><th>Status</th><th></th></tr></thead><tbody>${data.map((x) => `<tr><td class="mono">${esc(x.repo)}</td><td class="mono">#${esc(x.number)}</td><td>${esc(x.title)}</td><td>${badge(x.state || x.status || "open")}</td><td>${x.htmlUrl ? `<a class="btn btn-ghost" href="${esc(x.htmlUrl)}" target="_blank" rel="noopener">Open</a>` : ""}</td></tr>`).join("")}</tbody></table></div>` : emptyState("⭕", "No open issues", "GitHub data is loaded per linked repository."));
+    else if (section === "pull-requests") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.length} pull requests across linked repos</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectPRNew(${JSON.stringify(p.id)})">＋ New PR</button></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Repo</th><th>#</th><th>Title</th><th>Status</th><th>Branch</th><th></th></tr></thead><tbody>${data.map((x) => `<tr><td class="mono">${esc(x.repo)}</td><td class="mono">#${esc(x.number)}</td><td>${esc(x.title)}</td><td>${badge(x.state || x.status || "open")}</td><td class="mono">${esc(x.head || "")}${x.base ? " → " + esc(x.base) : ""}</td><td>${x.htmlUrl ? `<a class="btn btn-ghost" href="${esc(x.htmlUrl)}" target="_blank" rel="noopener">Open</a>` : ""}</td></tr>`).join("")}</tbody></table></div>` : emptyState("⑂", "No open pull requests", "Agent pull requests will show up here."));
+    else if (section === "commits") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.length} recent commits across linked repos</span></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Repo</th><th>SHA</th><th>Message</th><th>Author</th><th>Date</th></tr></thead><tbody>${data.map((c) => `<tr><td class="mono">${esc(c.repo)}</td><td class="mono">${esc(String(c.sha||"").slice(0,7))}</td><td>${esc(String(c.message||"").split("\n")[0])}</td><td>${esc(c.author || "—")}</td><td>${timeAgo(c.date)}</td></tr>`).join("")}</tbody></table></div>` : emptyState("📝", "No commits found", "Commits appear once the linked repositories have history."));
+    else if (section === "conversations") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.length} project conversations</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectConversationNew(${JSON.stringify(p.id)})">＋ New Conversation</button></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Title</th><th>Source</th><th>Messages</th><th>Updated</th><th></th></tr></thead><tbody>${data.map((c) => `<tr><td><strong>${esc(c.title)}</strong>${c.summary ? `<div class="sub">${esc(c.summary.slice(0,100))}</div>` : ""}</td><td>${esc(c.source)}</td><td>${(c.messages||[]).length}</td><td>${timeAgo(c.updatedAt)}</td><td style="white-space:nowrap"><button class="btn btn-ghost" onclick="projectConversationOpen(${JSON.stringify(c.id)})">Open</button><button class="btn btn-ghost" title="Delete conversation" onclick="projectConversationDelete(${JSON.stringify(c.id)})">🗑</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("💬", "No conversations yet", "Start a project-aware conversation."));
     else html = miniJson(data);
     $("#content").innerHTML = `${projectCrumbs(p, section)}<div class="overview"><div><h1>${esc(p.name)} / ${esc(title)}</h1><p>${esc(p.description || "")}</p></div>${projectActionBar(p)}</div>${projectSectionNav(p.id, section)}<div class="card card-body">${html}</div>`;
   }
-  ["agents","memory","skills","repositories","workflows","tasks","runs","tests","issues","pull-requests"].forEach((section) => on(`/projects/:id/${section}`, (rest) => renderProjectResource(rest[0], section)));
+  ["agents","memory","skills","repositories","workflows","tasks","runs","tests","issues","pull-requests","commits","conversations"].forEach((section) => on(`/projects/:id/${section}`, (rest) => renderProjectResource(rest[0], section)));
 
   window.projectDryRun = (id) => {
     openModal("Dry Run — preview without changing anything", `<div class="field"><label>What should the agent do?</label><textarea class="textarea" id="dry-text" placeholder="Fix the login bug after the last commit"></textarea></div><div class="flex"><button class="btn btn-primary" id="dry-go">Preview plan</button><button class="btn" onclick="closeModal()">Close</button></div><div id="dry-out" class="mt"></div>`);
@@ -1375,7 +1503,7 @@
     };
   };
   window.projectAsk = (id) => {
-    openModal("Project Assistant — طبق پرامپ پروژه", `<div class="field"><label>درخواست</label><textarea class="textarea" id="ask-prompt" dir="auto" placeholder="مثلاً: پروژه را بررسی کن، بعد از آخرین Commit تست کامل Login را اجرا کن؛ اگر Backend بود درست کن و در نهایت PR بساز."></textarea><div class="field-hint">در حالت Autonomous، سیستم خودش Workflow/Agent مناسب را انتخاب می‌کند، Context پروژه و قوانین GitHub را inject می‌کند و عملیات حساس را به Approval می‌فرستد.</div></div><div class="grid-2"><div class="field"><label>Execution mode</label><select class="select" id="ask-mode"><option value="workflow" selected>Autonomous workflow loop</option><option value="agent">Smart single-agent routing</option><option value="simulation">Simulation / dry-run only</option></select></div><div class="field"><label>Agent hint</label><select class="select" id="ask-agent"><option value="">Auto-detect</option><option value="backend-developer">Backend</option><option value="frontend-developer">Frontend</option><option value="uiux">UI/UX</option><option value="qa-test">QA/Test</option><option value="debugging">Debugging</option><option value="database">Database</option><option value="security">Security</option><option value="devops">DevOps</option><option value="system-architect">Architect</option><option value="research">Research</option><option value="code-reviewer">Code Reviewer</option><option value="documentation">Documentation</option></select></div></div><div class="flex"><button class="btn btn-primary" id="ask-go">Start</button><button class="btn" onclick="closeModal()">Cancel</button></div><div id="ask-result" class="mt"></div>`);
+    openModal("Project Assistant — طبق پرامپ پروژه", `<div class="field"><label>درخواست</label><textarea class="textarea" id="ask-prompt" dir="auto" placeholder="مثلاً: پروژه را بررسی کن، بعد از آخرین Commit تست کامل Login را اجرا کن؛ اگر Backend بود درست کن و در نهایت PR بساز."></textarea><div class="field-hint">در حالت Autonomous، سیستم خودش Workflow/Agent مناسب را انتخاب می‌کند، Context پروژه و قوانین GitHub را inject می‌کند و عملیات حساس را به Approval می‌فرستد.</div></div><div class="grid-2"><div class="field"><label>Execution mode</label><select class="select" id="ask-mode"><option value="autonomous" selected>Autonomous task loop (research → build → test → fix)</option><option value="workflow">Autonomous workflow loop</option><option value="agent">Smart single-agent routing</option><option value="simulation">Simulation / dry-run only</option></select></div><div class="field"><label>Agent hint</label><select class="select" id="ask-agent"><option value="">Auto-detect</option><option value="backend-developer">Backend</option><option value="frontend-developer">Frontend</option><option value="uiux">UI/UX</option><option value="qa-test">QA/Test</option><option value="debugging">Debugging</option><option value="database">Database</option><option value="security">Security</option><option value="devops">DevOps</option><option value="system-architect">Architect</option><option value="research">Research</option><option value="code-reviewer">Code Reviewer</option><option value="documentation">Documentation</option></select></div></div><div class="flex"><button class="btn btn-primary" id="ask-go">Start</button><button class="btn" onclick="closeModal()">Cancel</button></div><div id="ask-result" class="mt"></div>`);
     const inp = $("#ask-prompt");
     inp.addEventListener("input", () => applyTextDirection(inp, inp.value));
     $("#ask-go").onclick = async () => {
@@ -1557,33 +1685,45 @@
       } catch (e) { toast("Import failed", e.message, "err"); }
     };
   };
+  const PROJECT_PERMISSION_GROUPS = [["project","Project"],["agent","Agent"],["workflow","Workflow"],["model","Model"],["provider","Provider"],["skill","Skill"],["memory","Memory"],["repository","Repository"],["deployment","Deployment"],["secret","Secrets"],["telegram","Telegram"],["admin","Admin"]];
   window.projectEdit = async (id) => {
     openModal("Edit project", `<div class="repo-empty">Loading…</div>`, { wide: true });
-    const [p, catalog, models] = await Promise.all([api("/projects/" + id), loadOptionCatalog(), api("/models").catch(() => [])]);
+    const [p, catalog, models, agents] = await Promise.all([api("/projects/" + id), loadOptionCatalog(), api("/models").catch(() => []), api(`/projects/${id}/agents`).catch(() => [])]);
     const caps = p.capabilities || {};
     const b = p.settings?.budget || {};
     const selectedModel = p.defaultModelId || "";
+    const selectedAgent = p.defaultAgentId || "";
+    const perms = p.settings?.permissions || {};
+    const permTab = `<div class="field-hint" style="margin-bottom:8px">Project-level permission matrix — gates what this project's members, agents and workflows may touch.</div><div class="grid-2">${PROJECT_PERMISSION_GROUPS.map(([g, label]) => `<div class="field"><label>${esc(label)}</label><label class="check"><input type="checkbox" data-perm="${g}.read" ${perms[`${g}.read`] !== false ? "checked" : ""}/> read</label><label class="check"><input type="checkbox" data-perm="${g}.write" ${perms[`${g}.write`] !== false ? "checked" : ""}/> write</label></div>`).join("")}</div>`;
+    const reposTab = `<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Branch</th><th>Role</th><th>Config</th><th></th></tr></thead><tbody>${(p.repositories || []).map((r) => `<tr><td class="mono">${esc(r.repo)}</td><td class="mono">${esc(r.branch)}</td><td>${esc(r.role)}</td><td>${r.isConfigRepo ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-muted">no</span>'}</td><td><button class="btn btn-ghost pe-unlink" data-repo="${esc(r.repo)}">Unlink</button></td></tr>`).join("")}</tbody></table></div><div class="flex mt"><button class="btn btn-primary" id="pe-link-repo">＋ Link repository</button></div><div class="field-hint">Branch, role and config-repo switches live in the edit dialog of each repository link.</div>`;
     $("#modal-body").innerHTML = `
       ${tabsHtml("pe", [
-        { id: "identity", label: "Identity", html: `<div class="field"><label>Name</label><input class="input" id="pe-name" value="${esc(p.name)}"/></div><div class="field"><label>Description</label><textarea class="textarea" id="pe-desc">${esc(p.description || "")}</textarea></div><div class="grid-2"><div class="field"><label>Status</label><select class="select" id="pe-active"><option value="true" ${p.active ? "selected" : ""}>Active</option><option value="false" ${!p.active ? "selected" : ""}>Inactive</option></select></div><div class="field"><label>Environment</label><select class="select" id="pe-env">${["development","staging","production"].map((x)=>`<option value="${x}" ${x === (p.settings?.environment || "development") ? "selected" : ""}>${x}</option>`).join("")}</select></div></div><div class="grid-2"><div class="field"><label>Default model</label><select class="select" id="pe-model"><option value="">Project router default</option>${models.map((m)=>`<option value="${esc(m.id)}" ${m.id === selectedModel ? "selected" : ""}>${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div><div class="field"><label>Telegram chat</label><input class="input mono" id="pe-telegram" value="${esc(p.telegramChatId || "")}" placeholder="not connected"/></div></div>` },
+        { id: "identity", label: "Identity", html: `<div class="field"><label>Name</label><input class="input" id="pe-name" value="${esc(p.name)}"/></div><div class="field"><label>Description</label><textarea class="textarea" id="pe-desc">${esc(p.description || "")}</textarea></div><div class="grid-2"><div class="field"><label>Status</label><select class="select" id="pe-active"><option value="true" ${p.active ? "selected" : ""}>Active</option><option value="false" ${!p.active ? "selected" : ""}>Inactive</option></select></div><div class="field"><label>Environment</label><select class="select" id="pe-env">${["development","staging","production"].map((x)=>`<option value="${x}" ${x === (p.settings?.environment || "development") ? "selected" : ""}>${x}</option>`).join("")}</select></div></div><div class="grid-2"><div class="field"><label>Default model</label><select class="select" id="pe-model"><option value="">Project router default</option>${models.map((m)=>`<option value="${esc(m.id)}" ${m.id === selectedModel ? "selected" : ""}>${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div><div class="field"><label>Telegram chat</label><input class="input mono" id="pe-telegram" value="${esc(p.telegramChatId || "")}" placeholder="not connected"/></div></div><div class="grid-2"><div class="field"><label>Default agent</label><select class="select" id="pe-agent"><option value="">Auto (router decides)</option>${agents.map((a)=>`<option value="${esc(a.id)}" ${a.id === selectedAgent ? "selected" : ""}>${esc(a.name)} (${esc(a.type)})</option>`).join("")}</select></div><div class="field"><label>Memory repository</label><select class="select" id="pe-memrepo"><option value="">Config repo (.ai-engineering)</option>${(p.repositories || []).map((r)=>`<option value="${esc(r.repo)}" ${r.repo === (p.memoryRepo || "") ? "selected" : ""}>${esc(r.repo)}</option>`).join("")}</select><div class="field-hint">Where versioned memory snapshots live.</div></div></div>` },
         { id: "capabilities", label: "Capabilities", html: `${CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], caps[k] || [], { placeholder: ph, single: new Set(catalog.singleSelectKeys || ["databases"]).has(k) })).join("")}${chipGroupHtml("agentTypes", "Agents to generate", catalog.agentTypes || [], caps.agentTypes || [], { core: catalog.coreAgentTypes || [], allowCustom: false, hint: "Saving re-runs onboarding: generated system prompts are refreshed with the new stack, agents outside the roster are disabled (never deleted)." })}` },
+        { id: "permissions", label: "Permissions", html: permTab },
+        { id: "repositories", label: "Repositories", html: reposTab },
         { id: "operations", label: "Operations", html: `<div class="grid-2"><div class="field"><label>Max tokens per run</label><input class="input" type="number" id="pe-b-tokens" value="${esc(b.maxTokensPerRun ?? 20000)}"/></div><div class="field"><label>Max calls per run</label><input class="input" type="number" id="pe-b-calls" value="${esc(b.maxCallsPerRun ?? 20)}"/></div><div class="field"><label>Max cost per run (USD)</label><input class="input" type="number" step="0.01" id="pe-b-cost" value="${esc(b.maxCostUsdPerRun ?? 5)}"/></div><div class="field"><label>Max duration (ms)</label><input class="input" type="number" id="pe-b-ms" value="${esc(b.maxDurationMs ?? 300000)}"/></div></div><div class="field"><label>Notifications</label><input class="input" id="pe-notifications" value="${esc((p.settings?.notifications || []).join(", "))}" placeholder="web, telegram"/></div><div class="field"><label>Metadata (JSON)</label><textarea class="textarea mono" id="pe-meta">${esc(JSON.stringify(p.settings?.metadata || {}, null, 2))}</textarea></div>` },
       ])}
       <div class="flex mt"><button class="btn btn-primary" id="pe-save">Save & re-onboard</button><button class="btn" id="pe-save-lite">Save without onboarding</button><button class="btn btn-danger" id="pe-delete">Delete project</button><button class="btn" onclick="closeModal()">Cancel</button></div>`;
     bindChipGroups($("#modal-body"));
+    $("#pe-link-repo").onclick = () => { closeModal(); projectAddRepo(id); };
+    $$(".pe-unlink", $("#modal-body")).forEach((btn) => { btn.onclick = () => { const repo = btn.dataset.repo; closeModal(); projectUnlinkRepo(id, repo); }; });
     const saveProject = async (reonboard) => {
       const metadataText = $("#pe-meta")?.value || "{}";
       let metadata = {};
       try { metadata = JSON.parse(metadataText); } catch (_) { toast("Invalid metadata JSON", "Fix the Operations tab metadata field", "err"); return; }
+      const permissions = {};
+      $$("[data-perm]", $("#modal-body")).forEach((c) => { permissions[c.dataset.perm] = c.checked; });
       try {
         await api("/projects/" + id, { method: "PATCH", body: {
           name: $("#pe-name").value.trim(), description: $("#pe-desc").value,
-          active: $("#pe-active").value === "true", defaultModelId: $("#pe-model").value, telegramChatId: $("#pe-telegram").value.trim(),
+          active: $("#pe-active").value === "true", defaultModelId: $("#pe-model").value, defaultAgentId: $("#pe-agent").value, memoryRepo: $("#pe-memrepo").value, telegramChatId: $("#pe-telegram").value.trim(),
           capabilities: readChipGroups($("#modal-body")), reonboard,
           settings: {
             environment: $("#pe-env").value,
             notifications: ($("#pe-notifications").value || "").split(",").map((x)=>x.trim()).filter(Boolean),
             metadata,
+            permissions,
             budget: { maxTokensPerRun: Number($("#pe-b-tokens").value) || 0, maxCallsPerRun: Number($("#pe-b-calls").value) || 0, maxCostUsdPerRun: Number($("#pe-b-cost").value) || 0, maxDurationMs: Number($("#pe-b-ms").value) || 0 },
           },
         } });
@@ -1597,6 +1737,192 @@
       try { await api(`/projects/${id}`, { method: "DELETE" }); closeModal(); toast("Project deleted", p.name, "ok"); location.hash = "#/projects"; }
       catch (e) { toast("Delete failed", e.message, "err"); }
     };
+  };
+
+  /* ---------- project sub-resource actions ---------- */
+  window.projectCreateAgent = async (id) => {
+    openModal("New Agent", `<div class="repo-empty">Loading agent types…</div>`, { wide: true });
+    const [types, models] = await Promise.all([api("/agents/types").catch(() => []), api("/models").catch(() => [])]);
+    $("#modal-body").innerHTML = `<div class="field"><label>Agent type</label><select class="select" id="nca-type">${types.map((t) => `<option value="${esc(t.type)}">${esc(t.role)} (${esc(t.type)})</option>`).join("")}</select><div class="field-hint" id="nca-mission"></div></div>
+      <div class="grid-2"><div class="field"><label>Name <span class="sub">optional — defaults to the role</span></label><input class="input" id="nca-name" placeholder=""/></div><div class="field"><label>Primary model <span class="sub">optional — project default otherwise</span></label><select class="select" id="nca-model"><option value="">Project default</option>${models.filter((m)=>m.active).map((m) => `<option value="${esc(m.id)}">${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div></div>
+      <div class="field"><label>Role <span class="sub">optional</span></label><input class="input" id="nca-role" placeholder=""/></div>
+      <div class="field"><label>Description <span class="sub">optional</span></label><textarea class="textarea" id="nca-desc" placeholder=""></textarea></div>
+      <div class="field"><label>System prompt <span class="sub">optional — auto-generated from the project stack when empty</span></label><textarea class="textarea mono" id="nca-prompt" style="min-height:140px" placeholder="Leave empty for the generated default…"></textarea></div>
+      <div class="flex"><button class="btn btn-primary" id="nca-go">Create agent</button><button class="btn" onclick="closeModal()">Cancel</button></div>`;
+    const syncMission = () => { const t = types.find((x) => x.type === $("#nca-type").value); $("#nca-mission").textContent = t ? t.mission : ""; };
+    $("#nca-type").onchange = syncMission; syncMission();
+    $("#nca-go").onclick = async () => {
+      const body = { projectId: id, type: $("#nca-type").value };
+      const name = $("#nca-name").value.trim(); if (name) body.name = name;
+      const role = $("#nca-role").value.trim(); if (role) body.role = role;
+      const desc = $("#nca-desc").value.trim(); if (desc) body.description = desc;
+      const prompt = $("#nca-prompt").value.trim(); if (prompt) body.systemPrompt = prompt;
+      const model = $("#nca-model").value; if (model) body.models = { primary: model, fallbacks: [], specialized: {} };
+      try { const a = await api("/agents", { method: "POST", body }); closeModal(); toast("Agent created", a.name, "ok"); refreshCurrent(); }
+      catch (e) { toast("Create failed", e.message, "err"); }
+    };
+  };
+  window.projectDeleteAgent = async (projectId, agentId) => {
+    if (!confirm("Delete this agent? Its run history is kept, but it will no longer run.")) return;
+    try { await api(`/agents/${agentId}`, { method: "DELETE" }); toast("Agent deleted", "", "ok"); refreshCurrent(); }
+    catch (e) { toast("Delete failed", e.message, "err"); }
+  };
+  window.projectMemoryFilter = (value) => {
+    document.querySelectorAll("#mem-tbody tr").forEach((tr) => {
+      tr.style.display = value === "all" || tr.dataset.mtype === value ? "" : "none";
+    });
+  };
+  window.projectMemoryNew = (id) => {
+    openModal("New Memory Entry", `<div class="field"><label>Type</label><select class="select" id="pmn-type">${["architecture","business","technical","decision","bug","knowledge","lesson","conversation"].map((t)=>`<option ${t === "knowledge" ? "selected" : ""}>${t}</option>`).join("")}</select></div><div class="field"><label>Key</label><input class="input mono" id="pmn-key" placeholder="auth.session-strategy"/></div><div class="field"><label>Content</label><textarea class="textarea" id="pmn-content"></textarea></div><div class="field"><label>Tags (comma separated)</label><input class="input" id="pmn-tags"/></div><div class="flex"><button class="btn btn-primary" id="pmn-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pmn-go").onclick = async () => {
+      const key = $("#pmn-key").value.trim(); const content = $("#pmn-content").value.trim();
+      if (!key || !content) { toast("Key and content are required", "", "err"); return; }
+      try {
+        await api("/memory", { method: "POST", body: { projectId: id, scope: "project", type: $("#pmn-type").value, key, content, tags: $("#pmn-tags").value.split(",").map((t) => t.trim()).filter(Boolean) } });
+        closeModal(); toast("Memory saved", key, "ok"); refreshCurrent();
+      } catch (e) { toast("Error", e.message, "err"); }
+    };
+  };
+  window.projectMemoryEdit = async (entryId) => {
+    const m = await api(`/memory/${entryId}`);
+    openModal("Edit Memory Entry", `<div class="field"><label>Type</label><select class="select" id="pme-type">${["architecture","business","technical","decision","bug","knowledge","lesson","conversation"].map((t)=>`<option ${t === m.type ? "selected" : ""}>${t}</option>`).join("")}</select></div><div class="field"><label>Key</label><input class="input mono" id="pme-key" value="${esc(m.key)}"/></div><div class="field"><label>Content</label><textarea class="textarea" id="pme-content">${esc(m.content)}</textarea></div><div class="field"><label>Tags (comma separated)</label><input class="input" id="pme-tags" value="${esc((m.tags||[]).join(", "))}"/></div><div class="flex"><button class="btn btn-primary" id="pme-go">Save (v${m.version + 1})</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pme-go").onclick = async () => {
+      try {
+        await api(`/memory/${entryId}`, { method: "PATCH", body: { type: $("#pme-type").value, key: $("#pme-key").value.trim(), content: $("#pme-content").value, tags: $("#pme-tags").value.split(",").map((t) => t.trim()).filter(Boolean) } });
+        closeModal(); toast("Memory updated", "", "ok"); refreshCurrent();
+      } catch (e) { toast("Error", e.message, "err"); }
+    };
+  };
+  window.projectMemoryDelete = async (entryId) => {
+    if (!confirm("Delete this memory entry?")) return;
+    try { await api(`/memory/${entryId}`, { method: "DELETE" }); toast("Memory deleted", "", "ok"); refreshCurrent(); }
+    catch (e) { toast("Delete failed", e.message, "err"); }
+  };
+  window.projectSkillAttach = async (id) => {
+    const slug = $("#skill-attach-sel")?.value;
+    if (!slug) { toast("Nothing to attach", "", "err"); return; }
+    try { await api(`/projects/${id}/skills`, { method: "POST", body: { slug } }); toast("Skill attached", slug, "ok"); refreshCurrent(); }
+    catch (e) { toast("Attach failed", e.message, "err"); }
+  };
+  window.projectSkillDetach = async (id, slug) => {
+    try { await api(`/projects/${id}/skills/${encodeURIComponent(slug)}`, { method: "DELETE" }); toast("Skill detached", slug, "ok"); refreshCurrent(); }
+    catch (e) { toast("Detach failed", e.message, "err"); }
+  };
+  window.projectWorkflowNew = async (id) => {
+    const agents = await api(`/projects/${id}/agents`).catch(() => []);
+    const enabled = agents.filter((a) => a.enabled);
+    openModal("New Workflow", `<div class="field"><label>Name</label><input class="input" id="pwn-name" placeholder="My agent pipeline"/></div><div class="field"><label>Description</label><input class="input" id="pwn-desc" placeholder="What does this workflow do?"/></div><div class="field"><label>Agents in order <span class="sub">checked agents run top → bottom</span></label><div style="display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px">${enabled.map((a) => `<label class="check"><input type="checkbox" data-agent="${esc(a.type)}" checked/> <span class="mono">${esc(a.type)}</span> — ${esc(a.name)}</label>`).join("") || '<span class="sub">No enabled agents</span>'}</div></div><label class="check"><input type="checkbox" id="pwn-approval" checked/> Require human approval at the end (merge / deploy / sensitive steps)</label><div class="flex mt"><button class="btn btn-primary" id="pwn-go">Create workflow</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pwn-go").onclick = async () => {
+      const name = $("#pwn-name").value.trim();
+      if (!name) { toast("Name required", "", "err"); return; }
+      const picked = [...document.querySelectorAll("[data-agent]:checked")].map((c) => c.dataset.agent);
+      if (!picked.length) { toast("Pick at least one agent", "", "err"); return; }
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `workflow-${Date.now()}`;
+      const nodes = picked.map((t, i) => ({ id: `${slug}-${i + 1}-${t}`, type: "agent", name: t, config: { agentType: t }, retries: 1 }));
+      if ($("#pwn-approval").checked) nodes.push({ id: `${slug}-approval`, type: "approval", name: "Human approval before PR / merge / deploy", config: { message: "Review the agent result before any merge, deployment, migration, or other sensitive operation." }, retries: 0 });
+      const edges = nodes.slice(0, -1).map((n, i) => ({ from: n.id, to: nodes[i + 1].id }));
+      try {
+        await api("/workflows", { method: "POST", body: { projectId: id, name, slug, description: $("#pwn-desc").value.trim(), nodes, edges, enabled: true } });
+        closeModal(); toast("Workflow created", name, "ok"); refreshCurrent();
+      } catch (e) { toast("Create failed", e.message, "err"); }
+    };
+  };
+  window.projectWorkflowToggle = async (projectId, workflowId, enable) => {
+    try { await api(`/workflows/${workflowId}`, { method: "PATCH", body: { enabled: enable } }); toast(enable ? "Workflow enabled" : "Workflow disabled", "", "ok"); refreshCurrent(); }
+    catch (e) { toast("Error", e.message, "err"); }
+  };
+  window.projectWorkflowDelete = async (projectId, workflowId) => {
+    if (!confirm("Delete this workflow? Queued tasks that reference it will fail.")) return;
+    try { await api(`/workflows/${workflowId}`, { method: "DELETE" }); toast("Workflow deleted", "", "ok"); refreshCurrent(); }
+    catch (e) { toast("Delete failed", e.message, "err"); }
+  };
+  window.projectTaskEdit = async (taskId) => {
+    const t = await api(`/tasks/${taskId}`);
+    const agents = await api(`/projects/${t.projectId}/agents`).catch(() => []);
+    openModal("Edit Task", `<div class="field"><label>Title</label><input class="input" id="pte-title" value="${esc(t.title)}"/></div><div class="field"><label>Description</label><textarea class="textarea" id="pte-desc">${esc(t.description || "")}</textarea></div><div class="grid-2"><div class="field"><label>Priority</label><select class="select" id="pte-prio">${["low","medium","high","critical"].map((x) => `<option ${x === (t.priority || "medium") ? "selected" : ""}>${x}</option>`).join("")}</select></div><div class="field"><label>Agent</label><select class="select" id="pte-agent"><option value="">Auto / workflow</option>${agents.map((a) => `<option value="${esc(a.type)}" ${a.type === t.agentType ? "selected" : ""}>${esc(a.name)} (${esc(a.type)})</option>`).join("")}</select></div></div><div class="flex"><button class="btn btn-primary" id="pte-go">Save</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pte-go").onclick = async () => {
+      try {
+        await api(`/tasks/${taskId}`, { method: "PATCH", body: { title: $("#pte-title").value.trim(), description: $("#pte-desc").value, priority: $("#pte-prio").value, agentType: $("#pte-agent").value || undefined } });
+        closeModal(); toast("Task updated", "", "ok"); refreshCurrent();
+      } catch (e) { toast("Error", e.message, "err"); }
+    };
+  };
+  window.projectTaskDelete = async (taskId) => {
+    if (!confirm("Delete this task? Its run history is kept.")) return;
+    try { await api(`/tasks/${taskId}`, { method: "DELETE" }); toast("Task deleted", "", "ok"); refreshCurrent(); }
+    catch (e) { toast("Delete failed", e.message, "err"); }
+  };
+  window.projectIssueNew = async (id) => {
+    const p = await api(`/projects/${id}`);
+    const repos = p.repositories || [];
+    openModal("New Issue", `<div class="field"><label>Repository</label><select class="select" id="pin-repo">${repos.map((r) => `<option value="${esc(r.repo)}" ${r.isConfigRepo ? "selected" : ""}>${esc(r.repo)}</option>`).join("")}</select></div><div class="field"><label>Title</label><input class="input" id="pin-title"/></div><div class="field"><label>Body</label><textarea class="textarea" id="pin-body" placeholder="Describe the issue…"></textarea></div><div class="flex"><button class="btn btn-primary" id="pin-go">Create issue</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pin-go").onclick = async () => {
+      const title = $("#pin-title").value.trim();
+      if (!title) { toast("Title required", "", "err"); return; }
+      try { const issue = await api(`/projects/${id}/issues`, { method: "POST", body: { repo: $("#pin-repo").value, title, body: $("#pin-body").value } }); closeModal(); toast("Issue created", `#${issue.number}`, "ok"); refreshCurrent(); }
+      catch (e) { toast("Create failed", e.message, "err"); }
+    };
+  };
+  window.projectPRNew = async (id) => {
+    const p = await api(`/projects/${id}`);
+    const repos = p.repositories || [];
+    openModal("New Pull Request", `<div class="field"><label>Repository</label><select class="select" id="ppr-repo">${repos.map((r) => `<option value="${esc(r.repo)}" ${r.isConfigRepo ? "selected" : ""}>${esc(r.repo)}</option>`).join("")}</select></div><div class="grid-2"><div class="field"><label>Head (from)</label><select class="select" id="ppr-head"><option>main</option></select></div><div class="field"><label>Base (into)</label><select class="select" id="ppr-base"><option>main</option></select></div></div><div class="field"><label>Title</label><input class="input" id="ppr-title"/></div><div class="field"><label>Body</label><textarea class="textarea" id="ppr-body" placeholder="Summary · changes · tests · risks"></textarea></div><div class="flex"><button class="btn btn-primary" id="ppr-go">Create PR</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    const loadBranches = async () => {
+      const repo = $("#ppr-repo").value;
+      const branches = await api(`/projects/${id}/branches?repo=${encodeURIComponent(repo)}`).catch(() => [{ name: "main" }]);
+      const opts = (branches.length ? branches : [{ name: "main" }]).map((b) => `<option>${esc(b.name)}</option>`).join("");
+      $("#ppr-head").innerHTML = opts; $("#ppr-base").innerHTML = opts;
+      const current = (repos.find((r) => r.repo === repo) || {}).branch || "main";
+      $("#ppr-base").value = current;
+    };
+    $("#ppr-repo").onchange = loadBranches;
+    await loadBranches();
+    $("#ppr-go").onclick = async () => {
+      const title = $("#ppr-title").value.trim();
+      if (!title) { toast("Title required", "", "err"); return; }
+      try { const pr = await api(`/projects/${id}/pull-requests`, { method: "POST", body: { repo: $("#ppr-repo").value, title, body: $("#ppr-body").value, head: $("#ppr-head").value, base: $("#ppr-base").value } }); closeModal(); toast("PR created", `#${pr.number}`, "ok"); refreshCurrent(); }
+      catch (e) { toast("Create failed", e.message, "err"); }
+    };
+  };
+  window.projectConversationNew = async (id) => {
+    openModal("New Conversation", `<div class="field"><label>Title</label><input class="input" id="pcn-title" placeholder="e.g. Login debugging session"/></div><div class="flex"><button class="btn btn-primary" id="pcn-go">Start</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pcn-go").onclick = async () => {
+      const title = $("#pcn-title").value.trim() || "Conversation";
+      try { const c = await api("/conversations", { method: "POST", body: { projectId: id, title, source: "web" } }); closeModal(); toast("Conversation started", title, "ok"); projectConversationOpen(c.id); }
+      catch (e) { toast("Create failed", e.message, "err"); }
+    };
+  };
+  window.projectConversationOpen = async (convId) => {
+    const render = async () => {
+      const c = await api(`/conversations/${convId}`);
+      openModal(c.title, `<div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow:auto;margin-bottom:10px">${(c.messages || []).length ? c.messages.map((m) => `<div class="list-row"><span>${m.role === "user" ? "🧑" : "🤖"}</span><div><div class="sub">${esc(m.role)} · ${timeAgo(m.createdAt)}</div><p>${esc(m.content)}</p></div></div>`).join("") : emptyState("💬", "No messages yet", "Write the first message below.")}</div>${c.summary ? `<div class="field"><label>Summary</label><pre class="mini-pre">${esc(c.summary)}</pre></div>` : ""}<div class="field"><label>Message</label><textarea class="textarea" id="pcv-msg" dir="auto" placeholder="Ask about this project…"></textarea></div><div class="flex"><button class="btn btn-primary" id="pcv-send">Send</button><button class="btn" id="pcv-sum">Summarize</button><button class="btn" onclick="closeModal()">Close</button></div>`, { wide: true });
+      $("#pcv-send").onclick = async () => {
+        const content = $("#pcv-msg").value.trim();
+        if (!content) return;
+        try { await api(`/conversations/${convId}/messages`, { method: "POST", body: { role: "user", content } }); render(); }
+        catch (e) { toast("Send failed", e.message, "err"); }
+      };
+      $("#pcv-sum").onclick = async () => {
+        try { const s = await api(`/conversations/${convId}/summarize`, { method: "POST", body: {} }); toast("Summary updated", s.method || "", "ok"); render(); }
+        catch (e) { toast("Summarize failed", e.message, "err"); }
+      };
+    };
+    await render();
+  };
+  window.projectConversationDelete = async (convId) => {
+    if (!confirm("Delete this conversation?")) return;
+    try { await api(`/conversations/${convId}`, { method: "DELETE" }); toast("Conversation deleted", "", "ok"); refreshCurrent(); }
+    catch (e) { toast("Delete failed", e.message, "err"); }
+  };
+  window.projectDebugRun = async (runId) => {
+    try {
+      const r = await api(`/runs/${runId}`);
+      const failed = (r.steps || []).filter((s) => s.status === "failed");
+      const desc = `Investigate failed run ${String(runId).slice(0, 8)} (${r.agentType}).\nError: ${r.error || failed.map((s) => `${s.label}: ${s.detail || ""}`).join("; ") || "unknown"}\nFailed steps: ${failed.map((s) => s.label).join(", ") || "—"}\nDiagnose the root cause; do not change code blindly.`;
+      const t = await api("/tasks", { method: "POST", body: { projectId: r.projectId, title: `Debug failed ${r.agentType} run`, description: desc, priority: "high", agentType: "debugging" } });
+      await api(`/tasks/${t.id}/run`, { method: "POST", body: {} });
+      closeModal(); toast("Debugging agent dispatched", `task ${t.id.slice(0, 8)}`, "ok"); refreshCurrent();
+    } catch (e) { toast("Error", e.message, "err"); }
   };
 
   /* AGENTS (global) */
@@ -1620,14 +1946,23 @@
   }
 
   /* AGENT DETAIL */
+  window.agentDelete = async (agentId, projectId) => {
+    if (!confirm("Delete this agent? Its run history is kept, but it will no longer run.")) return;
+    try { await api(`/agents/${agentId}`, { method: "DELETE" }); toast("Agent deleted", "", "ok"); location.hash = projectId ? `#/projects/${projectId}/agents` : "#/agents"; }
+    catch (e) { toast("Delete failed", e.message, "err"); }
+  };
   on("/agents/:id", async (rest) => {
     const id = rest[0];
     const a = await api("/agents/" + id);
     $("#content").innerHTML = `
+      <div class="field-hint"><a href="#/agents">Agents</a> / <a href="#/projects/${esc(a.projectId)}/agents">${esc(a.projectId.slice(0,12))}</a> / ${esc(a.type)}</div>
       <div class="overview"><div><h1>${esc(a.name)}</h1><p>${esc(a.role)} — ${esc(a.type)}</p></div>
         <div class="action-row">
+          <a class="btn" href="#/projects/${esc(a.projectId)}/agents">← Project</a>
+          <button class="btn btn-primary" onclick="projectRunAgentType(${JSON.stringify(a.projectId)}, ${JSON.stringify(a.type)})">▶ Run</button>
           ${a.enabled ? `<button class="btn" id="toggle-agent">Disable</button>` : `<button class="btn btn-primary" id="toggle-agent">Enable</button>`}
-          <button class="btn btn-primary" onclick="editPrompt('${a.id}')">✏️ Edit Prompt</button>
+          <button class="btn" onclick="editPrompt('${a.id}')">✏️ Edit Prompt</button>
+          <button class="btn btn-danger" onclick="agentDelete(${JSON.stringify(a.id)}, ${JSON.stringify(a.projectId)})">🗑 Delete</button>
         </div></div>
       <div class="grid-2">
         <div class="card card-body">
@@ -1666,6 +2001,67 @@
         <td style="white-space:nowrap"><button class="btn btn-ghost" onclick="promptDiff('${id}', ${v.version})">Diff vs current</button>${v.current ? "" : `<button class="btn btn-ghost" onclick="promptRestore('${id}', ${v.version})">Restore</button>`}</td></tr>`).join("") || `<tr><td colspan="5">${emptyState("📝", "No versions yet", "Edit the prompt to create v1.")}</td></tr>`}
       </tbody></table></div>`;
     $("#content").appendChild(panel);
+    // Observability: per-agent stats + recent runs + cost.
+    const [statsRows, agentRuns, agentCosts] = await Promise.all([
+      api(`/observability/agents?agentId=${id}`).catch(() => []),
+      api(`/runs?agentId=${id}`).catch(() => []),
+      api(`/costs?agentId=${id}`).catch(() => []),
+    ]);
+    const st = statsRows[0] || { totalRuns: 0, success: 0, failure: 0, avgDuration: 0, tokens: 0, costUsd: 0, errorRate: 0 };
+    const costTotal = agentCosts.reduce((s, c) => s + (c.estimatedCostUsd || 0), 0);
+    const statsPanel = document.createElement("div");
+    statsPanel.className = "card card-body mt";
+    statsPanel.innerHTML = `<div class="card-title">Performance <span class="sub">observability · last ${agentRuns.length} runs</span></div>
+      <div class="stat-grid">
+        <div class="card stat"><div class="stat-label">Runs</div><div class="stat-value">${st.totalRuns}</div><div class="stat-sub">${st.success} ok · ${st.failure} failed</div></div>
+        <div class="card stat"><div class="stat-label">Error rate</div><div class="stat-value">${st.errorRate}%</div></div>
+        <div class="card stat"><div class="stat-label">Avg duration</div><div class="stat-value">${st.avgDuration}ms</div></div>
+        <div class="card stat"><div class="stat-label">Tokens</div><div class="stat-value">${Number(st.tokens || 0).toLocaleString()}</div></div>
+        <div class="card stat"><div class="stat-label">Est. cost</div><div class="stat-value">${money(costTotal || st.costUsd)}</div><div class="stat-sub">${agentCosts.length} model calls</div></div>
+      </div>
+      ${agentRuns.length ? `<div class="table-wrap mt"><table><thead><tr><th>Run</th><th>Status</th><th>Tokens</th><th>Cost</th><th>When</th><th></th></tr></thead><tbody>${agentRuns.slice(0, 8).map((r) => `<tr><td class="mono">${esc(r.id.slice(0, 8))}</td><td>${badge(r.status)}</td><td>${esc(r.totalTokens)}</td><td>${money(r.costUsd)}</td><td>${timeAgo(r.createdAt)}</td><td><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a></td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️", "No runs yet", "Run this agent from its project page.")}`;
+    $("#content").appendChild(statsPanel);
+    // Agent Builder: models / skills / tools / permissions / limits.
+    const [allModels, allSkills, allTools] = await Promise.all([
+      api("/models").catch(() => []),
+      api("/skills").catch(() => []),
+      api("/tools").catch(() => []),
+    ]);
+    const AGENT_PERMS = ["github.read","github.write","repository.read","repository.write","memory.read","memory.write","project.read","project.write","deployment.read","deployment.write"];
+    const builder = document.createElement("div");
+    builder.className = "card card-body mt";
+    builder.innerHTML = `<div class="card-title">Agent Builder <span class="sub">models · skills · tools · permissions · limits</span></div>
+      <div class="grid-2">
+        <div class="field"><label>Primary model</label><select class="select" id="ab-model"><option value="">Router default</option>${allModels.filter((m) => m.active).map((m) => `<option value="${esc(m.id)}" ${m.id === (a.models?.primary || "") ? "selected" : ""}>${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div>
+        <div class="field"><label>Fallback models <span class="sub">tried A → B → C on failure</span></label><div style="display:flex;flex-wrap:wrap;gap:6px;max-height:120px;overflow:auto">${allModels.filter((m) => m.active).map((m) => `<label class="check"><input type="checkbox" data-fb="${esc(m.id)}" ${(a.models?.fallbacks || []).includes(m.id) ? "checked" : ""}/> ${esc(m.displayName || m.modelId)}</label>`).join("")}</div></div>
+      </div>
+      <div class="field"><label>Skills</label><div style="display:flex;flex-wrap:wrap;gap:6px">${allSkills.map((s) => `<label class="check"><input type="checkbox" data-sk="${esc(s.slug)}" ${(a.skills || []).includes(s.slug) ? "checked" : ""}/> ${esc(s.name)}</label>`).join("") || '<span class="sub">No skills in catalog</span>'}</div></div>
+      <div class="field"><label>Tools</label><div style="display:flex;flex-wrap:wrap;gap:6px">${allTools.map((t) => `<label class="check" title="${esc(t.description || "")}"><input type="checkbox" data-tl="${esc(t.name)}" ${(a.tools || []).includes(t.name) ? "checked" : ""}/> <span class="mono">${esc(t.name)}</span>${t.dangerous ? ' <span class="badge badge-warn">dangerous</span>' : ""}</label>`).join("") || '<span class="sub">No tools registered</span>'}</div><div class="field-hint">Dangerous tools (write / merge / deploy / migrate) are approval-gated at runtime.</div></div>
+      <div class="field"><label>Permissions</label><div style="display:flex;flex-wrap:wrap;gap:6px">${AGENT_PERMS.map((pm) => `<label class="check"><input type="checkbox" data-pm="${pm}" ${(a.permissions || []).includes(pm) ? "checked" : ""}/> <span class="mono">${pm}</span></label>`).join("")}</div></div>
+      <div class="grid-2">
+        <div class="field"><label>Max iterations</label><input class="input" type="number" id="ab-iter" value="${esc(a.maxIterations ?? 5)}"/></div>
+        <div class="field"><label>Timeout (ms)</label><input class="input" type="number" id="ab-timeout" value="${esc(a.timeoutMs ?? 120000)}"/></div>
+        <div class="field"><label>Token budget</label><input class="input" type="number" id="ab-budget" value="${esc(a.tokenBudget ?? 20000)}"/></div>
+        <div class="field"><label>Memory sources (comma separated)</label><input class="input" id="ab-mem" value="${esc((a.memorySources || []).join(", "))}"/></div>
+      </div>
+      <div class="flex mt"><button class="btn btn-primary" id="ab-save">Save agent</button><span class="sub">Prompt edits keep version history; config saves bump v${a.version} → v${a.version + 1}.</span></div>`;
+    $("#content").appendChild(builder);
+    $("#ab-save").onclick = async () => {
+      const pick = (sel, attr) => [...document.querySelectorAll(sel)].filter((c) => c.checked).map((c) => c.getAttribute(attr));
+      try {
+        await api(`/agents/${id}`, { method: "PATCH", body: {
+          models: { primary: $("#ab-model").value, fallbacks: pick("[data-fb]", "data-fb"), specialized: a.models?.specialized || {} },
+          skills: pick("[data-sk]", "data-sk"),
+          tools: pick("[data-tl]", "data-tl"),
+          permissions: pick("[data-pm]", "data-pm"),
+          maxIterations: Number($("#ab-iter").value) || 5,
+          timeoutMs: Number($("#ab-timeout").value) || 120000,
+          tokenBudget: Number($("#ab-budget").value) || 20000,
+          memorySources: $("#ab-mem").value.split(",").map((x) => x.trim()).filter(Boolean),
+        } });
+        toast("Agent saved", a.name, "ok"); refreshCurrent();
+      } catch (e) { toast("Save failed", e.message, "err"); }
+    };
   });
   window.promptDiff = async (id, from) => {
     const d = await api(`/agents/${id}/prompt-versions/diff?from=${from}&to=current`);
@@ -3295,7 +3691,7 @@
     const c = await api(`/runs/${id}/console`);
     $("#content").innerHTML = `
       <div class="overview"><div><h1>Run Console</h1><p class="mono">${esc(c.runId)}</p></div>
-        <div class="action-row">${badge(c.status)}<span class="pill">Model: ${esc(c.modelId || "—")}</span></div></div>
+        <div class="action-row">${badge(c.status)}<span class="pill">Model: ${esc(c.modelId || "—")}</span><a class="btn" href="#/projects/${esc(c.projectId)}/runs">← Project runs</a><button class="btn" onclick="projectRunTask(${JSON.stringify(c.taskId)})">↻ Retry task</button>${c.status === "failed" || c.error ? `<button class="btn btn-primary" onclick="projectDebugRun(${JSON.stringify(c.runId)})">🐞 Send to debugging agent</button>` : ""}</div></div>
       <div class="stat-grid">
         <div class="card stat"><div class="stat-label">Agent</div><div class="stat-value" style="font-size:16px">${esc(c.agent)}</div></div>
         <div class="card stat"><div class="stat-label">Tokens</div><div class="stat-value">${c.tokens.total}</div><div class="stat-sub">in ${c.tokens.input} · out ${c.tokens.output}</div></div>
@@ -3307,7 +3703,7 @@
           <div class="step-ico">${s.status==="succeeded"?"✓":s.status==="failed"?"✗":s.status==="running"?"▶":s.status==="skipped"?"⏭":"○"}</div>
           <div><div class="step-label">${s.index+1}. ${esc(s.label)}</div>${s.detail?`<div class="step-detail">${esc(s.detail)}</div>`:""}${s.tool?`<div class="step-detail mono">tool: ${esc(s.tool)}</div>`:""}</div>
         </div>`).join("") || "No steps yet"}</div>
-        ${c.error ? `<div class="error-state mt"><h4>Error</h4><pre>${esc(c.error)}</pre></div>` : ""}
+        ${(c.error || (c.steps || []).some((s) => s.status === "failed")) ? `<div class="error-state mt"><h4>What happened</h4><pre>${esc(c.error || "One or more steps failed — see below.")}</pre>${(c.steps || []).filter((s) => s.status === "failed").map((s) => `<div class="meter-row"><span class="lbl">${esc(s.label)}</span><span class="mono">${esc(s.tool || "step")}</span></div>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ""}`).join("")}<div class="field-hint">Suggested: retry once — if it fails again, send the run to the debugging agent for root-cause analysis.</div><div class="flex mt"><button class="btn" onclick="projectRunTask(${JSON.stringify(c.taskId)})">↻ Retry</button><button class="btn btn-primary" onclick="projectDebugRun(${JSON.stringify(c.runId)})">🐞 Send to agent</button></div></div>` : ""}
       </div>`;
   });
 

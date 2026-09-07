@@ -68,7 +68,23 @@ export const readFileTool: ToolDefinition = {
   timeoutMs: 15000,
   async execute(ctx: ToolContext, input) {
     const repo = toRepoRef(ctx.project.configRepo);
-    const path = str(input.path);
+    let path = str(input.path);
+    if (!path) {
+      // Default inspection (used by deterministic agent plans): prefer the
+      // project's AI brief / docs so "inspect before changing" always reads
+      // something meaningful instead of failing on a missing path.
+      const candidates = ["Agent.md", "README.md", ".ai-engineering/project.yaml", "package.json"];
+      for (const candidate of candidates) {
+        const hit = await ctx.github.getFile(repo, candidate, ctx.project.branch).catch(() => undefined);
+        if (hit) {
+          return { ok: true, output: hit.content.slice(0, 8000), data: { path: candidate, sha: hit.sha } };
+        }
+      }
+      const entries = await ctx.github.listFiles(repo, ctx.project.branch).catch(() => []);
+      const first = entries.find((e) => e.type === "blob");
+      if (!first) return { ok: true, output: "Repository is empty — nothing to read yet.", data: { empty: true } };
+      path = first.path;
+    }
     const file = await ctx.github.getFile(repo, path, ctx.project.branch);
     if (!file) return { ok: false, output: `File not found: ${path}` };
     return { ok: true, output: file.content.slice(0, 8000), data: { path, sha: file.sha } };

@@ -146,6 +146,23 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim();
     if (typeof body.description === "string") patch.description = body.description;
     if (typeof body.defaultModelId === "string") patch.defaultModelId = body.defaultModelId || undefined;
+    if (typeof body.defaultAgentId === "string") {
+      const agentId = body.defaultAgentId.trim();
+      if (agentId) {
+        const agentRec = container.agentRepo.findById(agentId);
+        if (!agentRec || agentRec.data.projectId !== id) {
+          return fail(reply, 400, "defaultAgentId must be an agent of this project");
+        }
+        patch.defaultAgentId = agentId;
+      } else {
+        patch.defaultAgentId = undefined;
+      }
+    }
+    if (typeof body.memoryRepo === "string") {
+      const mem = body.memoryRepo.trim();
+      if (mem && !isValidRepoFullName(mem)) return fail(reply, 400, `Invalid memory repository "${mem}" — expected owner/name`);
+      patch.memoryRepo = mem || undefined;
+    }
     if (typeof body.telegramChatId === "string") patch.telegramChatId = body.telegramChatId || undefined;
     if (typeof body.active === "boolean") patch.active = body.active;
     if (body.settings && typeof body.settings === "object") patch.settings = { ...p.settings, ...(body.settings as Partial<Project["settings"]>) };
@@ -166,6 +183,14 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       patch.repositories = p.repositories.map((r) => (r === cfg ? { ...r, repo, branch } : r));
     }
     const updated = save({ ...p, ...patch, id });
+    container.auditRepo.record({
+      action: "project.updated",
+      projectId: id,
+      result: "success",
+      source: "web",
+      correlationId: `project-${id}-${Date.now()}`,
+      metadata: { fields: Object.keys(patch) },
+    });
     // Capability edits normally refresh generated agents/prompts, but UI callers
     // can explicitly send reonboard:false when they are only saving metadata or
     // want to stage stack changes before regenerating the roster.
@@ -279,6 +304,223 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return out;
   });
 
+  // ---- Project overview: one call for the whole project dashboard page ----
+  app.get("/projects/:id/overview", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const gh = githubForProject(req, p);
+    const agents = container.agentRepo.byProject(id);
+    const tasks = container.taskRepo.byProject(id);
+    const runs = container.runRepo.byProject(id);
+    const workflows = container.workflowRepo.byProject(id);
+    const memory = container.memoryRepo.byProject(id);
+    const cost = container.costRepo.totals({ projectId: id });
+    const qaRuns = runs.filter((r) => r.agentType === "qa-test");
+    const lastQa = qaRuns[0];
+
+    const issues: Array<Record<string, unknown>> = [];
+    const prs: Array<Record<string, unknown>> = [];
+    const commits: Array<Record<string, unknown>> = [];
+    for (const link of p.repositories) {
+      const ref = parseRepoFullName(link.repo);
+      if (!ref) continue;
+      try {
+        for (const i of await gh.listIssues(ref)) issues.push({ repo: link.repo, ...i });
+      } catch { /* per-repo failures must not hide the others */ }
+      try {
+        for (const pr of await gh.listPullRequests(ref)) prs.push({ repo: link.repo, ...pr });
+      } catch { /* ignore */ }
+      try {
+        for (const c of await gh.listCommits(ref, link.branch)) commits.push({ repo: link.repo, ...c });
+      } catch { /* ignore */ }
+    }
+    commits.sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
+
+    const errors = runs
+      .filter((r) => r.status === "failed" || !!r.error)
+      .slice(0, 5)
+      .map((r) => ({
+        runId: r.id,
+        taskId: r.taskId,
+        agentType: r.agentType,
+        error: r.error ?? r.steps.find((s) => s.status === "failed")?.detail ?? "run failed",
+        createdAt: r.createdAt,
+      }));
+    const decisions = memory.filter((m) => m.type === "decision").slice(0, 5);
+    const activity = [
+      ...runs.slice(0, 20).map((r) => ({ kind: "run", id: r.id, title: `${r.agentType} run`, status: r.status, at: r.createdAt })),
+      ...tasks.slice(0, 20).map((t) => ({ kind: "task", id: t.id, title: t.title, status: t.status, at: t.updatedAt })),
+    ]
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+      .slice(0, 12);
+    const budget = p.settings.budget;
+    return {
+      project: p,
+      status: p.active ? "active" : "inactive",
+      counts: {
+        agents: agents.length,
+        agentsEnabled: agents.filter((a) => a.enabled).length,
+        tasks: tasks.length,
+        tasksRunning: tasks.filter((t) => t.status === "running" || t.status === "queued").length,
+        tasksWaiting: tasks.filter((t) => t.status === "waiting_for_approval").length,
+        runs: runs.length,
+        runsFailed: runs.filter((r) => r.status === "failed").length,
+        workflows: workflows.length,
+        memory: memory.length,
+        skills: p.settings.skills.length,
+        issues: issues.length,
+        pullRequests: prs.length,
+        commits: commits.length,
+        repositories: p.repositories.length,
+      },
+      testStatus: {
+        total: qaRuns.length,
+        succeeded: qaRuns.filter((r) => r.status === "succeeded").length,
+        failed: qaRuns.filter((r) => r.status === "failed").length,
+        lastRun: lastQa
+          ? { id: lastQa.id, status: lastQa.status, agentType: lastQa.agentType, createdAt: lastQa.createdAt }
+          : null,
+      },
+      openIssues: issues.filter((i) => String(i.state ?? "open").toLowerCase() === "open").slice(0, 5),
+      openPRs: prs.filter((x) => String(x.state ?? "open").toLowerCase() === "open").slice(0, 5),
+      recentCommits: commits.slice(0, 8),
+      recentErrors: errors,
+      recentDecisions: decisions,
+      recentRuns: runs.slice(0, 8).map((r) => ({
+        id: r.id, agentType: r.agentType, status: r.status,
+        totalTokens: r.totalTokens, costUsd: r.costUsd, durationMs: r.durationMs, createdAt: r.createdAt,
+      })),
+      activity,
+      cost,
+      budget,
+    };
+  });
+
+  // ---- Recent commits across the linked repositories ----
+  app.get("/projects/:id/commits", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { repo?: string; limit?: string };
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const gh = githubForProject(req, p);
+    const targets = q.repo ? p.repositories.filter((r) => r.repo === q.repo) : p.repositories;
+    const out: Array<Record<string, unknown>> = [];
+    for (const link of targets) {
+      const ref = parseRepoFullName(link.repo);
+      if (!ref) continue;
+      try {
+        for (const c of await gh.listCommits(ref, link.branch)) out.push({ repo: link.repo, branch: link.branch, ...c });
+      } catch { /* ignore per-repo failures */ }
+    }
+    out.sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
+    const limit = Math.min(Math.max(Number(q.limit) || 30, 1), 100);
+    return out.slice(0, limit);
+  });
+
+  // ---- Branches of one linked repository (repo picker / PR form) ----
+  app.get("/projects/:id/branches", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { repo?: string };
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const target = q.repo
+      ? p.repositories.find((r) => r.repo.toLowerCase() === String(q.repo).toLowerCase())
+      : configRepoOf(p.repositories);
+    if (!target) return fail(reply, 404, "repository is not linked to this project");
+    const ref = parseRepoFullName(target.repo);
+    if (!ref) return fail(reply, 400, `Invalid repository "${target.repo}"`);
+    try {
+      const gh = githubForProject(req, p);
+      return await gh.listBranches(ref);
+    } catch (err) {
+      return fail(reply, errStatus(err), err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  // ---- Create an issue on a linked repository ----
+  app.post("/projects/:id/issues", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const title = String(body.title ?? "").trim();
+    if (!title) return fail(reply, 400, "Issue title is required");
+    const target = typeof body.repo === "string" && body.repo
+      ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
+      : configRepoOf(p.repositories);
+    if (!target) return fail(reply, 404, "repository is not linked to this project");
+    const ref = parseRepoFullName(target.repo);
+    if (!ref) return fail(reply, 400, `Invalid repository "${target.repo}"`);
+    try {
+      const gh = githubForProject(req, p);
+      const issue = await gh.createIssue(ref, title, String(body.body ?? ""));
+      container.auditRepo.record({
+        action: "github.issue.created", projectId: id, result: "success", source: "web",
+        correlationId: `issue-${id}-${Date.now()}`, metadata: { repo: target.repo, number: issue.number, title },
+      });
+      reply.code(201);
+      return { repo: target.repo, ...issue };
+    } catch (err) {
+      return fail(reply, errStatus(err), err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  // ---- Create a pull request on a linked repository ----
+  app.post("/projects/:id/pull-requests", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const title = String(body.title ?? "").trim();
+    const head = String(body.head ?? "").trim();
+    const base = String(body.base ?? "").trim();
+    if (!title) return fail(reply, 400, "Pull request title is required");
+    if (!head || !base) return fail(reply, 400, "Both head and base branches are required");
+    const target = typeof body.repo === "string" && body.repo
+      ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
+      : configRepoOf(p.repositories);
+    if (!target) return fail(reply, 404, "repository is not linked to this project");
+    const ref = parseRepoFullName(target.repo);
+    if (!ref) return fail(reply, 400, `Invalid repository "${target.repo}"`);
+    try {
+      const gh = githubForProject(req, p);
+      const pr = await gh.createPullRequest(ref, title, String(body.body ?? ""), head, base);
+      container.auditRepo.record({
+        action: "github.pr.created", projectId: id, result: "success", source: "web",
+        correlationId: `pr-${id}-${Date.now()}`, metadata: { repo: target.repo, number: pr.number, title, head, base },
+      });
+      reply.code(201);
+      return { repo: target.repo, ...pr };
+    } catch (err) {
+      return fail(reply, errStatus(err), err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  // ---- Attach / detach project skills (without a full re-onboard) ----
+  app.post("/projects/:id/skills", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { slug?: string; slugs?: string[] };
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const slugs = [...(body.slug ? [body.slug] : []), ...(Array.isArray(body.slugs) ? body.slugs : [])]
+      .map((s) => String(s).trim())
+      .filter(Boolean);
+    if (!slugs.length) return fail(reply, 400, "Skill slug is required");
+    const unknown = slugs.filter((s) => !container.skillRepo.findBySlug(s));
+    if (unknown.length) return fail(reply, 404, `Unknown skill(s): ${unknown.join(", ")}`);
+    const next = save({ ...p, settings: { ...p.settings, skills: [...new Set([...p.settings.skills, ...slugs])] } });
+    return next.settings.skills;
+  });
+
+  app.delete("/projects/:id/skills/:slug", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id, slug } = req.params as { id: string; slug: string };
+    const p = load(id);
+    if (!p) return fail(reply, 404, "project not found");
+    const next = save({ ...p, settings: { ...p.settings, skills: p.settings.skills.filter((s) => s !== slug) } });
+    return next.settings.skills;
+  });
+
   const workflowForIntent = (projectId: string, text: string): string | undefined => {
     const workflows = container.workflowRepo.byProject(projectId).filter((w) => w.enabled);
     const lower = text.toLowerCase();
@@ -295,7 +537,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (!project) return fail(reply, 404, "project not found");
     const title = String(body.title ?? "AI request");
     const description = String(body.description ?? body.prompt ?? title);
-    const executionMode = body.executionMode === "agent" || body.executionMode === "simulation" ? body.executionMode : "workflow";
+    const executionMode = body.executionMode === "agent" || body.executionMode === "simulation" || body.executionMode === "autonomous" ? body.executionMode : "workflow";
     const routedAgentType = (body.agentType as AgentType | undefined) ?? container.agentRouter.route(`${title} ${description}`);
     const workflowId = typeof body.workflowId === "string" && body.workflowId
       ? body.workflowId
@@ -322,7 +564,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       projectId: id,
       title,
       description,
-      agentType: workflowId ? undefined : routedAgentType,
+      agentType: workflowId || executionMode === "autonomous" ? undefined : routedAgentType,
       workflowId,
       input: { ...(body.input as Record<string, unknown> | undefined ?? {}), routedAgentType, executionMode },
     });

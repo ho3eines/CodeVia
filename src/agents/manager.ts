@@ -17,9 +17,11 @@ import type { AgentRunner } from "./runner.js";
 import { TaskCancelledError } from "./runner.js";
 import type { WorkflowEngine } from "../workflow/engine.js";
 import type { AgentRouter } from "./router.js";
+import { AutonomousOrchestrator } from "./orchestrator.js";
 import type { AgentGenerator } from "./generator.js";
 import type { SkillRepository } from "../skills/registry.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
+import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { IGitHubService } from "../github/types.js";
 import { parseRepoFullName } from "../github/types.js";
 import type { Permission } from "../types.js";
@@ -77,6 +79,7 @@ export interface CreateTaskInput {
   projectId: string;
   title: string;
   description?: string;
+  priority?: Task["priority"];
   agentType?: AgentType;
   workflowId?: string;
   input?: Record<string, unknown>;
@@ -100,6 +103,8 @@ export interface AgentManagerDeps {
   modelRepo: ModelRepository;
   providerRepo: ProviderRepository;
   github: IGitHubService;
+  /** Real-AI access for the autonomous task loop (optional — loop stays deterministic without it). */
+  providerRegistry?: ProviderRegistry;
 }
 
 /**
@@ -185,7 +190,7 @@ export class AgentManager {
   }
 
   /** Online onboarding: analyze repo, generate agents/skills/workflows/rules. */
-  async onboardProject(projectId: string, tech: string[] = []): Promise<{ agents: number; skills: number }> {
+  async onboardProject(projectId: string, tech: string[] = []): Promise<{ agents: number; skills: number; seeded: number }> {
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!stored) throw new Error(`Project ${projectId} not found`);
     const project = hydrateProject(stored);
@@ -232,7 +237,9 @@ export class AgentManager {
       rules: discovered.length,
       detected: { languages: detected.capabilities.languages, frameworks: detected.capabilities.frameworks, databases: detected.capabilities.databases },
     });
-    return { agents: agents.length, skills: seeded };
+    // `skills` = skills attached to the project (what the UI reports);
+    // `seeded` = newly-seeded built-in catalog entries (0 after the first run).
+    return { agents: agents.length, skills: skills.length, seeded };
   }
 
   /**
@@ -579,6 +586,7 @@ export class AgentManager {
       parentTaskId: input.parentTaskId,
       title: input.title,
       description: input.description ?? "",
+      priority: input.priority ?? "medium",
       status: "created",
       agentType: input.agentType,
       correlationId: generateCorrelationId(),
@@ -602,10 +610,36 @@ export class AgentManager {
     live.emit({ type: "task.updated", taskId, data: { status: "running" } });
 
     try {
-      if (task.workflowId) {
+      if ((task.input as Record<string, unknown> | undefined)?.executionMode === "autonomous" && !task.workflowId) {
+        // Autonomous task loop: research → breakdown → implement → QA gate → fix loop.
+        const orchestrator = new AutonomousOrchestrator({
+          projectRepo: this.deps.projectRepo,
+          taskRepo: this.deps.taskRepo,
+          agentRepo: this.deps.agentRepo,
+          agentRunner: this.deps.agentRunner,
+          agentRouter: this.agentRouter,
+          github: this.deps.github,
+          modelRepo: this.deps.modelRepo,
+          providerRepo: this.deps.providerRepo,
+          providerRegistry: this.deps.providerRegistry,
+        });
+        await orchestrator.run(taskId);
+      } else if (task.workflowId) {
         const workflow = this.deps.workflowRepo.findById(task.workflowId)?.data;
         if (!workflow) throw new Error(`Workflow ${task.workflowId} not found`);
-        await this.deps.workflowEngine.run(workflow, project, task, task.input);
+        const result = await this.deps.workflowEngine.run(workflow, project, task, task.input);
+        if (result.status === "waiting_for_approval") {
+          const waiting: Task = { ...this.deps.taskRepo.findById(taskId)!.data, status: "waiting_for_approval", approvalRequired: true, updatedAt: new Date().toISOString() };
+          this.deps.taskRepo.upsert(waiting, { projectId: task.projectId, parentId: task.parentTaskId });
+          live.emit({ type: "task.updated", taskId, data: { status: "waiting_for_approval" } });
+          return waiting;
+        }
+        if (result.status === "failed") {
+          const failedNodes = result.trace.filter((t) => t.status === "failed").map((t) => t.node);
+          throw new Error(
+            `Workflow "${workflow.name}" failed${failedNodes.length ? ` at: ${failedNodes.join(", ")}` : ""}`,
+          );
+        }
       } else {
         await this.routeAndRun(task, project);
       }

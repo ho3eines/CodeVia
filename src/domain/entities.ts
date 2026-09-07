@@ -343,6 +343,8 @@ export interface Workflow {
 /* ------------------------------------------------------------------ *
  * Task / Run
  * ------------------------------------------------------------------ */
+export type TaskPriority = "low" | "medium" | "high" | "critical";
+
 export interface Task {
   id: ID;
   projectId: ID;
@@ -350,6 +352,7 @@ export interface Task {
   parentTaskId?: ID;
   title: string;
   description: string;
+  priority?: TaskPriority;
   status: TaskStatus;
   agentType?: AgentType;
   assignedAgentId?: ID;

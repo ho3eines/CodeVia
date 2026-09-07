@@ -51,10 +51,13 @@ describe("AgentManager end-to-end (mock GitHub + mock AI)", () => {
     // The routed agent should be debugging (as requested).
     expect(first.agentType).toBe("debugging");
     expect(result.status).toBe("succeeded");
-    // Steps should include a commit + a created PR.
+    // Debugging is diagnosis-only (read-only agent): it must produce a
+    // genuinely successful run — not a task that "succeeds" with a failed run.
+    expect(first.status).toBe("succeeded");
     const labels = first.steps.map((s) => s.label).join(" | ");
-    expect(labels).toContain("Implement the change");
-    expect(labels).toContain("Create pull request");
+    expect(labels).toContain("Diagnose root cause");
+    expect(labels).toContain("Propose fix and responsible agent");
+    expect(labels).not.toContain("Create pull request");
   });
 
   it("keeps agents isolated across multiple projects (no roster collision)", async () => {

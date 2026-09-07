@@ -75,6 +75,9 @@ export class WorkflowEngine {
             });
             output = { runId: run.id, status: run.status, steps: run.steps };
             record.status = run.status === "succeeded" ? "succeeded" : "failed";
+            // A failed agent run fails the workflow (best-effort: siblings still
+            // run so their diagnostics are collected), an approval wait pauses it.
+            if (run.status === "failed" || run.status === "cancelled") status = "failed";
             if (run.status === "waiting_for_approval") status = "waiting_for_approval";
             break;
           }
@@ -115,6 +118,7 @@ export class WorkflowEngine {
             );
             output = result;
             record.status = result.ok ? "succeeded" : "failed";
+            if (!result.ok) status = "failed";
             break;
           }
           case "condition": {
@@ -166,6 +170,9 @@ export class WorkflowEngine {
 
     const walk = async (nodeId: string): Promise<void> => {
       await execNode(nodeId);
+      // A rejected approval pauses the workflow: downstream nodes must NOT run
+      // until a human approves (or the run is retried).
+      if (status === "waiting_for_approval") return;
       // Follow outgoing edges, but only traverse a branch when a condition node
       // produced a truthy value and the edge condition (if any) matches.
       const edges = workflow.edges.filter((e) => e.from === nodeId);

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { AgentRouter } from "../agents/router.js";
 import { defaultPlanFor } from "../agents/plan.js";
+import { scaffoldFor } from "../agents/generator.js";
 import { ContextEngine } from "../ai/context-engine.js";
 import type { Agent, Project, Task } from "../domain/entities.js";
 
@@ -35,9 +36,12 @@ describe("AgentRouter (Autonomous Error Routing)", () => {
 
 function agent(type: Agent["type"]): Agent {
   const now = new Date().toISOString();
+  // Realistic toolbox + permissions (same scaffold onboarding uses), because
+  // plans are permission-aware: read-only agents must not get write steps.
+  const scaffold = scaffoldFor(type);
   return {
     id: "a1", projectId: "p1", type, name: "Agent", slug: type, role: "", description: "",
-    systemPrompt: "", skills: [], tools: [], permissions: [],
+    systemPrompt: "", skills: [...scaffold.skills], tools: [...scaffold.tools], permissions: [...scaffold.permissions],
     models: { primary: "m", fallbacks: [], specialized: {} },
     maxIterations: 5, timeoutMs: 1000, tokenBudget: 100, memorySources: [],
     enabled: true, version: 1, createdAt: now, updatedAt: now,
@@ -63,6 +67,25 @@ describe("defaultPlanFor", () => {
   it("produces a QA plan that includes classifying failures", () => {
     const plan = defaultPlanFor(agent("qa-test"), task());
     expect(plan.map((s) => s.label.toLowerCase()).join(" ")).toContain("classify failures");
+  });
+
+  it("gives read-only agents executable plans (no write/PR steps they cannot run)", () => {
+    for (const type of ["research", "qa-test", "security", "code-reviewer", "debugging"] as const) {
+      const a = agent(type);
+      const plan = defaultPlanFor(a, task());
+      const tools = plan.map((s) => s.tool).filter(Boolean) as string[];
+      expect(tools).not.toContain("write_file");
+      expect(tools).not.toContain("create_pull_request");
+      for (const t of tools) expect(a.tools).toContain(t);
+    }
+  });
+
+  it("gives the debugging agent a diagnosis plan that hands off to a fixer", () => {
+    const plan = defaultPlanFor(agent("debugging"), task());
+    const labels = plan.map((s) => s.label).join(" | ");
+    expect(labels).toContain("Diagnose root cause");
+    expect(labels).toContain("Propose fix and responsible agent");
+    expect(plan.find((s) => s.label.includes("Propose fix"))?.chainTo).toBe("backend-developer");
   });
 });
 

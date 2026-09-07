@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
-import type { Agent } from "../../domain/entities.js";
+import type { Agent, AgentType } from "../../domain/entities.js";
+import { AGENT_TYPES, AgentGenerator, isAgentType, scaffoldFor } from "../../agents/generator.js";
+import { hydrateProject } from "../../domain/project-options.js";
 import { diffLines, diffSummary } from "../../prompts/versions.js";
 import { resolveRequestUser } from "../auth.js";
 
@@ -9,29 +11,77 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     return container.agentRepo.findMany().map((r) => r.data);
   });
 
-  app.post("/agents", { schema: { tags: ["agents"] } }, async (req) => {
-    const body = req.body as Record<string, unknown>;
+  /** Tool catalog for the Agent Builder (name, permissions, danger flag). */
+  app.get("/tools", { schema: { tags: ["tools"] } }, async () => {
+    return container.toolRegistry.list().map((t) => ({
+      name: t.name,
+      description: t.description,
+      dangerous: t.dangerous,
+      permissions: t.permissions,
+      timeoutMs: t.timeoutMs,
+    }));
+  });
+
+  /** Agent-type catalog (scaffold defaults) for the "New agent" form. */
+  app.get("/agents/types", { schema: { tags: ["agents"] } }, async () => {
+    return AGENT_TYPES.map((type: AgentType) => ({ type, ...scaffoldFor(type) }));
+  });
+
+  app.post("/agents", { schema: { tags: ["agents"] } }, async (req, reply) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const projectId = String(body.projectId ?? "");
+    const projectRec = projectId ? container.projectRepo.findById(projectId) : undefined;
+    if (!projectRec) {
+      reply.code(404);
+      return { error: "project not found — an agent must belong to a project" };
+    }
+    if (!isAgentType(body.type)) {
+      reply.code(400);
+      return { error: `Unknown agent type "${String(body.type)}" — see GET /agents/types` };
+    }
+    const type: AgentType = body.type;
+    const scaffold = scaffoldFor(type);
+    const project = hydrateProject(projectRec.data);
+    const nonEmptyStrings = (v: unknown): string[] | undefined =>
+      Array.isArray(v) && v.length ? v.map((x) => String(x)) : undefined;
+    // Omitted skills/tools/permissions/models fall back to the type scaffold so
+    // a hand-created agent is executable immediately (same defaults as onboarding).
+    const generator = new AgentGenerator(container.agentRepo, container.skillRepo, container.modelRepo);
+    const systemPrompt =
+      typeof body.systemPrompt === "string" && body.systemPrompt.trim()
+        ? body.systemPrompt
+        : generator.promptFor(type, project);
     const agent = container.agentRepo.create({
-      projectId: String(body.projectId),
-      type: (body.type as Agent["type"]) ?? "backend-developer",
-      name: String(body.name ?? "Agent"),
-      slug: String(body.slug ?? body.type ?? "agent"),
-      role: String(body.role ?? ""),
-      description: String(body.description ?? ""),
-      configPath: body.configPath as string | undefined,
-      systemPrompt: String(body.systemPrompt ?? ""),
-      projectPrompt: body.projectPrompt as string | undefined,
-      skills: (body.skills as string[]) ?? [],
-      tools: (body.tools as string[]) ?? [],
-      permissions: (body.permissions as string[]) ?? [],
-      models: body.models as Agent["models"] ?? { primary: "", fallbacks: [], specialized: {} },
-      maxIterations: Number(body.maxIterations ?? 5),
+      projectId,
+      type,
+      name: String(body.name ?? scaffold.role),
+      slug: String(body.slug ?? type),
+      role: String(body.role ?? scaffold.role),
+      description: String(body.description ?? scaffold.mission),
+      configPath: (body.configPath as string | undefined) ?? `.ai-engineering/agents/${type}.yaml`,
+      systemPrompt,
+      projectPrompt: (body.projectPrompt as string | undefined) ?? project.description,
+      skills: nonEmptyStrings(body.skills) ?? [...scaffold.skills],
+      tools: nonEmptyStrings(body.tools) ?? [...scaffold.tools],
+      permissions: nonEmptyStrings(body.permissions) ?? [...scaffold.permissions],
+      models: (body.models as Agent["models"] | undefined) ?? generator.modelsFor(project.defaultModelId, type),
+      maxIterations: Number(body.maxIterations ?? (type === "backend-developer" ? 10 : 5)),
       timeoutMs: Number(body.timeoutMs ?? 120000),
       tokenBudget: Number(body.tokenBudget ?? 20000),
-      memorySources: (body.memorySources as string[]) ?? [],
+      memorySources: nonEmptyStrings(body.memorySources) ?? ["project", type],
       enabled: body.enabled !== false,
     });
     container.promptVersionRepo.snapshot(agent, { source: "web:create" });
+    container.auditRepo.record({
+      action: "agent.created",
+      projectId,
+      agentId: agent.id,
+      result: "success",
+      source: "web",
+      correlationId: `agent-${agent.id}-${Date.now()}`,
+      metadata: { type },
+    });
+    reply.code(201);
     return agent;
   });
 
@@ -189,7 +239,11 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
 
   app.get("/agents/:id/history", { schema: { tags: ["agents"] } }, async (req) => {
     const { id } = req.params as { id: string };
-    return container.runRepo.findMany({ parentId: id }).map((r) => r.data);
+    // Runs are indexed by parent task, so filter by agent explicitly.
+    return container.runRepo
+      .findMany()
+      .map((r) => r.data)
+      .filter((r) => r.agentId === id);
   });
 
   app.delete("/agents/:id", { schema: { tags: ["agents"] } }, async (req) => {
