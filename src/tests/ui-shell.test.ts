@@ -87,6 +87,49 @@ describe("UI shell", () => {
     expect(errors).toEqual([]);
   }, 60000);
 
+  it("wires every project action-bar button to a complete, callable handler", async () => {
+    const project = await container.agentManager.createProject({
+      name: "Action Bar QA",
+      description: "Seeded to verify the project toolbar buttons actually fire.",
+      configRepo: "acme/action-bar-qa",
+      branch: "main",
+    });
+    const { win, go } = await boot();
+    const content = await go(`#/projects/${project.id}`);
+    const bar = content.querySelector(".action-row") as El;
+    expect(bar, "project action bar rendered").toBeTruthy();
+    const buttons = [...bar.querySelectorAll("button")] as Array<El & { textContent: string | null; getAttribute(a: string): string | null; click(): void }>;
+    // ❓ Ask AI · ▶ Run Agent · ＋ Create Task · 🔀 Run Workflow · 🧪 Dry Run · 📏 Rules
+    // ↻ Load / fill missing · ⬇ Pull · 📱 Telegram · ⇩ Export · ⇧ Import · ⏸ Deactivate · ⚙ Edit
+    expect(buttons.length).toBeGreaterThanOrEqual(13);
+    const called = new Map<string, unknown[]>();
+    for (const btn of buttons) {
+      const attr = btn.getAttribute("onclick");
+      expect(attr, `button "${btn.textContent?.trim()}" has an onclick handler`).toBeTruthy();
+      // Regression: an unescaped ${JSON.stringify(id)} inside the double-quoted
+      // onclick attribute made the HTML parser truncate the handler (e.g. to
+      // `projectRun(`), so the click threw a SyntaxError and nothing happened.
+      const m = /^([A-Za-z_$][\w$]*)\(([\s\S]*)\)$/.exec(attr!);
+      expect(m, `handler for "${btn.textContent?.trim()}" is a complete call, got: ${attr}`).toBeTruthy();
+      const fn = m![1];
+      const original = win[fn];
+      expect(typeof original, `${fn} is defined on window`).toBe("function");
+      let args: unknown[] | undefined;
+      win[fn] = (...a: unknown[]) => { args = a; called.set(fn, a); };
+      // jsdom with runScripts:"outside-only" never executes inline handler
+      // attributes on click, so run the exact code the browser would run.
+      // With the old truncated markup this throws a SyntaxError instead.
+      try { win.eval(attr!); } finally { win[fn] = original; }
+      expect(args, `${fn} was invoked by clicking "${btn.textContent?.trim()}"`).toBeDefined();
+      expect(args![0], `${fn} receives the project id`).toBe(project.id);
+    }
+    // The toggle button passes the *next* active state as a plain boolean.
+    const toggle = called.get("projectToggleActive");
+    expect(toggle, "projectToggleActive fired").toBeTruthy();
+    expect(typeof toggle![1]).toBe("boolean");
+    expect(toggle![1]).toBe(!project.active);
+  }, 60000);
+
   it("renders project detail tabs and operational controls", async () => {
     const project = await container.agentManager.createProject({
       name: "Project Detail QA",
@@ -409,6 +452,38 @@ describe("test verdict dialog", () => {
     expect((win.document.querySelector("#verdict-backdrop") as El).hasAttribute("hidden")).toBe(true);
     expect((win.document.querySelector("#pv-name") as El).getAttribute("value")).toBe("My provider");
   }, 30000);
+});
+
+describe("inline event handler markup", () => {
+  it("never interpolates raw JSON.stringify into a quoted HTML attribute", () => {
+    // Inline handlers are written inside double-quoted attributes. A raw
+    // ${JSON.stringify(value)} injects unescaped double quotes, the HTML
+    // parser truncates the attribute, and the button silently dies with a
+    // SyntaxError on click. Every interpolation must go through esc().
+    const js = readFileSync(resolve(process.cwd(), "public", "app.js"), "utf8");
+    const raw = [...js.matchAll(/on\w+="[^"]*\$\{JSON\.stringify\(/g)].map((m) => m[0]);
+    expect(raw).toEqual([]);
+  });
+
+  it("keeps template literals balanced around esc(JSON.stringify(...))", () => {
+    // A previous bulk edit wrapped the opening side only, producing
+    // ${esc(JSON.stringify(x)} inside the templates — a syntax error. Every
+    // interpolation must close esc() as well as stringify(), i.e. end "))}"
+    // right before the template placeholder closes.
+    const js = readFileSync(resolve(process.cwd(), "public", "app.js"), "utf8");
+    const needle = "${esc(JSON.stringify(";
+    const broken: string[] = [];
+    for (let i = js.indexOf(needle); i !== -1; i = js.indexOf(needle, i + 1)) {
+      let depth = 0, j = i + 1; // j sits on the "{" of "${"
+      for (; j < js.length; j++) {
+        if (js[j] === "{") depth++;
+        else if (js[j] === "}") { depth--; if (depth === 0) break; }
+      }
+      const expr = js.slice(i, j + 1);
+      if (!/\)\)\}$/.test(expr)) broken.push(expr);
+    }
+    expect(broken).toEqual([]);
+  });
 });
 
 describe("link styling", () => {
