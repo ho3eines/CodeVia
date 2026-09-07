@@ -142,7 +142,28 @@ export function resolveGitHubForProject(opts: {
   project: import("../domain/entities.js").Project;
   kv: KvStore;
   fallback: IGitHubService;
+  /**
+   * The signed-in user behind the current request, when there is one.
+   *
+   * Each user must act as themselves: the repositories listed on the GitHub
+   * page come from *this* user's OAuth token, so project actions have to use
+   * the same credential. Resolving by `project.ownerId` instead meant a project
+   * created by (or seeded for) another identity — including the pre-login
+   * `user-demo` owner — kept using a foreign token or fell back to the mock,
+   * even though the caller was properly connected to GitHub.
+   *
+   * Background work (workers, webhooks, schedules) has no request user and
+   * keeps using the connection stored on the project.
+   */
+  requestUserId?: string;
 }): IGitHubService {
+  // A signed-in user always acts as themselves, whoever owns the project. This
+  // is also the safer default: the caller can only ever reach repositories
+  // their own token already grants.
+  if (opts.requestUserId && getUserGitHubToken(opts.kv, opts.requestUserId)) {
+    const userId = opts.requestUserId;
+    return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
+  }
   const connection = opts.project.githubConnection;
   if (!connection) return opts.fallback; // legacy installations
   if (connection.kind === "user-oauth") {
@@ -176,3 +197,44 @@ export function resolveGitHubForProject(opts: {
   return mock;
 }
 const projectMocks = new WeakMap<IGitHubService, MockGitHubService>();
+
+/**
+ * Re-bind projects that no longer have a usable GitHub identity onto `userId`.
+ *
+ * Projects created before GitHub login existed were stored with the pre-login
+ * `user-demo` owner and `kind: "mock"`. Interactive requests are repaired the
+ * moment their owner opens them, but a project nobody opens stays stranded and
+ * its scheduled/worker runs keep failing (or silently seed a mock repo). Doing
+ * this once at login clears the whole backlog.
+ *
+ * Only genuinely stranded projects are touched: a connection that still
+ * resolves to a decryptable token is left with its current owner, so this can
+ * never take a live project away from another user.
+ *
+ * Returns the ids that were adopted.
+ */
+export function adoptStrandedProjects(opts: {
+  kv: KvStore;
+  projects: Array<import("../domain/entities.js").Project>;
+  save: (project: import("../domain/entities.js").Project) => void;
+  userId: string;
+  login?: string;
+}): string[] {
+  const adopted: string[] = [];
+  for (const project of opts.projects) {
+    const connection = project.githubConnection;
+    // A working user-oauth connection belongs to someone else — never steal it.
+    if (connection?.kind === "user-oauth" && connection.userId && getUserGitHubToken(opts.kv, connection.userId)) continue;
+    // A server-token project keeps working as long as the server token is set.
+    if (connection?.kind === "server-token" && isServerGitHubEnabled()) continue;
+    project.githubConnection = { kind: "user-oauth", userId: opts.userId, login: opts.login };
+    try {
+      opts.save(project);
+      adopted.push(project.id);
+    } catch (err) {
+      logger.warn(`could not adopt project ${project.id}: ${String(err).slice(0, 200)}`);
+    }
+  }
+  if (adopted.length) logger.info(`adopted ${adopted.length} stranded GitHub project(s) onto ${opts.login ?? opts.userId}`);
+  return adopted;
+}

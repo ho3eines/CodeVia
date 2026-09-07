@@ -9,6 +9,8 @@ import {
   saveGitHubAdminSettings,
 } from "../../auth/admin-settings.js";
 import { getStorageInfo } from "../../app/storage.js";
+import { resolveGitHubForUser } from "../../github/registry.js";
+import { resolveRequestUser } from "../auth.js";
 
 /** Only owner/admin roles may read or change admin settings. */
 function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
@@ -24,10 +26,12 @@ const ASSIGNABLE_ROLES: UserRole[] = ["owner", "admin", "developer", "reviewer",
 
 export function registerAdminRoutes(app: FastifyInstance, container: Container): void {
   // System health dashboard
-  app.get("/admin/health", { schema: { tags: ["admin"] } }, async () => {
+  app.get("/admin/health", { schema: { tags: ["admin"] } }, async (req) => {
     const dbOk = await container.db.raw().prepare("SELECT 1 AS ok").get();
     const queueStats = container.queue.stats();
     const providerHealth = container.providerRegistry.all().map((p) => ({ id: p.id, kind: p.type }));
+    const { user, authenticated } = resolveRequestUser(req, container);
+    const gh = resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github });
     return {
       api: { status: "healthy", pid: process.pid, uptime: process.uptime() },
       database: { status: dbOk ? "healthy" : "down", path: getEnv().DATABASE_PATH },
@@ -35,7 +39,10 @@ export function registerAdminRoutes(app: FastifyInstance, container: Container):
       // storage (settings/users wiped on every Railway deploy).
       storage: await getStorageInfo(),
       queue: { status: "healthy", ...queueStats },
-      github: { status: container.github.kind === "real" ? "connected" : "mock", kind: container.github.kind },
+      // Report the credential this caller would actually use. The platform-wide
+      // service is the mock whenever no server GITHUB_TOKEN is set, which made
+      // health say "mock" even for users properly connected through OAuth.
+      github: { status: gh.source === "mock" ? "mock" : "connected", kind: gh.service.kind, source: gh.source },
       telegram: { status: (await container.telegram.health()) ? "connected" : "mock" },
       providers: providerHealth,
     };

@@ -78,7 +78,7 @@ export class Container {
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
   readonly github: IGitHubService = resolveGitHubService();
-  readonly githubForProject = (project: Project): IGitHubService => resolveGitHubForProject({ project, kv: this.kv, fallback: this.github });
+  readonly githubForProject = (project: Project, requestUserId?: string): IGitHubService => resolveGitHubForProject({ project, kv: this.kv, fallback: this.github, requestUserId });
   /** Project folder (CodeVia/*) sync between the database and the project repo. Shares the platform github instance. */
   readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github, githubForProject: this.githubForProject, repositories: { projectRepo: this.projectRepo, agentRepo: this.agentRepo, taskRepo: this.taskRepo, memoryRepo: this.memoryRepo, skillRepo: this.skillRepo, workflowRepo: this.workflowRepo, runRepo: this.runRepo, conversationRepo: this.conversationRepo, promptVersionRepo: this.promptVersionRepo }, transaction: (fn) => this.db.tx(fn) });
   readonly telegram = resolveTelegramService();
@@ -174,6 +174,7 @@ export class Container {
       projectRepo: this.projectRepo,
       taskRepo: this.taskRepo,
       github: this.github,
+      githubForProject: this.githubForProject,
       telegram: this.telegram,
       notificationRepo: this.notificationRepo,
       logger: logger.child({ component: "worker" }),
@@ -318,6 +319,7 @@ export class Container {
       runRepo: this.runRepo,
       agentManager: this.agentManager,
       github: this.github,
+      githubForProject: this.githubForProject,
       modelRepo: this.modelRepo,
       skillRepo: this.skillRepo,
       memoryRepo: this.memoryRepo,
