@@ -335,7 +335,7 @@ body {
 .stat-icon { position: absolute; top: 17px; inset-inline-end: 17px; font-size: 17px; opacity: .75; }
 
 .grid-2 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
-.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 
 /* ---------- 8. Tables ---------- */
 .table-wrap { overflow-x: auto; border-radius: var(--radius-sm); }
@@ -938,6 +938,9 @@ hr { border: 0; border-top: 1px solid var(--stroke); margin: 16px 0; }
   .sidebar-close { display: grid !important; }
   .menu-btn { display: inline-flex; }
   .grid-2, .grid-3, .admin-hero { grid-template-columns: 1fr; }
+  /* Keep card grids from overflowing on small screens: children (e.g. tables)
+     must shrink below their intrinsic width instead of pushing the page out. */
+  .grid-2 > *, .grid-3 > *, .admin-hero > * { min-width: 0; }
   .content { padding: 16px; }
   .cmd-btn .kbd { display: none; }
 }

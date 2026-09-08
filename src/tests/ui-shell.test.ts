@@ -629,4 +629,14 @@ describe("link styling", () => {
     expect(css).toMatch(/\.meter-row \.val \{[^}]*overflow-wrap:\s*anywhere/);
     expect(css).toMatch(/\.meter-row \.val \.badge \{[^}]*white-space:\s*normal/);
   });
+
+  it("card grids shrink on mobile: grid children never push the page wide", () => {
+    // Regression: the GitHub page put a wide repository table inside a
+    // .grid-3 column, and the column's intrinsic min-width stretched every
+    // card past the viewport (574px in a 442px column). Grid columns must
+    // use minmax(0,1fr) and children min-width:0 so tables scroll in place.
+    const css = readFileSync(resolve(process.cwd(), "public", "app.css"), "utf8");
+    expect(css).toMatch(/\.grid-3 \{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+    expect(css).toMatch(/\.grid-2 > \*,\s*\.grid-3 > \*,\s*\.admin-hero > \* \{[^}]*min-width:\s*0/);
+  });
 });
