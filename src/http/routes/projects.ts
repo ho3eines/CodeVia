@@ -14,6 +14,7 @@ import { parseRepoFullName } from "../../github/types.js";
 import { resolveGitHubForUser, isServerGitHubEnabled } from "../../github/registry.js";
 import { canAccessProject, DEMO_USER_ID, resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken, getUserGitHubToken } from "../../auth/github-tokens.js";
+import { adoptProjectConnection as bindProjectConnection } from "../../auth/project-connection.js";
 import { logger } from "../../logger.js";
 import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
@@ -377,7 +378,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { user, authenticated } = resolveRequestUser(req, container);
     const requestUserId = authenticated ? user.id : undefined;
     if (requestUserId && getUserGitHubToken(container.kv, requestUserId)) {
-      adoptProjectConnection(p, requestUserId);
+      // Bind this project to the account using it so later writes (including
+      // background work with no request user) use that owner's own credential.
+      bindProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: p, userId: requestUserId });
       return container.githubForProject(p, requestUserId);
     }
     if (p.githubConnection) return container.githubForProject(p);
@@ -397,20 +400,6 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
    * A connection that already resolves to a usable token is never reassigned,
    * so a project stays with its owner while that owner remains connected.
    */
-  const adoptProjectConnection = (p: Project, userId: string): void => {
-    const current = p.githubConnection;
-    if (current?.kind === "user-oauth" && current.userId && getUserGitHubToken(container.kv, current.userId)) return;
-    const login = describeUserGitHubToken(container.kv, userId).login;
-    if (current?.kind === "user-oauth" && current.userId === userId && current.login === login) return;
-    p.githubConnection = { kind: "user-oauth", userId, login };
-    try {
-      container.projectRepo.update(p);
-    } catch (err) {
-      // Never fail the request over bookkeeping — the token above still works.
-      logger.warn(`could not adopt GitHub connection for project ${p.id}: ${String(err).slice(0, 200)}`);
-    }
-  };
-
   app.get("/projects/:id/issues", { schema: { tags: ["projects"] } }, async (req, reply) => {
 
     const { id } = req.params as { id: string };

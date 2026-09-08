@@ -1,4 +1,4 @@
-import type { Agent, Skill, AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task, Workflow, WorkflowNode } from "../domain/entities.js";
+import type { Agent, Run, Skill, AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task, Workflow, WorkflowNode } from "../domain/entities.js";
 import {
   agentTypesForProject,
   canonicalOption,
@@ -331,16 +331,30 @@ export class AgentManager {
     return files.syncAll(p, { promptVersions: this.deps.promptVersionRepo?.byProject(projectId).map((v) => targetRevision ? { ...v, repositoryRevision: targetRevision } : v), agents, tasks: this.deps.taskRepo.byProject(projectId), memory: this.deps.memoryRepo?.byProject(projectId) ?? [], skillCatalog: [...catalog.values()].map((s) => targetRevision ? { ...s, repositoryRevision: targetRevision } : s), workflows: this.deps.workflowRepo.byProject(projectId).map((w) => targetRevision ? { ...w, repositoryRevision: targetRevision } : w), runs: this.deps.runRepo.byProject(projectId), conversations: this.deps.conversationRepo?.findMany({ projectId }).map((r) => targetRevision ? { ...r.data, repositoryRevision: targetRevision } : r.data) }, opts);
   }
 
-  /** Save observed execution history without rewriting prompts, skills, rules or memory. */
+  /**
+   * Save observed execution history without rewriting prompts, skills, rules or
+   * memory. Trailing Git writes are best-effort: a finished (or failed) task
+   * must never be dead-lettered because the outbox commit to CodeVia/tasks or
+   * CodeVia/runs could not reach GitHub. Failures are recorded on the outbox
+   * and retried on the next touch (`retryTaskSync`).
+   */
   private async syncRuntimeState(projectId: string): Promise<void> {
     const p = this.deps.projectRepo.findById(projectId)?.data;
     if (!p || !this.deps.projectFiles) return;
-    for (const task of this.deps.taskRepo.byProject(projectId)) await this.deps.projectFiles.syncTask(p, task);
-    for (const run of this.deps.runRepo.byProject(projectId)) await this.deps.projectFiles.syncRun(p, run);
+    for (const key of [...this.pendingRunSyncs]) {
+      const [pid, runId] = key.split(":");
+      if (pid !== projectId) continue;
+      const run = this.deps.runRepo.findById(runId)?.data;
+      if (run) await this.syncRunFile(projectId, run);
+    }
+    for (const task of this.deps.taskRepo.byProject(projectId)) await this.syncTaskFile(projectId, task);
+    for (const run of this.deps.runRepo.byProject(projectId)) await this.syncRunFile(projectId, run);
   }
 
   /** Tasks whose latest runtime-state write did not reach Git (R07 outbox). */
   private pendingTaskSyncs = new Set<string>();
+  /** Runs whose latest runtime-state write did not reach Git (R07 outbox). */
+  private pendingRunSyncs = new Set<string>();
 
   /** Best-effort: mirror one task into CodeVia/tasks/<id>.md (never throws). */
   async syncTaskFile(projectId: string, task: Task): Promise<boolean> {
@@ -357,6 +371,25 @@ export class AgentManager {
     } catch (err) {
       this.pendingTaskSyncs.add(key);
       logger.warn("syncTaskFile failed", { projectId, taskId: task.id, err: String(err) });
+      return false;
+    }
+  }
+
+  /** Best-effort: mirror one run into CodeVia/runs/<id>.md (never throws). */
+  async syncRunFile(projectId: string, run: Run): Promise<boolean> {
+    const key = `${projectId}:${run.id}`;
+    try {
+      const files = this.deps.projectFiles;
+      if (!files) return false;
+      const stored = this.deps.projectRepo.findById(projectId)?.data;
+      if (!stored) return false;
+      const ok = await files.syncRun(hydrateProject(stored), run);
+      if (ok) this.pendingRunSyncs.delete(key);
+      else this.pendingRunSyncs.add(key);
+      return ok;
+    } catch (err) {
+      this.pendingRunSyncs.add(key);
+      logger.warn("syncRunFile failed", { projectId, runId: run.id, err: String(err) });
       return false;
     }
   }
@@ -765,13 +798,16 @@ export class AgentManager {
   private async executeTask(taskId: string): Promise<Task> {
     const task = this.deps.taskRepo.findById(taskId)?.data;
     if (!task) throw new Error(`Task ${taskId} not found`);
-    const project = await this.refreshProject(task.projectId);
-
-    assertTaskActive(this.deps.taskRepo, task);
-    this.deps.taskRepo.upsert({ ...task, status: "running", error: undefined }, { projectId: task.projectId, parentId: task.parentTaskId });
-    live.emit({ type: "task.updated", taskId, projectId: task.projectId, data: { status: "running" } });
-
+    // Everything — including the project refresh, which can throw on repository
+    // state — runs inside the handler below. That way a failure can never leave
+    // the task stranded as a non-terminal status ("queued") with no live job,
+    // which used to surface later as a false "Owning task is already in flight".
     try {
+      const project = await this.refreshProject(task.projectId);
+      assertTaskActive(this.deps.taskRepo, task);
+      this.deps.taskRepo.upsert({ ...task, status: "running", error: undefined }, { projectId: task.projectId, parentId: task.parentTaskId });
+      live.emit({ type: "task.updated", taskId, projectId: task.projectId, data: { status: "running" } });
+
       if ((task.input as Record<string, unknown> | undefined)?.executionMode === "autonomous" && !task.workflowId) {
         // Autonomous task loop: research → breakdown → implement → QA gate → fix loop.
         const orchestrator = new AutonomousOrchestrator({

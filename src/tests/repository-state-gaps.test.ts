@@ -269,3 +269,89 @@ describe("R08 — malformed schema-2 numeric settings fail closed", () => {
     expect(read.maxIterations).toBe(original.maxIterations);
   });
 });
+
+describe("hardening — trailing runtime-state writes never dead-letter a finished job", () => {
+  it("keeps a run best-effort through a Git outage, then backfills it from the outbox", async () => {
+    const done = await research();
+    expect(done.status).toBe("succeeded");
+    const run = container.runRepo.byTask(done.id)[0];
+    const mutated = { ...run, summary: "OUTBOX_RUN_SUMMARY", updatedAt: new Date().toISOString() };
+    const path = `CodeVia/runs/${run.id}.md`;
+    const fileSummary = async (): Promise<string | undefined> =>
+      (parseMatter((await container.github.getFile(repo(project), path, project.branch))!.content).data.run as { summary?: string } | undefined)?.summary;
+    // Sanity: the live run file is not yet the mutated revision.
+    expect(await fileSummary()).not.toContain("OUTBOX_RUN_SUMMARY");
+
+    const original = container.github.commit.bind(container.github);
+    container.github.commit = async () => {
+      throw Object.assign(new Error("Simulated temporary Git write outage"), { status: 503 });
+    };
+    let firstOk: boolean | undefined;
+    try {
+      firstOk = await container.agentManager.syncRunFile(project.id, mutated);
+    } finally {
+      container.github.commit = original as unknown as typeof container.github.commit;
+    }
+    // Non-fatal: returns false instead of throwing (so runTask/syncRuntimeState cannot dead-letter).
+    expect(firstOk).toBe(false);
+    // The failure is recorded in the run outbox and retried once Git is back.
+    const retried = await container.agentManager.syncRunFile(project.id, mutated);
+    expect(retried).toBe(true);
+    expect(await fileSummary()).toBe("OUTBOX_RUN_SUMMARY");
+  });
+
+  it("reports exactly which agent and path when a definition sits outside CodeVia/agents/", async () => {
+    const agent = container.agentRepo.byType(project.id, "research")!;
+    const mislocated = { ...agent, id: "agent-mislocated-path", configPath: "CodeVia/elsewhere/research.md" };
+    let caught: unknown;
+    try {
+      container.projectFiles.agentPath(mislocated);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    const message = String((caught as Error).message);
+    expect(message).toContain("must be inside CodeVia/agents/");
+    expect(message).toContain("agent-mislocated-path");
+    expect(message).toContain("CodeVia/elsewhere/research.md");
+  });
+
+  it("explains a GitHub 404 as a missing repository or an inaccessible token", async () => {
+    const original = container.github.commit.bind(container.github);
+    container.github.commit = async () => {
+      throw Object.assign(new Error("GitHub 404 https://api.github.com/repos/audit/source/git/trees"), { status: 404 });
+    };
+    try {
+      await expect(container.projectFiles.syncMemory(project, [{
+        id: "mem-404",
+        projectId: project.id,
+        scope: "project",
+        type: "knowledge",
+        key: "404-probe",
+        content: "probe",
+        tags: [],
+        refs: [],
+        source: "test",
+        version: 1,
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt,
+      }])).rejects.toThrow(/cannot access|does not exist under the connected account/);
+      await expect(container.projectFiles.syncMemory(project, [{
+        id: "mem-404b",
+        projectId: project.id,
+        scope: "project",
+        type: "knowledge",
+        key: "404-probe-b",
+        content: "probe",
+        tags: [],
+        refs: [],
+        source: "test",
+        version: 1,
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt,
+      }])).rejects.toThrow(new RegExp(`${project.configRepo.split("/")[0]}/${project.configRepo.split("/")[1]}`));
+    } finally {
+      container.github.commit = original as unknown as typeof container.github.commit;
+    }
+  });
+});

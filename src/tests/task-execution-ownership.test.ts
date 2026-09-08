@@ -133,6 +133,26 @@ describe("task ownership and retries", () => {
     expect(c.taskRepo.findById(parent.id)?.data.status).toBe("cancelled");
   });
 
+  it("re-runs a task left stranded as 'queued' after its job was dead-lettered", async () => {
+    const task = c.agentManager.createTask({ projectId: project.id, title: "Stranded queued task", description: "plain single-agent" });
+    // Reproduce the pre-fix failure mode: a job was enqueued, dead-lettered, and
+    // the task was left non-terminal ("queued") with no live work behind it.
+    const dead = c.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
+    c.queue.update(dead.id, { status: "dead", attempts: 3, error: "dead-lettered" });
+    c.taskRepo.upsert({ ...task, status: "queued" }, { projectId: task.projectId, parentId: task.parentTaskId });
+    expect(c.queue.hasLiveJob(task.id)).toBe(false);
+    // Liveness-based guard lets it run instead of a false "already in flight".
+    const first = await app.inject({ method: "POST", url: `/tasks/${task.id}/run` });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ taskId: task.id });
+    // A genuinely pending/live job for the same task still blocks a re-run.
+    const blocking = await app.inject({ method: "POST", url: `/tasks/${task.id}/run` });
+    expect(blocking.statusCode).toBe(409);
+    // Once every job for the task is dead, it becomes re-runnable again.
+    for (const id of [dead.id, first.json().jobId]) c.queue.update(id, { status: "dead" });
+    expect(c.queue.hasLiveJob(task.id)).toBe(false);
+  });
+
   it("recovers an execution job orphaned by a process restart", () => {
     const { parent } = parentAndChild("running");
     const job = c.queue.enqueue("agent.run", { taskId: parent.id });

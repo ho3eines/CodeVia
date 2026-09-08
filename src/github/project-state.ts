@@ -286,7 +286,20 @@ export class ProjectFilesService {
       const basis = this.baselines.get(this.cacheKey(p)) ?? new Map<string, string>();
       for (const f of changed) basis.set(f.path, f.content);
       this.baselines.set(this.cacheKey(p), basis);
-    } catch (error) { this.snapshots.delete(this.cacheKey(p)); throw stateError("commit failed; state was not acknowledged as saved", error); }
+    } catch (error) {
+      this.snapshots.delete(this.cacheKey(p));
+      if ((error as { status?: number })?.status === 404) {
+        // GitHub returns 404 for repos that don't exist AND for repos the
+        // acting token cannot access (to avoid leaking repo existence). When a
+        // repo "exists and you have access", this means the credential that is
+        // actually writing differs from the one with access — so say so clearly.
+        throw stateError(
+          `commit failed: GitHub returned 404 (Not Found) for ${this.ref(p).owner}/${this.ref(p).name}. This usually means the repository does not exist under the connected account, or the token/connection performing the write cannot access it. Re-check the project's connected repository and re-link your GitHub account; state was not acknowledged as saved`,
+          error,
+        );
+      }
+      throw stateError("commit failed; state was not acknowledged as saved", error);
+    }
   }
   async writeFiles(p: Project, files: StateWrite[], message: string, checkConflicts = true): Promise<boolean> {
     const fallback = this.baselines.has(this.cacheKey(p)) ? new Map(this.baselines.get(this.cacheKey(p))) : undefined;
@@ -416,7 +429,10 @@ export class ProjectFilesService {
   }
   agentPath(a: Agent): string {
     const path = a.configPath ?? statePath(AGENTS_DIR, a.id);
-    if (!isStatePath(path) || !path.startsWith(`${AGENTS_DIR}/`) || !path.endsWith(".md")) throw stateError("agent definition path must be inside CodeVia/agents/");
+    if (!isStatePath(path) || !path.startsWith(`${AGENTS_DIR}/`) || !path.endsWith(".md")) {
+      const raw = a.configPath ?? `(unset; would fall back to ${path})`;
+      throw stateError(`agent definition path must be inside CodeVia/agents/; agent ${a.id} (type "${a.type}", slug "${a.slug ?? a.type}") has configPath "${raw}". Move its definition under CodeVia/agents/ (or delete the stale record) and pull/refresh.`);
+    }
     return path;
   }
   syncTask(p: Project, t: Task): Promise<boolean> { return this.writeFiles(p, [{ path: this.entityPath(p, "task", TASKS_DIR, t.id), content: renderTaskFile(t), runtime: true }], `[CodeVia] task ${t.id} → ${t.status}`, false); }

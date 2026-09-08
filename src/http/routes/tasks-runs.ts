@@ -3,12 +3,14 @@ import { live } from "../../realtime/live.js";
 import { executionTask } from "../../agents/execution.js";
 import type { Container } from "../../app/container.js";
 import { matter } from "../../github/project-files.js";
+import { accessibleProjectIds } from "../project-access.js";
 
 export function registerTaskRoutes(app: FastifyInstance, container: Container): void {
   app.get("/tasks", { schema: { tags: ["tasks"] } }, async (req) => {
     const q = req.query as { projectId?: string; status?: string };
-    let tasks = container.taskRepo.findMany();
-    if (q.projectId) tasks = container.taskRepo.findMany({ projectId: q.projectId });
+    const owned = accessibleProjectIds(req, container);
+    let tasks = container.taskRepo.findMany().filter((t) => owned.has(t.data.projectId));
+    if (q.projectId) tasks = tasks.filter((t) => t.data.projectId === q.projectId && owned.has(t.data.projectId));
     if (q.status) tasks = tasks.filter((t) => t.data.status === q.status);
     return tasks.map((r) => r.data);
   });
@@ -79,7 +81,16 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     if (!container.taskRepo.findById(id)) return reply.code(404).send({ error: "task not found" });
     let task;
     try { task = executionTask(container.taskRepo, id); } catch (err) { return reply.code(409).send({ error: String(err) }); }
-    if (["running", "queued", "waiting_for_approval"].includes(task.status) || container.agentManager.isTaskRunning(task.id) || container.queue.hasRunningTask(task.id)) return reply.code(409).send({ error: "Owning task is already in flight", taskId: task.id });
+    // A "running" task is genuinely executing (or was interrupted mid-run) and
+    // must not be double-started. "waiting_for_approval" is held for a human.
+    // Anything else — including a task stranded as "queued" by a dead-lettered
+    // job or a hard-killed worker — has no live work behind it and can be
+    // re-run instead of being permanently stuck at a false "already in flight".
+    const active = container.agentManager.isTaskRunning(task.id) || container.queue.hasLiveJob(task.id) || task.status === "running";
+    if (active) return reply.code(409).send({ error: "Owning task is already in flight", taskId: task.id });
+    if (task.status === "waiting_for_approval") {
+      return reply.code(409).send({ error: "Task is waiting for approval; approve, reject, or cancel it before running again", taskId: task.id });
+    }
     container.taskRepo.upsert({ ...task, status: "queued", error: undefined, updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
     const p = container.projectRepo.findById(task.projectId)?.data;
     if (p) await container.projectFiles.syncTask(p, container.taskRepo.findById(task.id)!.data);
@@ -111,7 +122,8 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
 
   app.get("/runs", { schema: { tags: ["runs"] } }, async (req) => {
     const q = req.query as { projectId?: string; status?: string; agentId?: string; agentType?: string; taskId?: string };
-    let runs = container.runRepo.findMany().map((r) => r.data);
+    const owned = accessibleProjectIds(req, container);
+    let runs = container.runRepo.findMany().map((r) => r.data).filter((r) => owned.has(r.projectId));
     if (q.projectId) runs = runs.filter((r) => r.projectId === q.projectId);
     if (q.status) runs = runs.filter((r) => r.status === q.status);
     if (q.agentId) runs = runs.filter((r) => r.agentId === q.agentId);
