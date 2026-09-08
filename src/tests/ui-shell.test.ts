@@ -198,6 +198,66 @@ describe("UI shell", () => {
     expect(userBubble.textContent).toContain("سلام");
   }, 30000);
 
+  it("keeps mixed English/Persian replies readable (direction follows the first strong character)", async () => {
+    const { win, go, settle } = await boot();
+    // jsdom's AbortController is not a Node AbortSignal, so feed the stream
+    // route a canned SSE reply instead of hitting the live mock.
+    const realFetch = win.fetch;
+    const reply = "[Mock Assistant]\nReceived: متن تست test میباشد\n\nThis is a simulated response";
+    win.fetch = (u: string, o?: RequestInit) => {
+      if (String(u).includes("/stream")) {
+        const sse = [
+          `data: ${JSON.stringify({ type: "delta", text: reply })}`,
+          "",
+          `data: ${JSON.stringify({ type: "done", text: reply, latencyMs: 12, status: 200 })}`,
+          "",
+        ].join("\n");
+        const enc = new TextEncoder();
+        let sent = false;
+        return Promise.resolve({
+          ok: true,
+          statusText: "OK",
+          body: {
+            getReader: () => ({
+              read: async () => {
+                if (sent) return { done: true };
+                sent = true;
+                return { done: false, value: enc.encode(sse) };
+              },
+            }),
+          },
+        });
+      }
+      return realFetch(u, o);
+    };
+    // jsdom lacks TextDecoder; the SPA decodes SSE chunks with it.
+    win.TextDecoder = TextDecoder;
+    win.TextEncoder = TextEncoder;
+    await go("#/models");
+    const models = await fetch(`${baseUrl}/models`).then((r) => r.json() as Promise<Array<{ id: string; providerId: string }>>);
+    const mock = models.find((m) => m.providerId === "provider-mock") ?? models[0];
+    win.openModelChat(mock.id);
+    const input = win.document.querySelector("#chat-input") as any;
+    input.value = "متن تست test میباشد";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    (win.document.querySelector("#chat-send") as El).click();
+    await settle(1200);
+
+    // The user's own message is Persian-first: bubble stays RTL (right-aligned)
+    // even with an embedded English word.
+    const user = win.document.querySelector(".chat-msg.user") as El;
+    expect(user.getAttribute("dir")).toBe("rtl");
+
+    // The mock reply echoes the Persian phrase inside mostly-English text. Its
+    // first strong character is Latin, so it must stay LTR (left-aligned and
+    // readable) instead of being forced RTL by the Persian words in the middle.
+    const assistant = [...win.document.querySelectorAll(".chat-msg.assistant")].pop() as El;
+    expect(assistant.getAttribute("dir")).toBe("ltr");
+    expect(assistant.textContent).toContain("متن تست");
+    expect(assistant.textContent).toContain("[Mock Assistant]");
+    win.close();
+  }, 30000);
+
   it("keeps the AI bubble on the left (text right-aligned) and the send button clear of the right edge", async () => {
     const { win, go, settle } = await boot();
     await go("#/models");

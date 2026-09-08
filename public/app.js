@@ -95,16 +95,21 @@
     return Math.floor(diff / 86400) + "d ago";
   };
   const money = (n) => (n ? "$" + Number(n).toFixed(2) : "$0.00");
+  const RTL_CHAR = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
   function isRtlText(text) {
     const s = String(text || "");
-    const rtlChars = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/g;
-    const rtl = (s.match(rtlChars) || []).length;
+    if (!s.trim()) return false;
+    const rtl = (s.match(/[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/g) || []).length;
     const ltr = (s.match(/[A-Za-z0-9]/g) || []).length;
-    const startsRtl = /^[\s"'([{«،؛؟]*[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(s.trim());
-    // Persian/Arabic text often contains English model names, endpoints or code
-    // terms. Treat it as RTL as soon as it clearly contains RTL prose, not only
-    // when RTL characters outnumber Latin characters.
-    return rtl > 0 && (startsRtl || rtl >= ltr || rtl >= 4);
+    // Direction follows the FIRST strong character — the same rule the browser
+    // uses with unicode-bidi: plaintext. Mixed messages then lay out naturally:
+    // a mostly-English reply that echoes a Persian phrase (e.g. "[Mock Assistant]
+    // Received: متن تست test میباشد …") stays LTR and reads in order, while
+    // Persian prose with an embedded English term ("مدل gpt-4o") stays RTL.
+    // Digits are weak in bidi, so a leading number does not decide direction.
+    const firstStrong = s.match(/^[\s\p{P}\p{S}\d]*([\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]|[A-Za-z])/u);
+    if (firstStrong) return RTL_CHAR.test(firstStrong[1]);
+    return rtl >= ltr;
   }
   const dirForText = (text) => (isRtlText(text) ? "rtl" : "ltr");
   function toast(title, msg, kind = "") {
