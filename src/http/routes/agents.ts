@@ -6,6 +6,7 @@ import { AGENT_TYPES, AgentGenerator, isAgentType, scaffoldFor } from "../../age
 import { hydrateProject } from "../../domain/project-options.js";
 import { diffLines, diffSummary } from "../../prompts/versions.js";
 import { resolveRequestUser } from "../auth.js";
+import { accessibleProjectIds } from "../project-access.js";
 
 function validateAgentEdit(agent: Agent): void {
   try {
@@ -29,8 +30,9 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     }
   };
 
-  app.get("/agents", { schema: { tags: ["agents"] } }, async () => {
-    return container.agentRepo.findMany().map((r) => r.data);
+  app.get("/agents", { schema: { tags: ["agents"] } }, async (req) => {
+    const owned = accessibleProjectIds(req, container);
+    return container.agentRepo.findMany().filter((r) => owned.has(r.data.projectId)).map((r) => r.data);
   });
 
   /** Tool catalog for the Agent Builder (name, permissions, danger flag). */

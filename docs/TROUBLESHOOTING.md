@@ -229,6 +229,79 @@ connected account's repository access, branch and login, then retry. If the exac
 mock error persists, check the deployed version and the affected project's saved
 connection instead of treating the OAuth app secret as a repository credential.
 
+### Per-account isolation: one user's project can't be written by another account's token
+
+For a real multi-user install, enable strict login mode (`REQUIRE_AUTH=true` or
+the **Require GitHub login** admin toggle) so each user only ever sees/drives
+their own projects. Each user signs in with GitHub and their own OAuth token is
+stored encrypted per user.
+
+When you create a project, it is bound to **your** account (`ownerId` +
+`githubConnection.userId = you`), and CodeVia commits the `CodeVia/*` state with
+*your* token. Interactive project actions now also **re-bind the acting owner**
+before a state write: if a project was created pre-login / in mock mode / with a
+stale or server connection, the first edit (e.g. creating a workflow) attaches
+it to the connected account that owns it, so later background writes use that
+owner's own credential instead of the platform mock or a server PAT that GitHub
+rejects as "no access". A foreign account can never take over another owner's
+project or connection.
+
+Isolation is enforced consistently across the API and realtime:
+`canAccessProject` gates the primary `/projects` routes, and the same rule now
+applies to every definition sub-resource (`/workflows`, `/agents`, `/tasks`,
+`/memory`, `/conversations`, `/runs`). A signed-in account can only reach (read,
+edit, run, delete, or list) projects it owns plus genuinely shared/unowned ones —
+foreign projects answer `404` rather than leaking existence or content. The
+Socket.IO realtime layer enforces the same rule per project room.
+
+### Saving project state reports `commit failed … GitHub returned 404 … /repos/<owner>/<repo>/git/trees`
+
+Saving a definition (e.g. creating/editing a workflow) commits into the project's
+**connected** repository. GitHub returns `404` for a repo that does not exist
+**and** for a repo the acting credential cannot access (it hides repo existence).
+If the repository genuinely exists and you can reach it in the browser, the write
+is almost certainly running with a *different* credential than the one with
+access — e.g. a `server-token`/demo connection on a private repo, or a stale
+OAuth token.
+
+Fix, in order:
+1. Make sure the project belongs to the account you're signed in as (per-account
+   isolation above). A workflow/agent creation made while signed in now binds
+   the project to your account automatically, so retry the save.
+2. If it still 404s, re-link the project to the correct connected account — and
+   for OAuth, **log out and in again** so a fresh repository token is stored
+   (tokens are encrypted and, like all sessions, invalidated when `AUTH_SECRET`
+   changes or the DB resets). Then retry.
+3. Only reach for `GITHUB_TOKEN` when you genuinely want a single shared
+   `server-token` connection across all projects; per-user OAuth doesn't need it.
+
+### A job is dead-lettered with `agent definition path must be inside CodeVia/agents/`
+
+This validation runs whenever an agent's stored `configPath` does not live under
+`CodeVia/agents/` and end in `.md`. It is thrown before any state is written, so
+a project with one mislocated/stale agent record used to block every save that
+iterates agents. The message now names the offending agent (id / type / slug)
+and the actual `configPath`, so you can find it. To recover, either move that
+agent's definition back under `CodeVia/agents/` or delete the stale record and
+re-`pull` the project from GitHub.
+
+Trailing runtime-state saves (task/run files written after an `agent.run` /
+`workflow.run` finishes) are best-effort and non-fatal: a Git outage, a 404, or a
+bad definition no longer dead-letters an otherwise successful run. The failed
+write is queued in the pending-sync outbox and retried on the next run/touch, and
+logged via `syncTaskFile failed` / `syncRunFile failed`.
+
+### Task re-run reports `Owning task is already in flight`
+
+A task is only truly in-flight while a live worker job exists for it (or it is
+mid-execution). If a task got stuck as `queued` because an earlier job was
+dead-lettered (e.g. a repository-state error, see above) or a worker was
+hard-killed, there is no live work behind it — re-running now starts fresh
+instead of returning a false `409 "already in flight"`. A genuinely running or
+approval-waiting task still blocks re-runs. If you still see the 409 with no
+job running, cancel the task (or wait for the interrupted run to be reconciled
+on restart) and run again.
+
 ## Tests fail to run (Vite can't resolve `node:sqlite`)
 
 `node:sqlite` is experimental. Vitest is configured to externalize it. If you add a new test importing the DB, ensure `vitest.config.ts` keeps `node:sqlite` external.

@@ -3,11 +3,14 @@ import type { Container } from "../../app/container.js";
 import type { MemoryEntry } from "../../domain/entities.js";
 import { randomUUID } from "node:crypto";
 import { localId, memorySchema } from "../../github/state-codec.js";
+import { accessibleProjectIds } from "../project-access.js";
 
 export function registerMemoryRoutes(app: FastifyInstance, container: Container): void {
   app.get("/memory", { schema: { tags: ["memory"] } }, async (req) => {
     const q = req.query as { projectId?: string; type?: string; scope?: string };
-    let data = (q.projectId ? container.memoryRepo.byProject(q.projectId) : container.memoryRepo.findMany().map((r) => r.data));
+    const owned = accessibleProjectIds(req, container);
+    // Global (ownerless) memory is shared; project-attached memory is per-account.
+    let data = (q.projectId ? container.memoryRepo.byProject(q.projectId).filter((d) => owned.has(q.projectId!)) : container.memoryRepo.findMany().map((r) => r.data).filter((d) => !d.projectId || owned.has(d.projectId)));
     if (q.type) data = data.filter((d) => d.type === q.type);
     if (q.scope) data = data.filter((d) => d.scope === q.scope);
     return data;

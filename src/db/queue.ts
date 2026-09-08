@@ -118,6 +118,16 @@ export class JobQueue {
     return !!this.db.get(`SELECT id FROM jobs WHERE status = 'running' AND type IN ('agent.run', 'workflow.run') AND json_extract(payload, '$.taskId') = :taskId LIMIT 1`, { taskId });
   }
 
+  /**
+   * True when a worker job for this task is actually live (enqueued and not yet
+   * claimed, or being processed). Jobs that finished — including dead-lettered
+   * ones (`status = 'dead'`) — do NOT count, so a task stranded as non-terminal
+   * by a job that died can be re-run instead of being reported "in flight".
+   */
+  hasLiveJob(taskId: string): boolean {
+    return !!this.db.get(`SELECT id FROM jobs WHERE status IN ('pending', 'running') AND type IN ('agent.run', 'workflow.run') AND json_extract(payload, '$.taskId') = :taskId LIMIT 1`, { taskId });
+  }
+
   update(id: string, patch: Partial<Pick<Job, "status" | "attempts" | "error" | "finishedAt">>): Job | undefined {
     const existing = this.getById(id);
     if (!existing) return undefined;

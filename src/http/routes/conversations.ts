@@ -3,6 +3,7 @@ import type { Container } from "../../app/container.js";
 import { randomUUID } from "node:crypto";
 import type { Conversation } from "../../domain/entities.js";
 import type { ConversationMessage } from "../../domain/entities.js";
+import { accessibleProjectIds } from "../project-access.js";
 
 const SUMMARY_SYSTEM_PROMPT =
   "You compress a chat between a user and an AI engineering assistant into a concise memory summary. " +
@@ -56,8 +57,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
   };
   app.get("/conversations", { schema: { tags: ["conversations"] } }, async (req) => {
     const q = req.query as { projectId?: string };
-    let convs = container.conversationRepo.findMany();
-    if (q.projectId) convs = container.conversationRepo.findMany({ projectId: q.projectId });
+    const owned = accessibleProjectIds(req, container);
+    let convs = container.conversationRepo.findMany().filter((r) => owned.has(r.data.projectId));
+    if (q.projectId) convs = convs.filter((r) => r.data.projectId === q.projectId && owned.has(q.projectId!));
     return convs.map((r) => r.data);
   });
 

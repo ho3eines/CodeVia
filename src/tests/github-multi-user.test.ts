@@ -6,6 +6,7 @@ import { buildServer } from "../http/app.js";
 import { signSession } from "../auth/github-oauth.js";
 import { storeUserGitHubToken } from "../auth/github-tokens.js";
 import { setUserGitHubFetchForTest, resolveGitHubForProject, adoptStrandedProjects } from "../github/registry.js";
+import { adoptProjectConnection } from "../auth/project-connection.js";
 import type { Project } from "../domain/entities.js";
 import { freshDb } from "./test-helpers.js";
 
@@ -275,6 +276,111 @@ describe("status endpoints reflect the caller's own credential", () => {
     const settings = (await srv.inject({ method: "GET", url: "/settings" })).json();
     expect(settings.githubConnected).toBe(false);
     expect(settings.githubSource).toBe("mock");
+  });
+});
+
+describe("per-account isolation of definition sub-resources", () => {
+  it("hides another account's workflows and refuses writes", async () => {
+    const srv = await boot();
+    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
+    const aliceProj = await container.agentManager.createProject({
+      ownerId: alice.id, name: "Alice App", description: "private", configRepo: "alice/one",
+    });
+    const bobProj = await container.agentManager.createProject({
+      ownerId: bob.id, name: "Bob App", description: "private", configRepo: "bob/only",
+    });
+    const aliceWf = container.workflowRepo.byProject(aliceProj.id)[0];
+    expect(aliceWf).toBeDefined();
+    const cookieBob = `cv_session=${signSession(bob.id)}`;
+
+    const list = await srv.inject({ method: "GET", url: "/workflows", headers: { cookie: cookieBob } });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().some((w: { projectId: string }) => w.projectId === aliceProj.id)).toBe(false);
+    expect(list.json().some((w: { projectId: string }) => w.projectId === bobProj.id)).toBe(true);
+
+    const get = await srv.inject({ method: "GET", url: `/workflows/${aliceWf.id}`, headers: { cookie: cookieBob } });
+    expect(get.statusCode).toBe(404);
+
+    const patch = await srv.inject({
+      method: "PATCH", url: `/workflows/${aliceWf.id}`, headers: { cookie: cookieBob },
+      payload: { name: "Hijacked" },
+    });
+    expect(patch.statusCode).toBe(404);
+
+    const run = await srv.inject({ method: "POST", url: `/workflows/${aliceWf.id}/run`, headers: { cookie: cookieBob }, payload: {} });
+    expect(run.statusCode).toBe(404);
+
+    const del = await srv.inject({ method: "DELETE", url: `/workflows/${aliceWf.id}`, headers: { cookie: cookieBob } });
+    expect(del.statusCode).toBe(404);
+
+    const create = await srv.inject({
+      method: "POST", url: "/workflows", headers: { cookie: cookieBob },
+      payload: { projectId: aliceProj.id, name: "Stolen", slug: "stolen" },
+    });
+    expect(create.statusCode).toBe(404);
+
+    const tasks = await srv.inject({ method: "GET", url: "/tasks", headers: { cookie: cookieBob } });
+    expect(tasks.json().every((t: { projectId: string }) => t.projectId !== aliceProj.id)).toBe(true);
+  });
+
+  it("adopts a ghost connection onto the owner only, never a foreign account", async () => {
+    await boot();
+    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
+    storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
+    storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
+
+    const owned = {
+      id: "ghost-owned",
+      ownerId: alice.id,
+      name: "Ghost",
+      slug: "ghost-owned",
+      description: "",
+      status: "active",
+      configRepo: "alice/one",
+      branch: "main",
+      repositories: [{ repo: "alice/one", branch: "main" }],
+      githubConnection: { kind: "user-oauth" as const, userId: "vanished", login: "ghost" },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as unknown as Project;
+    container.projectRepo.upsert(owned);
+
+    expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: bob.id })).toBe(false);
+    expect(container.projectRepo.findById("ghost-owned")?.data.githubConnection).toMatchObject({ userId: "vanished", login: "ghost" });
+
+    expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: alice.id })).toBe(true);
+    expect(container.projectRepo.findById("ghost-owned")?.data.githubConnection).toMatchObject({ kind: "user-oauth", userId: alice.id, login: "alice" });
+  });
+
+  it("binds the acting owner before a workflow write and never steals a live foreign connection", async () => {
+    const srv = await boot();
+    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
+    storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
+    storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
+
+    const aliceProj = await container.agentManager.createProject({
+      ownerId: alice.id, name: "Alice Bind", description: "d", configRepo: "alice/bind",
+    });
+    container.projectRepo.update({ ...aliceProj, githubConnection: { kind: "mock" } });
+
+    await srv.inject({
+      method: "POST", url: "/workflows",
+      headers: { cookie: `cv_session=${signSession(alice.id)}` },
+      payload: { projectId: aliceProj.id, name: "Bound", slug: "bound-flow" },
+    });
+    const after = container.projectRepo.findById(aliceProj.id)?.data;
+    expect(after?.githubConnection).toMatchObject({ kind: "user-oauth", userId: alice.id, login: "alice" });
+
+    // Bob cannot take over Alice's now-live connection even by guessing the id.
+    await srv.inject({
+      method: "POST", url: "/workflows",
+      headers: { cookie: `cv_session=${signSession(bob.id)}` },
+      payload: { projectId: aliceProj.id, name: "Hijack", slug: "hijack" },
+    });
+    expect(container.projectRepo.findById(aliceProj.id)?.data.githubConnection).toMatchObject({ userId: alice.id, login: "alice" });
   });
 });
 

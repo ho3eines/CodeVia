@@ -1,7 +1,17 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { Workflow } from "../../domain/entities.js";
 import { parseWorkflowFile, renderWorkflowFile } from "../../github/state-codec.js";
+import { resolveProjectForRequest, accessibleProjectIds } from "../project-access.js";
+
+/** True when the caller may act on `projectId`; replies 404 (hidden) otherwise. */
+function guardProject(req: FastifyRequest, reply: FastifyReply, c: Container, projectId: string | undefined): boolean {
+  if (!projectId || !resolveProjectForRequest(req, c, projectId)) {
+    reply.code(404);
+    return false;
+  }
+  return true;
+}
 
 export function registerWorkflowRoutes(app: FastifyInstance, container: Container): void {
   const persist = async (w: Workflow) => {
@@ -12,12 +22,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
     container.workflowRepo.upsert(w, { projectId: w.projectId });
     return w;
   };
-  app.get("/workflows", { schema: { tags: ["workflows"] } }, async () => {
-    return container.workflowRepo.findMany().map((r) => r.data);
+  app.get("/workflows", { schema: { tags: ["workflows"] } }, async (req) => {
+    const owned = accessibleProjectIds(req, container);
+    return container.workflowRepo.findMany().filter((r) => owned.has(r.data.projectId)).map((r) => r.data);
   });
 
-  app.post("/workflows", { schema: { tags: ["workflows"] } }, async (req) => {
+  app.post("/workflows", { schema: { tags: ["workflows"] } }, async (req, reply) => {
     const b = req.body as Record<string, unknown>;
+    if (!guardProject(req, reply, container, b.projectId ? String(b.projectId) : undefined)) return reply;
     const w = container.workflowRepo.create({
       projectId: String(b.projectId),
       name: String(b.name ?? "Workflow"),
@@ -30,29 +42,30 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
     return persist(w);
   });
 
-  app.get("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req) => {
+  app.get("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.workflowRepo.findById(id);
-    if (!r) return { error: "workflow not found" };
+    if (!r) return reply.code(404).send({ error: "workflow not found" });
+    if (!guardProject(req, reply, container, r.data.projectId)) return reply.code(404).send({ error: "workflow not found" });
     return r.data;
   });
 
-  app.patch("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req) => {
+  app.patch("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const b = req.body as Record<string, unknown>;
     const r = container.workflowRepo.findById(id);
-    if (!r) return { error: "workflow not found" };
+    if (!r || !guardProject(req, reply, container, r.data.projectId)) return reply.code(404).send({ error: "workflow not found" });
     const w = { ...r.data, ...b, id, projectId: r.data.projectId, version: r.data.version + 1, updatedAt: new Date().toISOString() } as Workflow;
     container.workflowRepo.upsert(w, { projectId: w.projectId });
     return persist(w);
   });
 
   // Execute a workflow via a task.
-  app.post("/workflows/:id/run", { schema: { tags: ["workflows"] } }, async (req) => {
+  app.post("/workflows/:id/run", { schema: { tags: ["workflows"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const b = req.body as Record<string, unknown>;
     const w = container.workflowRepo.findById(id);
-    if (!w) return { error: "workflow not found" };
+    if (!w || !guardProject(req, reply, container, w.data.projectId)) return reply.code(404).send({ error: "workflow not found" });
     const task = container.agentManager.createTask({
       projectId: w.data.projectId,
       title: String(b.title ?? `Run ${w.data.name}`),
@@ -66,10 +79,11 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
     return { task: queued, jobId: job.id };
   });
 
-  app.delete("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req) => {
+  app.delete("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const w = container.workflowRepo.findById(id)?.data;
-    const p = w && container.projectRepo.findById(w.projectId)?.data;
+    if (!w || !guardProject(req, reply, container, w.projectId)) return reply.code(404).send({ error: "workflow not found" });
+    const p = container.projectRepo.findById(w.projectId)?.data;
     // The tombstone records the workflow identity (R03): slug + id survive
     // repository copies where IDs are re-bound to a new project.
     if (p) await container.projectFiles.tombstone(p, container.projectFiles.pathFor(p, "workflow", id), { kind: "workflow", id: w?.id ?? id, slug: w?.slug });
