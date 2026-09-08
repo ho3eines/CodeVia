@@ -123,6 +123,12 @@ export interface IGitHubService {
     files: GithubFile[],
     parentSha?: string,
   ): Promise<GithubCommit>;
+  /**
+   * Delete repository files in one commit. Used to purge a project's CodeVia/*
+   * state when the project itself is deleted, so a later project reusing the
+   * same repo does not resurrect stale definitions.
+   */
+  deleteFiles?(repo: GithubRepoRef, branch: string, message: string, paths: string[], parentSha?: string): Promise<GithubCommit>;
   createPullRequest(repo: GithubRepoRef, title: string, body: string, head: string, base: string, opts?: { draft?: boolean }): Promise<GithubPullRequest>;
   /** CI evidence for the exact committed SHA. Legacy adapters without this cannot attest tests. */
   getChecks?(repo: GithubRepoRef, sha: string): Promise<GithubCheck[]>;

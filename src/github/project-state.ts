@@ -81,6 +81,37 @@ export class ProjectFilesService {
     while (history.size > 32) history.delete(history.keys().next().value!);
     this.revisions.set(this.cacheKey(p), history);
   }
+  /**
+   * Purge a deleted project's CodeVia/* state from the repository so a later
+   * project reusing the same repo starts clean instead of resurrecting the
+   * deleted project's name/description/units. Best-effort: the project row is
+   * already gone, so repo cleanup must never fail the delete request.
+   */
+  async removeProject(p: Project): Promise<void> {
+    this.snapshots.delete(this.cacheKey(p));
+    this.decoded.delete(this.cacheKey(p));
+    this.revisions.delete(this.cacheKey(p));
+    this.baselines.delete(this.cacheKey(p));
+    this.entityPaths.delete(this.cacheKey(p));
+    try {
+      const gh = this.github(p);
+      if (!gh.deleteFiles) return;
+      const sha = await this.head(p);
+      let tree;
+      try { tree = await gh.listFiles(this.ref(p), sha, CODEVIA_DIR); }
+      catch (error) {
+        if ((error as { status?: number }).status !== 404) throw error;
+        tree = await gh.listFiles(this.ref(p), sha);
+      }
+      const paths = tree.filter((e) => e.type === "blob" && e.path.startsWith(`${CODEVIA_DIR}/`)).map((e) => e.path);
+      if (paths.length) await gh.deleteFiles(this.ref(p), p.branch, `[CodeVia] remove project state (${p.id})`, paths, sha);
+    } catch (error) {
+      // Project deletion already succeeded in the DB; repository cleanup is best-effort.
+      this.snapshots.delete(this.cacheKey(p));
+      this.decoded.delete(this.cacheKey(p));
+    }
+  }
+
   isTombstoned(p: Project, path: string): boolean {
     const raw = this.baselines.get(this.cacheKey(p))?.get(path);
     return raw !== undefined && parseMatter(raw).data.deleted === true;

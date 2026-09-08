@@ -361,6 +361,22 @@ export class MockGitHubService implements IGitHubService {
     return commit;
   }
 
+  async deleteFiles(ref: GithubRepoRef, branch: string, message: string, paths: string[], parentSha?: string): Promise<GithubCommit> {
+    const r = this.repo(ref);
+    if (parentSha && r.branches.get(branch) !== parentSha) throw new Error("Repository changed after inspection");
+    const tree = this.tree(r, branch);
+    const previousSha = r.branches.get(branch);
+    if (previousSha) this.remember(r, previousSha, tree);
+    for (const path of paths) tree.delete(path);
+    const sha = this.sha(message + Date.now() + this.counter++);
+    r.branches.set(branch, sha);
+    this.remember(r, sha, tree);
+    const commit: GithubCommit = { sha, message, author: "codevia-agent", date: new Date().toISOString() };
+    r.commits.unshift(commit);
+    this.persist();
+    return commit;
+  }
+
   async createPullRequest(ref: GithubRepoRef, title: string, body: string, head: string, base: string, opts: { draft?: boolean } = {}): Promise<GithubPullRequest> {
     const r = this.repo(ref);
     const pr: GithubPullRequest = {

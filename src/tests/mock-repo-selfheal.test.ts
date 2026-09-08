@@ -144,4 +144,45 @@ describe("restored project whose mock repository is missing", () => {
     expect(commit).not.toHaveBeenCalled();
     expect(c.agentRepo.byProject(p.id).length).toBeGreaterThan(0);
   });
+
+  it("deleteFiles removes exactly the requested paths and advances the branch", async () => {
+    const ref = { owner: "ho3eines", name: "purge" };
+    gh.seedRepo("ho3eines", "purge", {
+      files: [{ path: "README.md", content: "# purge\n" }],
+    });
+    await gh.commit(ref, "main", "add state", [
+      { path: "CodeVia/project.md", content: "# stale\n" },
+      { path: "CodeVia/agents/research.md", content: "# agent\n" },
+    ]);
+
+    const before = (await gh.listFiles(ref, "main")).map((f) => f.path);
+    expect(before).toContain("CodeVia/project.md");
+
+    const commit = await gh.deleteFiles!(ref, "main", "[CodeVia] remove project state", ["CodeVia/project.md", "CodeVia/agents/research.md"]);
+    expect(commit).toHaveProperty("sha");
+
+    const after = (await gh.listFiles(ref, "main")).map((f) => f.path);
+    expect(after).not.toContain("CodeVia/project.md");
+    expect(after).not.toContain("CodeVia/agents/research.md");
+    // Untouched files survive, and the branch HEAD advanced.
+    expect(after).toContain("README.md");
+    expect((await gh.listBranches(ref)).find((b) => b.name === "main")?.sha).toBe(commit.sha);
+  });
+
+  it("removeProject purges CodeVia/* so a new project on the same repo starts clean", async () => {
+    const first = await c.agentManager.createProject({ name: "Stale One", description: "old", configRepo: "ho3eines/recycle" });
+    await c.agentManager.syncProjectState(first.id);
+    expect((await gh.listFiles({ owner: "ho3eines", name: "recycle" }, "main")).map((f) => f.path)).toContain("CodeVia/project.md");
+
+    c.projectRepo.deleteById(first.id);
+    await c.projectFiles.removeProject(first);
+
+    expect((await gh.listFiles({ owner: "ho3eines", name: "recycle" }, "main")).map((f) => f.path).filter((f) => f.startsWith("CodeVia/"))).toHaveLength(0);
+
+    // The same repo can host a brand-new project with its own identity.
+    const second = await c.agentManager.createProject({ name: "Fresh Reborn", description: "new", configRepo: "ho3eines/recycle" });
+    const stored = c.projectRepo.findById(second.id)?.data;
+    expect(stored?.name).toBe("Fresh Reborn");
+    expect(stored?.description).toBe("new");
+  });
 });

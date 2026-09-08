@@ -180,6 +180,30 @@ describe("sync + pull + restore (mock GitHub)", () => {
     expect(content?.content).toContain("## Skills (");
     void renderProjectFile;
   });
+
+  it("delete purges the repo folder so a new project on the same repo starts clean", async () => {
+    // Create a project on a repo, let onboarding write CodeVia/* to the mock repo.
+    const first = await container.agentManager.createProject({ name: "Delete Me", description: "stale state", configRepo: "acme/reuse" });
+    await container.agentManager.syncProjectState(first.id);
+    expect((await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content).toContain("Delete Me");
+
+    // Delete it (DB + repository state).
+    container.projectRepo.deleteById(first.id);
+    await container.projectFiles.removeProject(first);
+
+    // The CodeVia/* folder is gone from the repo — a later project on the same
+    // repo must NOT resurrect the deleted project's name/description.
+    const files = await container.github.listFiles({ owner: "acme", name: "reuse" }, "main", "CodeVia");
+    expect(files.filter((f) => f.path.startsWith("CodeVia/")).length).toBe(0);
+
+    // Recreate on the same repo: the new project's own definition must win.
+    const second = await container.agentManager.createProject({ name: "Fresh Start", description: "clean", configRepo: "acme/reuse" });
+    const stored = container.projectRepo.findById(second.id)?.data;
+    expect(stored?.name).toBe("Fresh Start");
+    expect(stored?.description).toBe("clean");
+    expect((await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content).toContain("Fresh Start");
+    expect((await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content).not.toContain("Delete Me");
+  });
 });
 
 describe("project folder API", () => {

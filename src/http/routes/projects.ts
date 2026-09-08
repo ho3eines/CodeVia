@@ -300,6 +300,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     container.projectRepo.deleteById(id);
+    // Purge the project's CodeVia/* state from the repository so a later project
+    // reusing the same repo does not resurrect this project's stale definition.
+    await container.projectFiles?.removeProject(hydrateProject(p));
     return { ok: true };
   });
 

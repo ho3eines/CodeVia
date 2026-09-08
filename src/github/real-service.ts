@@ -299,6 +299,39 @@ export class RealGitHubService implements IGitHubService {
     return { sha: commitRes.sha, message, author: "codevia-agent", date: new Date().toISOString() };
   }
 
+  async deleteFiles(
+    repo: GithubRepoRef,
+    branch: string,
+    message: string,
+    paths: string[],
+    parentSha?: string,
+  ): Promise<GithubCommit> {
+    if (!paths.length) throw new Error("No files to delete");
+    const branchData = (await this.json<{ commit: { sha: string } }>(
+      `/repos/${repo.owner}/${repo.name}/branches/${encodeURIComponent(branch)}`,
+    )) as { commit: { sha: string } } | undefined;
+    const sha = branchData?.commit.sha;
+    if (!sha) throw new Error("Cannot delete files: branch has no HEAD sha");
+    if (parentSha && parentSha !== sha) throw new Error("Repository changed after inspection; refusing to delete newer work. Retry with fresh context.");
+    const parent = await this.json<{ tree: { sha: string } }>(`/repos/${repo.owner}/${repo.name}/git/commits/${sha}`);
+
+    // GitHub deletes a path from a tree when its entry carries `sha: null`.
+    const tree = paths.map((path) => ({ path, mode: "100644", type: "blob", sha: null }));
+    const treeRes = await this.json<{ sha: string }>(`/repos/${repo.owner}/${repo.name}/git/trees`, {
+      method: "POST",
+      body: JSON.stringify({ base_tree: parent.tree.sha, tree }),
+    });
+    const commitRes = await this.json<{ sha: string }>(`/repos/${repo.owner}/${repo.name}/git/commits`, {
+      method: "POST",
+      body: JSON.stringify({ message, tree: treeRes.sha, parents: [sha] }),
+    });
+    await this.json(`/repos/${repo.owner}/${repo.name}/git/refs/heads/${branch}`, {
+      method: "PATCH",
+      body: JSON.stringify({ sha: commitRes.sha, force: false }),
+    });
+    return { sha: commitRes.sha, message, author: "codevia-agent", date: new Date().toISOString() };
+  }
+
   async createPullRequest(repo: GithubRepoRef, title: string, body: string, head: string, base: string, opts: { draft?: boolean } = {}): Promise<GithubPullRequest> {
     const res = await this.json<{
       number: number;
