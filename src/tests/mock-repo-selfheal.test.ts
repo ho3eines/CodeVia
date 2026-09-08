@@ -185,4 +185,26 @@ describe("restored project whose mock repository is missing", () => {
     expect(stored?.name).toBe("Fresh Reborn");
     expect(stored?.description).toBe("new");
   });
+
+  it("DELETE /projects/:id cascades to all project-scoped records", async () => {
+    const p = await c.agentManager.createProject({ name: "Cascade", description: "d", configRepo: "ho3eines/cascade" });
+    c.agentManager.createTask({ projectId: p.id, title: "T", description: "d" });
+    c.memoryRepo.upsert({ id: "mem-x", projectId: p.id, scope: "project", type: "decision", key: "k", content: "v", tags: [], refs: [], source: "web", version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, { projectId: p.id, key: "k" });
+    expect(c.agentRepo.byProject(p.id).length).toBeGreaterThan(0);
+
+    const srv = await server();
+    const res = await srv.inject({ method: "DELETE", url: `/projects/${p.id}` });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { ok: boolean }).ok).toBe(true);
+
+    // No orphaned records anywhere: the project itself and every scoped entity are gone.
+    expect(c.projectRepo.findById(p.id)).toBeUndefined();
+    expect(c.agentRepo.byProject(p.id)).toHaveLength(0);
+    expect(c.taskRepo.byProject(p.id)).toHaveLength(0);
+    expect(c.memoryRepo.byProject(p.id)).toHaveLength(0);
+    expect(c.workflowRepo.byProject(p.id)).toHaveLength(0);
+    expect(c.runRepo.byProject(p.id)).toHaveLength(0);
+    expect(c.conversationRepo.findMany({ projectId: p.id })).toHaveLength(0);
+    expect(c.skillRepo.findMany({ projectId: p.id })).toHaveLength(0);
+  });
 });

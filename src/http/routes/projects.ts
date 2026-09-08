@@ -299,6 +299,15 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    // Cascade-delete every project-scoped record so a deleted project leaves no
+    // orphans behind (agents, tasks, runs, memory, workflows, …).
+    for (const repo of [
+      container.agentRepo, container.taskRepo, container.runRepo, container.memoryRepo,
+      container.workflowRepo, container.conversationRepo, container.promptVersionRepo,
+      container.skillRepo, container.costRepo, container.approvalRepo, container.notificationRepo,
+    ]) {
+      repo.deleteByProject(id);
+    }
     container.projectRepo.deleteById(id);
     // Purge the project's CodeVia/* state from the repository so a later project
     // reusing the same repo does not resurrect this project's stale definition.
