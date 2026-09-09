@@ -299,8 +299,17 @@ export class ProjectFilesService {
         // acting token cannot access (to avoid leaking repo existence). When a
         // repo "exists and you have access", this means the credential that is
         // actually writing differs from the one with access — so say so clearly.
+        // Identify the *acting* identity (login + granted scopes) so the user
+        // can see at a glance which account/token failed instead of guessing.
+        let actor = "";
+        try {
+          const gh = this.github(p);
+          const viewer = await gh.getViewer();
+          const scopes = viewer.scopes?.length ? viewer.scopes.join(", ") : "none (fine-grained/installation token)";
+          actor = ` — the write was attempted as @${viewer.login || "?"} (scopes: ${scopes})`;
+        } catch { /* diagnostic only; never mask the original 404 */ }
         throw stateError(
-          `commit failed: GitHub returned 404 (Not Found) for ${this.ref(p).owner}/${this.ref(p).name}. This usually means the repository does not exist under the connected account, or the token/connection performing the write cannot access it. Re-check the project's connected repository and re-link your GitHub account; state was not acknowledged as saved`,
+          `commit failed: GitHub returned 404 (Not Found) for ${this.ref(p).owner}/${this.ref(p).name}. This usually means the repository does not exist under the connected account, or the token/connection performing the write cannot access it. Re-check the project's connected repository and re-link your GitHub account${actor}; state was not acknowledged as saved`,
           error,
         );
       }
