@@ -80,6 +80,14 @@ export class ConversationRepository extends DocumentRepository<Conversation> {
     this.upsert(updated, { projectId: updated.projectId, parentId: updated.userId });
     return updated;
   }
+  updateModel(convId: string, modelId: string): Conversation | undefined {
+    const rec = this.findById(convId);
+    if (!rec) return undefined;
+    if (rec.data.modelId === modelId) return rec.data;
+    const updated: Conversation = { ...rec.data, modelId, updatedAt: new Date().toISOString() };
+    this.upsert(updated, { projectId: updated.projectId, parentId: updated.userId });
+    return updated;
+  }
 }
 
 export class MemoryRepository extends DocumentRepository<MemoryEntry> {

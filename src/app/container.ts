@@ -8,6 +8,8 @@ import { getUserRepo } from "../auth/users.js";
 import type { ModelProvider, Project } from "../domain/entities.js";
 import { getAgentRepo } from "../agents/agent-repo.js";
 import { getRunRepo, getCostRepo, getAuditRepo, getNotificationRepo } from "../observability/repos.js";
+import { getModelBenchmarkRepo } from "../observability/model-bench-repo.js";
+import { MathBenchmarkService } from "../ai/math-benchmark.js";
 import { getSkillRepo, SkillRegistry } from "../skills/registry.js";
 import { getModelRepo, getProviderRepo } from "../ai/model-repo.js";
 import { providerRegistry, ProviderRegistry } from "../ai/provider-registry.js";
@@ -63,10 +65,14 @@ export class Container {
   readonly skillRepo = getSkillRepo();
   readonly modelRepo = getModelRepo();
   readonly providerRepo = getProviderRepo();
+  readonly benchRepo = getModelBenchmarkRepo();
+  readonly mathBench: MathBenchmarkService;
 
   readonly skillsRegistry = new SkillRegistry(this.skillRepo);
   readonly providerRegistry: ProviderRegistry = providerRegistry;
   readonly modelRouter: ModelRouter = modelRouter;
+  /** Math-benchmark service: quizzes all active models with random arithmetic
+   *  to gather real accuracy/latency/error-rate telemetry for the smart router. */
   /** Routed model calls outside agent runs (summaries, PR text, chat). */
   readonly aiText: AiTextService = new AiTextService({
     modelRepo: this.modelRepo,
@@ -74,6 +80,7 @@ export class Container {
     providerRegistry: this.providerRegistry,
     modelRouter: this.modelRouter,
     costRepo: this.costRepo,
+    benchRepo: this.benchRepo,
   });
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
@@ -114,6 +121,13 @@ export class Container {
   readonly githubAutomation: GithubAutomation;
 
   constructor() {
+    this.mathBench = new MathBenchmarkService({
+      modelRepo: this.modelRepo,
+      providerRepo: this.providerRepo,
+      providerRegistry: this.providerRegistry,
+      benchRepo: this.benchRepo,
+      costRepo: this.costRepo,
+    });
     this.agentRunner = new AgentRunner({
       runRepo: this.runRepo,
       costRepo: this.costRepo,

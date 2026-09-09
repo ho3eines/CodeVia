@@ -43,8 +43,14 @@ const definitionSchema = z.object({
   settings: z.object({ environment: z.enum(["development", "staging", "production"]), notifications: stringList, rules: stringList, skills: stringList, generatedSkills: stringList.optional(), workflows: stringList,
     budget: z.object({ maxTokensPerRun: z.number().finite().nonnegative(), maxCallsPerRun: z.number().finite().nonnegative(), maxCostUsdPerRun: z.number().finite().nonnegative(), maxDurationMs: z.number().finite().nonnegative() }),
     permissions: z.record(z.boolean()), metadata: z.record(z.unknown()),
-  }),
-});
+    // Orchestrator-loop options (added 2026-09) — optional so legacy project
+    // files without these keys keep loading. .passthrough() also lets unknown
+    // future fields round-trip without breaking parse.
+    maxFixLoops: z.number().int().nonnegative().max(10).optional(),
+    researchBeforeFix: z.boolean().optional(),
+    cacheContextInMemory: z.boolean().optional(),
+  }).passthrough(),
+}).passthrough();
 const stateError = (message: string, cause?: unknown) => Object.assign(new Error(`CodeVia repository state: ${message}${cause ? ` (${String(cause)})` : ""}`), { statusCode: 502, retryable: false });
 const conflict = (path: string) => Object.assign(new Error(`CodeVia conflict at ${path}; the repository changed since it was read. Refresh and retry; no files were overwritten.`), { statusCode: 409, retryable: false });
 

@@ -493,6 +493,7 @@
         timeout: 20000,
         withCredentials: true,
       });
+      window.socket = socket;
     } catch (_) { return; }
     socket.on("connect", () => {
       setLivePill(true);
@@ -550,6 +551,16 @@
   /* ---------- router ---------- */
   const routes = {};
   function on(path, fn) { routes[path] = fn; }
+  // Alias a route so deep links like /projects/:id/settings still hit the same
+  // handler (our simple matchRoute requires exact segment count so suffixes
+  // don't fall through automatically).
+  function onWithSub(path, fn) {
+    routes[path] = fn;
+    // Also register the single-sub-path variant for this handler so top-level
+    // tab URLs like /projects/:id/project resolve here instead of 404ing to the
+    // projects list.
+    routes[path + "/:sub"] = fn;
+  }
   function renderNav() {
     const groups = [
       ["Platform", [
@@ -612,6 +623,12 @@
    */
   async function route(opts = {}) {
     if (!opts.silent) showSkeleton();
+    // Tear down any live chat session from the previous page before routing
+    // (stops polling and detaches socket listeners so they don't accumulate).
+    if (typeof window._projectChatCleanup === "function") {
+      try { window._projectChatCleanup(); } catch(_) {}
+      window._projectChatCleanup = null;
+    }
     // Strip the query part ("#/github?login=success") before matching routes.
     const hash = (location.hash.replace(/^#/, "").split("?")[0]) || "/dashboard";
     renderNav();
@@ -1341,24 +1358,20 @@
   /* PROJECT DETAIL */
   const capLabel = (catalog, key, id) => ((catalog && catalog[key]) || []).find((o) => (o.value ?? o.id) === id)?.label || id;
   const PROJECT_SECTIONS = [
-    ["overview", "Overview", "#/projects/"],
-    ["agents", "Agents", "/agents"],
-    ["memory", "Memory", "/memory"],
-    ["skills", "Skills", "/skills"],
-    ["repositories", "Repositories", "/repositories"],
-    ["workflows", "Workflows", "/workflows"],
-    ["tasks", "Tasks", "/tasks"],
-    ["runs", "Runs", "/runs"],
-    ["tests", "Tests", "/tests"],
-    ["issues", "Issues", "/issues"],
-    ["pull-requests", "Pull Requests", "/pull-requests"],
-    ["commits", "Commits", "/commits"],
-    ["conversations", "Conversations", "/conversations"],
+    ["chat", "💬 Chat", "#/projects/"],
+    ["project", "📁 Project", "/project"],
+    ["settings", "⚙️ Settings", "/settings"],
   ];
-  function projectSectionNav(id, active = "overview") {
+  function projectSectionNav(id, active = "chat") {
+    // Normalise legacy section names (agents/tasks/...) to top-level tabs so
+    // deep links still highlight the right tab.
+    const SETTINGS_SUB = new Set(["agents","memory","skills","repositories","workflows","tasks","runs","tests","issues","pull-requests","commits","conversations","rules","telegram"]);
+    let top = active;
+    if (active === "overview") top = "chat";
+    else if (SETTINGS_SUB.has(active)) top = "settings";
     return `<div class="tabs project-tabs">${PROJECT_SECTIONS.map(([key, label, suffix]) => {
-      const href = key === "overview" ? `#/projects/${id}` : `#/projects/${id}${suffix}`;
-      return `<a class="tab ${active === key ? "active" : ""}" href="${esc(href)}">${esc(label)}</a>`;
+      const href = `#/projects/${id}${suffix}`;
+      return `<a class="tab ${top === key ? "active" : ""}" href="${esc(href)}">${esc(label)}</a>`;
     }).join("")}</div>`;
   }
   function repoPath(repo) {
@@ -1385,117 +1398,367 @@
   </div>`;
   function miniJson(v) { return `<pre class="mini-pre">${esc(JSON.stringify(v ?? {}, null, 2))}</pre>`; }
 
-  on("/projects/:id", async (rest) => {
+  /* ---------- Project-level helpers ---------- */
+  async function getProjectChatConv(projectId) {
+    // Use (or create) a conversation named "Project Chat" scoped to this project
+    // so the Chat tab is ready instantly and survives reloads.
+    const list = await api(`/conversations?projectId=${encodeURIComponent(projectId)}`).catch(() => []);
+    const KEEP_TITLE = "Project Chat";
+    let c = list.find((x) => x.title === KEEP_TITLE && x.source === "web");
+    if (!c) c = await api("/conversations", { method: "POST", body: { projectId, title: KEEP_TITLE, source: "web" } });
+    return c;
+  }
+
+  async function readFileAsAttachment(file) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === "string" ? reader.result : undefined;
+        // Only include inline data for images <1MB and small text files; anything
+        // else is just metadata so we don't blow up the model context window.
+        const inline = file.size < 1_000_000 && (file.type.startsWith("image/") || file.type.startsWith("text/") || file.type === "application/json");
+        resolve({
+          name: file.name,
+          contentType: file.type || "application/octet-stream",
+          size: file.size,
+          dataUrl: inline ? dataUrl : undefined,
+          preview: file.size > 1_000_000 ? `(large file, ${(file.size/1024).toFixed(0)}KB – filename only)` : undefined,
+        });
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /* ---------- Project Chat Tab ---------- */
+  function projectChatTabHtml(conv) {
+    const msgs = conv?.messages || [];
+    return `<div class="p-chat-wrap" style="display:flex;flex-direction:column;gap:10px">
+      <div class="card card-body p-chat-card" style="flex:1;display:flex;flex-direction:column;padding:0;overflow:hidden">
+        <div id="p-chat-msgs" class="p-chat-msgs">
+          ${msgs.length ? msgs.map(msgBubble).join("") : `<div class="p-chat-empty">💬 Start chatting with your project AI. Ask a question, attach a screenshot, or dispatch an autonomous task.</div>`}
+        </div>
+        <div class="p-chat-composer">
+          <div id="p-chat-attachments" class="p-chat-att"></div>
+          <div style="display:flex;gap:8px;align-items:flex-end">
+            <label class="btn btn-ghost p-chat-btn-icon" for="p-chat-file" title="Attach file">📎</label>
+            <input id="p-chat-file" type="file" multiple style="display:none" onchange="projectChatAttach(this)"/>
+            <textarea id="p-chat-input" class="textarea p-chat-input" dir="auto" placeholder="Ask anything… or switch mode to dispatch a task"></textarea>
+            <button class="btn btn-primary p-chat-send" id="p-chat-send">↑</button>
+          </div>
+          <div class="p-chat-controls">
+            <label class="p-field"><span>Model</span><select class="select" id="p-chat-model"></select></label>
+            <label class="p-field"><span>Mode</span><select class="select" id="p-chat-mode">
+              <option value="chat">Chat</option>
+              <option value="autonomous">🚀 Autonomous</option>
+              <option value="agent">▶ Agent</option>
+              <option value="simulation">🧪 Dry-run</option>
+            </select></label>
+            <label class="p-field" id="p-chat-agent-wrap" style="display:none"><span>Agent</span><select class="select" id="p-chat-agent"></select></label>
+            <label class="p-field"><span>Temp</span><input type="number" id="p-chat-temp" min="0" max="2" step="0.1" value="0.3" class="input"/></label>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  async function mountProjectChat(projectId, convId) {
+    // Cleanup registry: when the user navigates away, tear down polling &
+    // socket listeners so we don't leak handlers or refresh a dead view.
+    const _projectChatCleanup = [];
+    const cleanup = () => { for (const fn of _projectChatCleanup.splice(0)) { try { fn(); } catch(_) {} } };
+    window._projectChatCleanup = cleanup;
+    let activeTaskIds = new Set();
+    let lastMsgCount = 0;
+    const refreshMessages = async () => {
+      try {
+        const conv = await api(`/conversations/${convId}`);
+        const box = $("#p-chat-msgs");
+        if (box) {
+          box.innerHTML = (conv.messages || []).length ? conv.messages.map(msgBubble).join("") : `<div class="p-chat-empty">💬 Start chatting with your project AI. Ask a question, attach a screenshot, or dispatch an autonomous task.</div>`;
+          box.scrollTop = box.scrollHeight;
+        }
+        // Track dispatched tasks so we can poll their progress and append status updates.
+        for (const m of conv.messages || []) {
+          const tid = m.metadata?.dispatchedTaskId;
+          if (tid && !activeTaskIds.has(tid)) activeTaskIds.add(tid);
+        }
+        lastMsgCount = (conv.messages || []).length;
+        return conv;
+      } catch (e) { return null; }
+    };
+    const refreshModelsAgents = async () => {
+      const [allModels, agents, benchResp] = await Promise.all([
+        api("/models").catch(() => []),
+        api(`/projects/${projectId}/agents`).catch(() => []),
+        api("/models/benchmark/stats").catch(() => ({ stats: [] })),
+      ]);
+      const stats = new Map((benchResp.stats || []).map((s) => [s.modelId, s]));
+      const active = allModels.filter((m) => m.active);
+      const sel = $("#p-chat-model");
+      if (sel && !sel.dataset.touched) {
+        const prev = sel.value;
+        sel.innerHTML = `<option value="">Auto (best per benchmark)</option>` + active.map((m) => {
+          const s = stats.get(m.id);
+          const tag = s ? `score ${s.score.toFixed(2)} · ${s.p95LatencyMs||s.avgLatencyMs||"?"}ms` : "no data";
+          return `<option value="${m.id}" ${prev===m.id?"selected":""}>${esc(m.displayName)} · ${esc(m.providerId.replace("provider-",""))} · ${tag}</option>`;
+        }).join("");
+      }
+      const ag = $("#p-chat-agent");
+      if (ag) {
+        ag.innerHTML = `<option value="">Auto-route from prompt</option>` + agents.filter((a)=>a.enabled).map((a) => `<option value="${esc(a.type)}">${esc(a.name)} (${esc(a.type)})</option>`).join("");
+      }
+    };
+    const refresh = async () => { await refreshModelsAgents(); return await refreshMessages(); };
+    await refresh();
+
+    // --- (F4) Live progress: poll active tasks + runs every 3s while a
+    // dispatched task is in flight, and show a live status line + append a
+    // final status message when the task succeeds/fails. Also listen on the
+    // existing socket.io channel for immediate nudges.
+    let pollTimer = null;
+    let finishedTasks = new Set();
+    const pollProgress = async () => {
+      if (!activeTaskIds.size) { pollTimer = null; return; }
+      let anyRunning = false;
+      let newStatus = null;
+      for (const tid of activeTaskIds) {
+        if (finishedTasks.has(tid)) continue;
+        try {
+          const task = await api(`/tasks/${tid}`).catch(() => null);
+          if (!task) continue;
+          if (task.status === "running" || task.status === "queued" || task.status === "created") { anyRunning = true; }
+          else if (task.status === "succeeded" || task.status === "failed" || task.status === "cancelled") {
+            finishedTasks.add(tid);
+            newStatus = { tid, status: task.status };
+          }
+        } catch {}
+      }
+      // Refresh messages so any new assistant posts (from sync'd runs) are visible.
+      await refreshMessages();
+      if (newStatus) {
+        const box = $("#p-chat-msgs");
+        if (box) {
+          const chip = document.createElement("div");
+          chip.style.cssText = "text-align:center;font-size:12px;color:var(--text-muted);margin:6px 0";
+          chip.innerHTML = newStatus.status === "succeeded"
+            ? `✅ Task <code>${newStatus.tid.slice(0,8)}</code> completed. <a href="#/projects/${esc(projectId)}/runs">View runs →</a>`
+            : `⚠️ Task <code>${newStatus.tid.slice(0,8)}</code> ${esc(newStatus.status)}. <a href="#/projects/${esc(projectId)}/runs">Inspect →</a>`;
+          box.appendChild(chip);
+          box.scrollTop = box.scrollHeight;
+        }
+      }
+      pollTimer = anyRunning ? setTimeout(pollProgress, 3000) : null;
+    };
+    // Hook into global socket for immediate nudges too.
+    const onRealtime = (ev) => {
+      if (!ev || !ev.projectId || ev.projectId !== projectId) return;
+      if (ev.type === "task.updated" || ev.type === "run.updated" || ev.type === "step.updated") {
+        if (activeTaskIds.size && !pollTimer) pollProgress();
+      }
+    };
+    if (window.socket && window.socket.on) {
+      window.socket.on("task.updated", onRealtime);
+      window.socket.on("run.updated", onRealtime);
+      window.socket.on("step.updated", onRealtime);
+    } else {
+      // socket may connect later — retry once after 1.5s.
+      const retryTimer = setTimeout(() => {
+        if (window.socket && window.socket.on) {
+          window.socket.on("task.updated", onRealtime);
+          window.socket.on("run.updated", onRealtime);
+          window.socket.on("step.updated", onRealtime);
+        }
+      }, 1500);
+      _projectChatCleanup.push(() => clearTimeout(retryTimer));
+    }
+    _projectChatCleanup.push(() => {
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+      if (window.socket && window.socket.off) {
+        window.socket.off("task.updated", onRealtime);
+        window.socket.off("run.updated", onRealtime);
+        window.socket.off("step.updated", onRealtime);
+      }
+    });
+
+    const sendBtn = $("#p-chat-send");
+    const input = $("#p-chat-input");
+    const modeSel = $("#p-chat-mode");
+    const agentWrap = $("#p-chat-agent-wrap");
+    if (modeSel) modeSel.onchange = () => { if (agentWrap) agentWrap.style.display = (modeSel.value === "agent") ? "flex" : "none"; };
+    let pending = [];
+    window.projectChatAttach = async (inp) => {
+      for (const f of inp.files || []) pending.push(await readFileAsAttachment(f));
+      inp.value = "";
+      renderChatAttachments();
+    };
+    function renderChatAttachments() {
+      const box = $("#p-chat-attachments");
+      if (!box) return;
+      box.innerHTML = pending.map((a,i) => `<span class="badge badge-info" style="display:inline-flex;gap:4px;align-items:center">📎 ${esc(a.name)} (${Math.round(a.size/1024)}KB) <button class="btn btn-ghost" style="padding:0 4px;font-size:12px" onclick="projectChatRemove(${i})">✕</button></span>`).join("");
+    }
+    window.projectChatRemove = (i) => { pending.splice(i,1); renderChatAttachments(); };
+    const send = async () => {
+      const content = input.value.trim();
+      if (!content && !pending.length) return;
+      input.value = "";
+      const attachments = pending.slice(); pending = []; renderChatAttachments();
+      const body = {
+        role: "user", content: content || "(attachment)",
+        modelId: $("#p-chat-model").value || undefined,
+        executionMode: $("#p-chat-mode").value || "chat",
+        agentType: $("#p-chat-agent").value || undefined,
+        temperature: Number($("#p-chat-temp").value) || 0.3,
+        attachments,
+      };
+      sendBtn.disabled = true; sendBtn.textContent = "…";
+      try {
+        await api(`/conversations/${convId}/messages`, { method: "POST", body });
+        await refreshMessages();
+        // Kick off progress polling immediately for dispatched tasks.
+        if ((body.executionMode === "autonomous" || body.executionMode === "agent") && !pollTimer) {
+          pollTimer = setTimeout(pollProgress, 1500);
+        }
+      } catch(e) { toast("Send failed", e.message, "err"); }
+      finally { sendBtn.disabled = false; sendBtn.textContent = "↑"; input.focus(); }
+    };
+    if (sendBtn) sendBtn.onclick = send;
+    if (input) {
+      input.focus();
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+      });
+    }
+  }
+
+  /* ---------- Project overview tab (info + quick ask + activity) ---------- */
+  function projectInfoTabHtml(p, stats) {
+    const repos = p.repositories || [];
+    return `<div class="grid-2">
+      <div class="card card-body">
+        <div class="card-title">Project overview</div>
+        <p>${esc(p.description || "No description yet.")}</p>
+        <div class="meter-row"><span class="lbl">Config repo</span><span class="mono">${esc(p.configRepo)} @ ${esc(p.branch)}</span></div>
+        <div class="meter-row"><span class="lbl">Repositories</span><span>${repos.length} linked</span></div>
+        <div class="meter-row"><span class="lbl">GitHub</span><span class="mono">${esc(p.githubConnection?.kind || "mock/demo")}</span></div>
+        <div class="meter-row"><span class="lbl">Environment</span><span class="badge badge-muted">${esc(p.settings?.environment || "development")}</span></div>
+        <div class="card-title mt">Quick actions</div>
+        <div class="flex" style="flex-wrap:wrap;gap:6px">
+          <button class="btn btn-primary" onclick="projectAsk(${esc(JSON.stringify(p.id))})">❓ Ask AI</button>
+          <button class="btn" onclick="projectDryRun(${esc(JSON.stringify(p.id))})">🧪 Dry-run</button>
+          <button class="btn" onclick="projectRun(${esc(JSON.stringify(p.id))})">▶ Run agent</button>
+          <button class="btn" onclick="projectEdit(${esc(JSON.stringify(p.id))})">⚙ Edit</button>
+        </div>
+      </div>
+      <div class="card card-body">
+        <div class="card-title">📊 Stats</div>
+        <div class="stat-grid" style="grid-template-columns:repeat(2,1fr)">
+          <div class="card stat"><div class="stat-label">Agents</div><div class="stat-value">${stats.counts?.agentsEnabled || 0}<span class="stat-sub">/${stats.counts?.agents||0}</span></div></div>
+          <div class="card stat"><div class="stat-label">Tasks</div><div class="stat-value">${stats.counts?.tasks||0}</div><div class="stat-sub">${stats.counts?.tasksRunning||0} running</div></div>
+          <div class="card stat"><div class="stat-label">Runs</div><div class="stat-value">${stats.counts?.runs||0}</div><div class="stat-sub">${stats.counts?.runsFailed||0} failed</div></div>
+          <div class="card stat"><div class="stat-label">Spend</div><div class="stat-value">${money(stats.cost?.costUsd||0)}</div></div>
+        </div>
+        <div class="card-title mt">Recent activity</div>
+        ${(stats.activity||[]).length ? `<div class="activity-feed">${stats.activity.slice(0,6).map((a) => `<a class="activity-item" href="#/projects/${esc(p.id)}/tasks"><span class="activity-dot"></span><div class="activity-body"><strong>${esc(a.title)}</strong><span>${timeAgo(a.at)} · ${esc(a.status)}</span></div></a>`).join("")}</div>` : emptyState("⚡","No activity yet")}
+      </div>
+      <div class="card card-body">
+        <div class="card-title">Recent tasks / runs <a class="sub" href="#/projects/${esc(p.id)}/runs">all →</a></div>
+        ${(stats.recentRuns||[]).length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Cost</th><th></th></tr></thead><tbody>${stats.recentRuns.slice(0,6).map((r)=>`<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)}</td><td>${money(r.costUsd)}</td><td><a class="btn btn-ghost" href="#/runs/${esc(r.id)}/console">Console</a></td></tr>`).join("")}</tbody></table></div>` : emptyState("▶️","No runs yet")}
+      </div>
+      <div class="card card-body">
+        <div class="card-title">Recent errors</div>
+        ${(stats.recentErrors||[]).length ? stats.recentErrors.slice(0,4).map((r)=>`<div class="list-row"><span>🔴</span><div><strong>${esc(r.agentType)}</strong><div class="sub">${esc((r.error||"").slice(0,100))}</div></div><a class="btn btn-ghost" href="#/runs/${esc(r.runId)}/console">Inspect</a></div>`).join("") : emptyState("✅","No errors")}
+      </div>
+    </div>`;
+  }
+
+  function projectSettingsTabHtml(p) {
+    const items = [
+      ["agents", "🤖 Agents", "Manage AI agents, prompts and per-agent allowed models"],
+      ["skills", "🛠️ Skills", "Attach/detach skills for this project"],
+      ["memory", "🗂️ Memory", "Project memory entries, decisions and lessons learned"],
+      ["repositories", "🐙 Repositories", "Link/unlink GitHub repositories and branches"],
+      ["workflows", "🔀 Workflows", "Multi-step agent workflows"],
+      ["tasks", "🧩 Tasks", "Task queue and manual task creation"],
+      ["runs", "▶️ Runs", "All agent executions and live consoles"],
+      ["tests", "🧪 Tests", "QA test runs"],
+      ["issues", "⭕ Issues", "GitHub issues across linked repos"],
+      ["pull-requests", "⑂ Pull Requests", "Open PRs and merges"],
+      ["commits", "📝 Commits", "Recent commit history"],
+      ["conversations", "💬 All Conversations", "Conversation history list"],
+    ];
+    const extra = [
+      ["Rules", "📏 Rules", "Project rules injected into every agent prompt", "projectRules"],
+      ["Telegram", "📱 Telegram", "Link a Telegram chat for notifications & control", "projectConfigureTelegram"],
+      ["Pull from GitHub", "⬇ Pull", "Restore agents/tasks/memory from CodeVia/ folder", "projectPull"],
+      ["Re-onboard", "↻ Load", "Re-detect project structure and fill missing agents", "projectReonboard"],
+      ["Export/Import", "⇩⇧ Export", "Backup / restore project state", "projectExport"],
+    ];
+    return `<div class="grid-2">
+      <div class="card card-body"><div class="card-title">Project resources</div>
+        ${items.map(([key, label, hint]) => `<a class="list-row" href="#/projects/${esc(p.id)}/${key}"><span style="font-size:20px">${label.split(" ")[0]}</span><div><strong>${label.split(" ").slice(1).join(" ")}</strong><div class="sub">${hint}</div></div><span class="spacer"></span><span class="badge badge-muted">→</span></a>`).join("")}
+      </div>
+      <div class="card card-body"><div class="card-title">Actions</div>
+        ${extra.map(([,label,hint,fn]) => `<button class="list-row" style="width:100%;text-align:left;border:0;background:transparent;cursor:pointer;color:inherit;font:inherit" onclick="${fn}(${esc(JSON.stringify(p.id))})"><span style="font-size:20px">${label.split(" ")[0]}</span><div><strong>${label.split(" ").slice(1).join(" ")}</strong><div class="sub">${hint}</div></div></button>`).join("")}
+        <div class="card-title mt">Danger zone</div>
+        <div class="flex" style="gap:8px;flex-wrap:wrap">
+          <button class="btn" onclick="projectToggleActive(${esc(JSON.stringify(p.id))}, ${esc(JSON.stringify(!p.active))})">${p.active?"⏸ Deactivate":"▶ Activate"}</button>
+          <button class="btn" onclick="projectEdit(${esc(JSON.stringify(p.id))})">⚙ Edit project</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  onWithSub("/projects/:id", async (rest) => {
     const id = rest[0];
+    const sub = (rest[1] || "").replace(/^\//, "");
+    // Determine active tab (default = chat)
+    let active = "chat";
+    const legacyMap = {
+      "":"chat","overview":"chat","agents":"settings","memory":"settings",
+      "skills":"settings","repositories":"settings","workflows":"settings",
+      "tasks":"settings","runs":"settings","tests":"settings","issues":"settings",
+      "pull-requests":"settings","commits":"settings","conversations":"settings",
+      "chat":"chat","project":"project","settings":"settings"
+    };
+    active = legacyMap[sub] || "chat";
     const p = await api("/projects/" + id);
-    const [agents, tasks, runs, workflows, catalog, issues, prs, memEntries, commits, spend] = await Promise.all([
+    const [agents, tasks, runs, memEntries] = await Promise.all([
       api(`/projects/${id}/agents`).catch(() => []),
       api(`/projects/${id}/tasks`).catch(() => []),
       api(`/projects/${id}/runs`).catch(() => []),
-      api(`/projects/${id}/workflows`).catch(() => []),
-      loadOptionCatalog().catch(() => null),
-      api(`/projects/${id}/issues`).catch(() => []),
-      api(`/projects/${id}/pull-requests`).catch(() => []),
       api(`/memory?projectId=${id}`).catch(() => []),
-      api(`/projects/${id}/commits?limit=8`).catch(() => []),
-      api(`/costs/summary?projectId=${id}`).catch(() => null),
     ]);
-    const qaRuns = runs.filter((r) => r.agentType === "qa-test");
-    const failedRuns = runs.filter((r) => r.status === "failed" || r.error).slice(0, 5);
-    const decisions = (Array.isArray(memEntries) ? memEntries : []).filter((m) => m.type === "decision").slice(0, 5);
+    const failedRuns = runs.filter((r) => r.status === "failed" || r.error).slice(0, 4);
     const activity = [
-      ...runs.slice(0, 15).map((r) => ({ kind: "▶ run", title: `${r.agentType}`, status: r.status, at: r.createdAt, link: `#/runs/${r.id}/console` })),
-      ...tasks.slice(0, 15).map((t) => ({ kind: "🧩 task", title: t.title, status: t.status, at: t.updatedAt, link: `#/projects/${id}/tasks` })),
+      ...runs.slice(0, 10).map((r) => ({ kind: "▶ run", title: `${r.agentType}`, status: r.status, at: r.createdAt, link: `#/runs/${r.id}/console` })),
+      ...tasks.slice(0, 10).map((t) => ({ kind: "🧩 task", title: t.title, status: t.status, at: t.updatedAt, link: `#/projects/${id}/tasks` })),
     ].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 10);
-    const caps = p.capabilities || {};
-    const repos = p.repositories || [{ repo: p.configRepo, branch: p.branch, role: "primary", isConfigRepo: true }];
-    const capRows = CAPABILITY_GROUPS.map(([k, label]) => {
-      const vals = caps[k] || [];
-      return `<div class="meter-row"><span class="lbl">${esc(label)}</span><span style="flex:1;display:flex;flex-wrap:wrap;gap:4px">${vals.length ? vals.map((v) => `<span class="badge badge-info">${esc(capLabel(catalog, k, v))}</span>`).join("") : '<span class="badge badge-muted">—</span>'}</span></div>`;
-    }).join("");
-    const connKind = p.githubConnection?.kind ? ({ "user-oauth": `GitHub account${p.githubConnection.login ? " @" + p.githubConnection.login : ""}`, "server-token": "server token", mock: "mock/demo" }[p.githubConnection.kind] || p.githubConnection.kind) : "—";
+    const stats = {
+      counts: {
+        agents: agents.length, agentsEnabled: agents.filter((a)=>a.enabled).length,
+        tasks: tasks.length, tasksRunning: tasks.filter((t)=>t.status==="running").length,
+        runs: runs.length, runsFailed: failedRuns.length,
+      },
+      cost: { costUsd: 0 },
+      activity, recentRuns: runs.slice(0,6), recentErrors: failedRuns,
+    };
+
     $("#content").innerHTML = `
       ${projectCrumbs(p, "overview")}
-      <div class="overview"><div><h1>${esc(p.name)} ${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</h1><p>${esc(p.description)}</p></div>${projectActionBar(p)}</div>
-      ${projectSectionNav(p.id, "overview")}
-      <div class="stat-grid">
-        <div class="card stat"><div class="stat-label">Config repository</div><div class="stat-value" style="font-size:16px">${esc(p.configRepo)}</div><div class="stat-sub">${esc(p.branch)} · ${repos.length} repo${repos.length === 1 ? "" : "s"} linked</div></div>
-        <div class="card stat"><div class="stat-label">Agents</div><div class="stat-value">${agents.filter((a) => a.enabled).length}<span class="stat-sub"> / ${agents.length}</span></div></div>
-        <div class="card stat"><div class="stat-label">Tasks</div><div class="stat-value">${tasks.length}</div><div class="stat-sub">${tasks.filter((t)=>t.status === "running").length} running</div></div>
-        <div class="card stat"><div class="stat-label">Runs</div><div class="stat-value">${runs.length}</div><div class="stat-sub">${runs.filter((r)=>r.status === "failed").length} failed</div></div>
-        <div class="card stat"><div class="stat-label">Open issues</div><div class="stat-value">${issues.length}</div><div class="stat-sub"><a href="#/projects/${esc(p.id)}/issues">view all</a></div></div>
-        <div class="card stat"><div class="stat-label">Open PRs</div><div class="stat-value">${prs.length}</div><div class="stat-sub"><a href="#/projects/${esc(p.id)}/pull-requests">view all</a></div></div>
-      </div>
-      <div class="grid-2">
-        <div class="card card-body">
-          <div class="card-title">Repositories <span class="sub">GitHub: ${esc(connKind)}</span></div>
-          <div class="table-wrap"><table><thead><tr><th>Repository</th><th>Branch</th><th>Role</th><th></th><th></th></tr></thead><tbody>
-          ${repos.map((r) => `<tr><td class="mono">${r.htmlUrl ? `<a href="${esc(r.htmlUrl)}" target="_blank" rel="noopener">${esc(r.repo)}</a>` : esc(r.repo)} ${r.private ? '<span class="badge badge-warn">private</span>' : ""}</td><td class="mono">${esc(r.branch)}</td><td><span class="badge badge-muted">${esc(r.role || "primary")}</span></td><td>${r.isConfigRepo ? '<span class="badge badge-ok" title=".ai-engineering lives here">config</span>' : ""}</td><td style="text-align:right"><button class="btn btn-ghost" title="Edit" onclick="projectEditRepo(${esc(JSON.stringify(p.id))}, ${esc(JSON.stringify(r.repo))})">✎</button>${repos.length > 1 ? `<button class="btn btn-ghost" title="Unlink" onclick="projectUnlinkRepo(${esc(JSON.stringify(p.id))}, ${esc(JSON.stringify(r.repo))})">✕</button>` : ""}</td></tr>`).join("")}
-          </tbody></table></div>
-          <div class="flex mt"><button class="btn" onclick="projectAddRepo(${esc(JSON.stringify(p.id))})">＋ Link repository</button><button class="btn" onclick="projectOpenGitHub(${esc(JSON.stringify(p.id))})">🐙 View GitHub</button></div>
-        </div>
-        <div class="card card-body">
-          <div class="card-title">Stack & capabilities <a class="sub" href="#" onclick="projectEdit(${esc(JSON.stringify(p.id))});return false">edit</a></div>
-          ${capRows}
-          <div class="meter-row"><span class="lbl">Agent roster</span><span style="flex:1;display:flex;flex-wrap:wrap;gap:4px">${(caps.agentTypes || []).length ? caps.agentTypes.map((v) => `<span class="badge badge-muted">${esc(capLabel(catalog, "agentTypes", v))}</span>`).join("") : '<span class="badge badge-muted">auto (derived from stack)</span>'}</span></div>
-          <div class="meter-row"><span class="lbl">Detected skills</span><span style="flex:1;display:flex;flex-wrap:wrap;gap:4px">${(p.settings?.skills || []).length ? p.settings.skills.map((v) => `<span class="badge badge-info">${esc(v)}</span>`).join("") : '<span class="badge badge-muted">—</span>'}</span></div>
-          <div class="meter-row"><span class="lbl">Telegram</span><span class="mono">${esc(p.telegramChatId || "not connected")}</span></div>
-          <div class="meter-row"><span class="lbl">Environment</span><span class="badge badge-muted">${esc(p.settings?.environment || "development")}</span></div>
-        </div>
-      </div>
-      <div class="grid-2 mt">
-        <div class="card card-body">
-          <div class="card-title">Agents <a href="#/projects/${esc(p.id)}/agents" class="sub">manage</a></div>
-          <div class="table-wrap"><table><thead><tr><th>Type</th><th>Name</th><th>Status</th><th></th></tr></thead><tbody>
-          ${agents.map((a) => `<tr><td class="mono">${esc(a.type)}</td><td><a href="#/agents/${esc(a.id)}">${esc(a.name)}</a></td><td>${a.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</td><td><button class="btn btn-ghost" onclick="projectRunAgentType(${esc(JSON.stringify(p.id))}, ${esc(JSON.stringify(a.type))})">Run</button></td></tr>`).join("")}
-          </tbody></table></div>
-        </div>
-        <div class="card card-body">
-          <div class="card-title">Workflows <a href="#/projects/${esc(p.id)}/workflows" class="sub">open</a></div>
-          ${workflows.length ? workflows.map((w) => `<div class="list-row"><span>🔀</span><div><strong>${esc(w.name)}</strong><div class="mono" style="color:var(--text-muted)">${esc(w.slug)} · v${w.version}</div></div><span class="spacer"></span>${w.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}<button class="btn btn-ghost" onclick="projectRunWorkflowId(${esc(JSON.stringify(p.id))}, ${esc(JSON.stringify(w.id))})">Run</button></div>`).join("") : emptyState("🔀", "No workflows yet", "Define a workflow to orchestrate agents.")}
-        </div>
-      </div>
-      <div class="grid-2 mt">
-        <div class="card card-body"><div class="card-title">GitHub activity <a href="#/projects/${esc(p.id)}/issues" class="sub">issues</a> · <a href="#/projects/${esc(p.id)}/pull-requests" class="sub">PRs</a> · <a href="#/projects/${esc(p.id)}/commits" class="sub">commits</a></div>
-          <div class="meter-row"><span class="lbl">Open issues</span><strong>${issues.length}</strong></div>
-          <div class="meter-row"><span class="lbl">Open PRs</span><strong>${prs.length}</strong></div>
-          <div class="meter-row"><span class="lbl">Recent commits</span><strong>${commits.length}</strong></div>
-          ${commits.slice(0,3).map((c) => `<div class="meter-row"><span class="mono" style="color:var(--text-muted)">${esc(String(c.sha||"").slice(0,7))}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(String(c.message||"").split("\n")[0])}</span></div>`).join("")}
-          <div class="flex mt"><button class="btn" onclick="location.hash='#/projects/${esc(p.id)}/tests'">🧪 Tests</button><button class="btn" onclick="location.hash='#/projects/${esc(p.id)}/runs'">▶ Runs</button></div>
-        </div>
-        <div class="card card-body"><div class="card-title">Budget guardrails <a class="sub" href="#" onclick="projectEdit(${esc(JSON.stringify(p.id))});return false">edit</a></div>
-          <div class="meter-row"><span class="lbl">Max tokens/run</span><span class="mono">${esc(p.settings?.budget?.maxTokensPerRun ?? "—")}</span></div>
-          <div class="meter-row"><span class="lbl">Max calls/run</span><span class="mono">${esc(p.settings?.budget?.maxCallsPerRun ?? "—")}</span></div>
-          <div class="meter-row"><span class="lbl">Max cost/run</span><span class="mono">${money(p.settings?.budget?.maxCostUsdPerRun)}</span></div>
-          <div class="meter-row"><span class="lbl">Max duration</span><span class="mono">${esc(p.settings?.budget?.maxDurationMs ?? "—")} ms</span></div>
-          <div class="card-title mt">Spend <span class="sub">this project · all time</span></div>
-          <div class="meter-row"><span class="lbl">Model calls</span><strong>${spend ? spend.calls : "—"}</strong></div>
-          <div class="meter-row"><span class="lbl">Tokens</span><strong>${spend ? Number(spend.tokens||0).toLocaleString() : "—"}</strong></div>
-          <div class="meter-row"><span class="lbl">Est. cost</span><strong>${spend ? money(spend.costUsd) : "—"}</strong></div>
-        </div>
-      </div>
-      <div class="grid-2 mt">
-        <div class="card card-body"><div class="card-title">Test status <a href="#/projects/${esc(p.id)}/tests" class="sub">qa runs</a></div>
-          ${qaRuns.length ? `<div class="meter-row"><span class="lbl">QA runs</span><strong>${qaRuns.length}</strong></div><div class="meter-row"><span class="lbl">Passed</span><strong style="color:var(--ok)">${qaRuns.filter((r)=>r.verification==="passed").length}</strong></div><div class="meter-row"><span class="lbl">Failed</span><strong style="color:var(--err)">${qaRuns.filter((r)=>r.status==="failed").length}</strong></div><div class="meter-row"><span class="lbl">Last run</span><span>${badge(qaRuns[0].status)} <a class="btn btn-ghost" href="#/runs/${qaRuns[0].id}/console">Console</a></span></div>` : emptyState("🧪", "No QA runs yet", "Run the QA agent or a workflow to test this project.")}
-        </div>
-        <div class="card card-body"><div class="card-title">Recent errors <a href="#/projects/${esc(p.id)}/runs" class="sub">all runs</a></div>
-          ${failedRuns.length ? failedRuns.map((r) => `<div class="list-row"><span>🔴</span><div><strong>${esc(r.agentType)}</strong><div class="sub mono">${esc((r.error || (r.steps||[]).find((s)=>s.status==="failed")?.detail || "run failed").slice(0,120))}</div></div><span class="spacer"></span><a class="btn btn-ghost" href="#/runs/${r.id}/console">Inspect</a><button class="btn btn-ghost" onclick="projectRunTask(${esc(JSON.stringify(r.taskId))})">Retry</button></div>`).join("") : emptyState("✅", "No errors", "Failed runs will show up here with retry actions.")}
-        </div>
-      </div>
-      <div class="grid-2 mt">
-        <div class="card card-body"><div class="card-title">Recent decisions <a href="#/projects/${esc(p.id)}/memory" class="sub">memory</a></div>
-          ${decisions.length ? decisions.map((m) => `<div class="list-row"><span>🧭</span><div><strong>${esc(m.key)}</strong><p>${esc((m.content||"").slice(0,140))}</p></div></div>`).join("") : emptyState("🧭", "No decisions logged", "Key decisions are stored in project memory.")}
-        </div>
-        <div class="card card-body"><div class="card-title">AI activity <span class="sub">latest runs & tasks</span></div>
-          ${activity.length ? `<div class="activity-feed">${activity.map((a) => `<a class="activity-item" href="${esc(a.link)}"><span class="activity-dot"></span><div class="activity-body"><strong>${esc(a.kind)} · ${esc(a.title).slice(0,60)}</strong><span>${timeAgo(a.at)} · ${esc(a.status)}</span></div></a>`).join("")}</div>` : emptyState("⚡", "No activity yet", "Ask the AI something to get started.")}
-        </div>
-      </div>
-      <div class="card card-body mt">
-        <div class="card-title">Recent Runs <a href="#/projects/${esc(p.id)}/runs" class="sub">view all</a></div>
-        ${runs.length ? `<div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th><th></th></tr></thead><tbody>
-          ${runs.slice(0,10).map((r) => `<tr><td class="mono">${r.id.slice(0,8)}</td><td>${esc(r.agentType)}</td><td>${badge(r.status)} ${verificationBadge(r.verification)}</td><td>${r.totalTokens}</td><td>${money(r.costUsd)}</td><td>${r.durationMs}ms</td><td><a class="btn btn-ghost" href="#/runs/${r.id}/console">Console</a></td></tr>`).join("")}
-        </tbody></table></div>` : emptyState("▶️", "No runs yet", "Ask the AI or run an agent to see executions here.")}
-      </div>`;
+      <div class="overview"><div><h1>${esc(p.name)} ${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</h1><p>${esc(p.description || "")}</p></div>${projectActionBar(p)}</div>
+      ${projectSectionNav(p.id, active)}
+      <div id="p-tab-body"></div>
+    `;
+    const body = $("#p-tab-body");
+    if (active === "chat") {
+      const conv = await getProjectChatConv(id);
+      body.innerHTML = projectChatTabHtml(conv);
+      await mountProjectChat(id, conv.id);
+    } else if (active === "project") {
+      body.innerHTML = projectInfoTabHtml(p, stats);
+    } else {
+      body.innerHTML = projectSettingsTabHtml(p);
+    }
   });
 
   // Autonomous-loop subtasks (research/build/verify/fix) render grouped under their parent.
@@ -1762,11 +2025,11 @@
     try { p = await api(`/projects/${id}`); }
     catch (e) { toast("Telegram settings unavailable", e.message, "err"); return; }
     const notes = p.settings?.notifications || [];
-    openModal("Project Telegram", `<div class="field"><label>Telegram chat ID</label><input class="input mono" id="ptg-chat" value="${esc(p.telegramChatId || "")}" placeholder="123456789 or -100..."/><div class="field-hint">Only the chat id is stored in project metadata. Bot tokens stay in Railway variables / secrets.</div></div><label class="check"><input type="checkbox" id="ptg-notify" ${notes.includes("telegram") ? "checked" : ""}/> Send project notifications to Telegram</label><div class="flex mt"><button class="btn btn-primary" id="ptg-save">Save Telegram settings</button><a class="btn" href="#/telegram">Open Telegram integration</a><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    openModal("Project Telegram", `<div class="field-hint">در این نسخه اعلان‌های تلگرام از طریق حساب بات متصل در صفحهٔ Telegram ارسال می‌شوند و نیازی به چت‌آیدی در سطح پروژه نیست.</div><label class="check"><input type="checkbox" id="ptg-notify" ${notes.includes("telegram") ? "checked" : ""}/> ارسال اعلان‌های پروژه به تلگرام</label><div class="flex mt"><button class="btn btn-primary" id="ptg-save">ذخیره</button><a class="btn" href="#/telegram">باز کردن صفحه تلگرام</a><button class="btn" onclick="closeModal()">انصراف</button></div>`);
     $("#ptg-save").onclick = async () => {
       const notify = $("#ptg-notify").checked;
       const notifications = Array.from(new Set([...(notes || []).filter((n)=>n !== "telegram"), ...(notify ? ["telegram"] : [])]));
-      try { await api(`/projects/${id}`, { method: "PATCH", body: { telegramChatId: $("#ptg-chat").value.trim(), settings: { notifications } } }); closeModal(); toast("Telegram settings saved", "", "ok"); refreshCurrent(); }
+      try { await api(`/projects/${id}`, { method: "PATCH", body: { settings: { notifications } } }); closeModal(); toast("تنظیمات تلگرام ذخیره شد", "", "ok"); refreshCurrent(); }
       catch (e) { toast("Error", e.message, "err"); }
     };
   };
@@ -1807,11 +2070,11 @@
     const reposTab = `<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Branch</th><th>Role</th><th>Config</th><th></th></tr></thead><tbody>${(p.repositories || []).map((r) => `<tr><td class="mono">${esc(r.repo)}</td><td class="mono">${esc(r.branch)}</td><td>${esc(r.role)}</td><td>${r.isConfigRepo ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-muted">no</span>'}</td><td><button class="btn btn-ghost pe-unlink" data-repo="${esc(r.repo)}">Unlink</button></td></tr>`).join("")}</tbody></table></div><div class="flex mt"><button class="btn btn-primary" id="pe-link-repo">＋ Link repository</button></div><div class="field-hint">Branch, role and config-repo switches live in the edit dialog of each repository link.</div>`;
     $("#modal-body").innerHTML = `
       ${tabsHtml("pe", [
-        { id: "identity", label: "Identity", html: `<div class="field"><label>Name</label><input class="input" id="pe-name" value="${esc(p.name)}"/></div><div class="field"><label>Description</label><textarea class="textarea" id="pe-desc">${esc(p.description || "")}</textarea></div><div class="grid-2"><div class="field"><label>Status</label><select class="select" id="pe-active"><option value="true" ${p.active ? "selected" : ""}>Active</option><option value="false" ${!p.active ? "selected" : ""}>Inactive</option></select></div><div class="field"><label>Environment</label><select class="select" id="pe-env">${["development","staging","production"].map((x)=>`<option value="${x}" ${x === (p.settings?.environment || "development") ? "selected" : ""}>${x}</option>`).join("")}</select></div></div><div class="grid-2"><div class="field"><label>Default model</label><select class="select" id="pe-model"><option value="">Project router default</option>${models.map((m)=>`<option value="${esc(m.id)}" ${m.id === selectedModel ? "selected" : ""}>${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div><div class="field"><label>Telegram chat</label><input class="input mono" id="pe-telegram" value="${esc(p.telegramChatId || "")}" placeholder="not connected"/></div></div><div class="grid-2"><div class="field"><label>Default agent</label><select class="select" id="pe-agent"><option value="">Auto (router decides)</option>${agents.map((a)=>`<option value="${esc(a.id)}" ${a.id === selectedAgent ? "selected" : ""}>${esc(a.name)} (${esc(a.type)})</option>`).join("")}</select></div><div class="field"><label>Memory repository</label><select class="select" id="pe-memrepo"><option value="">Config repo (.ai-engineering)</option>${(p.repositories || []).map((r)=>`<option value="${esc(r.repo)}" ${r.repo === (p.memoryRepo || "") ? "selected" : ""}>${esc(r.repo)}</option>`).join("")}</select><div class="field-hint">Where versioned memory snapshots live.</div></div></div>` },
+        { id: "identity", label: "Identity", html: `<div class="field"><label>Name</label><input class="input" id="pe-name" value="${esc(p.name)}"/></div><div class="field"><label>Description</label><textarea class="textarea" id="pe-desc">${esc(p.description || "")}</textarea></div><div class="grid-2"><div class="field"><label>Status</label><select class="select" id="pe-active"><option value="true" ${p.active ? "selected" : ""}>Active</option><option value="false" ${!p.active ? "selected" : ""}>Inactive</option></select></div><div class="field"><label>Environment</label><select class="select" id="pe-env">${["development","staging","production"].map((x)=>`<option value="${x}" ${x === (p.settings?.environment || "development") ? "selected" : ""}>${x}</option>`).join("")}</select></div></div><div class="grid-2"><div class="field"><label>Default model</label><select class="select" id="pe-model"><option value="">Project router default</option>${models.map((m)=>`<option value="${esc(m.id)}" ${m.id === selectedModel ? "selected" : ""}>${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div></div><div class="grid-2"><div class="field"><label>Default agent</label><select class="select" id="pe-agent"><option value="">Auto (router decides)</option>${agents.map((a)=>`<option value="${esc(a.id)}" ${a.id === selectedAgent ? "selected" : ""}>${esc(a.name)} (${esc(a.type)})</option>`).join("")}</select></div><div class="field"><label>Memory repository</label><select class="select" id="pe-memrepo"><option value="">Config repo (.ai-engineering)</option>${(p.repositories || []).map((r)=>`<option value="${esc(r.repo)}" ${r.repo === (p.memoryRepo || "") ? "selected" : ""}>${esc(r.repo)}</option>`).join("")}</select><div class="field-hint">Where versioned memory snapshots live.</div></div></div>` },
         { id: "capabilities", label: "Capabilities", html: `${CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], caps[k] || [], { placeholder: ph, single: new Set(catalog.singleSelectKeys || ["databases"]).has(k) })).join("")}${chipGroupHtml("agentTypes", "Agents to generate", catalog.agentTypes || [], caps.agentTypes || [], { core: catalog.coreAgentTypes || [], allowCustom: false, hint: "Saving reads CodeVia and creates only missing definitions. Existing prompts and enabled/disabled choices are preserved." })}` },
         { id: "permissions", label: "Permissions", html: permTab },
         { id: "repositories", label: "Repositories", html: reposTab },
-        { id: "operations", label: "Operations", html: `<div class="grid-2"><div class="field"><label>Max tokens per run</label><input class="input" type="number" id="pe-b-tokens" value="${esc(b.maxTokensPerRun ?? 20000)}"/></div><div class="field"><label>Max calls per run</label><input class="input" type="number" id="pe-b-calls" value="${esc(b.maxCallsPerRun ?? 20)}"/></div><div class="field"><label>Max cost per run (USD)</label><input class="input" type="number" step="0.01" id="pe-b-cost" value="${esc(b.maxCostUsdPerRun ?? 5)}"/></div><div class="field"><label>Max duration (ms)</label><input class="input" type="number" id="pe-b-ms" value="${esc(b.maxDurationMs ?? 300000)}"/></div></div><div class="field"><label>Notifications</label><input class="input" id="pe-notifications" value="${esc((p.settings?.notifications || []).join(", "))}" placeholder="web, telegram"/></div><div class="field"><label>Metadata (JSON)</label><textarea class="textarea mono" id="pe-meta">${esc(JSON.stringify(p.settings?.metadata || {}, null, 2))}</textarea></div>` },
+        { id: "operations", label: "Operations", html: `<div class="grid-2"><div class="field"><label>Max tokens per run</label><input class="input" type="number" id="pe-b-tokens" value="${esc(b.maxTokensPerRun ?? 20000)}"/></div><div class="field"><label>Max calls per run</label><input class="input" type="number" id="pe-b-calls" value="${esc(b.maxCallsPerRun ?? 20)}"/></div><div class="field"><label>Max cost per run (USD)</label><input class="input" type="number" step="0.01" id="pe-b-cost" value="${esc(b.maxCostUsdPerRun ?? 5)}"/></div><div class="field"><label>Max duration (ms)</label><input class="input" type="number" id="pe-b-ms" value="${esc(b.maxDurationMs ?? 300000)}"/></div></div><div class="grid-2"><div class="field"><label>Max QA↔Fix loops</label><input class="input" type="number" id="pe-fixloops" min="0" max="6" value="${esc(p.settings?.maxFixLoops ?? 2)}"/><div class="field-hint">How many diagnosis/fix rounds after a failing QA run before giving up.</div></div><div class="field"><label>Diagnose via research before fixing</label><select class="select" id="pe-researchfix"><option value="true" ${p.settings?.researchBeforeFix !== false ? "selected" : ""}>On (recommended)</option><option value="false" ${p.settings?.researchBeforeFix === false ? "selected" : ""}>Off (direct fix)</option></select></div><div class="field"><label>Cache GitHub context in memory</label><select class="select" id="pe-cachectx"><option value="true" ${p.settings?.cacheContextInMemory !== false ? "selected" : ""}>On</option><option value="false" ${p.settings?.cacheContextInMemory === false ? "selected" : ""}>Off (rescan every run)</option></select></div></div><div class="field"><label>Notifications</label><input class="input" id="pe-notifications" value="${esc((p.settings?.notifications || []).join(", "))}" placeholder="web, telegram"/></div><div class="field"><label>Metadata (JSON)</label><textarea class="textarea mono" id="pe-meta">${esc(JSON.stringify(p.settings?.metadata || {}, null, 2))}</textarea></div>` },
       ])}
       <div class="flex mt"><button class="btn btn-primary" id="pe-save">Save & re-onboard</button><button class="btn" id="pe-save-lite">Save without onboarding</button><button class="btn btn-danger" id="pe-delete">Delete project</button><button class="btn" onclick="closeModal()">Cancel</button></div>`;
     bindChipGroups($("#modal-body"));
@@ -1826,7 +2089,7 @@
       try {
         await api("/projects/" + id, { method: "PATCH", body: {
           name: $("#pe-name").value.trim(), description: $("#pe-desc").value,
-          active: $("#pe-active").value === "true", defaultModelId: $("#pe-model").value, defaultAgentId: $("#pe-agent").value, memoryRepo: $("#pe-memrepo").value, telegramChatId: $("#pe-telegram").value.trim(),
+          active: $("#pe-active").value === "true", defaultModelId: $("#pe-model").value, defaultAgentId: $("#pe-agent").value, memoryRepo: $("#pe-memrepo").value, 
           capabilities: readChipGroups($("#modal-body")), reonboard,
           settings: {
             environment: $("#pe-env").value,
@@ -1834,6 +2097,9 @@
             metadata,
             permissions,
             budget: { maxTokensPerRun: Number($("#pe-b-tokens").value) || 0, maxCallsPerRun: Number($("#pe-b-calls").value) || 0, maxCostUsdPerRun: Number($("#pe-b-cost").value) || 0, maxDurationMs: Number($("#pe-b-ms").value) || 0 },
+            maxFixLoops: Math.max(0, Math.min(6, Number($("#pe-fixloops").value) || 0)),
+            researchBeforeFix: $("#pe-researchfix").value === "true",
+            cacheContextInMemory: $("#pe-cachectx").value === "true",
           },
         } });
         closeModal(); toast("Project updated", reonboard ? "Repository loaded; missing definitions initialized" : "Settings saved", "ok"); refreshCurrent();
@@ -2171,9 +2437,15 @@
     const builder = document.createElement("div");
     builder.className = "card card-body mt";
     builder.innerHTML = `<div class="card-title">Agent Builder <span class="sub">models · skills · tools · permissions · limits</span></div>
+      <div class="field"><label>Allowed models <span class="sub">when non-empty, this agent ONLY uses these models (best-performing chosen by smart router). Leave empty to allow all active models.</span></label>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;max-height:140px;overflow:auto;padding:8px;border:1px dashed var(--border);border-radius:8px">
+          ${allModels.filter((m) => m.active).map((m) => `<label class="check"><input type="checkbox" data-am="${esc(m.id)}" ${((a.models?.allowedModels) || []).includes(m.id) ? "checked" : ""}/> ${esc(m.displayName || m.modelId)} <span class="sub mono">${esc(m.providerId.replace("provider-",""))}</span></label>`).join("") || '<span class="sub">No active models</span>'}
+        </div>
+        <div class="field-hint">🧠 Tip: run a benchmark from the Models page first so the router has real latency/accuracy data to pick the best one automatically.</div>
+      </div>
       <div class="grid-2">
-        <div class="field"><label>Primary model</label><select class="select" id="ab-model"><option value="">Router default</option>${allModels.filter((m) => m.active).map((m) => `<option value="${esc(m.id)}" ${m.id === (a.models?.primary || "") ? "selected" : ""}>${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div>
-        <div class="field"><label>Fallback models <span class="sub">tried A → B → C on failure</span></label><div style="display:flex;flex-wrap:wrap;gap:6px;max-height:120px;overflow:auto">${allModels.filter((m) => m.active).map((m) => `<label class="check"><input type="checkbox" data-fb="${esc(m.id)}" ${(a.models?.fallbacks || []).includes(m.id) ? "checked" : ""}/> ${esc(m.displayName || m.modelId)}</label>`).join("")}</div></div>
+        <div class="field"><label>Primary model <span class="sub">overrides smart routing when set</span></label><select class="select" id="ab-model"><option value="">Router default (auto-pick best)</option>${allModels.filter((m) => m.active).map((m) => `<option value="${esc(m.id)}" ${m.id === (a.models?.primary || "") ? "selected" : ""}>${esc(m.displayName || m.modelId)} · ${esc(m.providerId)}</option>`).join("")}</select></div>
+        <div class="field"><label>Fallback models <span class="sub">tried A → B → C on failure (after auto-fallbacks by score)</span></label><div style="display:flex;flex-wrap:wrap;gap:6px;max-height:120px;overflow:auto">${allModels.filter((m) => m.active).map((m) => `<label class="check"><input type="checkbox" data-fb="${esc(m.id)}" ${(a.models?.fallbacks || []).includes(m.id) ? "checked" : ""}/> ${esc(m.displayName || m.modelId)}</label>`).join("")}</div></div>
       </div>
       <div class="field"><label>Skills</label><div style="display:flex;flex-wrap:wrap;gap:6px">${allSkills.map((s) => `<label class="check"><input type="checkbox" data-sk="${esc(s.slug)}" ${(a.skills || []).includes(s.slug) ? "checked" : ""}/> ${esc(s.name)}</label>`).join("") || '<span class="sub">No skills in catalog</span>'}</div></div>
       <div class="field"><label>Tools</label><div style="display:flex;flex-wrap:wrap;gap:6px">${allTools.map((t) => `<label class="check" title="${esc(t.description || "")}"><input type="checkbox" data-tl="${esc(t.name)}" ${(a.tools || []).includes(t.name) ? "checked" : ""}/> <span class="mono">${esc(t.name)}</span>${t.dangerous ? ' <span class="badge badge-warn">dangerous</span>' : ""}</label>`).join("") || '<span class="sub">No tools registered</span>'}</div><div class="field-hint">Dangerous tools (write / merge / deploy / migrate) are approval-gated at runtime.</div></div>
@@ -2190,7 +2462,7 @@
       const pick = (sel, attr) => [...document.querySelectorAll(sel)].filter((c) => c.checked).map((c) => c.getAttribute(attr));
       try {
         await api(`/agents/${id}`, { method: "PATCH", body: {
-          models: { primary: $("#ab-model").value, fallbacks: pick("[data-fb]", "data-fb"), specialized: a.models?.specialized || {} },
+          models: { primary: $("#ab-model").value, fallbacks: pick("[data-fb]", "data-fb"), allowedModels: pick("[data-am]", "data-am"), specialized: a.models?.specialized || {} },
           skills: pick("[data-sk]", "data-sk"),
           tools: pick("[data-tl]", "data-tl"),
           permissions: pick("[data-pm]", "data-pm"),
@@ -2298,6 +2570,7 @@
     $("#content").innerHTML = `<div class="overview">
         <div><h1>Models</h1><p id="models-head-note">Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)</p></div>
         <div class="flex">
+          <button class="btn" onclick="runModelBenchmark()">🧪 Benchmark all models</button>
           <button class="btn" onclick="modelGroupsCollapseAll()">Collapse all</button>
           <button class="btn" onclick="modelGroupsExpandAll()">Expand all</button>
           <button class="btn" onclick="openModelGroups()">🗂 Groups</button>
@@ -2314,10 +2587,63 @@
         </div>
         <div class="field-hint" id="model-search-summary">${modelSearchSummary()}</div>
       </div>
+      <div id="model-bench-card"></div>
       <div id="model-bulkbar"></div>
       <div id="model-groups">${modelGroupsInnerHtml()}</div>`;
+    renderBenchmarkCard();
     renderBulkBar();
   }
+
+  /* ---------- Smart model routing — benchmark panel ---------- */
+  let benchStatsCache = null;
+  async function renderBenchmarkCard() {
+    const el = $("#model-bench-card");
+    if (!el) return;
+    if (!benchStatsCache) {
+      try {
+        const r = await api("/models/benchmark/stats");
+        benchStatsCache = r.stats || [];
+      } catch (_) { benchStatsCache = []; }
+    }
+    if (!benchStatsCache || !benchStatsCache.length) {
+      el.innerHTML = `<div class="card card-body mt"><div class="card-title">🧪 Smart routing benchmark <span class="sub">no data yet</span></div>
+        <p style="color:var(--text-muted);font-size:13px">The router picks the best model for each agent call based on real speed, accuracy and error rate. Run a quick math quiz across every active model to seed the data (uses temperature=0, cheap — ~20 short calls).</p>
+        <div class="flex mt"><button class="btn btn-primary" onclick="runModelBenchmark()">▶ Run benchmark now</button></div></div>`;
+      return;
+    }
+    const modelName = (id) => { const m = modelsCache.find((x) => x.id === id); return m ? m.displayName : id; };
+    el.innerHTML = `<div class="card card-body mt">
+        <div class="card-title">🧪 Smart routing benchmark <span class="sub">${benchStatsCache.length} model(s) ranked by composite score</span></div>
+        <p style="color:var(--text-muted);font-size:12px">Score = 60% accuracy · 20% reliability · 20% speed. Higher is better. Models with recent errors are demoted in the fallback chain.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Rank</th><th>Model</th><th>Score</th><th>Accuracy</th><th>Avg latency</th><th>p95 latency</th><th>Error rate</th><th>Avg cost</th><th>Attempts</th><th>Last tested</th></tr></thead>
+          <tbody>${benchStatsCache.map((s, i) => `<tr${i===0?' style="background:var(--glass)"':""}>
+            <td><strong>#${i+1}</strong></td><td><strong>${esc(modelName(s.modelId))}</strong><div class="sub mono">${esc(s.modelId.slice(0,20))}</div></td>
+            <td><strong>${s.score.toFixed(3)}</strong></td>
+            <td>${s.accuracy?`<span class="badge badge-${s.accuracy>.8?'ok':s.accuracy>.5?'warn':'err'}">${(s.accuracy*100).toFixed(0)}%</span>`:'<span class="badge badge-muted">—</span>'}</td>
+            <td class="mono">${s.avgLatencyMs}ms</td>
+            <td class="mono">${s.p95LatencyMs}ms</td>
+            <td>${s.errorRate?`<span class="badge badge-${s.errorRate>.2?'err':'ok'}">${(s.errorRate*100).toFixed(0)}%</span>`:'<span class="badge badge-ok">0%</span>'}</td>
+            <td class="mono">${s.avgCostUsd?'$'+s.avgCostUsd.toFixed(4):'—'}</td>
+            <td>${s.totalAttempts}</td>
+            <td class="sub">${s.lastTestedAt?timeAgo(s.lastTestedAt):'—'}</td>
+          </tr>`).join("")}</tbody>
+        </table></div>
+        <div class="flex mt"><button class="btn btn-primary" onclick="runModelBenchmark()">▶ Re-run benchmark (all active models)</button><span class="field-hint" style="margin-left:8px">Results persist and accumulate — re-running refines the scores.</span></div>
+      </div>`;
+  }
+  window.runModelBenchmark = async () => {
+    const btn = document.activeElement;
+    if (btn) btn.disabled = true;
+    toast("Benchmark running", "Sending random math problems to all active models…", "");
+    try {
+      const r = await api("/models/benchmark/run", { method: "POST", body: { problemsPerModel: 6 } });
+      benchStatsCache = r.stats;
+      await renderBenchmarkCard();
+      toast("Benchmark complete", `${r.modelCount} models · ${r.resultCount} attempts · ${r.problemCount} problems each`, "ok");
+    } catch (e) { toast("Benchmark failed", e.message, "err"); }
+    finally { if (btn) btn.disabled = false; }
+  };
 
   function modelSearchSummary() {
     const q = modelSearchQuery.trim();
@@ -3953,12 +4279,112 @@
     const list = await api("/conversations");
     $("#content").innerHTML = `<div class="overview"><div><h1>Conversations</h1><p>Project-aware conversations with auto-summarization</p></div></div>
       ${searchPanelHtml("conversation-search", "Search conversations by title, project, source, message text or updated time…")}
-      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Project</th><th>Source</th><th>Messages</th><th>Updated</th></tr></thead><tbody id="conversation-tbody"></tbody></table></div></div>`;
-    bindSearchPanel("conversation-search", list, conversationRows, "#conversation-tbody", "conversation", { emptyHtml: () => `<tr><td colspan="5">${emptyState("🔎", "No matching conversations", "Try searching by title, project, source or message content.")}</td></tr>` });
+      <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Project</th><th>Source</th><th>Messages</th><th>Updated</th><th></th></tr></thead><tbody id="conversation-tbody"></tbody></table></div></div>`;
+    bindSearchPanel("conversation-search", list, conversationRows, "#conversation-tbody", "conversation", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching conversations", "Try searching by title, project, source or message content.")}</td></tr>` });
   });
   function conversationRows(list) {
-    return list.map((c) => `<tr><td><a href="#/conversations/${c.id}"><strong>${esc(c.title)}</strong></a></td><td class="mono">${(c.projectId||"—").slice(0,12)}</td><td>${esc(c.source)}</td><td>${c.messages.length}</td><td>${timeAgo(c.updatedAt)}</td></tr>`).join("");
+    return list.map((c) => `<tr><td><a href="#/conversations/${c.id}"><strong>${esc(c.title)}</strong></a>${c.summary ? `<div class="sub">${esc(c.summary.slice(0,100))}</div>` : ""}</td><td class="mono">${(c.projectId||"—").slice(0,12)}</td><td>${esc(c.source)}</td><td>${c.messages.length}</td><td>${timeAgo(c.updatedAt)}</td><td style="white-space:nowrap"><a class="btn btn-ghost" href="#/conversations/${esc(c.id)}">Open</a><button class="btn btn-ghost" title="Delete conversation" onclick="conversationDelete(${esc(JSON.stringify(c.id))})">🗑</button></td></tr>`).join("");
   }
+
+  /* CONVERSATION DETAIL (full-page chat view) */
+  on("/conversations/:id", async (rest) => {
+    const id = rest[0];
+    const render = async () => {
+      const c = await api(`/conversations/${id}`);
+      const msgs = c.messages || [];
+      const projectIdShort = (c.projectId || "—").slice(0, 12);
+      $("#content").innerHTML = `
+        <div class="overview">
+          <div>
+            <div class="field-hint"><a href="#/conversations">← All conversations</a></div>
+            <h1>💬 ${esc(c.title)}</h1>
+            <p class="sub mono">project ${esc(projectIdShort)} · source ${esc(c.source)} · ${msgs.length} message(s) · updated ${timeAgo(c.updatedAt)} · model ${esc(c.modelId || "project default")}</p>
+          </div>
+          <div class="action-row">
+            <button class="btn" id="cv-sum">📝 Summarize now</button>
+            <button class="btn btn-danger" onclick="conversationDelete(${esc(JSON.stringify(c.id))}, true)">🗑 Delete</button>
+          </div>
+        </div>
+        ${c.summary ? `<div class="card card-body"><div class="card-title">Context summary <span class="sub">auto-updates every 20 messages</span></div><pre class="mini-pre" dir="auto">${esc(c.summary)}</pre></div>` : ""}
+        <div class="card card-body mt" style="padding:0">
+          <div id="cv-messages" style="display:flex;flex-direction:column;gap:10px;padding:16px;max-height:65vh;overflow-y:auto;background:var(--bg,#0b0d17)">
+            ${msgs.length ? msgs.map(msgBubble).join("") : `<div style="padding:60px 20px;text-align:center;color:var(--text-muted)">💬 No messages yet — type below to start chatting with the project assistant.</div>`}
+          </div>
+          <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end">
+            <textarea id="cv-input" class="textarea" dir="auto" placeholder="Ask anything about this project…" style="flex:1;min-height:46px;max-height:200px;resize:vertical;margin:0"></textarea>
+            <button class="btn btn-primary" id="cv-send" style="height:46px">Send ↵</button>
+          </div>
+          <div class="field-hint" style="padding:0 16px 12px">Enter sends · Shift+Enter for newline · last ${Math.min(msgs.length, 50)} messages visible to AI; older context is auto-summarized.</div>
+        </div>`;
+      setTimeout(() => { const box = $("#cv-messages"); if (box) box.scrollTop = box.scrollHeight; }, 30);
+      const input = $("#cv-input");
+      const sendBtn = $("#cv-send");
+      input.focus();
+      const doSend = async () => {
+        const content = input.value.trim();
+        if (!content) return;
+        input.value = "";
+        sendBtn.disabled = true;
+        sendBtn.textContent = "…";
+        try {
+          const updated = await api(`/conversations/${id}/messages`, { method: "POST", body: { role: "user", content } });
+          await render();
+        } catch (e) {
+          toast("Send failed", e.message, "err");
+          sendBtn.disabled = false;
+          sendBtn.textContent = "Send ↵";
+        }
+      };
+      sendBtn.onclick = doSend;
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); }
+      });
+      $("#cv-sum").onclick = async () => {
+        try {
+          const s = await api(`/conversations/${id}/summarize`, { method: "POST", body: {} });
+          toast("Summary updated", s.method || "ok", "ok");
+          render();
+        } catch (e) { toast("Summarize failed", e.message, "err"); }
+      };
+    };
+    await render();
+  });
+
+  function msgBubble(m) {
+    const isUser = m.role === "user";
+    const dir = dirForText(m.content);
+    const bg = isUser ? "var(--primary, #7c6cff)" : "var(--panel, var(--glass))";
+    const color = isUser ? "#fff" : "var(--text)";
+    const align = isUser ? "flex-end" : "flex-start";
+    const icon = isUser ? "🧑" : "🤖";
+    const label = isUser ? "You" : "CodeVia AI";
+    const meta = m.metadata || {};
+    const atts = (meta.attachments || []).map((a) => {
+      if (a.dataUrl && a.contentType && a.contentType.startsWith("image/")) return `<img src="${esc(a.dataUrl)}" alt="${esc(a.name)}" style="max-width:180px;max-height:180px;border-radius:8px;margin-top:8px;display:block;border:1px solid rgba(255,255,255,.15)"/>`;
+      return `<div style="margin-top:6px;padding:6px 8px;background:rgba(255,255,255,.08);border-radius:8px;font-size:12px;display:inline-flex;gap:6px;align-items:center">📎 ${esc(a.name)} <span style="opacity:.7">${Math.round((a.size||0)/1024)}KB${a.preview?" · "+esc(a.preview):""}</span></div>`;
+    }).join("");
+    const metaRow = meta.modelId || meta.executionMode ? `<div style="font-size:10px;opacity:.55;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${meta.modelId?`<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(String(meta.modelId).replace(/^model-/,""))}</span>`:""}${meta.executionMode?`<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(meta.executionMode)}</span>`:""}${meta.dispatchedTaskId?`<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">task ${esc(String(meta.dispatchedTaskId).slice(0,8))}</span>`:""}</div>` : "";
+    return `<div style="display:flex;gap:8px;justify-content:${align}">
+      ${isUser ? "" : `<span style="font-size:22px;line-height:1;align-self:flex-end">${icon}</span>`}
+      <div style="max-width:min(78%,520px);background:${bg};color:${color};padding:10px 14px;border-radius:16px;border-bottom-${isUser?"right":"left"}-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.2)">
+        <div style="font-size:11px;opacity:.7;margin-bottom:4px">${esc(label)} · ${timeAgo(m.createdAt)}</div>
+        <div dir="${dir}" style="white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.55">${esc(m.content)}</div>
+        ${atts}
+        ${metaRow}
+      </div>
+      ${isUser ? `<span style="font-size:22px;line-height:1;align-self:flex-end">${icon}</span>` : ""}
+    </div>`;
+  }
+
+  window.conversationDelete = async (convId, goBack) => {
+    if (!confirm("Delete this conversation? This cannot be undone.")) return;
+    try {
+      await api(`/conversations/${convId}`, { method: "DELETE" });
+      toast("Conversation deleted", "", "ok");
+      if (goBack) location.hash = "#/conversations";
+      else refreshCurrent();
+    } catch (e) { toast("Delete failed", e.message, "err"); }
+  };
 
   /* MEMORY */
   on("/memory", async () => {
@@ -4328,16 +4754,15 @@
   window.openTelegramAccount = async (editId) => {
     const existing = editId ? (await api("/integrations/telegram/accounts")).find((a) => a.id === editId) : null;
     openModal(editId ? "Edit Telegram bot" : "Connect Telegram bot", `
-      <div class="field"><label>Bot token <span class="select-count">from @BotFather — stored encrypted</span></label><input class="input mono" id="ta-token" type="password" placeholder="123456:ABC-DEF..." value=""/></div>
-      <div class="field"><label>AccountId <span class="select-count">your Telegram numeric id (e.g. 123456789)</span></label><input class="input mono" id="ta-account" value="${esc(existing?.accountId || "")}" placeholder="123456789"/></div>
-      <div class="field"><label>ChatId <span class="select-count">optional — defaults to AccountId</span></label><input class="input mono" id="ta-chat" value="${esc(existing?.chatId || "")}" placeholder="(optional)"/></div>
-      <div class="field"><label>Label <span class="select-count">optional</span></label><input class="input" id="ta-name" value="${esc(existing?.name || "")}" placeholder="My bot"/></div>
-      <div class="field-hint">Connect checks the token with Telegram’s real <span class="mono">getMe</span> API and registers the platform webhook.</div>
+      <div class="field"><label>Bot token <span class="select-count">از @BotFather — رمزنگاری‌شده ذخیره می‌شود</span></label><input class="input mono" id="ta-token" type="password" placeholder="123456:ABC-DEF..." value=""/></div>
+      <div class="field"><label>User ID <span class="select-count">آیدی عددی تلگرام شما (مثلاً 123456789) — فقط همین یوزر اجازه‌ی چت با بات را دارد</span></label><input class="input mono" id="ta-account" value="${esc(existing?.accountId || "")}" placeholder="123456789"/></div>
+      <div class="field"><label>Label <span class="select-count">اختیاری</span></label><input class="input" id="ta-name" value="${esc(existing?.name || "")}" placeholder="My bot"/></div>
+      <div class="field-hint">چت آیدی دیگر لازم نیست — بات به‌طور خودکار از آیدی عددی شما استفاده می‌کند و تنها به پیام‌های شما پاسخ می‌دهد.</div>
       <div class="flex"><button class="btn btn-primary" id="ta-go">${editId ? "Save & connect" : "Connect"}</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
     $("#ta-go").onclick = async () => {
       const token = $("#ta-token").value.trim();
       if (!token && !editId) { toast("Bot token required", "", "err"); return; }
-      const body = { token, accountId: $("#ta-account").value.trim(), chatId: $("#ta-chat").value.trim(), name: $("#ta-name").value.trim() };
+      const body = { token, accountId: $("#ta-account").value.trim(), name: $("#ta-name").value.trim() };
       try {
         const r = editId ? await api(`/integrations/telegram/accounts/${editId}`, { method: "PATCH", body }) : await api("/integrations/telegram/accounts", { method: "POST", body });
         if (r && r.warning) toast("Bot connected — but note", r.warning, "warn");
