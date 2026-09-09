@@ -66,7 +66,10 @@ export class AiTextService {
   async complete(req: AiTextRequest): Promise<AiTextResult | null> {
     const available = this.deps.modelRepo.listActive().map(toCandidate);
     const perfStats = this.deps.benchRepo.computeStats();
-    ModelBenchmarkRepository.addSpeedNormalisation(perfStats);
+    // Ignore telemetry for models that no longer exist (deleted/deactivated), so
+    // a stale model can never skew the speed normalisation or be routed to.
+    const liveIds = new Set(this.deps.modelRepo.listActive().map((m) => m.id));
+    ModelBenchmarkRepository.addSpeedNormalisation(perfStats.filter((s) => liveIds.has(s.modelId)));
     const candidates = this.deps.modelRouter.route(
       available,
       req.agentModels ?? EMPTY_MODELS,
