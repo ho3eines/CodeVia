@@ -516,21 +516,43 @@
         refreshCurrent();
       }, 400);
     };
+    // Live home page: the top-level Chat page re-renders its open message thread
+    // in place (throttled) whenever an event arrives for its current project, so
+    // replies posted by a run/task/approval appear without a manual refresh. The
+    // Project overview page just does a silent same-page refresh instead.
+    let homeRefreshTimer = null;
+    const refreshHome = () => {
+      const homeChat = /^#\/chat(?:\?|$)/.test(location.hash) || location.hash === "" || location.hash === "#";
+      if (homeChat && typeof window._projectChatRefresh === "function") {
+        if (homeRefreshTimer) return;
+        homeRefreshTimer = setTimeout(() => { homeRefreshTimer = null; if (window._projectChatRefresh) window._projectChatRefresh(); }, 300);
+        return;
+      }
+      // Top-level Project overview only — a project's *detail* page already
+      // streams through its own chat/socket wiring, so don't silently re-render
+      // the whole sub-page on every event.
+      if (/^#\/project(?:\?|$)/.test(location.hash)) realtimeRefresh();
+    };
+    const forCurrentProject = (ev) => !!ev && !!ev.projectId && window._projectChatProject && ev.projectId === window._projectChatProject;
     socket.on("connect_error", () => setLivePill(false));
     socket.on("run.updated", (ev) => {
       if (ev.runId && (location.hash.startsWith("#/runs") || /^#\/projects\/[^/]+\/(runs|tests)$/.test(location.hash))) realtimeRefresh();
+      if (forCurrentProject(ev)) refreshHome();
       if (ev.data && ev.data.status === "succeeded") toast("Run completed", ev.runId, "ok");
     });
     socket.on("step.updated", (ev) => {
       if (ev.runId && location.hash.includes("/console")) realtimeRefresh();
+      if (forCurrentProject(ev)) refreshHome();
     });
     socket.on("task.updated", (ev) => {
       if (ev.taskId && (location.hash.startsWith("#/tasks") || /^#\/projects\/[^/]+\/tasks$/.test(location.hash))) realtimeRefresh();
+      if (forCurrentProject(ev)) refreshHome();
     });
     socket.on("notification", (ev) => {
       const kind = ev && ev.data && ev.data.kind;
       if (kind === "approval.required") toast("Approval required", ev.data.action || "", "warn");
       if (kind && kind.startsWith("approval.") && (location.hash.startsWith("#/approvals") || location.hash.startsWith("#/dashboard"))) refreshCurrent();
+      if (forCurrentProject(ev)) refreshHome();
       refreshBell();
     });
   }
@@ -561,38 +583,69 @@
     // projects list.
     routes[path + "/:sub"] = fn;
   }
+  // A few list endpoints can (on some deployments / after the repo re-org)
+  // resolve to a paginated `{ items: [...] }` object or even `undefined`
+  // instead of a bare array. Normalise before `.filter`/`.map` so a page can
+  // never blow up with "X.filter is not a function" — the bug class seen on the
+  // project page with `runs.filter`.
+  const asArray = (v) => (Array.isArray(v) ? v : v && typeof v === "object" && Array.isArray(v.items) ? v.items : v && typeof v === "object" && Array.isArray(v.data) ? v.data : []);
+
+  /* ---------- current project context (top-level Chat / Project pages) ----------
+     The home surface is project-centric: the top-level Chat and Project pages
+     render the *current* project. Which project that is gets remembered locally
+     so the UI opens on the project you were last working in. */
+  const CV_PROJECT_KEY = "cv_project";
+  function rememberedProjectId() { try { return localStorage.getItem(CV_PROJECT_KEY) || ""; } catch (_) { return ""; } }
+  function rememberProject(id) { try { if (id) localStorage.setItem(CV_PROJECT_KEY, id); } catch (_) {} }
+  function pickCurrentProject(projects) {
+    const arr = asArray(projects);
+    const stored = rememberedProjectId();
+    if (stored && arr.some((p) => p && p.id === stored)) return stored;
+    const first = (arr.find((p) => p && p.id) || {}).id || "";
+    if (first) rememberProject(first);
+    return first;
+  }
+  function workspaceHeaderHtml(p, projects, active) {
+    const opts = asArray(projects).map((x) => `<option value="${esc(x.id)}" ${x.id === p.id ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+    return `<div class="card card-body workspace-head">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:22px">${active === "chat" ? "💬" : "📁"}</span>
+        <div style="flex:1;min-width:180px">
+          <div class="sub" style="margin-bottom:2px">${active === "chat" ? "Chat · current project" : "Project · current project"}</div>
+          <select class="select mono" id="ws-project-switch" title="Switch current project">${opts}</select>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <a class="btn btn-ghost" href="#/projects/${esc(p.id)}">Open project page →</a>
+          <a class="btn btn-ghost" href="#/projects">All projects</a>
+          <a class="btn" href="#/settings">⚙️ Settings</a>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--text-muted)">
+        <span>${p.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</span>
+        <span class="mono">${esc(p.configRepo || "")} @ ${esc(p.branch || "main")}</span>
+      </div>
+    </div>`;
+  }
+  function workspaceEmptyState() {
+    return `<div class="card card-body"><div class="empty"><div class="empty-emoji">📁</div>
+      <h3>No project yet</h3><p>Create a project first — then this page becomes a live chat + overview for it.</p>
+      <div class="flex mt" style="justify-content:center"><button class="btn btn-primary" onclick="openProjectModal()">＋ Create Project</button><a class="btn" href="#/projects">Browse / manage projects</a></div>
+    </div></div>`;
+  }
   function renderNav() {
+    // Deliberately minimal: the user drives the platform from a project's
+    // Chat / Project / Settings. Every deeper management section lives behind
+    // the Settings hub (still its own route for deep links).
     const groups = [
-      ["Platform", [
-        ["#/dashboard", "📊", "Dashboard"],
-        ["#/projects", "📁", "Projects"],
-        ["#/runs", "▶️", "Runs"],
-        ["#/tasks", "🧩", "Tasks"],
-        ["#/approvals", "🛑", "Approvals"],
-        ["#/logs", "📜", "Logs"],
-        ["#/conversations", "💬", "Conversations"],
-      ]],
-      ["AI", [
-        ["#/agents", "🤖", "Agents"],
-        ["#/models", "🧠", "Models"],
-        ["#/providers", "🔌", "Providers"],
-        ["#/skills", "🛠️", "Skills"],
-        ["#/workflows", "🔀", "Workflows"],
-        ["#/memory", "🗂️", "Memory"],
-      ]],
-      ["Integrations", [
-        ["#/github", "🐙", "GitHub"],
-        ["#/telegram", "📱", "Telegram"],
-      ]],
-      ["System", [
+      ["Workspace", [
+        ["#/chat", "💬", "Chat"],
+        ["#/project", "📁", "Project"],
         ["#/settings", "⚙️", "Settings"],
-        ["#/admin", "🛡️", "Admin"],
-        ["#/search", "🔍", "Search"],
       ]],
     ];
     $("#nav").innerHTML = groups.map(([label, items]) =>
       `<div class="nav-group">${label}</div>` +
-      items.map(([href, icon, text]) => `<a href="${href}" data-href="${href}"><span class="nav-icon">${icon}</span>${text}</a>`).join("")
+      items.map(([href, icon, text]) => `<a href="${href}" data-href="${href.replace(/^#/, "")}"><span class="nav-icon">${icon}</span>${text}</a>`).join("")
     ).join("");
   }
   // Match a path against registered routes, supporting ":param" segments.
@@ -630,12 +683,12 @@
       window._projectChatCleanup = null;
     }
     // Strip the query part ("#/github?login=success") before matching routes.
-    const hash = (location.hash.replace(/^#/, "").split("?")[0]) || "/dashboard";
+    const hash = (location.hash.replace(/^#/, "").split("?")[0]) || "/chat";
     renderNav();
     const [pathKey, ...rest] = hash.split("/").filter(Boolean);
-    const key = "/" + (pathKey || "dashboard");
+    const key = "/" + (pathKey || "chat");
     const full = "/" + [pathKey, ...rest].join("/");
-    const matched = matchRoute(full) || matchRoute(key) || matchRoute("/dashboard");
+    const matched = matchRoute(full) || matchRoute(key) || matchRoute("/chat");
     const handler = matched.handler;
     const params = matched.params || {};
     const title = $("#topbar-title");
@@ -663,7 +716,7 @@
       }
     }
     {
-      const shown = titleMap[matched.pattern] || titleMap[full] || titleMap[key] || "Dashboard";
+      const shown = titleMap[matched.pattern] || titleMap[full] || titleMap[key] || "Chat";
       title.textContent = document.title = shown;
       $("nav").setAttribute("aria-current", "true");
       $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.href === key));
@@ -714,7 +767,7 @@
     openBell(); refreshBell(); refreshCurrent();
   };
   const titleMap = {
-    "/dashboard": "Dashboard", "/projects": "Projects", "/agents": "Agents", "/models": "Models",
+    "/chat": "Chat", "/project": "Project", "/dashboard": "Dashboard", "/projects": "Projects", "/agents": "Agents", "/models": "Models",
     "/providers": "Providers", "/skills": "Skills", "/workflows": "Workflows", "/tasks": "Tasks",
     "/runs": "Runs", "/conversations": "Conversations", "/memory": "Memory", "/github": "GitHub",
     "/telegram": "Telegram", "/settings": "Settings", "/admin": "Admin", "/search": "Search",
@@ -1465,8 +1518,16 @@
     // Cleanup registry: when the user navigates away, tear down polling &
     // socket listeners so we don't leak handlers or refresh a dead view.
     const _projectChatCleanup = [];
-    const cleanup = () => { for (const fn of _projectChatCleanup.splice(0)) { try { fn(); } catch(_) {} } };
+    const cleanup = () => {
+      // Drop the live-refresh handles along with the pollers/listeners so a
+      // torn-down chat never reacts to stale socket events.
+      window._projectChatCleanup = null;
+      window._projectChatRefresh = null;
+      window._projectChatProject = null;
+      for (const fn of _projectChatCleanup.splice(0)) { try { fn(); } catch(_) {} }
+    };
     window._projectChatCleanup = cleanup;
+    window._projectChatProject = projectId;
     let activeTaskIds = new Set();
     let lastMsgCount = 0;
     const refreshMessages = async () => {
@@ -1486,6 +1547,10 @@
         return conv;
       } catch (e) { return null; }
     };
+    // Live-refresh seam for the top-level Chat page: socket events for this
+    // project nudge the open message thread in place (no full re-render, so the
+    // composer / scroll aren't disturbed while a task is streaming).
+    window._projectChatRefresh = refreshMessages;
     const refreshModelsAgents = async () => {
       const [allModels, agents, benchResp] = await Promise.all([
         api("/models").catch(() => []),
@@ -1708,6 +1773,76 @@
     </div>`;
   }
 
+  /* ---------- Top-level workspace: Chat (home) & Project ----------
+     The home page is the current project's live chat; the Project page is its
+     overview. Both carry a project switcher and auto-refresh over Socket.io so
+     changes that happen in chat or on a project appear live (see connectSocket). */
+  function bindWorkspaceSwitcher() {
+    const sel = document.getElementById("ws-project-switch");
+    if (!sel) return;
+    sel.addEventListener("change", () => {
+      rememberProject(sel.value);
+      // Re-route in place; route() tears down the old chat session first.
+      route({ silent: true });
+    });
+  }
+  function projectWorkspaceOverviewHtml(p, ov) {
+    const stats = {
+      counts: ov.counts || { agents: 0, agentsEnabled: 0, tasks: 0, tasksRunning: 0, runs: 0, runsFailed: 0 },
+      activity: ov.activity || [],
+      recentRuns: ov.recentRuns || [],
+      recentErrors: ov.recentErrors || [],
+      cost: ov.cost || { costUsd: 0 },
+    };
+    const commits = asArray(ov.recentCommits).slice(0, 5);
+    const openPRs = asArray(ov.openPRs).slice(0, 5);
+    const openIssues = asArray(ov.openIssues).slice(0, 5);
+    return `<div style="display:flex;flex-direction:column;gap:10px">
+      ${projectInfoTabHtml(p, stats)}
+      <div class="grid-2">
+        <div class="card card-body">
+          <div class="card-title">Recent commits <a class="sub" href="#/projects/${esc(p.id)}/commits">all →</a></div>
+          ${commits.length ? commits.map((c) => `<div class="list-row"><span>📝</span><div><strong>${esc(String(c.message || "").split("\n")[0]).slice(0,90)}</strong><div class="sub mono">${esc(String(c.sha || "").slice(0,7))} · ${esc(c.author || "—")}</div></div><span class="spacer"></span><span style="color:var(--text-muted);font-size:11px">${timeAgo(c.date)}</span></div>`).join("") : emptyState("📝", "No commits yet", "")}
+        </div>
+        <div class="card card-body">
+          <div class="card-title">Open pull requests <a class="sub" href="#/projects/${esc(p.id)}/pull-requests">all →</a></div>
+          ${openPRs.length ? openPRs.map((x) => `<div class="list-row"><span>⑂</span><div><strong>${esc(x.title)}</strong><div class="sub mono">#${esc(String(x.number || ""))}</div></div><span class="spacer"></span>${x.htmlUrl ? `<a class="btn btn-ghost" href="${esc(x.htmlUrl)}" target="_blank" rel="noopener">Open</a>` : ""}</div>`).join("") : emptyState("⑂", "No open PRs", "")}
+          <div class="card-title mt">Open issues <a class="sub" href="#/projects/${esc(p.id)}/issues">all →</a></div>
+          ${openIssues.length ? openIssues.map((x) => `<div class="list-row"><span>⭕</span><div><strong>${esc(x.title)}</strong><div class="sub mono">#${esc(String(x.number || ""))}</div></div></div>`).join("") : emptyState("⭕", "No open issues", "")}
+        </div>
+      </div>
+    </div>`;
+  }
+  on("/chat", async () => {
+    const projects = asArray(await api("/projects").catch(() => []));
+    const pid = pickCurrentProject(projects);
+    if (!pid) { $("#content").innerHTML = workspaceEmptyState(); return; }
+    rememberProject(pid);
+    const [p, conv] = await Promise.all([
+      api("/projects/" + pid).catch(() => null),
+      getProjectChatConv(pid).catch(() => null),
+    ]);
+    if (!p) { $("#content").innerHTML = workspaceEmptyState(); return; }
+    $("#content").innerHTML = workspaceHeaderHtml(p, projects, "chat") + projectChatTabHtml(conv || { messages: [] });
+    bindWorkspaceSwitcher();
+    if (conv) await mountProjectChat(pid, conv.id);
+  });
+  on("/project", async () => {
+    const projects = asArray(await api("/projects").catch(() => []));
+    const pid = pickCurrentProject(projects);
+    if (!pid) { $("#content").innerHTML = workspaceEmptyState(); return; }
+    rememberProject(pid);
+    const ov = await api(`/projects/${pid}/overview`).catch(() => null);
+    const p = ov && ov.project ? ov.project : await api("/projects/" + pid).catch(() => null);
+    if (!p) { $("#content").innerHTML = workspaceEmptyState(); return; }
+    // Track the current project so the realtime layer (connectSocket) knows an
+    // event belongs to the page being shown and can refresh the overview live.
+    window._projectChatProject = pid;
+    $("#content").innerHTML = workspaceHeaderHtml(p, projects, "project")
+      + (ov ? projectWorkspaceOverviewHtml(p, ov) : emptyState("📁", "Could not load project overview", ""));
+    bindWorkspaceSwitcher();
+  });
+
   onWithSub("/projects/:id", async (rest) => {
     const id = rest[0];
     const sub = (rest[1] || "").replace(/^\//, "");
@@ -1722,12 +1857,22 @@
     };
     active = legacyMap[sub] || "chat";
     const p = await api("/projects/" + id);
-    const [agents, tasks, runs, memEntries] = await Promise.all([
+    // Visiting a project makes it the "current" one the top-level Chat/Project
+    // pages operate on.
+    rememberProject(id);
+    // Normalise every list with asArray(): a list endpoint that (for whatever
+    // reason) resolves to an object/undefined instead of an array previously
+    // crashed the whole project page with "runs.filter is not a function".
+    const [agentsRaw, tasksRaw, runsRaw, memRaw] = await Promise.all([
       api(`/projects/${id}/agents`).catch(() => []),
       api(`/projects/${id}/tasks`).catch(() => []),
       api(`/projects/${id}/runs`).catch(() => []),
       api(`/memory?projectId=${id}`).catch(() => []),
     ]);
+    const agents = asArray(agentsRaw);
+    const tasks = asArray(tasksRaw);
+    const runs = asArray(runsRaw);
+    const memEntries = asArray(memRaw);
     const failedRuns = runs.filter((r) => r.status === "failed" || r.error).slice(0, 4);
     const activity = [
       ...runs.slice(0, 10).map((r) => ({ kind: "▶ run", title: `${r.agentType}`, status: r.status, at: r.createdAt, link: `#/runs/${r.id}/console` })),
@@ -1782,11 +1927,11 @@
 
   async function renderProjectResource(id, section) {
     const p = await api("/projects/" + id);
-    const data = section === "conversations"
+    const data = asArray(section === "conversations"
       ? await api(`/conversations?projectId=${id}`)
-      : await api(`/projects/${id}/${section}`);
-    const skillCatalog = section === "skills" ? await api(`/skills?projectId=${encodeURIComponent(id)}`) : [];
-    const skillTemplates = section === "skills" ? await api("/skills") : [];
+      : await api(`/projects/${id}/${section}`));
+    const skillCatalog = section === "skills" ? asArray(await api(`/skills?projectId=${encodeURIComponent(id)}`)) : [];
+    const skillTemplates = section === "skills" ? asArray(await api("/skills")) : [];
     const title = PROJECT_SECTIONS.find((x) => x[0] === section)?.[1] || section;
     let html = "";
     if (section === "agents") html = `<div class="flex" style="margin-bottom:10px"><span class="sub">${data.filter((a)=>a.enabled).length} enabled · ${data.length} total</span><span class="spacer"></span><button class="btn btn-primary" onclick="projectCreateAgent(${esc(JSON.stringify(p.id))})">＋ New Agent</button></div>` + (data.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Model</th><th>Skills</th><th>Status</th><th></th></tr></thead><tbody>${data.map((a) => `<tr><td><a href="#/agents/${esc(a.id)}"><strong>${esc(a.name)}</strong></a><div class="sub">${esc(a.role)}</div></td><td class="mono">${esc(a.type)}</td><td class="mono">${esc(a.models?.primary || "—")}</td><td>${(a.skills || []).slice(0,4).map((s)=>`<span class="badge badge-muted">${esc(s)}</span>`).join(" ")}</td><td>${a.enabled ? '<span class="badge badge-ok">enabled</span>' : '<span class="badge badge-muted">disabled</span>'}</td><td style="white-space:nowrap"><button class="btn btn-ghost" onclick="projectToggleAgent(${esc(JSON.stringify(p.id))}, ${esc(JSON.stringify(a.id))}, ${esc(JSON.stringify(!a.enabled))})">${a.enabled ? "Disable" : "Enable"}</button><button class="btn btn-ghost" onclick="projectRunAgentType(${esc(JSON.stringify(p.id))}, ${esc(JSON.stringify(a.type))})">Run</button><button class="btn btn-ghost" title="Delete agent" onclick="projectDeleteAgent(${esc(JSON.stringify(p.id))}, ${esc(JSON.stringify(a.id))})">🗑</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("🤖", "No agents", "Initialize missing CodeVia definitions to add agents."));
@@ -4154,9 +4299,10 @@
     if (!w || w.error) { $("#content").innerHTML = emptyState("🔍", "Workflow not found", id); return; }
     wfDraft = JSON.parse(JSON.stringify(w)); window.__wfSel = -1;
     const [tasks, runs] = await Promise.all([api("/tasks").catch(() => []), api("/runs").catch(() => [])]);
-    const myTasks = tasks.filter((t) => t.workflowId === id).slice(0, 8);
+    const myTasks = asArray(tasks).filter((t) => t.workflowId === id).slice(0, 8);
+    const myRunsAll = asArray(runs);
     const taskIds = new Set(myTasks.map((t) => t.id));
-    const myRuns = runs.filter((r) => taskIds.has(r.taskId)).slice(0, 8);
+    const myRuns = myRunsAll.filter((r) => taskIds.has(r.taskId)).slice(0, 8);
     $("#content").innerHTML = `
       <div class="overview"><div><a href="#/workflows" class="muted">← Workflows</a><h1><input class="input" id="wf-title" value="${esc(w.name)}" style="font-size:20px;font-weight:700;min-width:320px"/></h1><p class="mono">${esc(w.slug)} · v${w.version} · project ${esc((w.projectId || "").slice(0, 12))}</p></div>
         <div class="action-row"><label class="flex" style="gap:6px;align-items:center"><input type="checkbox" id="wf-enabled" ${w.enabled ? "checked" : ""}/> enabled</label><button class="btn" onclick="wfRun()">▶ Run</button><button class="btn btn-primary" onclick="wfSave()">Save</button><button class="btn btn-ghost" onclick="wfDelete()">Delete</button></div></div>
@@ -4177,7 +4323,7 @@
 
   /* TASKS */
   on("/tasks", async () => {
-    const list = await api("/tasks");
+    const list = asArray(await api("/tasks"));
     $("#content").innerHTML = `<div class="overview"><div><h1>Tasks</h1><p>Task queue & execution</p></div></div>
       ${searchPanelHtml("task-search", "Search tasks by title, status, agent, project or workflow…")}
       <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Status</th><th>Agent</th><th>Project</th><th>Created</th><th></th></tr></thead><tbody id="task-tbody"></tbody></table></div></div>`;
@@ -4190,7 +4336,7 @@
 
   /* RUNS */
   on("/runs", async () => {
-    const list = await api("/runs");
+    const list = asArray(await api("/runs"));
     $("#content").innerHTML = `<div class="overview"><div><h1>AI Run Console</h1><p>Observable agent executions (status, steps, results — never chain-of-thought)</p></div></div>
       ${searchPanelHtml("run-search", "Search runs by id, agent, status, model, task, project or correlation id…")}
       <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Duration</th><th></th></tr></thead><tbody id="run-tbody"></tbody></table></div></div>`;
@@ -4256,7 +4402,10 @@
 
   /* LOGS */
   on("/logs", async () => {
-    const [runs, audit, notes] = await Promise.all([api("/runs"), api("/audit").catch(() => []), api("/notifications").catch(() => [])]);
+    const [runsRaw, auditRaw, notesRaw] = await Promise.all([api("/runs"), api("/audit").catch(() => []), api("/notifications").catch(() => [])]);
+    const runs = asArray(runsRaw);
+    const audit = asArray(auditRaw);
+    const notes = asArray(notesRaw);
     const failed = runs.filter((r) => r.status === "failed" || r.error);
     $("#content").innerHTML = `<div class="overview"><div><h1>Logs</h1><p>Run outcomes, audit trail and notifications — traceable by correlation id</p></div></div>
       <div class="grid-2">
@@ -4782,10 +4931,50 @@
   };
 
   /* SETTINGS */
+  // Settings doubles as the hub for every section that is NOT in the primary
+  // nav (which is intentionally minimal: Chat / Project / Settings). Each entry
+  // is a normal link to its own page — the pages themselves are unchanged.
+  function settingsHubHtml() {
+    const groups = [
+      ["Workspace", [
+        ["#/projects", "📁", "All projects", "Create, manage and open every project"],
+        ["#/dashboard", "📊", "Dashboard", "Global run / spend / health overview"],
+      ]],
+      ["AI & agents", [
+        ["#/agents", "🤖", "Agents", "Agent registry, prompts and per-agent models"],
+        ["#/models", "🧠", "Models", "Model catalog, benchmarks and visibility"],
+        ["#/providers", "🔌", "Providers", "Provider connections and keys"],
+        ["#/skills", "🛠️", "Skills", "Skill templates"],
+        ["#/workflows", "🔀", "Workflows", "Multi-step workflow engine"],
+        ["#/memory", "🗂️", "Memory", "GitHub-backed memory entries"],
+      ]],
+      ["Execution & review", [
+        ["#/tasks", "🧩", "Tasks", "Task queue and manual dispatch"],
+        ["#/runs", "▶️", "Runs", "Run console — status, steps, evidence"],
+        ["#/approvals", "🛑", "Approvals", "Approve / reject gated steps"],
+        ["#/logs", "📜", "Logs", "Errors, audit trail and notifications"],
+        ["#/conversations", "💬", "Conversations", "Conversation history list"],
+      ]],
+      ["Integrations & system", [
+        ["#/github", "🐙", "GitHub", "GitHub OAuth and repositories"],
+        ["#/telegram", "📱", "Telegram", "Telegram bots and pairing"],
+        ["#/admin", "🛡️", "Admin", "Health, users, backup, storage"],
+        ["#/search", "🔍", "Search", "Search across the whole platform"],
+      ]],
+    ];
+    return `<div class="card card-body"><div class="card-title">All sections <span class="sub">everything that is not in the top menu lives here</span></div>
+      <div class="settings-hub">${groups.map(([g, items]) => `<div class="settings-hub-group">
+        <div class="settings-hub-label">${esc(g)}</div>
+        <div class="settings-hub-grid">${items.map(([href, icon, label, hint]) =>
+          `<a class="settings-hub-tile" href="${esc(href)}"><span class="sh-ico">${icon}</span><div><strong>${esc(label)}</strong><div class="sub">${esc(hint)}</div></div></a>`).join("")}
+        </div>
+      </div>`).join("")}</div></div>`;
+  }
   on("/settings", async () => {
     const s = await api("/settings");
     const policy = await api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 900000, pending: 0 }));
-    $("#content").innerHTML = `<div class="overview"><div><h1>Settings</h1><p>Import / Export / Backup — secrets are never exported</p></div></div>
+    $("#content").innerHTML = `${settingsHubHtml()}
+      <div class="overview" style="margin-top:12px"><div><h1>Settings</h1><p>Import / Export / Backup — secrets are never exported</p></div></div>
       <div class="grid-2">
         <div class="card card-body"><div class="card-title">Platform</div>
           <div class="meter-row"><span class="lbl">Environment</span><span class="val">${esc(s.environment)}</span></div>

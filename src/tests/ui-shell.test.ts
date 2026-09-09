@@ -90,6 +90,46 @@ describe("UI shell", () => {
     expect(errors).toEqual([]);
   }, 60000);
 
+  it("keeps the primary nav to exactly Chat / Project / Settings", async () => {
+    const { win } = await boot();
+    const links = [...win.document.querySelectorAll("#nav a")].map((a) => ({
+      href: (a as El).getAttribute("href"),
+      text: ((a as El).textContent ?? "").trim(),
+    }));
+    expect(links.length, `nav must have exactly 3 items, got ${JSON.stringify(links)}`).toBe(3);
+    const texts = links.map((l) => l.text);
+    for (const expected of ["Chat", "Project", "Settings"]) {
+      expect(texts.some((t) => t.includes(expected)), `nav missing ${expected}`).toBe(true);
+    }
+    // Everything else (agents/models/.../admin/search) must NOT be a nav item.
+    const banned = ["Agents", "Models", "Providers", "Skills", "Workflows", "Tasks", "Runs", "Approvals", "Logs", "Memory", "GitHub", "Telegram", "Admin", "Search", "Conversations", "Dashboard"];
+    for (const b of banned) {
+      expect(texts.some((t) => t.includes(b)), `"${b}" leaked into the primary nav`).toBe(false);
+    }
+  }, 30000);
+
+  it("opens on a current project's chat (home) with a live project switcher, and every moved section is reachable from Settings", async () => {
+    await container.agentManager.createProject({ name: "Home Hub QA", description: "Home surface", configRepo: "acme/home-hub-qa", branch: "main" });
+    const { win, go, errors } = await boot();
+    const chat = await go("#/chat");
+    expect((chat.textContent ?? "")).not.toMatch(/Something went wrong/);
+    // Home = a Chat page carrying a project switcher + message composer.
+    expect(win.document.querySelector("#ws-project-switch"), "chat home has a project switcher").toBeTruthy();
+    expect(chat.querySelector(".p-chat-composer"), "chat home shows the composer").toBeTruthy();
+
+    const proj = await go("#/project");
+    expect((proj.textContent ?? "")).not.toMatch(/Something went wrong/);
+    expect(win.document.querySelector("#ws-project-switch"), "project page has a project switcher").toBeTruthy();
+
+    // Settings is the hub: every moved top-level section is linkable from it.
+    const settings = await go("#/settings");
+    const hubLinks = [...settings.querySelectorAll("a")].map((a) => (a as El).getAttribute("href"));
+    for (const target of ["#/agents", "#/models", "#/providers", "#/skills", "#/workflows", "#/tasks", "#/runs", "#/approvals", "#/logs", "#/memory", "#/github", "#/telegram", "#/admin", "#/search", "#/conversations", "#/dashboard"]) {
+      expect(hubLinks, `Settings hub must link every moved section`).toContain(target);
+    }
+    expect(errors).toEqual([]);
+  }, 60000);
+
   it("wires every project action-bar button to a complete, callable handler", async () => {
     const project = await container.agentManager.createProject({
       name: "Action Bar QA",

@@ -1,5 +1,5 @@
 // Service worker for CodeVia PWA — app shell cache + offline fallback for navigation.
-const CACHE = "codevia-shell-v1";
+const CACHE = "codevia-shell-v2";
 const SHELL = [
   "/",
   "/index.html",
