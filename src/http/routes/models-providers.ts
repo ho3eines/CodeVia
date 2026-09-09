@@ -523,8 +523,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
         missing.push(id);
         continue;
       }
-      if (action === "delete") container.modelRepo.deleteById(id);
-      else {
+      if (action === "delete") {
+        container.modelRepo.deleteById(id);
+        // Drop this model's benchmark rows so a deleted model never shows up
+        // again in the benchmark table / smart-router stats.
+        container.benchRepo.purgeForModel(id);
+      } else {
         container.modelRepo.upsert({
           ...row.data,
           active: action === "activate",
@@ -540,6 +544,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     if (!container.modelRepo.findById(id)) return fail(reply, 404, "model not found");
     container.modelRepo.deleteById(id);
+    container.benchRepo.purgeForModel(id);
     return { ok: true };
   });
 
@@ -821,6 +826,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
           continue;
         }
         for (const m of models) container.modelRepo.deleteById(m.data.id);
+        if (models.length) container.benchRepo.purgeForModels(models.map((m) => m.data.id));
         deletedModels += models.length;
         container.providerRepo.deleteById(id);
         container.providerRegistry.invalidate(id);
@@ -900,6 +906,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       return fail(reply, 409, `Provider has ${models.length} model(s). Delete them first or call with ?cascade=true`, { models: models.map((m) => m.data.id) });
     }
     for (const m of models) container.modelRepo.deleteById(m.data.id);
+    if (models.length) container.benchRepo.purgeForModels(models.map((m) => m.data.id));
     container.providerRepo.deleteById(id);
     container.providerRegistry.invalidate(id);
     return { ok: true, deletedModels: models.length };

@@ -29,6 +29,29 @@ export class ModelBenchmarkRepository extends DocumentRepository<ModelBenchmarkR
     return this.findMany({ key: runId }).map((r) => r.data);
   }
 
+  /**
+   * Drop every stored result belonging to a model. Called when a model (or its
+   * provider, which deletes the provider's models) is deleted so deleted models
+   * never resurface in the benchmark table / smart-router stats.
+   */
+  purgeForModel(modelId: string): number {
+    return this.purgeForModels([modelId]);
+  }
+
+  /** Drop every stored result whose modelId is in the given set. */
+  purgeForModels(modelIds: string[]): number {
+    const set = new Set(modelIds);
+    if (!set.size) return 0;
+    let n = 0;
+    for (const rec of this.findMany({})) {
+      if (set.has(rec.data.modelId)) {
+        this.deleteById(rec.data.id);
+        n++;
+      }
+    }
+    return n;
+  }
+
   /** Purge all results older than `cutoffMs` (default: keep last 30 days). */
   prune(cutoffMs = 30 * 24 * 60 * 60 * 1000): number {
     const cutoff = new Date(Date.now() - cutoffMs).toISOString();

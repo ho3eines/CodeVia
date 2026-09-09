@@ -2740,30 +2740,77 @@
   }
 
   /* ---------- Smart model routing — benchmark panel ---------- */
+  // Benchmark runs execute in the background and are *paced* (one provider call
+  // at a time with a multi-second pause), so instead of a silent blocking button
+  // we POST /run, then poll /status every ~2s and render what is currently being
+  // tested until the run reaches done/error/idle, at which point we stop and
+  // refresh the aggregated scores table.
   let benchStatsCache = null;
-  async function renderBenchmarkCard() {
+  let benchPollTimer = null;   // setTimeout handle for the live poll loop
+  let benchWatchRunId = null;  // runId we are currently watching
+
+  function benchStopPolling() {
+    if (benchPollTimer) { clearTimeout(benchPollTimer); benchPollTimer = null; }
+    benchWatchRunId = null;
+  }
+
+  const benchModelName = (id) => { const m = modelsCache.find((x) => x.id === id); return m ? m.displayName : id; };
+
+  /** Live progress card shown while a run is in flight. */
+  function benchProgressCardHtml(p) {
+    const total = Math.max(p.totalModels || 0, 0);
+    const done = Math.max(p.completedModels || 0, 0);
+    const modelPct = total ? Math.round((done / total) * 100) : 0;
+    const probTotal = Math.max(p.totalProblems || 0, 0);
+    const probDone = Math.max(p.completedProblems || 0, 0);
+    const probPct = probTotal ? Math.round((probDone / probTotal) * 100) : 0;
+    const cur = p.currentModelLabel || (p.currentModelId ? benchModelName(p.currentModelId) : null);
+    const runShort = (p.runId || "").slice(0, 8);
+    return `<div class="card card-body mt">
+      <div class="card-title">🧪 Smart routing benchmark <span class="sub">benchmark running · <span class="mono">${esc(runShort || "…")}</span></span></div>
+      <div class="flex" style="flex-wrap:wrap;gap:8px;align-items:center;margin:4px 0 6px">
+        <span class="badge badge-info">⏳ running</span>
+        <span style="font-size:13px">Testing <strong>all active models across every active provider</strong>, one at a time — a <span class="mono">${p.delayMs}ms</span> pause between calls so provider rate limits are never tripped.</span>
+      </div>
+      ${cur ? `<div class="meter-row"><span class="lbl">Now testing</span><span class="val" style="text-align:left">${esc(cur)}${p.currentModelId ? ` <span class="sub mono">${esc(String(p.currentModelId).slice(0, 20))}</span>` : ""}</span></div>` : ""}
+      <div class="meter-row"><span class="lbl">Models</span><div class="bar"><span style="width:${modelPct}%"></span></div><span class="val">${done}/${total}</span></div>
+      <div class="meter-row"><span class="lbl">Problems</span><div class="bar"><span style="width:${probPct}%"></span></div><span class="val">${probDone}/${probTotal}</span></div>
+      <div class="meter-row"><span class="lbl">Results so far</span><span class="val">${p.resultCount || 0}</span></div>
+      <p style="color:var(--text-muted);font-size:12px;margin-top:6px">This can take a while when several providers are configured — the page updates live and the ranking table refreshes automatically when it finishes.</p>
+    </div>`;
+  }
+
+  function benchErrorCardHtml(p) {
+    const runShort = (p.runId || "").slice(0, 8);
+    return `<div class="card card-body mt">
+      <div class="card-title">🧪 Smart routing benchmark <span class="sub"><span class="mono">${esc(runShort || "…")}</span></span></div>
+      <div class="error-state"><h4>Benchmark run failed</h4><pre>${esc(p.error || "The run ended with an unexpected error.")}</pre></div>
+      <div class="flex mt"><button class="btn btn-primary" onclick="runModelBenchmark()">↻ Try benchmark again</button></div>
+    </div>`;
+  }
+
+  /** Render the aggregated per-model ranking table (fresh stats — deleted models never linger). */
+  async function benchRenderStats() {
     const el = $("#model-bench-card");
     if (!el) return;
-    if (!benchStatsCache) {
-      try {
-        const r = await api("/models/benchmark/stats");
-        benchStatsCache = r.stats || [];
-      } catch (_) { benchStatsCache = []; }
-    }
+    benchStatsCache = null;
+    try {
+      const r = await api("/models/benchmark/stats");
+      benchStatsCache = r.stats || [];
+    } catch (_) { benchStatsCache = []; }
     if (!benchStatsCache || !benchStatsCache.length) {
       el.innerHTML = `<div class="card card-body mt"><div class="card-title">🧪 Smart routing benchmark <span class="sub">no data yet</span></div>
-        <p style="color:var(--text-muted);font-size:13px">The router picks the best model for each agent call based on real speed, accuracy and error rate. Run a quick math quiz across every active model to seed the data (uses temperature=0, cheap — ~20 short calls).</p>
+        <p style="color:var(--text-muted);font-size:13px">The router picks the best model for each agent call based on real speed, accuracy and error rate. Run a quick math quiz across every active model to seed the data (uses temperature=0, short calls, paced to stay rate-limit friendly).</p>
         <div class="flex mt"><button class="btn btn-primary" onclick="runModelBenchmark()">▶ Run benchmark now</button></div></div>`;
       return;
     }
-    const modelName = (id) => { const m = modelsCache.find((x) => x.id === id); return m ? m.displayName : id; };
     el.innerHTML = `<div class="card card-body mt">
         <div class="card-title">🧪 Smart routing benchmark <span class="sub">${benchStatsCache.length} model(s) ranked by composite score</span></div>
         <p style="color:var(--text-muted);font-size:12px">Score = 60% accuracy · 20% reliability · 20% speed. Higher is better. Models with recent errors are demoted in the fallback chain.</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Rank</th><th>Model</th><th>Score</th><th>Accuracy</th><th>Avg latency</th><th>p95 latency</th><th>Error rate</th><th>Avg cost</th><th>Attempts</th><th>Last tested</th></tr></thead>
           <tbody>${benchStatsCache.map((s, i) => `<tr${i===0?' style="background:var(--glass)"':""}>
-            <td><strong>#${i+1}</strong></td><td><strong>${esc(modelName(s.modelId))}</strong><div class="sub mono">${esc(s.modelId.slice(0,20))}</div></td>
+            <td><strong>#${i+1}</strong></td><td><strong>${esc(benchModelName(s.modelId))}</strong><div class="sub mono">${esc(s.modelId.slice(0,20))}</div></td>
             <td><strong>${s.score.toFixed(3)}</strong></td>
             <td>${s.accuracy?`<span class="badge badge-${s.accuracy>.8?'ok':s.accuracy>.5?'warn':'err'}">${(s.accuracy*100).toFixed(0)}%</span>`:'<span class="badge badge-muted">—</span>'}</td>
             <td class="mono">${s.avgLatencyMs}ms</td>
@@ -2777,17 +2824,108 @@
         <div class="flex mt"><button class="btn btn-primary" onclick="runModelBenchmark()">▶ Re-run benchmark (all active models)</button><span class="field-hint" style="margin-left:8px">Results persist and accumulate — re-running refines the scores.</span></div>
       </div>`;
   }
+
+  /** Render a running snapshot into the card; returns false if the card is gone. */
+  function benchRenderRunning(p) {
+    const el = $("#model-bench-card");
+    if (!el) return false;
+    el.innerHTML = benchProgressCardHtml(p);
+    return true;
+  }
+
+  /** One poll iteration; returns true to keep polling, false to stop. */
+  async function benchPollOnce() {
+    const el = $("#model-bench-card");
+    if (!el) { benchStopPolling(); return false; }
+    let st = null;
+    try { st = await api("/models/benchmark/status"); } catch (_) {}
+    const p = st && st.progress;
+    // Server unreachable — stop rather than spin forever.
+    if (!p) { benchStopPolling(); benchRenderStats(); return false; }
+    if (p.status === "running") {
+      // Follow whichever run the server is executing (a re-run in another tab
+      // can swap runId underneath us — keep watching the current one).
+      benchWatchRunId = p.runId || benchWatchRunId;
+      benchRenderRunning(p);
+      return true;
+    }
+    // Terminal state: done / error / idle → abort polling.
+    benchStopPolling();
+    if (p.status === "error") {
+      toast("Benchmark failed", p.error || "The run ended with an error.", "err");
+      el.innerHTML = benchErrorCardHtml(p);
+    } else if (p.status === "done") {
+      toast("Benchmark complete", `${p.completedModels || p.totalModels} model(s) · ${p.resultCount} results`, "ok");
+      await benchRenderStats();
+    } else {
+      // idle — nothing is running, just show the persisted ranking.
+      await benchRenderStats();
+    }
+    return false;
+  }
+
+  /** Kick off the 2s poll loop (no-op if already polling). */
+  function benchStartPolling() {
+    if (benchPollTimer) return;
+    const tick = async () => {
+      benchPollTimer = null;
+      const keep = await benchPollOnce();
+      if (keep) benchPollTimer = setTimeout(tick, 2000);
+    };
+    benchPollTimer = setTimeout(tick, 0);
+  }
+
+  async function renderBenchmarkCard() {
+    const el = $("#model-bench-card");
+    if (!el) return;
+    // Cancel any previous poll loop for this page so a re-render never stacks
+    // duplicate timers, then re-evaluate the live state.
+    benchStopPolling();
+    let st = null;
+    try { st = await api("/models/benchmark/status"); } catch (_) {}
+    const p = st && st.progress;
+    if (p && p.status === "running") {
+      benchWatchRunId = p.runId || "";
+      benchRenderRunning(p);
+      benchStartPolling();
+      return;
+    }
+    await benchRenderStats();
+  }
+
   window.runModelBenchmark = async () => {
     const btn = document.activeElement;
     if (btn) btn.disabled = true;
-    toast("Benchmark running", "Sending random math problems to all active models…", "");
+    // Clear any stale poll loop before kicking a fresh run off.
+    benchStopPolling();
     try {
       const r = await api("/models/benchmark/run", { method: "POST", body: { problemsPerModel: 6 } });
-      benchStatsCache = r.stats;
-      await renderBenchmarkCard();
-      toast("Benchmark complete", `${r.modelCount} models · ${r.resultCount} attempts · ${r.problemCount} problems each`, "ok");
-    } catch (e) { toast("Benchmark failed", e.message, "err"); }
-    finally { if (btn) btn.disabled = false; }
+      if (r.alreadyRunning) {
+        toast("Benchmark already running", "A benchmark is already in progress — showing its live progress.", "warn");
+      } else if (!r.started || !r.totalModels) {
+        toast("Nothing to benchmark", "No active models on active providers were found.", "warn");
+        await benchRenderStats();
+        return;
+      } else {
+        toast("Benchmark started", `${r.totalModels} model(s) · ${r.problemCount} problems each`, "");
+      }
+      // Watch the run the server is now executing until it reaches done/error.
+      let st = null;
+      try { st = await api("/models/benchmark/status"); } catch (_) {}
+      const p = st && st.progress;
+      if (p && p.status === "running") {
+        benchWatchRunId = p.runId || r.runId;
+        benchRenderRunning(p);
+        benchStartPolling();
+      } else {
+        await benchRenderStats();
+      }
+    } catch (e) {
+      toast("Benchmark failed", e.message, "err");
+      await benchRenderStats();
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   };
 
   function modelSearchSummary() {
