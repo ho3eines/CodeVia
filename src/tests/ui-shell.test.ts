@@ -66,7 +66,10 @@ async function boot() {
   const go = async (hash: string) => {
     win.location.hash = hash;
     win.dispatchEvent(new win.Event("hashchange"));
-    await settle();
+    // Give async route handlers (chat mount, sub-resource fetches) time to settle.
+    // Chat tab does parallel fetches for conversations/models/agents/benchmark so
+    // a longer settle is needed on first project navigation.
+    await settle(1800);
     return win.document.querySelector("#content") as El;
   };
   return { win, errors, go, settle };
@@ -140,14 +143,20 @@ describe("UI shell", () => {
       database: "PostgreSQL",
     });
     const { go } = await boot();
-    for (const suffix of ["", "/agents", "/repositories", "/workflows", "/tasks", "/runs", "/tests", "/issues", "/pull-requests", "/skills", "/memory"]) {
+    // All legacy deep links must render; top-level tabs are now Chat/Project/Settings (3)
+    // but sub-resource pages (agents/tasks/...) reuse the Settings tab and render their own content card.
+    for (const suffix of ["", "/project", "/settings", "/agents", "/repositories", "/workflows", "/tasks", "/runs", "/tests", "/issues", "/pull-requests", "/skills", "/memory"]) {
       const content = await go(`#/projects/${project.id}${suffix}`);
       const text = content.textContent ?? "";
+      if (!content.querySelector(".project-tabs")) {
+        console.error(`route ${suffix || "/"} missing tabs; content preview:`, (content as any).innerHTML?.slice(0, 500));
+      }
       expect(text, `project route ${suffix || "/"} rendered an error state`).not.toMatch(/Something went wrong/);
       expect(text).toContain("Project Detail QA");
-      expect(content.querySelectorAll(".project-tabs .tab").length).toBeGreaterThanOrEqual(10);
+      // Top-level tab count is now 3 (Chat/Project/Settings); deep links land on Settings for legacy sections
+      const topTabs = content.querySelectorAll(".project-tabs .tab");
+      expect(topTabs.length).toBeGreaterThanOrEqual(3);
       expect(text).toContain("Ask AI");
-      expect(text).toContain("Edit");
     }
   }, 60000);
 

@@ -20,6 +20,7 @@ import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
 import { isAgentType } from "../../agents/generator.js";
 import { IMPLEMENTERS } from "../../agents/implementation.js";
+import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
 
 function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
   reply.code(status);
@@ -700,50 +701,18 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const project = load(id);
     if (!project || !canAccess(req, project)) return fail(reply, 404, "project not found");
     const description = String(body.description ?? body.prompt ?? body.title ?? "").trim();
-    if (!description) return fail(reply, 400, "A non-empty project request is required");
     const title = String(body.title ?? description.slice(0, 120)).trim() || description.slice(0, 120);
-    if (body.executionMode !== undefined && !["agent", "simulation", "workflow", "autonomous"].includes(String(body.executionMode))) return fail(reply, 400, "Unknown execution mode");
-    const executionMode = body.executionMode === "agent" || body.executionMode === "simulation" || body.executionMode === "workflow" ? body.executionMode : body.executionMode === undefined && body.workflowId ? "workflow" : "autonomous";
     if (body.agentType !== undefined && !isAgentType(body.agentType)) return fail(reply, 400, "Unknown agent type");
-    if (executionMode === "autonomous" && body.agentType && !IMPLEMENTERS.includes(body.agentType as AgentType)) return fail(reply, 400, "Autonomous agent hints must name an implementation specialist. Use executionMode: agent for research, QA or other read-only agents.");
-    const routedAgentType = (body.agentType as AgentType | undefined) ?? container.agentRouter.route(`${title} ${description}`);
-    const workflowId = typeof body.workflowId === "string" && body.workflowId
-      ? body.workflowId
-      : executionMode === "workflow"
-        ? workflowForIntent(id, `${title} ${description}`)
-        : undefined;
-    if (workflowId) {
-      const workflow = container.workflowRepo.findById(workflowId)?.data;
-      if (!workflow?.enabled || workflow.projectId !== id) return fail(reply, 400, "Workflow must be enabled and belong to this project");
-    }
-    if (executionMode === "simulation") {
-      const agent = container.agentRepo.byType(id, routedAgentType);
-      const plan = agent ? defaultPlanFor(agent, {
-        id: "simulation",
-        projectId: id,
-        title,
-        description,
-        status: "created",
-        agentType: routedAgentType,
-        correlationId: "simulation",
-        input: body.input as Record<string, unknown> | undefined ?? {},
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }) : [];
-      return { simulation: true, projectId: id, routedAgentType, workflowId, plan: plan.map((s) => ({ label: s.label, tool: s.tool, requiresApproval: s.requiresApproval })) };
-    }
-    const task = container.agentManager.createTask({
-      projectId: id,
+    const result = dispatchProjectAsk(container, id, {
       title,
       description,
-      agentType: workflowId || executionMode === "autonomous" ? undefined : routedAgentType,
-      workflowId,
-      input: { ...(body.input as Record<string, unknown> | undefined ?? {}), routedAgentType, agentHint: body.agentType, executionMode },
+      executionMode: body.executionMode as "autonomous" | "agent" | "simulation" | "workflow" | undefined,
+      agentType: body.agentType as string | undefined,
+      workflowId: typeof body.workflowId === "string" ? body.workflowId : undefined,
+      correlationId: `project-ask-${id}-${Date.now()}`,
     });
-    const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
-    const queued = { ...task, status: "queued" as const, updatedAt: new Date().toISOString() };
-    container.taskRepo.upsert(queued, { projectId: task.projectId, parentId: task.parentTaskId });
-    return { task: queued, jobId: job.id, routedAgentType, workflowId, executionMode };
+    if (isAskError(result)) return fail(reply, result.status, result.error);
+    return result;
   });
 
   // Re-run onboarding

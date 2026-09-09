@@ -3,6 +3,7 @@ import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
 import { ModelRouter, toCandidate, type TaskCategory } from "../ai/model-router.js";
 import type { Agent, Project, Task } from "../domain/entities.js";
 import type { CostRepository } from "../observability/repos.js";
+import { getModelBenchmarkRepo, ModelBenchmarkRepository } from "../observability/model-bench-repo.js";
 import { BudgetExceededError, TaskCancelledError, type ExecutionBudget } from "./execution.js";
 import { logger } from "../logger.js";
 import { projectBrief } from "../domain/project-brief.js";
@@ -62,7 +63,10 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
     if (!available.length) throw new Error(`Assigned models for ${deps.agent.name} are missing or disabled; refusing unrelated providers or simulation`);
   }
   if (!available.length) return undefined;
-  const initial = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category);
+  const benchRepo: ModelBenchmarkRepository = getModelBenchmarkRepo();
+  const perfStats = benchRepo.computeStats();
+  ModelBenchmarkRepository.addSpeedNormalisation(perfStats);
+  const initial = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category, {}, perfStats);
   if (!initial.length) throw new Error(`No active ${deps.category} model is available for ${deps.agent.name}`);
   const session: RealChat = {
     setContext: (context) => { deps.context = context; },
@@ -81,7 +85,7 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
         { role: "user" as const, content: `${deps.context}\n\n--- Current operation ---\n${user}` },
       ];
       const inputEstimate = Math.ceil(messages.reduce((n, m) => n + m.content.length, 0) / 4);
-      const candidates = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category, { maxTokens: inputEstimate + 1 });
+      const candidates = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category, { maxTokens: inputEstimate + 1 }, perfStats);
       let lastError: unknown;
       for (const candidate of candidates) {
         deps.checkActive();

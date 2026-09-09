@@ -219,7 +219,33 @@ export class AutonomousOrchestrator {
       available = [hint as AgentType];
     }
     if (!available.length) throw new Error("Autonomous preflight failed: no enabled implementer");
-    const pack = await buildContextPack({ github, project, memoryRepo: this.deps.memoryRepo, strict: true });
+
+    // --- (F1) Context cache hydrate: pull the persisted project context file
+    // into memory BEFORE scanning so research sees a warm registry on repeat
+    // runs instead of rebuilding the world from Git every time.
+    if (this.deps.files && this.deps.memoryRepo) {
+      try {
+        await this.deps.files.restore(project, {
+          projectRepo: this.deps.projectRepo, taskRepo: this.deps.taskRepo,
+          agentRepo: this.deps.agentRepo, memoryRepo: this.deps.memoryRepo,
+        }, { includeTasks: false });
+        project = this.deps.projectRepo.findById(project.id)!.data;
+      } catch (err) {
+        logger.warn("preflight context restore failed, continuing without warm cache", { projectId: project.id, err: String(err) });
+      }
+    }
+    active();
+
+    // Resolve loop / routing settings with defaults.
+    const maxFixLoops = project.settings.maxFixLoops ?? this.deps.maxFixLoops ?? 2;
+    const researchBeforeFix = project.settings.researchBeforeFix !== false; // default ON
+    const cacheCtx = project.settings.cacheContextInMemory !== false; // default ON
+
+    // --- (F1 cont.) Build context pack (reads tree, configs, memory, and the
+    // already-restored entity registry). With a real GitHub connection this
+    // still lists files, but registry/configs/memory come from the local cache
+    // when restore succeeded.
+    let pack = await buildContextPack({ github, project, memoryRepo: this.deps.memoryRepo, strict: true });
     check();
     let brief = "";
     let breakdown: BreakdownItem[] = [];
@@ -373,15 +399,78 @@ export class AutonomousOrchestrator {
       if (!qaRun.steps.some((s) => s.status === "failed" && s.data?.verification === "failed" && s.data?.fixable === true)) {
         throw Object.assign(new Error(`QA could not verify the implementation: ${runError(qaRun)}`), { retryable: false });
       }
-      if (fixLoops >= (this.deps.maxFixLoops ?? 2)) throw Object.assign(new Error(`QA still failing after ${fixLoops} fix loop(s): ${runError(qaRun)}`), { retryable: false });
+      if (fixLoops >= maxFixLoops) throw Object.assign(new Error(`QA still failing after ${fixLoops} fix loop(s): ${runError(qaRun)}`), { retryable: false });
       fixLoops += 1;
       const failure = runError(qaRun);
-      const failedRepo = qaRun.steps.find((s) => s.status === "failed")?.data?.repo;
-      const candidates = breakdown.filter((item) => !failedRepo || repositoryForAgent(project!, item.agentType).repo === failedRepo);
-      const routed = this.deps.agentRouter.route(failure, "error");
-      const fixType = routed === "uiux" && candidates.some((i) => i.agentType === "frontend-developer") ? "frontend-developer" : routed;
-      const fixItem = candidates.find((i) => i.files.some((p) => failure.includes(p))) ?? candidates.find((i) => i.agentType === fixType) ?? candidates[0] ?? breakdown[0];
-      await implement(fixItem, failure);
+
+      // --- (F2) Research-before-fix loop:
+      // When a fixable QA failure comes back, send the failure description
+      // BACK through the research agent first so it can diagnose root cause
+      // and re-target the right owner, rather than patching on the same
+      // implementer that produced the bug.
+      let fixTarget: BreakdownItem;
+      let fixBrief = brief;
+      if (researchBeforeFix && usedRealAi) {
+        // Refresh context pack so research sees the latest failed run's outputs.
+        pack = await buildContextPack({ github, project, memoryRepo: this.deps.memoryRepo, strict: false });
+        const fixResearchTask = this.spawn(task, `Diagnose failure (attempt ${fixLoops}): ${task.title}`,
+          `QA reported the following failure(s):\n\n${failure}\n\nRepositories/branches under test:\n${artifacts().map((r) => `- ${r.repo}@${r.branch} (${r.files.join(", ")})`).join("\n")}\n\nOriginal research brief:\n${brief}\n\nDiagnose which unit is responsible, what specifically must change, and provide a short revised plan. Reference concrete files/lines where possible.`,
+          "research", { fixLoop: fixLoops, failure, dependsOn: [qaTask.id] });
+        const diagRun = await this.phase(fixResearchTask, researchAgent, project, {
+          taskBudget: budget, category: "research",
+          preparePlan: async (ctx) => {
+            if (ctx.chat) {
+              usedRealAi = true;
+              const diag = await ctx.chat.chat(
+                "You are diagnosing a QA failure. Based on the failure description, the repository context, and the original research brief, identify which agent/unit must fix what. Reply with a short root-cause analysis and a concrete recommendation.",
+                researchRequest(project!, task, renderPromptContext(pack, `(diagnosis loop ${fixLoops})`)) + `\n\n=== QA failure ===\n${failure}`,
+                2500
+              );
+              fixBrief = `${brief}\n\n--- Fix-loop diagnosis (attempt ${fixLoops}) ---\n${diag}`;
+              return defaultPlanFor(researchAgent, fixResearchTask);
+            }
+            return defaultPlanFor(researchAgent, fixResearchTask);
+          }
+        });
+        this.requireSuccess(diagRun, "Diagnostic research");
+        // Append the diagnostic note to project memory so subsequent runs see it.
+        if (this.deps.memoryRepo) {
+          const memId = `mem-${randomUUID().slice(0, 8)}`;
+          this.deps.memoryRepo.upsert({
+            id: memId, projectId: project.id, scope: "task",
+            type: "bug", key: `qa-failure/${task.id}/attempt-${fixLoops}`,
+            content: fixBrief, tags: ["qa", "fix-loop", task.id], refs: [qaTask.id],
+            source: "orchestrator", version: 1,
+            createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          }, { projectId: project.id });
+        }
+        // After diagnosis, re-route using the failure + diagnosis text.
+        const routed = this.deps.agentRouter.route(`${failure}\n${fixBrief}`, "error");
+        const normRouted = routed === "uiux" && available.includes("frontend-developer") ? "frontend-developer"
+                         : IMPLEMENTERS.includes(routed as typeof IMPLEMENTERS[number]) ? routed
+                         : undefined;
+        const failedRepo = qaRun.steps.find((s) => s.status === "failed")?.data?.repo;
+        const candidates = breakdown.filter((item) => !failedRepo || repositoryForAgent(project!, item.agentType).repo === failedRepo);
+        fixTarget = candidates.find((i) => i.files.some((p) => failure.includes(p)))
+                 ?? candidates.find((i) => normRouted && i.agentType === normRouted)
+                 ?? candidates[0] ?? breakdown[0];
+      } else {
+        // Fallback / no real AI: deterministic routing (original behaviour).
+        // Map non-implementer router hits (security/devops/...) to the closest
+        // implementer so we don't try to spawn a fix task on a QA-only agent.
+        const failedRepo = qaRun.steps.find((s) => s.status === "failed")?.data?.repo;
+        const candidates = breakdown.filter((item) => !failedRepo || repositoryForAgent(project!, item.agentType).repo === failedRepo);
+        const routed = this.deps.agentRouter.route(failure, "error");
+        const fixType = routed === "uiux" && candidates.some((i) => i.agentType === "frontend-developer")
+          ? "frontend-developer"
+          : IMPLEMENTERS.includes(routed as typeof IMPLEMENTERS[number])
+            ? routed
+            : "backend-developer";
+        fixTarget = candidates.find((i) => i.files.some((p) => failure.includes(p))) ?? candidates.find((i) => i.agentType === fixType) ?? candidates[0] ?? breakdown[0];
+      }
+
+      // Dispatch the fix using the (possibly revised) brief.
+      await implement(fixTarget, `${failure}\n\n--- Diagnosis ---\n${fixBrief !== brief ? fixBrief.split("--- Fix-loop diagnosis")[1] ?? "" : "(deterministic routing)"}`);
     }
     check();
     for (const working of work.values()) {

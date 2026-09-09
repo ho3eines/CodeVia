@@ -216,35 +216,29 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     const cmd = head.toLowerCase().replace(/@\w+$/, "");
     const args = rest.join(" ").trim();
 
-    if (cmd === "/start" || cmd === "/menu" || cmd === "/home") return this.menuHome(chatId);
+    // RESTRICTED MODE (v5+): Telegram is chat + project selection only.
+    // Administrative sections (agents/models/skills/tasks/runs/settings/memory
+    // etc.) are intentionally hidden to keep the bot surface small; use the web
+    // UI for everything else. Only /start, /project, /cancel and natural
+    // language chat are exposed.
+    if (cmd === "/start" || cmd === "/menu" || cmd === "/home" || cmd === "/help") return this.menuHome(chatId);
     if (cmd === "/help" || cmd === "/?" || cmd === "/کمک") return this.helpView();
     if (cmd === "/id" || cmd === "/chatid" || cmd === "/whoami") return this.identityView(t);
     if (cmd === "/ping" || cmd === "/health") return this.pingView();
     if (cmd === "/projects" || cmd === "/project") return this.projectsView();
-    if (cmd === "/agents") return this.globalSection(chatId, "agents");
-    if (cmd === "/models") return this.globalSection(chatId, "models");
-    if (cmd === "/skills") return this.globalSection(chatId, "skills");
-    if (cmd === "/tasks") return this.globalSection(chatId, "tasks");
-    if (cmd === "/runs") return this.globalSection(chatId, "runs");
-    if (cmd === "/status") return this.globalSection(chatId, "status");
-    if (cmd === "/tests") return this.globalSection(chatId, "tests");
-    if (cmd === "/memory") return this.globalSection(chatId, "memory");
-    if (cmd === "/github" || cmd === "/issues" || cmd === "/pr" || cmd === "/prs") {
-      return this.projectScoped(chatId, "github");
-    }
-    if (cmd === "/review") return this.projectScoped(chatId, "status");
-    if (cmd === "/dashboard") return this.globalSection(chatId, "dashboard");
-    if (cmd === "/settings") return this.settingsView(chatId);
     if (cmd === "/stop" || cmd === "/cancel") return this.cancelPendingView(chatId);
-    if (cmd === "/run") return this.runCommand(chatId, args);
-    if (cmd === "/task") return this.taskCommand(chatId, args);
-    if (cmd === "/approvals" || cmd === "/approve" || cmd === "/reject") {
-      if ((cmd === "/approve" || cmd === "/reject") && args) {
-        return this.decideApproval(t, cmd === "/approve" ? "approve" : "reject", args.split(/\s+/)[0]!);
-      }
-      return this.approvalsView(chatId);
+    // The following admin commands are disabled on Telegram (web UI only):
+    // /agents /models /skills /tasks /runs /status /tests /memory /review
+    // /dashboard /settings /run /task /approvals /logs
+    if (cmd.startsWith("/")) {
+      return this.deps.telegram.sendMessage({
+        chatId,
+        text: "⚠️ Only /start, /project, /cancel and plain chat are available on Telegram. Use the web UI for agents, tasks, runs, settings, etc.",
+      }).then(() => ({
+        text: "",
+        keyboard: this.homeKeyboard(),
+      }));
     }
-    if (cmd === "/logs") return this.globalSection(chatId, "logs");
 
     // Anything else — Persian included — is a natural-language request.
     return this.handleNaturalLanguage(chatId, raw);
@@ -264,19 +258,21 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     const arg = rest.join(":");
 
     switch (action) {
-      case "approve":
-      case "reject":
-        return this.decideApproval({ chatId, updateId: 0 }, action, arg);
       case "project":
         return this.selectProject(chatId, arg);
+      // RESTRICTED MODE: agents / approvals / action / global menu sections
+      // other than help/ping are hidden. Reject them so callbacks from stale
+      // keyboards don't accidentally touch internal surfaces.
+      case "approve":
+      case "reject":
       case "menu":
-        return this.globalSection(chatId, arg);
       case "agent":
-        return this.agentView(arg);
       case "action":
-        return this.projectAction(chatId, arg);
       default:
-        return this.menuHome(chatId);
+        return {
+          text: "⚠️ That feature is not available on Telegram right now. Use the web UI or send a plain message.",
+          keyboard: this.homeKeyboard(),
+        };
     }
   }
 
@@ -360,14 +356,9 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
 
 
   private homeKeyboard(): InlineKeyboard {
+    // RESTRICTED MODE: only Project list + chat help + ping.
     return [
       [{ text: "📚 Projects", callback_data: "project:list" }],
-      [{ text: "🤖 Agents", callback_data: "menu:agents" }, { text: "🧠 Models", callback_data: "menu:models" }],
-      [{ text: "🧩 Skills", callback_data: "menu:skills" }, { text: "🛠 Tasks", callback_data: "menu:tasks" }],
-      [{ text: "📼 Runs", callback_data: "menu:runs" }, { text: "📊 Status", callback_data: "menu:status" }],
-      [{ text: "🧪 Tests", callback_data: "menu:tests" }, { text: "🧠 Memory", callback_data: "menu:memory" }],
-      [{ text: "📦 GitHub", callback_data: "menu:github" }, { text: "🎛 Dashboard", callback_data: "menu:dashboard" }],
-      [{ text: "🛑 Approvals", callback_data: "menu:approvals" }, { text: "📜 Logs", callback_data: "menu:logs" }],
       [{ text: "🆘 Help", callback_data: "menu:help" }, { text: "🏓 Self-check", callback_data: "menu:ping" }],
     ];
   }
@@ -832,37 +823,26 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
 
   private async handleNaturalLanguage(chatId: string, text: string): Promise<View> {
     const project = this.activeProject(chatId);
-    if (!project || !this.deps.queue || !this.deps.agentManager) {
+    if (!project) {
       return {
-        text: "🤔 Select a project first (📚 Projects), then send your request.",
+        text: "🤔 لطفاً اول یک پروژه انتخاب کن (📚 Projects) بعد پیام بفرست.",
         keyboard: this.projectsKeyboardOnly(),
       };
     }
-    const title = text.length > 100 ? `${text.slice(0, 100)}…` : text;
-    const task = this.deps.agentManager.createTask({
-      projectId: project.id,
-      title,
-      description: text,
-      input: { executionMode: "autonomous", source: "telegram" },
-    });
-    const job = this.deps.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
-    this.deps.taskRepo.upsert(
-      { ...task, status: "queued", updatedAt: new Date().toISOString() },
-      { projectId: task.projectId, parentId: task.parentTaskId },
-    );
+    // RESTRICTED MODE (v5+): Telegram is chat-only on this build — no task
+    // creation, no autonomous loop, no agents dispatched from Telegram. Users
+    // can chat about the selected project (status, quick Q&A, simple notes);
+    // heavier workflows must be triggered from the web UI.
+    const short = text.length > 120 ? `${text.slice(0, 120)}…` : text;
     return {
       text: [
-        `🛠 Task created & queued.`,
+        `💬 پیامت برای پروژه «${project.name}» دریافت شد:`,
         "",
-        `📌 ${title}`,
-        `🆔 ${task.id}`,
-        `📦 ${project.name}`,
-        `⚙️ status: queued`,
-        "🔎 Research → specialist tasks + skills → implementation → QA",
+        short,
         "",
-        "Run `/status` or open the project menu to track progress.",
+        "⚠️ در این نسخه بات تلگرام فقط برای انتخاب پروژه و چت ساده فعال است. برای اجرای تسک، اجنت‌ها، تست‌ها و تنظیمات از وب‌اپ استفاده کن.",
       ].join("\n"),
-      keyboard: this.projectKeyboard(project),
+      keyboard: this.homeKeyboard(),
     };
   }
 

@@ -249,6 +249,14 @@ export interface ProjectSettings {
   generatedSkills?: string[];
   workflows: string[];
   budget: Budget;
+  /** Max autonomous QA↔Fix retry loops before the parent task fails. */
+  maxFixLoops?: number;
+  /** When QA fails, route back through research to re-analyse before fixing
+   *  instead of patching directly on the same implementer. */
+  researchBeforeFix?: boolean;
+  /** Cache GitHub context in memory between runs to avoid rescanning the tree
+   *  on every autonomous execution. */
+  cacheContextInMemory?: boolean;
   permissions: Record<Permission, boolean>;
   metadata: Record<string, unknown>;
 }
@@ -287,6 +295,15 @@ export interface AgentModelConfig {
   primary: ID;
   secondary?: ID;
   fallbacks: ID[];
+  /**
+   * Explicit allow-list of model IDs this agent may use. When non-empty, the
+   * router only considers models whose id is in this list (and which satisfy
+   * the required capabilities). Primary/secondary/fallbacks are filtered
+   * against this list too. Users set this from the agent editor to pin an
+   * agent to a specific set of models (e.g. "only use fast + cheap models for
+   * the conversation assistant").
+   */
+  allowedModels?: ID[];
   specialized: Partial<
     Record<"research" | "coding" | "vision" | "fast" | "final-review" | "reasoning", ID>
   >;
@@ -434,12 +451,36 @@ export interface Run {
  * ------------------------------------------------------------------ */
 export type ConversationSource = "web" | "telegram";
 
+export interface ConversationAttachment {
+  /** Client-supplied file name. */
+  name: string;
+  /** MIME type (e.g. "image/png", "text/plain", "application/pdf"). */
+  contentType: string;
+  /** File size in bytes. */
+  size: number;
+  /** For images / small files (<1MB), a data: URL so vision-capable models can
+   *  see it. For larger/binary files we include only filename + kind so the
+   *  assistant says it cannot see the binary content directly. */
+  dataUrl?: string;
+  /** One-line preview/description shown in the transcript bubble. */
+  preview?: string;
+}
+
 export interface ConversationMessage {
   id: ID;
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   createdAt: ISODate;
-  metadata?: Record<string, unknown>;
+  metadata?: {
+    attachments?: ConversationAttachment[];
+    /** The model used to produce an assistant message. */
+    modelId?: ID;
+    /** Execution mode (autonomous/agent/simulation/fast) used when dispatching. */
+    executionMode?: string;
+    /** When this user message triggered an autonomous/agent task, store it. */
+    dispatchedTaskId?: ID;
+    [k: string]: unknown;
+  };
 }
 
 export interface Conversation {
@@ -547,4 +588,62 @@ export interface Notification {
   projectId?: ID;
   read: boolean;
   createdAt: ISODate;
+}
+
+/* ------------------------------------------------------------------ *
+ * Model Benchmark (smart routing telemetry)
+ * ------------------------------------------------------------------ */
+
+/** A single math problem sent to all models during a benchmark run. */
+export interface MathBenchmarkProblem {
+  id: string;
+  /** Textual question in English (numbers in ASCII so models can parse). */
+  question: string;
+  /** The exact expected answer (as a number or short string). */
+  expected: string;
+  /** Operation kind used for analytics grouping. */
+  kind: "arithmetic" | "algebra" | "word-problem" | "order-of-ops" | "fractions";
+}
+
+/** One (model, problem) attempt recorded during a benchmark. */
+export interface ModelBenchmarkResult {
+  id: ID;
+  benchmarkRunId: string;
+  modelId: ID;
+  providerId: ID;
+  problemId: string;
+  problemKind: MathBenchmarkProblem["kind"];
+  question: string;
+  expectedAnswer: string;
+  modelAnswer: string;
+  /** true when the model's answer parses to the expected value. */
+  correct: boolean;
+  /** Whether the model returned *anything* parseable (vs. error / refusal). */
+  answered: boolean;
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  /** Error string if the provider threw (timeout, rate limit, HTTP error…). */
+  error?: string;
+  createdAt: ISODate;
+}
+
+/** Aggregated per-model performance computed from all benchmark results. */
+export interface ModelPerformanceStats {
+  modelId: ID;
+  totalAttempts: number;
+  successAttempts: number; // answered without error
+  correctCount: number;
+  accuracy: number; // 0..1 (correct / successAttempts; if none → 0)
+  avgLatencyMs: number;
+  p95LatencyMs: number;
+  errorRate: number; // 0..1
+  avgCostUsd: number;
+  /** Composite score 0..1 — higher is better. Weighted: accuracy 60%, speed 20%, reliability 20%. */
+  score: number;
+  /** Category-specific accuracy breakdown. */
+  byKind: Record<string, { attempts: number; correct: number; accuracy: number }>;
+  lastTestedAt?: ISODate;
 }

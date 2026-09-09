@@ -11,7 +11,7 @@ import { accessibleProjectIds } from "../project-access.js";
 function validateAgentEdit(agent: Agent): void {
   try {
     const strings = z.array(z.string()).max(1024);
-    z.object({ id: z.string(), projectId: z.string(), name: z.string(), systemPrompt: z.string(), projectPrompt: z.string().optional(), skills: strings, tools: strings, permissions: strings, memorySources: strings, enabled: z.boolean(), version: z.number().int().positive(), maxIterations: z.number().finite().nonnegative(), timeoutMs: z.number().finite().nonnegative(), tokenBudget: z.number().finite().nonnegative(), models: z.object({ primary: z.string(), secondary: z.string().optional(), fallbacks: strings, specialized: z.record(z.string()) }) }).parse(agent);
+    z.object({ id: z.string(), projectId: z.string(), name: z.string(), systemPrompt: z.string(), projectPrompt: z.string().optional(), skills: strings, tools: strings, permissions: strings, memorySources: strings, enabled: z.boolean(), version: z.number().int().positive(), maxIterations: z.number().finite().nonnegative(), timeoutMs: z.number().finite().nonnegative(), tokenBudget: z.number().finite().nonnegative(), models: z.object({ primary: z.string(), secondary: z.string().optional(), fallbacks: strings, allowedModels: z.array(z.string()).max(64).optional(), specialized: z.record(z.string()) }) }).parse(agent);
   } catch (error) { throw Object.assign(new Error(`Invalid agent definition: ${String(error)}`), { statusCode: 422 }); }
 }
 

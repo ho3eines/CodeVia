@@ -26,6 +26,7 @@ import { registerMemoryRoutes } from "./routes/memory.js";
 import { registerGithubRoutes } from "./routes/github.js";
 import { registerTelegramRoutes } from "./routes/telegram.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
+import { registerModelBenchRoutes } from "./routes/model-bench.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerSearchRoutes } from "./routes/search.js";
 import { registerObservabilityRoutes } from "./routes/observability.js";
@@ -306,6 +307,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     registerProjectRoutes(app, container);
     registerAgentRoutes(app, container);
     registerModelRoutes(app, container);
+    registerModelBenchRoutes(app, container);
     registerSkillRoutes(app, container);
     registerWorkflowRoutes(app, container);
     registerTaskRoutes(app, container);
