@@ -82,12 +82,14 @@ function parseAttachments(raw: unknown): ParsedAttachment[] {
   // A non-array `attachments` (older clients / hand-crafted payloads) must not
   // take the whole request down with "…slice is not a function".
   const list: Array<Record<string, unknown>> = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];
-  return list.slice(0, 8).map((a) => ({
-    name: String(a.name || "file").slice(0, 200),
-    contentType: String(a.contentType || "application/octet-stream").slice(0, 100),
-    size: Number(a.size) || 0,
-    dataUrl: typeof a.dataUrl === "string" && a.dataUrl.length < 1_000_000 ? a.dataUrl : undefined,
-    preview: typeof a.preview === "string" ? a.preview.slice(0, 300) : undefined,
+  // Bound to max 8 attachments to avoid huge payloads.
+  const bounded = list.slice(0, 8);
+  return bounded.map((a) => ({
+    name: typeof a?.name === "string" ? a.name.slice(0, 200) : "file",
+    contentType: typeof a?.contentType === "string" ? a.contentType.slice(0, 100) : "application/octet-stream",
+    size: Number(a?.size) || 0,
+    dataUrl: typeof a?.dataUrl === "string" && a.dataUrl.length < 1_000_000 ? a.dataUrl : undefined,
+    preview: typeof a?.preview === "string" ? a.preview.slice(0, 300) : undefined,
   }));
 }
 
