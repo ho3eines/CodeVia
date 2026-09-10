@@ -28,7 +28,7 @@ function heuristicSummary(messages: ConversationMessage[] | undefined, take: num
 /** AI-powered context compression with a deterministic fallback when no model is configured. */
 async function summarizeConversation(
   container: Container,
-  conv: { id: string; projectId: string; modelId?: string; summary?: string; messages?: ConversationMessage[] },
+  conv: { id: string; projectId?: string; modelId?: string; summary?: string; messages?: ConversationMessage[] },
 ): Promise<{ summary: string; method: "ai" | "heuristic"; modelId?: string }> {
   const messages = conv.messages ?? [];
   const transcript = messages
@@ -107,7 +107,7 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
  * and the SSE streaming endpoint so both answer identically.
  */
 function buildChatMessages(opts: {
-  safeProject: Project;
+  safeProject?: Project;
   updated: Conversation;
   content: string;
   attachments: ParsedAttachment[];
@@ -123,11 +123,17 @@ function buildChatMessages(opts: {
         })
         .join("\n")
     : "";
-  const systemPrompt = `You are CodeVia's project assistant AI for the project "${safeProject.name}".
+  // Standalone chats (no project) get a generic assistant prompt; only
+  // project-connected conversations see project and repository context.
+  const systemPrompt = safeProject
+    ? `You are CodeVia's project assistant AI for the project "${safeProject.name}".
 Project description: ${safeProject.description || "No description provided"}
 Repositories: ${(safeProject.repositories ?? []).map((r) => r.repo).join(", ")}
 Language: Respond in the same language the user uses in their message.
-Be helpful, concise, and accurate. When relevant, reference project context, skills, and agents available.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}${repoBrief ? `\n\nRepository context (read this before answering questions about the codebase; never claim a file is missing without checking this list):\n${repoBrief}` : ""}`;
+Be helpful, concise, and accurate. When relevant, reference project context, skills, and agents available.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}${repoBrief ? `\n\nRepository context (read this before answering questions about the codebase; never claim a file is missing without checking this list):\n${repoBrief}` : ""}`
+    : `You are CodeVia's AI assistant, a friendly general-purpose helper.
+Language: Respond in the same language the user uses in their message.
+Be helpful, concise, and accurate. Answer questions directly; if a question needs project or repository context you don't have, say so briefly.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}`;
 
   // Build multimodal-ish user message: put images inline as data URLs for
   // vision-capable models when possible; otherwise just list them in text.
@@ -197,7 +203,9 @@ function resolveOrderedModels(
 
 export function registerConversationRoutes(app: FastifyInstance, container: Container): void {
   const persist = async (conv: Conversation | undefined) => {
-    if (!conv) return;
+    // Standalone chats live only in the database — there is no project whose
+    // CodeVia/ folder could mirror them.
+    if (!conv || !conv.projectId) return;
     const p = container.projectRepo.findById(conv.projectId)?.data;
     if (!p) return;
     // Mirror into CodeVia/conversations is best-effort: the AI reply is already
@@ -237,10 +245,17 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     const r = req as FastifyRequest;
     const conv = container.conversationRepo.findById(id)?.data;
     if (!conv) return undefined;
-    const project = container.projectRepo.findById(conv.projectId)?.data;
-    if (!project) return undefined;
-    if (!canAccessProject(resolveRequestUser(r, container).user, project)) return undefined;
-    return conv;
+    // Project-connected chats require project access; standalone chats only
+    // require ownership (same legacy allowances as the list endpoint).
+    if (conv.projectId) {
+      const project = container.projectRepo.findById(conv.projectId)?.data;
+      if (!project) return undefined;
+      if (!canAccessProject(resolveRequestUser(r, container).user, project)) return undefined;
+      return conv;
+    }
+    const uid = resolveRequestUser(r, container).user.id;
+    if (!conv.userId || conv.userId === uid || conv.userId === "user-demo" || uid === "user-demo") return conv;
+    return undefined;
   };
   app.get("/conversations", { schema: { tags: ["conversations"] } }, async (req) => {
     const q = req.query as { projectId?: string };
@@ -248,7 +263,8 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     const owned = accessibleProjectIds(req, container);
     let convs = container.conversationRepo
       .findMany()
-      .filter((r) => owned.has(r.data.projectId))
+      // Project chats need project access; standalone chats only need ownership.
+      .filter((r) => !r.data.projectId || owned.has(r.data.projectId))
       // User isolation: a user only sees conversations they created (or web
       // conversations in demo / pre-multi-user installs).
       .filter((r) => !r.data.userId || r.data.userId === uid || r.data.userId === "user-demo" || uid === "user-demo");
@@ -258,13 +274,16 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
 
   app.post("/conversations", { schema: { tags: ["conversations"] } }, async (req) => {
     const b = req.body as Record<string, unknown>;
-    const pid = String(b.projectId);
-    const project = container.projectRepo.findById(pid)?.data;
-    if (!project || !canAccessProject(resolveRequestUser(req, container).user, project)) {
-      throw Object.assign(new Error("project not found"), { statusCode: 404 });
+    // projectId is optional: omitted → standalone chat without project context.
+    const rawPid = typeof b.projectId === "string" ? b.projectId.trim() : "";
+    if (rawPid) {
+      const project = container.projectRepo.findById(rawPid)?.data;
+      if (!project || !canAccessProject(resolveRequestUser(req, container).user, project)) {
+        throw Object.assign(new Error("project not found"), { statusCode: 404 });
+      }
     }
     const conv = container.conversationRepo.create({
-      projectId: pid,
+      ...(rawPid ? { projectId: rawPid } : {}),
       userId: String(b.userId ?? userFor(req)),
       source: (b.source as "web" | "telegram") ?? "web",
       title: String(b.title ?? "Conversation"),
@@ -323,9 +342,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     // directly (that crashed every send with "Cannot read properties of
     // undefined (reading 'map')" while the rest of the UI — which hydrates —
     // kept working).
-    const project = container.projectRepo.findById(updated.projectId)?.data;
+    const project = updated.projectId ? container.projectRepo.findById(updated.projectId)?.data : undefined;
     const safeProject = project ? hydrateProject(project) : undefined;
-    if (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject)) {
+    if (updated.projectId && (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject))) {
       reply.code(404);
       return { error: "project not found" };
     }
@@ -333,7 +352,17 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     // If the user asked for an execution mode other than plain chat, dispatch
     // a task and return a status message instead of a normal chat reply.
     const mode = b.executionMode ?? "chat";
-    if (role === "user" && safeProject && mode !== "chat") {
+    if (role === "user" && mode !== "chat" && !safeProject) {
+      // Task execution modes need a project — a standalone chat can't dispatch work.
+      const errMsg: ConversationMessage = {
+        id: randomUUID(),
+        role: "assistant",
+        content: "💡 Task modes (autonomous / agent / simulation) need a project. Use the Chat tab inside a project to dispatch work — or keep chatting here for plain Q&A.",
+        createdAt: new Date().toISOString(),
+        metadata: { executionMode: mode, error: true },
+      };
+      updated = container.conversationRepo.addMessage(id, errMsg);
+    } else if (role === "user" && safeProject && mode !== "chat") {
       const result = dispatchProjectAsk(container, safeProject.id, {
         title: content.slice(0, 80),
         description: content,
@@ -371,14 +400,15 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         };
         updated = container.conversationRepo.addMessage(id, statusMsg);
       }
-    } else if (role === "user" && b.generateResponse !== false && safeProject) {
+    } else if (role === "user" && b.generateResponse !== false) {
       // Plain chat: build context including attachments for vision-capable models.
       // Give the assistant real repository evidence (file tree, README, manifest
       // excerpts) so questions like "review this project" or "read the README"
       // are answered from the repo instead of invented from the project name.
       // Advisory only: a missing/private repo must never break the send — and a
       // slow GitHub must never stall it either (8s budget, then chat without it).
-      const repoBrief = safeProject.configRepo
+      // Standalone chats simply skip this (no project → no repo brief).
+      const repoBrief = safeProject?.configRepo
         ? ((await withTimeout(
             buildRepoBrief({
               github: container.githubForProject(safeProject, resolveRequestUser(req, container).user.id),
@@ -392,7 +422,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       try {
         const res = await container.aiText.complete({
           category: "fast",
-          preferredModelId: b.modelId ?? updated.modelId ?? safeProject.defaultModelId,
+          preferredModelId: b.modelId ?? updated.modelId ?? safeProject?.defaultModelId,
           projectId: updated.projectId,
           correlationId: `conv-chat-${id}-${Date.now()}`,
           maxTokens: 2000,
@@ -456,9 +486,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       reply.code(404);
       return { error: "conversation not found" };
     }
-    const project = container.projectRepo.findById(existing.projectId)?.data;
+    const project = existing.projectId ? container.projectRepo.findById(existing.projectId)?.data : undefined;
     const safeProject = project ? hydrateProject(project) : undefined;
-    if (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject)) {
+    if (existing.projectId && (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject))) {
       reply.code(404);
       return { error: "project not found" };
     }
@@ -515,7 +545,22 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       send({ type: "user", message: msg, conversation: afterUser });
 
       const mode = b.executionMode ?? "chat";
-      if (role === "user" && mode !== "chat") {
+      if (role === "user" && mode !== "chat" && !safeProject) {
+        // Task execution modes need a project — a standalone chat can't dispatch work.
+        const statusMsg: ConversationMessage = {
+          id: randomUUID(),
+          role: "assistant",
+          content: "💡 Task modes (autonomous / agent / simulation) need a project. Use the Chat tab inside a project to dispatch work — or keep chatting here for plain Q&A.",
+          createdAt: new Date().toISOString(),
+          metadata: { executionMode: mode, error: true },
+        };
+        const updated = container.conversationRepo.addMessage(id, statusMsg) ?? afterUser;
+        send({ type: "message", message: statusMsg, conversation: updated });
+        send({ type: "done", conversation: finish(updated), message: statusMsg });
+        end();
+        return reply;
+      }
+      if (role === "user" && mode !== "chat" && safeProject) {
         const result = dispatchProjectAsk(container, safeProject.id, {
           title: content.slice(0, 80),
           description: content,
@@ -571,7 +616,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       }
 
       const current = container.conversationRepo.findById(id)?.data ?? afterUser;
-      const repoBrief = safeProject.configRepo
+      const repoBrief = safeProject?.configRepo
         ? ((await withTimeout(
             buildRepoBrief({
               github: container.githubForProject(safeProject, resolveRequestUser(req, container).user.id),
@@ -581,7 +626,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           )) ?? "")
         : "";
       const messages = buildChatMessages({ safeProject, updated: current, content, attachments, repoBrief });
-      const ordered = resolveOrderedModels(container, b.modelId ?? current.modelId ?? safeProject.defaultModelId);
+      const ordered = resolveOrderedModels(container, b.modelId ?? current.modelId ?? safeProject?.defaultModelId);
       if (!ordered.length) {
         const errMsg: ConversationMessage = {
           id: randomUUID(),
@@ -662,7 +707,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
             container.costRepo.create({
               providerId: usedProvider?.id ?? ordered[0]?.provider.id,
               modelId: m.id,
-              projectId: safeProject.id,
+              projectId: safeProject?.id,
               inputTokens,
               outputTokens,
               totalTokens: inputTokens + outputTokens,
@@ -707,7 +752,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
   app.delete("/conversations/:id", { schema: { tags: ["conversations"] } }, async (req) => {
     const { id } = req.params as { id: string };
     const conv = container.conversationRepo.findById(id)?.data;
-    const p = conv && container.projectRepo.findById(conv.projectId)?.data;
+    const p = conv?.projectId ? container.projectRepo.findById(conv.projectId)?.data : undefined;
     if (p) await container.projectFiles.tombstone(p, container.projectFiles.pathFor(p, "conversation", id));
     container.conversationRepo.deleteById(id);
     return { ok: true };

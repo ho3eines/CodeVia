@@ -108,14 +108,25 @@ describe("UI shell", () => {
     }
   }, 30000);
 
-  it("opens on a current project's chat (home) with a live project switcher, and every moved section is reachable from Settings", async () => {
+  it("opens Chat as a standalone AI chat (home) while project-connected chat lives in the project section, and every moved section is reachable from Settings", async () => {
     await container.agentManager.createProject({ name: "Home Hub QA", description: "Home surface", configRepo: "acme/home-hub-qa", branch: "main" });
     const { win, go, errors } = await boot();
+    // Home = simple standalone AI chat: no project switcher, no project composer.
     const chat = await go("#/chat");
     expect((chat.textContent ?? "")).not.toMatch(/Something went wrong/);
-    // Home = a Chat page carrying a project switcher + message composer.
-    expect(win.document.querySelector("#ws-project-switch"), "chat home has a project switcher").toBeTruthy();
-    expect(chat.querySelector(".p-chat-composer"), "chat home shows the composer").toBeTruthy();
+    expect(win.document.querySelector("#ws-project-switch"), "standalone chat must not carry a project switcher").toBeFalsy();
+    expect(chat.querySelector(".p-chat-composer"), "standalone chat must not show the project composer").toBeFalsy();
+    expect(chat.querySelector("#chat-messages"), "standalone chat shows messages").toBeTruthy();
+    expect(chat.querySelector("#chat-input"), "standalone chat shows the input").toBeTruthy();
+    expect(chat.querySelector("#chat-send"), "standalone chat shows the send button").toBeTruthy();
+    expect(chat.querySelector("#chat-new"), "standalone chat offers a new-chat button").toBeTruthy();
+
+    // Project-connected chat exists only inside the project section.
+    const created = container.projectRepo.findMany().map((r) => r.data).find((p) => p.name === "Home Hub QA");
+    expect(created, "test project exists").toBeTruthy();
+    const projectChat = await go(`#/projects/${created!.id}`);
+    expect((projectChat.textContent ?? "")).not.toMatch(/Something went wrong/);
+    expect(projectChat.querySelector(".p-chat-composer"), "project page shows the project-connected composer").toBeTruthy();
 
     const proj = await go("#/project");
     expect((proj.textContent ?? "")).not.toMatch(/Something went wrong/);

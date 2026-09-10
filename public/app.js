@@ -1906,18 +1906,127 @@
     </div>`;
   }
   on("/chat", async () => {
-    const projects = asArray(await api("/projects").catch(() => []));
-    const pid = pickCurrentProject(projects);
-    if (!pid) { $("#content").innerHTML = workspaceEmptyState(); return; }
-    rememberProject(pid);
-    const [p, conv] = await Promise.all([
-      api("/projects/" + pid).catch(() => null),
-      getProjectChatConv(pid).catch(() => null),
-    ]);
-    if (!p) { $("#content").innerHTML = workspaceEmptyState(); return; }
-    $("#content").innerHTML = workspaceHeaderHtml(p, projects, "chat") + projectChatTabHtml(conv || { messages: [] });
-    bindWorkspaceSwitcher();
-    if (conv) await mountProjectChat(pid, conv.id);
+    // Standalone AI chat — deliberately NOT project-bound. No project picker,
+    // no execution modes: just ask anything. Project-connected chat lives in
+    // the project section (#/projects/:id → Chat tab).
+    const KEY = "codevia.standaloneChatId";
+    const rememberChat = (id) => { try { if (id) localStorage.setItem(KEY, id); else localStorage.removeItem(KEY); } catch (_) { /* ignore */ } };
+    let convId = null;
+    try { convId = localStorage.getItem(KEY) || null; } catch (_) { /* ignore */ }
+    let conv = convId ? await api(`/conversations/${encodeURIComponent(convId)}`).catch(() => null) : null;
+    // Never show a project-connected conversation on this page.
+    if (conv && conv.projectId) conv = null;
+    if (!conv || !conv.id) { conv = null; convId = null; }
+    let msgs = conv ? asArray(conv.messages) : [];
+    const emptyHtml = `<div style="padding:60px 20px;text-align:center;color:var(--text-muted)">💬 Ask anything — no project needed.</div>`;
+    $("#content").innerHTML = `
+      <div class="overview">
+        <div><h1>💬 Chat</h1><p>Simple AI chat — ask anything, no project needed</p></div>
+        <div class="action-row">
+          <button class="btn btn-ghost" id="chat-history">🕘 History</button>
+          <button class="btn" id="chat-new">＋ New chat</button>
+        </div>
+      </div>
+      <div class="card card-body mt" style="padding:0">
+        <div id="chat-messages" style="display:flex;flex-direction:column;gap:10px;padding:16px;max-height:65vh;overflow-y:auto;background:var(--bg,#0b0d17)">
+          ${msgs.length ? msgs.map(msgBubble).join("") : emptyHtml}
+        </div>
+        <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end">
+          <textarea id="chat-input" class="textarea" dir="auto" placeholder="Ask anything…" style="flex:1;min-height:46px;max-height:200px;resize:vertical;margin:0"></textarea>
+          <button class="btn btn-primary" id="chat-send" style="height:46px">Send ↵</button>
+        </div>
+        <div class="field-hint" style="padding:0 16px 12px">Enter sends · Shift+Enter for newline</div>
+      </div>`;
+    const box = $("#chat-messages");
+    const input = $("#chat-input");
+    const sendBtn = $("#chat-send");
+    const paintMessages = (list) => {
+      msgs = asArray(list);
+      if (box) {
+        box.innerHTML = msgs.length ? msgs.map(msgBubble).join("") : emptyHtml;
+        box.scrollTop = box.scrollHeight;
+      }
+    };
+    setTimeout(() => { if (box) box.scrollTop = box.scrollHeight; }, 30);
+    input.focus();
+    let sending = false;
+    let streamAbort = null;
+    const setSendBtn = (streaming) => {
+      if (streaming) { sendBtn.disabled = false; sendBtn.innerHTML = "■ Stop"; sendBtn.title = "Stop generating"; }
+      else { sendBtn.disabled = false; sendBtn.textContent = "Send ↵"; sendBtn.title = ""; }
+    };
+    const doSend = async () => {
+      // While a reply streams, activating send stops the generation instead.
+      if (sending) { if (streamAbort) streamAbort.abort(); return; }
+      const content = input.value.trim();
+      if (!content) return;
+      sending = true;
+      setSendBtn(true);
+      input.value = "";
+      // Lazily create the conversation on first send so abandoned visits don't
+      // pile up empty chats; title it from the first question.
+      if (!convId) {
+        try {
+          const created = await api("/conversations", { method: "POST", body: { title: content.slice(0, 60), source: "web" } });
+          convId = created.id;
+          rememberChat(convId);
+        } catch (e) {
+          toast("Could not start chat", e.message, "err");
+          sending = false; setSendBtn(false); input.value = content;
+          return;
+        }
+      }
+      // The user's own message appears instantly — no waiting on the model.
+      if (box && msgs.length === 0) box.innerHTML = "";
+      if (box) {
+        box.insertAdjacentHTML("beforeend", msgBubble({ role: "user", content, createdAt: new Date().toISOString() }));
+        box.scrollTop = box.scrollHeight;
+      }
+      // Typing placeholder while the reply streams in token by token.
+      const uid = "chat-live-" + Date.now();
+      if (box) {
+        box.insertAdjacentHTML("beforeend", streamingBubbleHtml(uid));
+        box.scrollTop = box.scrollHeight;
+      }
+      const live = liveChatHandlers(uid, box);
+      streamAbort = new AbortController();
+      try {
+        await streamConversationSend(convId, { role: "user", content }, live.handlers, { signal: streamAbort.signal });
+        // Authoritative re-paint from stored state (replaces optimistic bubbles).
+        const fresh = live.finalConv && live.finalConv.id ? live.finalConv : await api(`/conversations/${convId}`).catch(() => null);
+        if (fresh && fresh.id) { conv = fresh; paintMessages(fresh.messages); }
+        else document.getElementById(uid)?.remove();
+      } catch (e) {
+        if (e && e.name === "AbortError") {
+          // Stopped by the user: the server kept the partial reply — show it.
+          const fresh = await api(`/conversations/${convId}`).catch(() => null);
+          if (fresh && fresh.id) { conv = fresh; paintMessages(fresh.messages); }
+        } else if (!live.gotEvent) {
+          // The stream never started — fall back to the classic send.
+          try {
+            const updated = await api(`/conversations/${convId}/messages`, { method: "POST", body: { role: "user", content } });
+            conv = updated; paintMessages(updated && updated.messages);
+          } catch (e2) {
+            toast("Send failed", e2.message, "err");
+            document.getElementById(uid)?.remove();
+            input.value = content;
+          }
+        } else {
+          toast("Connection interrupted", "Showing what was saved — send “continue” if the reply cut off.", "warn");
+          const fresh = await api(`/conversations/${convId}`).catch(() => null);
+          if (fresh && fresh.id) { conv = fresh; paintMessages(fresh.messages); }
+        }
+      } finally {
+        sending = false; streamAbort = null;
+        if (document.getElementById("chat-send") === sendBtn) setSendBtn(false);
+      }
+    };
+    sendBtn.onclick = doSend;
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); }
+    });
+    $("#chat-new").onclick = () => { rememberChat(null); refreshCurrent(); };
+    $("#chat-history").onclick = () => { location.hash = "#/conversations"; };
   });
   on("/project", async () => {
     const projects = asArray(await api("/projects").catch(() => []));
@@ -5102,7 +5211,7 @@
   /* CONVERSATIONS */
   on("/conversations", async () => {
     const list = asArray(await api("/conversations"));
-    $("#content").innerHTML = `<div class="overview"><div><h1>Conversations</h1><p>Project-aware conversations with auto-summarization</p></div></div>
+    $("#content").innerHTML = `<div class="overview"><div><h1>Conversations</h1><p>Chat history — standalone and project-connected, with auto-summarization</p></div></div>
       ${searchPanelHtml("conversation-search", "Search conversations by title, project, source, message text or updated time…")}
       <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Project</th><th>Source</th><th>Messages</th><th>Updated</th><th></th></tr></thead><tbody id="conversation-tbody"></tbody></table></div></div>`;
     bindSearchPanel("conversation-search", list, conversationRows, "#conversation-tbody", "conversation", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching conversations", "Try searching by title, project, source or message content.")}</td></tr>` });
@@ -5117,13 +5226,17 @@
     const render = async (seed) => {
       const c = seed && seed.id ? seed : await api(`/conversations/${id}`);
       const msgs = asArray(c && c.messages);
-      const projectIdShort = (c.projectId || "—").slice(0, 12);
+      // Standalone chats show no project info at all — that lives in the project section.
+      const projectBit = c.projectId ? `project ${esc(c.projectId.slice(0, 12))} · ` : "";
+      const modelBit = esc(c.modelId || (c.projectId ? "project default" : "default"));
+      const askPlaceholder = c.projectId ? "Ask anything about this project…" : "Ask anything…";
+      const emptyText = c.projectId ? "💬 No messages yet — type below to start chatting with the project assistant." : "💬 No messages yet — type below to start chatting.";
       $("#content").innerHTML = `
         <div class="overview">
           <div>
             <div class="field-hint"><a href="#/conversations">← All conversations</a></div>
             <h1>💬 ${esc(c.title)}</h1>
-            <p class="sub mono">project ${esc(projectIdShort)} · source ${esc(c.source)} · ${msgs.length} message(s) · updated ${timeAgo(c.updatedAt)} · model ${esc(c.modelId || "project default")}</p>
+            <p class="sub mono">${projectBit}source ${esc(c.source)} · ${msgs.length} message(s) · updated ${timeAgo(c.updatedAt)} · model ${modelBit}</p>
           </div>
           <div class="action-row">
             <button class="btn" id="cv-sum">📝 Summarize now</button>
@@ -5133,10 +5246,10 @@
         ${c.summary ? `<div class="card card-body"><div class="card-title">Context summary <span class="sub">auto-updates every 20 messages</span></div><pre class="mini-pre" dir="auto">${esc(c.summary)}</pre></div>` : ""}
         <div class="card card-body mt" style="padding:0">
           <div id="cv-messages" style="display:flex;flex-direction:column;gap:10px;padding:16px;max-height:65vh;overflow-y:auto;background:var(--bg,#0b0d17)">
-            ${msgs.length ? msgs.map(msgBubble).join("") : `<div style="padding:60px 20px;text-align:center;color:var(--text-muted)">💬 No messages yet — type below to start chatting with the project assistant.</div>`}
+            ${msgs.length ? msgs.map(msgBubble).join("") : `<div style="padding:60px 20px;text-align:center;color:var(--text-muted)">${emptyText}</div>`}
           </div>
           <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end">
-            <textarea id="cv-input" class="textarea" dir="auto" placeholder="Ask anything about this project…" style="flex:1;min-height:46px;max-height:200px;resize:vertical;margin:0"></textarea>
+            <textarea id="cv-input" class="textarea" dir="auto" placeholder="${askPlaceholder}" style="flex:1;min-height:46px;max-height:200px;resize:vertical;margin:0"></textarea>
             <button class="btn btn-primary" id="cv-send" style="height:46px">Send ↵</button>
           </div>
           <div class="field-hint" style="padding:0 16px 12px">Enter sends · Shift+Enter for newline · last ${Math.min(msgs.length, 50)} messages visible to AI; older context is auto-summarized.</div>
@@ -5310,6 +5423,45 @@
         <div id="${uid}-meta" style="font-size:10px;opacity:.55;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"></div>
       </div>
     </div>`;
+  }
+
+  /**
+   * Streaming-frame handlers shared by the simple chats: typing status, model
+   * badge, token-by-token text with cursor, auto-scroll, and capture of the
+   * authoritative conversation from message/done/error frames.
+   */
+  function liveChatHandlers(uid, box) {
+    let finalConv = null;
+    let gotEvent = false;
+    const scroll = () => { if (box) box.scrollTop = box.scrollHeight; };
+    return {
+      get finalConv() { return finalConv; },
+      get gotEvent() { return gotEvent; },
+      handlers: {
+        onUser: () => { gotEvent = true; },
+        onMeta: (ev) => {
+          gotEvent = true;
+          const s = document.getElementById(uid + "-status"); if (s) s.textContent = "typing…";
+          const mt = document.getElementById(uid + "-meta");
+          if (mt && ev.displayName) mt.innerHTML = `<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(ev.displayName)}</span>`;
+        },
+        onRetry: (ev) => { const s = document.getElementById(uid + "-status"); if (s) s.textContent = ev.message || "trying fallback…"; },
+        onDelta: (ev) => {
+          gotEvent = true;
+          const t = document.getElementById(uid + "-text");
+          if (t) {
+            const acc = (t.dataset.acc || "") + (ev.text || "");
+            t.dataset.acc = acc;
+            t.innerHTML = `${esc(acc)}<span class="chat-cursor">▍</span>`;
+            t.setAttribute("dir", dirForText(acc));
+          }
+          scroll();
+        },
+        onMessage: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+        onDone: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+        onError: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+      },
+    };
   }
 
   function msgBubble(m) {

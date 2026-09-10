@@ -487,7 +487,8 @@ export interface Conversation {
   /** Cache-only optimistic read stamp; never exported to the repository. */
   repositoryRevision?: string;
   id: ID;
-  projectId: ID;
+  /** Omitted for standalone chats (the top-level Chat page); set when the conversation is connected to a project. */
+  projectId?: ID;
   userId: ID;
   source: ConversationSource;
   title: string;

@@ -658,7 +658,7 @@ export class ProjectFilesService {
       }
       if (repos.conversationRepo) for (const c of snapshot.conversations) {
         const key = id("conversation", c.id)!; const existing = repos.conversationRepo.findById(key)?.data;
-        if (existing && existing.projectId !== p.id) throw stateError(`conversation identity crosses projects: ${key}`);
+        if (existing && existing.projectId && existing.projectId !== p.id) throw stateError(`conversation identity crosses projects: ${key}`);
         repos.conversationRepo.upsert({ ...c, repositoryRevision: snapshot.sha, id: key, projectId: p.id, activeAgentId: id("agent", c.activeAgentId) }, { projectId: p.id, parentId: c.userId });
       }
     };
