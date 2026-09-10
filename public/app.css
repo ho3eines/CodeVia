@@ -1216,3 +1216,63 @@ label.check input { accent-color: var(--primary); }
 @media (hover: none) {
   .list-row:hover { transform: none; }
 }
+
+/* ---------- 29. Models page: tabs, pager, unresponsive list ---------- */
+.models-tabs { margin-bottom: 14px; }
+.tab-dot { color: #22d3ee; font-size: 10px; animation: pulse 1.4s infinite; }
+.tab.active .tab-dot { color: #fff; }
+
+.pager {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin: 14px 0 4px; padding: 10px 14px;
+  border: 1px solid var(--stroke); border-radius: var(--radius); background: var(--glass);
+}
+.pager-info { font-size: 12px; color: var(--text-muted); }
+.pager-info strong { color: var(--text); }
+.pager-btns { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.pager-btn { min-width: 34px; padding: 6px 10px; font-size: 12px; }
+.pager-btn.active { background: linear-gradient(135deg, var(--primary), var(--primary-strong)); color: #fff; border-color: transparent; }
+.pager-btn:disabled { opacity: .4; cursor: not-allowed; }
+.pager-gap { color: var(--text-muted); padding: 0 2px; }
+.pager-per { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); margin: 0; }
+.pager-per .select { width: auto; padding: 6px 30px 6px 10px; font-size: 12px; }
+
+/* Unresponsive cleanup tab */
+.unresp-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 4px 0 12px; }
+.unresp-field { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); margin: 0; }
+.unresp-field .select { width: auto; padding: 7px 30px 7px 10px; font-size: 12px; }
+.unresp-bulk {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; margin-bottom: 12px; border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--stroke));
+  background: color-mix(in srgb, var(--warn) 7%, var(--glass));
+  font-size: 13px;
+}
+.unresp-err { display: inline-block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+tr.row-selected td { background: var(--primary-soft); }
+tr.row-selected:hover td { background: var(--primary-soft); }
+
+/* ---------- 30. Light-theme legibility for the model registry ---------- */
+/* Glass-on-glass washes out in daylight: give the model list solid surfaces
+   and darker secondary text so it reads as clearly as the dark theme. */
+[data-theme="light"] .model-card { background: #ffffff; border-color: rgba(24, 32, 72, 0.16); box-shadow: var(--shadow-sm); }
+[data-theme="light"] .model-card:hover { background: #ffffff; border-color: color-mix(in srgb, var(--primary) 55%, rgba(24, 32, 72, 0.2)); }
+[data-theme="light"] .model-card.row-selected { background: color-mix(in srgb, var(--primary) 10%, #ffffff); }
+[data-theme="light"] .model-id { color: #3b4270; }
+[data-theme="light"] .model-group-sub { color: #3b4270; }
+[data-theme="light"] .model-card-facts { color: #3b4270; }
+[data-theme="light"] .model-card-facts span { background: #f1f4fc; border-color: rgba(24, 32, 72, 0.14); }
+[data-theme="light"] .model-select-chip { background: #ffffff; color: #3b4270; border-color: rgba(24, 32, 72, 0.2); }
+[data-theme="light"] .badge-muted { background: #e9edf8; color: #3b4270; border-color: rgba(24, 32, 72, 0.16); }
+[data-theme="light"] .model-group-head { background: linear-gradient(120deg, rgba(98, 72, 229, 0.1), transparent 60%); }
+[data-theme="light"] .model-active-meter { background: #e9edf8; }
+[data-theme="light"] .chev-btn { background: #ffffff; color: #3b4270; border-color: rgba(24, 32, 72, 0.2); }
+[data-theme="light"] tbody tr:hover td { background: rgba(98, 72, 229, 0.06); }
+[data-theme="light"] tr.row-selected td { background: color-mix(in srgb, var(--primary) 10%, #ffffff); }
+[data-theme="light"] .pager { background: #ffffff; border-color: rgba(24, 32, 72, 0.14); box-shadow: var(--shadow-sm); }
+[data-theme="light"] .unresp-bulk { background: #fff8ec; border-color: rgba(180, 83, 9, 0.35); }
+[data-theme="light"] .unresp-err { color: #3b4270; }
+@media (max-width: 640px) {
+  .pager { justify-content: center; text-align: center; }
+  .unresp-err { max-width: 140px; }
+}

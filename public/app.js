@@ -814,6 +814,14 @@
     modelVisibleCache = [];
     modelSearchQuery = "";
     modelSelection.clear();
+    modelsTab = "models";
+    modelsPage = 1;
+    benchPage = 1;
+    benchQuery = "";
+    benchStatsCache = null;
+    benchStopPolling();
+    unrespPage = 1;
+    unrespCache = null;
     providersPageCache = [];
     providersVisibleCache = [];
     providerSummary = null;
@@ -2658,6 +2666,20 @@
   // Which provider groups are collapsed — kept across data refreshes so an
   // add/edit/delete no longer re-expands everything and loses your place.
   const modelCollapsedGroups = new Set();
+  // Models page tabs + pagination. The page used to render everything (search,
+  // the full benchmark table and every provider group) in one endless scroll;
+  // it is now three focused tabs, each with its own pager.
+  let modelsTab = "models"; // 'models' | 'benchmark' | 'unresponsive'
+  let modelsPage = 1;
+  let modelsPerPage = 24;
+  let benchPage = 1;
+  let benchPerPage = 15;
+  let benchQuery = "";
+  let unrespPage = 1;
+  let unrespPerPage = 15;
+  let unrespThreshold = 0.5; // errorRate >= threshold counts as unresponsive
+  let unrespIncludeUntested = false;
+  let unrespCache = null; // last computed unresponsive rows
 
   function providerNameOf(id) {
     return providersCache.find((p) => p.id === id)?.name || id || "Unknown provider";
@@ -2707,28 +2729,134 @@
     });
   }
 
-  /** The groups list HTML — shared by full render, search-as-you-type and in-place data refresh. */
+  /* ---------- Models page: shared pager + tabs ---------- */
+  function clampPage(page, total, perPage) {
+    const totalPages = Math.max(1, Math.ceil(Math.max(0, total) / Math.max(1, perPage)));
+    return Math.min(Math.max(1, page), totalPages);
+  }
+
+  /** Shared pager: "Showing X–Y of Z" + per-page select + prev/next + numbered buttons. */
+  function pagerHtml(opts) {
+    const total = Math.max(0, opts.total || 0);
+    const perPage = Math.max(1, opts.perPage || 15);
+    const page = clampPage(opts.page || 1, total, perPage);
+    const options = opts.perOptions || [10, 15, 25, 50];
+    const totalPages = Math.max(1, Math.ceil(total / perPage));
+    const from = total ? (page - 1) * perPage + 1 : 0;
+    const to = Math.min(total, page * perPage);
+    // Windowed page numbers: 1 … window … last.
+    const nums = [];
+    const push = (p) => { if (!nums.includes(p)) nums.push(p); };
+    push(1);
+    for (let p = page - 2; p <= page + 2; p++) if (p > 1 && p < totalPages) push(p);
+    if (totalPages > 1) push(totalPages);
+    nums.sort((a, b) => a - b);
+    let btns = "";
+    let prev = 0;
+    for (const p of nums) {
+      if (p - prev > 1) btns += `<span class="pager-gap">…</span>`;
+      btns += `<button class="btn btn-ghost pager-btn ${p === page ? "active" : ""}" ${p === page ? "disabled" : ""} onclick="${opts.pageFn}(${p})">${p}</button>`;
+      prev = p;
+    }
+    return `<div class="pager">
+      <span class="pager-info">Showing <strong>${from}–${to}</strong> of <strong>${total}</strong></span>
+      <div class="pager-btns">
+        <button class="btn btn-ghost pager-btn" ${page <= 1 ? "disabled" : ""} onclick="${opts.pageFn}(${page - 1})">‹ Prev</button>
+        ${btns}
+        <button class="btn btn-ghost pager-btn" ${page >= totalPages ? "disabled" : ""} onclick="${opts.pageFn}(${page + 1})">Next ›</button>
+      </div>
+      <label class="pager-per">per page <select class="select" onchange="${opts.perFn}(Number(this.value))">${options.map((o) => `<option value="${o}" ${o === perPage ? "selected" : ""}>${o}</option>`).join("")}</select></label>
+    </div>`;
+  }
+
+  function modelsTabsHtml() {
+    const benchCount = benchStatsCache ? benchStatsCache.length : null;
+    const unrespCount = unrespCache ? unrespCache.length : null;
+    const runningDot = benchWatchRunId ? ` <span class="tab-dot" title="Benchmark running">●</span>` : "";
+    const tab = (id, icon, label, count, extra = "") => `<button class="tab ${modelsTab === id ? "active" : ""}" onclick="modelsSwitchTab('${id}')">${icon} ${label}${count != null ? `<span class="tab-badge">${count}</span>` : ""}${extra}</button>`;
+    return `<div class="tabs models-tabs" role="tablist">${tab("models", "🧠", "Models", modelsCache.length)}${tab("benchmark", "🧪", "Benchmark", benchCount, runningDot)}${tab("unresponsive", "⚠️", "Unresponsive", unrespCount)}</div>`;
+  }
+  window.modelsSwitchTab = (tab) => {
+    if (!["models", "benchmark", "unresponsive"].includes(tab)) return;
+    modelsTab = tab;
+    renderModelsPage();
+  };
+
+  /** Re-render the tab strip in place (counts / running dot) without touching the body. */
+  function updateModelsTabCounts() {
+    const t = $(".models-tabs");
+    if (t) t.outerHTML = modelsTabsHtml();
+  }
+  function updateModelsHeadNote() {
+    const allGroups = groupModelsByProvider(modelsCache);
+    const note = $("#models-head-note");
+    if (note) note.textContent = `Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)`;
+  }
+
+  /** The current page slice of the filtered models (grouped for display). */
+  function modelsPageSlice() {
+    const start = (modelsPage - 1) * modelsPerPage;
+    return modelVisibleCache.slice(start, start + modelsPerPage);
+  }
+  function modelsPagerHtml() {
+    if (!modelVisibleCache.length) return "";
+    return pagerHtml({ total: modelVisibleCache.length, page: modelsPage, perPage: modelsPerPage, pageFn: "modelsPager", perFn: "modelsPerPageSet", perOptions: [12, 24, 48, 96] });
+  }
+  window.modelsPager = (p) => {
+    modelsPage = clampPage(p, modelVisibleCache.length, modelsPerPage);
+    const g = $("#model-groups"); if (g) g.innerHTML = modelGroupsInnerHtml();
+    const pg = $("#model-pager"); if (pg) pg.innerHTML = modelsPagerHtml();
+    const s = $("#model-search-summary"); if (s) s.innerHTML = modelSearchSummary();
+    renderBulkBar();
+    $("#models-tab-body")?.scrollIntoView?.({ block: "start" });
+  };
+  window.modelsPerPageSet = (n) => {
+    modelsPerPage = [12, 24, 48, 96].includes(n) ? n : 24;
+    modelsPage = 1;
+    const g = $("#model-groups"); if (g) g.innerHTML = modelGroupsInnerHtml();
+    const pg = $("#model-pager"); if (pg) pg.innerHTML = modelsPagerHtml();
+    const s = $("#model-search-summary"); if (s) s.innerHTML = modelSearchSummary();
+    renderBulkBar();
+  };
+
+  /** The groups list HTML — only the current page slice, shared by full render, search and in-place refresh. */
   function modelGroupsInnerHtml() {
-    const groups = groupModelsByProvider(modelVisibleCache);
+    const groups = groupModelsByProvider(modelsPageSlice());
     const hasModels = modelsCache.length > 0;
     return groups.map(renderProviderGroup).join("") || `<div class="card card-body">${emptyState(hasModels ? "🔎" : "🧠", hasModels ? "No matching models" : "No models", hasModels ? "Try a different search term or clear the filter." : "Add a model and attach it to a provider.")}</div>`;
   }
 
   function renderModelsPage() {
     modelVisibleCache = filteredModels();
-    const allGroups = groupModelsByProvider(modelsCache);
-    const hasModels = modelsCache.length > 0;
-    const hasQuery = modelSearchQuery.trim().length > 0;
+    modelsPage = clampPage(modelsPage, modelVisibleCache.length, modelsPerPage);
+    const headActions = modelsTab === "models"
+      ? `<button class="btn" onclick="modelGroupsCollapseAll()">Collapse all</button>
+         <button class="btn" onclick="modelGroupsExpandAll()">Expand all</button>
+         <button class="btn" onclick="openModelGroups()">🗂 Groups</button>
+         <button class="btn btn-primary" onclick="openModel()">＋ Add Model</button>`
+      : modelsTab === "benchmark"
+        ? `<button class="btn btn-primary" onclick="runModelBenchmark()">🧪 Benchmark all models</button>
+           <button class="btn" onclick="openModel()">＋ Add Model</button>`
+        : `<button class="btn" onclick="refreshUnresponsive()">↻ Refresh list</button>
+           <button class="btn" onclick="runModelBenchmark()">🧪 Benchmark all models</button>
+           <button class="btn btn-primary" onclick="openModel()">＋ Add Model</button>`;
     $("#content").innerHTML = `<div class="overview">
-        <div><h1>Models</h1><p id="models-head-note">Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)</p></div>
-        <div class="flex">
-          <button class="btn" onclick="runModelBenchmark()">🧪 Benchmark all models</button>
-          <button class="btn" onclick="modelGroupsCollapseAll()">Collapse all</button>
-          <button class="btn" onclick="modelGroupsExpandAll()">Expand all</button>
-          <button class="btn" onclick="openModelGroups()">🗂 Groups</button>
-          <button class="btn btn-primary" onclick="openModel()">＋ Add Model</button>
-        </div>
+        <div><h1>Models</h1><p id="models-head-note"></p></div>
+        <div class="flex">${headActions}</div>
       </div>
+      ${modelsTabsHtml()}
+      <div id="models-tab-body"></div>`;
+    updateModelsHeadNote();
+    if (modelsTab === "models") renderModelsListTab();
+    else if (modelsTab === "benchmark") renderBenchmarkTab();
+    else renderUnresponsiveTab();
+  }
+
+  function renderModelsListTab() {
+    const body = $("#models-tab-body");
+    if (!body) return;
+    const hasQuery = modelSearchQuery.trim().length > 0;
+    body.innerHTML = `
       <div class="card card-body model-search-card">
         <div class="model-search-row">
           <div class="model-search-box">
@@ -2739,11 +2867,17 @@
         </div>
         <div class="field-hint" id="model-search-summary">${modelSearchSummary()}</div>
       </div>
-      <div id="model-bench-card"></div>
       <div id="model-bulkbar"></div>
-      <div id="model-groups">${modelGroupsInnerHtml()}</div>`;
-    renderBenchmarkCard();
+      <div id="model-groups">${modelGroupsInnerHtml()}</div>
+      <div id="model-pager">${modelsPagerHtml()}</div>`;
     renderBulkBar();
+  }
+
+  function renderBenchmarkTab() {
+    const body = $("#models-tab-body");
+    if (!body) return;
+    body.innerHTML = `<div id="model-bench-card"><div class="card card-body"><div class="repo-empty">Loading benchmark…</div></div></div>`;
+    renderBenchmarkCard();
   }
 
   /* ---------- Smart model routing — benchmark panel ---------- */
@@ -2796,6 +2930,19 @@
     </div>`;
   }
 
+  /** Filtered benchmark stats (search box on the Benchmark tab). */
+  function filteredBenchStats() {
+    const rows = benchStatsCache || [];
+    const q = benchQuery.trim().toLowerCase();
+    if (!q) return rows;
+    const terms = q.split(/\s+/).filter(Boolean);
+    return rows.filter((s) => {
+      const m = modelsCache.find((x) => x.id === s.modelId);
+      const hay = `${m?.displayName || ""} ${m?.modelId || ""} ${s.modelId} ${m?.providerId ? providerNameOf(m.providerId) : ""}`.toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    });
+  }
+
   /** Render the aggregated per-model ranking table (fresh stats — deleted models never linger). */
   async function benchRenderStats() {
     const el = $("#model-bench-card");
@@ -2805,18 +2952,38 @@
       const r = await api("/models/benchmark/stats");
       benchStatsCache = r.stats || [];
     } catch (_) { benchStatsCache = []; }
+    updateModelsTabCounts();
+    // A fresh benchmark changes who counts as unresponsive — drop that cache.
+    unrespCache = null;
     if (!benchStatsCache || !benchStatsCache.length) {
       el.innerHTML = `<div class="card card-body mt"><div class="card-title">🧪 Smart routing benchmark <span class="sub">no data yet</span></div>
         <p style="color:var(--text-muted);font-size:13px">The router picks the best model for each agent call based on real speed, accuracy and error rate. Run a quick math quiz across every active model to seed the data (uses temperature=0, short calls, paced to stay rate-limit friendly).</p>
         <div class="flex mt"><button class="btn btn-primary" onclick="runModelBenchmark()">▶ Run benchmark now</button></div></div>`;
       return;
     }
-    el.innerHTML = `<div class="card card-body mt">
-        <div class="card-title">🧪 Smart routing benchmark <span class="sub">${benchStatsCache.length} model(s) ranked by composite score</span></div>
+    benchPage = clampPage(benchPage, filteredBenchStats().length, benchPerPage);
+    el.innerHTML = benchStatsCardHtml();
+  }
+
+  /** The ranking card with its own search + pager (page slice only). */
+  function benchStatsCardHtml() {
+    const rows = filteredBenchStats();
+    const start = (benchPage - 1) * benchPerPage;
+    const pageRows = rows.slice(start, start + benchPerPage);
+    const hasQuery = benchQuery.trim().length > 0;
+    return `<div class="card card-body mt">
+        <div class="card-title">🧪 Smart routing benchmark <span class="sub">${rows.length} model(s) ranked by composite score</span></div>
         <p style="color:var(--text-muted);font-size:12px">Score = 60% accuracy · 20% reliability · 20% speed. Higher is better. Models with recent errors are demoted in the fallback chain.</p>
+        <div class="model-search-row" style="margin-bottom:12px">
+          <div class="model-search-box">
+            <span class="model-search-icon">⌕</span>
+            <input class="input" id="bench-search" placeholder="Filter ranking by model or provider…" value="${esc(benchQuery)}" autocomplete="off" oninput="benchSearch(this.value)"/>
+          </div>
+          <button class="btn btn-ghost" onclick="benchSearchClear()" ${hasQuery ? "" : "disabled"}>Clear</button>
+        </div>
         <div class="table-wrap"><table>
           <thead><tr><th>Rank</th><th>Model</th><th>Score</th><th>Accuracy</th><th>Avg latency</th><th>p95 latency</th><th>Error rate</th><th>Avg cost</th><th>Attempts</th><th>Last tested</th></tr></thead>
-          <tbody>${benchStatsCache.map((s, i) => `<tr${i===0?' style="background:var(--glass)"':""}>
+          <tbody>${pageRows.map((s, k) => { const i = start + k; return `<tr${i===0?' style="background:var(--glass)"':""}>
             <td><strong>#${i+1}</strong></td><td><strong>${esc(benchModelName(s.modelId))}</strong><div class="sub mono">${esc(s.modelId.slice(0,20))}</div></td>
             <td><strong>${s.score.toFixed(3)}</strong></td>
             <td>${s.accuracy?`<span class="badge badge-${s.accuracy>.8?'ok':s.accuracy>.5?'warn':'err'}">${(s.accuracy*100).toFixed(0)}%</span>`:'<span class="badge badge-muted">—</span>'}</td>
@@ -2826,11 +2993,43 @@
             <td class="mono">${s.avgCostUsd?'$'+s.avgCostUsd.toFixed(4):'—'}</td>
             <td>${s.totalAttempts}</td>
             <td class="sub">${s.lastTestedAt?timeAgo(s.lastTestedAt):'—'}</td>
-          </tr>`).join("")}</tbody>
+          </tr>`; }).join("") || `<tr><td colspan="10">${emptyState("🔎", "No matching models", "Try a different filter or clear it.")}</td></tr>`}</tbody>
         </table></div>
+        ${pagerHtml({ total: rows.length, page: benchPage, perPage: benchPerPage, pageFn: "benchPager", perFn: "benchPerPageSet", perOptions: [10, 15, 25, 50] })}
         <div class="flex mt"><button class="btn btn-primary" onclick="runModelBenchmark()">▶ Re-run benchmark (all active models)</button><span class="field-hint" style="margin-left:8px">Results persist and accumulate — re-running refines the scores.</span></div>
       </div>`;
   }
+
+  function rerenderBenchCard() {
+    const el = $("#model-bench-card");
+    if (el && benchStatsCache) el.innerHTML = benchStatsCardHtml();
+  }
+  window.benchSearch = (value) => {
+    benchQuery = value || "";
+    benchPage = 1;
+    const input = $("#bench-search");
+    const start = input?.selectionStart ?? benchQuery.length;
+    const end = input?.selectionEnd ?? benchQuery.length;
+    rerenderBenchCard();
+    const again = $("#bench-search");
+    if (again) { again.focus(); try { again.setSelectionRange(start, end); } catch (_) {} }
+  };
+  window.benchSearchClear = () => {
+    benchQuery = "";
+    benchPage = 1;
+    rerenderBenchCard();
+    $("#bench-search")?.focus();
+  };
+  window.benchPager = (p) => {
+    benchPage = clampPage(p, filteredBenchStats().length, benchPerPage);
+    rerenderBenchCard();
+    $("#model-bench-card")?.scrollIntoView?.({ block: "start" });
+  };
+  window.benchPerPageSet = (n) => {
+    benchPerPage = [10, 15, 25, 50].includes(n) ? n : 15;
+    benchPage = 1;
+    rerenderBenchCard();
+  };
 
   /** Render a running snapshot into the card; returns false if the card is gone. */
   function benchRenderRunning(p) {
@@ -2842,31 +3041,36 @@
 
   /** One poll iteration; returns true to keep polling, false to stop. */
   async function benchPollOnce() {
+    // The benchmark card only exists on the Benchmark tab — when the user is
+    // on another tab we keep polling silently and surface progress via the
+    // tab's running dot instead of stopping the loop.
     const el = $("#model-bench-card");
-    if (!el) { benchStopPolling(); return false; }
     let st = null;
     try { st = await api("/models/benchmark/status"); } catch (_) {}
     const p = st && st.progress;
     // Server unreachable — stop rather than spin forever.
-    if (!p) { benchStopPolling(); benchRenderStats(); return false; }
+    if (!p) { benchStopPolling(); updateModelsTabCounts(); if (el) benchRenderStats(); return false; }
     if (p.status === "running") {
       // Follow whichever run the server is executing (a re-run in another tab
       // can swap runId underneath us — keep watching the current one).
       benchWatchRunId = p.runId || benchWatchRunId;
-      benchRenderRunning(p);
+      updateModelsTabCounts();
+      if (el) benchRenderRunning(p);
       return true;
     }
     // Terminal state: done / error / idle → abort polling.
     benchStopPolling();
+    updateModelsTabCounts();
     if (p.status === "error") {
       toast("Benchmark failed", p.error || "The run ended with an error.", "err");
-      el.innerHTML = benchErrorCardHtml(p);
+      if (el) el.innerHTML = benchErrorCardHtml(p);
     } else if (p.status === "done") {
       toast("Benchmark complete", `${p.completedModels || p.totalModels} model(s) · ${p.resultCount} results`, "ok");
-      await benchRenderStats();
+      if (el) await benchRenderStats();
+      else { benchStatsCache = null; unrespCache = null; updateModelsTabCounts(); }
     } else {
       // idle — nothing is running, just show the persisted ranking.
-      await benchRenderStats();
+      if (el) await benchRenderStats();
     }
     return false;
   }
@@ -2901,6 +3105,12 @@
   }
 
   window.runModelBenchmark = async () => {
+    // Benchmark progress lives on the Benchmark tab — jump there first so the
+    // live card is visible while the run executes.
+    if (location.hash.startsWith("#/models") && modelsTab !== "benchmark") {
+      modelsTab = "benchmark";
+      renderModelsPage();
+    }
     const btn = document.activeElement;
     if (btn) btn.disabled = true;
     // Clear any stale poll loop before kicking a fresh run off.
@@ -2938,8 +3148,10 @@
   function modelSearchSummary() {
     const q = modelSearchQuery.trim();
     if (!modelsCache.length) return "No models in the registry yet.";
-    if (!q) return `Showing all ${modelsCache.length} model(s). Search supports multiple words, provider names, capabilities like code or vision, and active/inactive status.`;
-    return `Showing ${modelVisibleCache.length} of ${modelsCache.length} model(s) for “${esc(q)}”.`;
+    const totalPages = Math.max(1, Math.ceil(modelVisibleCache.length / modelsPerPage));
+    const pageBit = modelVisibleCache.length > modelsPerPage ? ` · page ${modelsPage}/${totalPages}` : "";
+    if (!q) return `Showing all ${modelsCache.length} model(s)${pageBit}. Search supports multiple words, provider names, capabilities like code or vision, and active/inactive status.`;
+    return `Showing ${modelVisibleCache.length} of ${modelsCache.length} model(s) for “${esc(q)}”${pageBit}.`;
   }
 
   window.modelSearch = (value) => {
@@ -2948,7 +3160,9 @@
     const start = input?.selectionStart ?? modelSearchQuery.length;
     const end = input?.selectionEnd ?? modelSearchQuery.length;
     modelVisibleCache = filteredModels();
-    $("#model-groups").innerHTML = modelGroupsInnerHtml();
+    modelsPage = 1;
+    const groups = $("#model-groups"); if (groups) groups.innerHTML = modelGroupsInnerHtml();
+    const pg = $("#model-pager"); if (pg) pg.innerHTML = modelsPagerHtml();
     const summary = $("#model-search-summary");
     if (summary) summary.innerHTML = modelSearchSummary();
     const clear = $("#model-search-clear");
@@ -2959,6 +3173,7 @@
 
   window.modelSearchClear = () => {
     modelSearchQuery = "";
+    modelsPage = 1;
     renderModelsPage();
     $("#model-search")?.focus();
   };
@@ -2971,8 +3186,8 @@
    */
   async function refreshModelsData() {
     if (!location.hash.startsWith("#/models")) return refreshCurrent();
-    const groups = $("#model-groups");
-    if (!groups) return refreshCurrent(); // page shell not mounted
+    const body = $("#models-tab-body");
+    if (!body) return refreshCurrent(); // page shell not mounted
     try {
       const [list, providers] = await Promise.all([api("/models"), api("/providers").catch(() => [])]);
       modelsCache = list;
@@ -2980,13 +3195,30 @@
       // Drop selections pointing at models that no longer exist.
       for (const id of [...modelSelection]) if (!list.some((m) => m.id === id)) modelSelection.delete(id);
       modelVisibleCache = filteredModels();
-      groups.innerHTML = modelGroupsInnerHtml();
-      const allGroups = groupModelsByProvider(modelsCache);
-      const note = $("#models-head-note");
-      if (note) note.textContent = `Model Registry — grouped by provider · ${modelsCache.length} model(s) in ${allGroups.length} group(s)`;
-      const summary = $("#model-search-summary");
-      if (summary) summary.innerHTML = modelSearchSummary();
-      renderBulkBar();
+      updateModelsHeadNote();
+      if (modelsTab === "models") {
+        modelsPage = clampPage(modelsPage, modelVisibleCache.length, modelsPerPage);
+        const groups = $("#model-groups"); if (groups) groups.innerHTML = modelGroupsInnerHtml();
+        const pg = $("#model-pager"); if (pg) pg.innerHTML = modelsPagerHtml();
+        const summary = $("#model-search-summary");
+        if (summary) summary.innerHTML = modelSearchSummary();
+        renderBulkBar();
+      } else if (modelsTab === "benchmark") {
+        // Re-evaluates live state / stats (keeps its own paging + filter).
+        renderBenchmarkCard();
+        updateModelsTabCounts();
+      } else {
+        if (!benchStatsCache) {
+          try {
+            const r = await api("/models/benchmark/stats");
+            benchStatsCache = r.stats || [];
+          } catch (_) { benchStatsCache = []; }
+        }
+        computeUnresponsive();
+        updateModelsTabCounts();
+        body.innerHTML = unrespCardHtml();
+      }
+      updateModelsTabCounts();
     } catch (e) { toast("Error", e.message, "err"); }
   }
   window.refreshModelsData = refreshModelsData;
@@ -3222,10 +3454,12 @@
     const row = document.querySelector(`[data-model="${CSS.escape(id)}"]`);
     if (row) row.classList.toggle("row-selected", checked);
     syncGroupCheckboxes();
+    syncUnrespSelectionUI();
     renderBulkBar();
   };
   window.modelSelectProvider = (providerId, checked) => {
-    const visibleForProvider = modelVisibleCache.filter((x) => (x.providerId || "__none__") === providerId);
+    // Only the models actually displayed on this page (pagination slice).
+    const visibleForProvider = modelsPageSlice().filter((x) => (x.providerId || "__none__") === providerId);
     for (const m of visibleForProvider) {
       if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
       const box = document.querySelector(`[data-model="${CSS.escape(m.id)}"] input[data-model-check]`);
@@ -3234,6 +3468,12 @@
       if (row) row.classList.toggle("row-selected", checked);
     }
     renderBulkBar();
+  };
+  window.modelSelectPage = (checked) => {
+    for (const m of modelsPageSlice()) {
+      if (checked) modelSelection.add(m.id); else modelSelection.delete(m.id);
+    }
+    renderModelsPage();
   };
   window.modelSelectAll = (checked) => {
     const target = modelVisibleCache.length || !modelSearchQuery.trim() ? modelVisibleCache : [];
@@ -3245,9 +3485,10 @@
   window.modelSelectionClear = () => { modelSelection.clear(); renderModelsPage(); };
 
   function syncGroupCheckboxes() {
+    const slice = modelsPageSlice();
     for (const card of $$(".model-group")) {
       const pid = card.dataset.provider;
-      const models = modelVisibleCache.filter((m) => (m.providerId || "__none__") === pid);
+      const models = slice.filter((m) => (m.providerId || "__none__") === pid);
       const box = card.querySelector(".model-check input");
       if (!box) continue;
       const selected = models.filter((m) => modelSelection.has(m.id)).length;
@@ -3262,10 +3503,12 @@
     if (!el) return;
     const n = modelSelection.size;
     if (!n) { el.innerHTML = ""; return; }
+    const pageN = modelsPageSlice().length;
     el.innerHTML = `<div class="bulk-bar">
       <span><strong>${n}</strong> model(s) selected</span>
       <div class="flex">
-        <button class="btn" onclick="modelSelectAll(true)">Select visible (${modelVisibleCache.length})</button>
+        <button class="btn" onclick="modelSelectPage(true)">Select page (${pageN})</button>
+        <button class="btn" onclick="modelSelectAll(true)">Select all filtered (${modelVisibleCache.length})</button>
         <button class="btn" onclick="modelBulk('activate')">✓ Activate</button>
         <button class="btn" onclick="modelBulk('deactivate')">⏸ Deactivate</button>
         <button class="btn btn-danger" onclick="modelBulk('delete')">🗑 Delete selected</button>
@@ -3283,6 +3526,196 @@
       modelSelection.clear();
       toast(`${r.affected} model(s) ${action === "delete" ? "deleted" : action + "d"}`, "", "ok");
       refreshModelsData();
+    } catch (e) { toast("Error", e.message, "err"); }
+  };
+
+  /* ---------- Unresponsive models — cleanup list ---------- */
+  // Models whose benchmark error rate is at/above the threshold (or that never
+  // answered once). Tick rows and delete/deactivate them in bulk.
+  function computeUnresponsive() {
+    const stats = new Map((benchStatsCache || []).map((s) => [s.modelId, s]));
+    const rows = [];
+    for (const m of modelsCache) {
+      const s = stats.get(m.id);
+      if (!s) {
+        if (unrespIncludeUntested) rows.push({ model: m, stat: null, reason: "never-tested" });
+        continue;
+      }
+      if (s.errorRate >= unrespThreshold || (s.totalAttempts > 0 && s.successAttempts === 0)) {
+        rows.push({ model: m, stat: s, reason: s.successAttempts === 0 ? "never-answered" : "high-error" });
+      }
+    }
+    rows.sort((a, b) => ((b.stat?.errorRate || 0) - (a.stat?.errorRate || 0))
+      || String(a.model.displayName || "").localeCompare(String(b.model.displayName || "")));
+    unrespCache = rows;
+    return rows;
+  }
+
+  function unrespPageSlice() {
+    const rows = unrespCache || [];
+    const start = (unrespPage - 1) * unrespPerPage;
+    return rows.slice(start, start + unrespPerPage);
+  }
+
+  async function renderUnresponsiveTab() {
+    const body = $("#models-tab-body");
+    if (!body) return;
+    body.innerHTML = `<div class="card card-body"><div class="repo-empty">Loading unresponsive models…</div></div>`;
+    try {
+      const [list, providers, bench] = await Promise.all([
+        api("/models"),
+        api("/providers").catch(() => []),
+        api("/models/benchmark/stats").catch(() => ({ stats: [] })),
+      ]);
+      modelsCache = list;
+      providersCache = providers;
+      benchStatsCache = bench.stats || [];
+      for (const id of [...modelSelection]) if (!list.some((m) => m.id === id)) modelSelection.delete(id);
+      modelVisibleCache = filteredModels();
+      updateModelsHeadNote();
+    } catch (e) {
+      if (modelsTab !== "unresponsive") return;
+      body.innerHTML = `<div class="card card-body"><div class="error-state"><h4>Could not load models</h4><pre>${esc(e.message)}</pre><div class="flex mt"><button class="btn btn-primary" onclick="refreshUnresponsive()">Retry</button></div></div></div>`;
+      return;
+    }
+    if (modelsTab !== "unresponsive" || !$("#models-tab-body")) return; // user switched tabs mid-fetch
+    computeUnresponsive();
+    unrespPage = clampPage(unrespPage, unrespCache.length, unrespPerPage);
+    updateModelsTabCounts();
+    $("#models-tab-body").innerHTML = unrespCardHtml();
+  }
+
+  function unrespReasonBadge(reason) {
+    if (reason === "never-answered") return `<span class="badge badge-err">never answered</span>`;
+    if (reason === "never-tested") return `<span class="badge badge-muted">never tested</span>`;
+    return `<span class="badge badge-warn">high error rate</span>`;
+  }
+
+  function unrespCardHtml() {
+    const rows = unrespCache || [];
+    const pageRows = unrespPageSlice();
+    const selectedHere = rows.filter((r) => modelSelection.has(r.model.id)).length;
+    const pageSelected = pageRows.length > 0 && pageRows.every((r) => modelSelection.has(r.model.id));
+    const thresholds = [[0.2, "≥ 20% errors"], [0.5, "≥ 50% errors"], [0.8, "≥ 80% errors"], [1, "100% errors"]];
+    return `<div class="card card-body">
+      <div class="card-title">⚠️ Unresponsive models <span class="sub">${rows.length} of ${modelsCache.length} model(s)</span></div>
+      <p style="color:var(--text-muted);font-size:12px">Models whose benchmark error rate is at/above the threshold — timeouts, rate limits, HTTP errors or empty replies. Tick the rows and delete or deactivate them in bulk. Run a benchmark first if the list is empty.</p>
+      <div class="unresp-controls">
+        <label class="unresp-field"><span>Error threshold</span>
+          <select class="select" onchange="unrespThresholdSet(Number(this.value))">${thresholds.map(([v, l]) => `<option value="${v}" ${v === unrespThreshold ? "selected" : ""}>${l}</option>`).join("")}</select>
+        </label>
+        <label class="check" style="margin:0"><input type="checkbox" ${unrespIncludeUntested ? "checked" : ""} onchange="unrespUntestedSet(this.checked)"/> Include never-tested models</label>
+        <span class="spacer"></span>
+        <button class="btn" onclick="refreshUnresponsive()">↻ Refresh</button>
+        <button class="btn" onclick="runModelBenchmark()">🧪 Run benchmark</button>
+      </div>
+      ${rows.length ? `
+      <div class="unresp-bulk">
+        <span id="unresp-sel-count"><strong>${selectedHere}</strong> selected</span>
+        <div class="flex">
+          <button class="btn" onclick="unrespSelectPage(true)">Select page (${pageRows.length})</button>
+          <button class="btn" onclick="unrespSelectAll()">Select all (${rows.length})</button>
+          <button class="btn" onclick="unrespBulk('deactivate')">⏸ Deactivate selected</button>
+          <button class="btn btn-danger" onclick="unrespBulk('delete')">🗑 Delete selected</button>
+          <button class="btn btn-ghost" onclick="unrespClearSelection()">Clear</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th style="width:34px"><input type="checkbox" id="unresp-check-all" ${pageSelected ? "checked" : ""} onchange="unrespSelectPage(this.checked)" title="Select this page"/></th><th>Model</th><th>Reason</th><th>Error rate</th><th>Accuracy</th><th>Attempts</th><th>Score</th><th>Last error</th><th>Last tested</th><th></th></tr></thead>
+        <tbody>${pageRows.map(({ model: m, stat: s, reason }) => {
+          const id = esc(m.id);
+          const sel = modelSelection.has(m.id);
+          return `<tr data-model="${id}" class="${sel ? "row-selected" : ""}">
+            <td><input type="checkbox" data-model-check ${sel ? "checked" : ""} onchange="modelSelectOne('${id}', this.checked)"/></td>
+            <td><strong>${esc(m.displayName || m.modelId)}</strong><div class="mono sub">${esc(m.modelId)}</div><div class="sub">${esc(providerNameOf(m.providerId))} · ${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}</div></td>
+            <td>${unrespReasonBadge(reason)}</td>
+            <td>${s ? `<span class="badge badge-${s.errorRate >= 0.8 ? "err" : "warn"}">${(s.errorRate * 100).toFixed(0)}%</span>` : '<span class="badge badge-muted">—</span>'}</td>
+            <td>${s && s.accuracy ? `${(s.accuracy * 100).toFixed(0)}%` : "—"}</td>
+            <td class="mono">${s ? `${s.successAttempts}/${s.totalAttempts}` : "—"}</td>
+            <td class="mono">${s ? s.score.toFixed(3) : "—"}</td>
+            <td><span class="unresp-err mono" title="${esc(s?.lastError || "")}">${esc(s?.lastError ? (s.lastError.length > 80 ? s.lastError.slice(0, 80) + "…" : s.lastError) : "—")}</span></td>
+            <td class="sub">${s?.lastTestedAt ? timeAgo(s.lastTestedAt) : "—"}</td>
+            <td style="white-space:nowrap"><button class="btn btn-ghost" onclick="openModelChat('${id}')">💬 Test</button><button class="btn btn-ghost danger-text" onclick="modelDelete('${id}')">🗑</button></td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table></div>
+      ${pagerHtml({ total: rows.length, page: unrespPage, perPage: unrespPerPage, pageFn: "unrespPager", perFn: "unrespPerPageSet", perOptions: [10, 15, 25, 50] })}`
+      : emptyState("✅", "No unresponsive models", unrespIncludeUntested ? "Every model is below the error threshold." : "Every tested model is below the error threshold. Tick “Include never-tested models” to also list models without benchmark data.")}
+    </div>`;
+  }
+
+  /** Sync the Unresponsive tab's header checkbox + selected count after a single toggle. */
+  function syncUnrespSelectionUI() {
+    const rows = unrespCache || [];
+    if (!rows.length || modelsTab !== "unresponsive") return;
+    const count = $("#unresp-sel-count");
+    if (count) count.innerHTML = `<strong>${rows.filter((r) => modelSelection.has(r.model.id)).length}</strong> selected`;
+    const all = $("#unresp-check-all");
+    if (all) {
+      const pageRows = unrespPageSlice();
+      const n = pageRows.filter((r) => modelSelection.has(r.model.id)).length;
+      all.checked = pageRows.length > 0 && n === pageRows.length;
+      all.indeterminate = n > 0 && n < pageRows.length;
+    }
+  }
+
+  function rerenderUnrespCard() {
+    const body = $("#models-tab-body");
+    if (body && modelsTab === "unresponsive") body.innerHTML = unrespCardHtml();
+  }
+
+  window.unrespThresholdSet = (v) => {
+    unrespThreshold = [0.2, 0.5, 0.8, 1].includes(v) ? v : 0.5;
+    unrespPage = 1;
+    computeUnresponsive();
+    updateModelsTabCounts();
+    rerenderUnrespCard();
+  };
+  window.unrespUntestedSet = (checked) => {
+    unrespIncludeUntested = !!checked;
+    unrespPage = 1;
+    computeUnresponsive();
+    updateModelsTabCounts();
+    rerenderUnrespCard();
+  };
+  window.unrespPager = (p) => {
+    unrespPage = clampPage(p, (unrespCache || []).length, unrespPerPage);
+    rerenderUnrespCard();
+    $("#models-tab-body")?.scrollIntoView?.({ block: "start" });
+  };
+  window.unrespPerPageSet = (n) => {
+    unrespPerPage = [10, 15, 25, 50].includes(n) ? n : 15;
+    unrespPage = 1;
+    rerenderUnrespCard();
+  };
+  window.unrespSelectPage = (checked) => {
+    for (const r of unrespPageSlice()) {
+      if (checked) modelSelection.add(r.model.id); else modelSelection.delete(r.model.id);
+    }
+    rerenderUnrespCard();
+  };
+  window.unrespSelectAll = () => {
+    for (const r of (unrespCache || [])) modelSelection.add(r.model.id);
+    rerenderUnrespCard();
+  };
+  window.unrespClearSelection = () => {
+    for (const r of (unrespCache || [])) modelSelection.delete(r.model.id);
+    rerenderUnrespCard();
+  };
+  window.refreshUnresponsive = () => {
+    if (modelsTab !== "unresponsive") { modelsTab = "unresponsive"; renderModelsPage(); return; }
+    renderUnresponsiveTab();
+  };
+  /** Bulk delete/deactivate scoped to the *selected unresponsive* rows (intersection with the shared selection). */
+  window.unrespBulk = async (action) => {
+    const ids = (unrespCache || []).map((r) => r.model.id).filter((id) => modelSelection.has(id));
+    if (!ids.length) { toast("Nothing selected", "Tick at least one unresponsive model first.", "warn"); return; }
+    if (action === "delete" && !confirm(`Delete ${ids.length} unresponsive model(s) from the system? Their benchmark history is removed too.`)) return;
+    try {
+      const r = await api("/models/bulk", { method: "POST", body: { action, ids } });
+      for (const id of ids) modelSelection.delete(id);
+      toast(`${r.affected} model(s) ${action === "delete" ? "deleted" : action + "d"}`, "", "ok");
+      renderUnresponsiveTab(); // refetch + recompute (stats change after deletes)
     } catch (e) { toast("Error", e.message, "err"); }
   };
 
@@ -3350,12 +3783,27 @@
   };
   window.modelGroupJump = (providerId) => {
     closeModal();
+    if (modelsTab !== "models") { modelsTab = "models"; renderModelsPage(); }
+    // The group may live on another page — jump to the page holding its first model.
+    const idx = modelVisibleCache.findIndex((m) => (m.providerId || "__none__") === providerId);
+    if (idx >= 0) {
+      const targetPage = Math.floor(idx / modelsPerPage) + 1;
+      if (targetPage !== modelsPage) {
+        modelsPage = targetPage;
+        const g = $("#model-groups"); if (g) g.innerHTML = modelGroupsInnerHtml();
+        const pg = $("#model-pager"); if (pg) pg.innerHTML = modelsPagerHtml();
+        const s = $("#model-search-summary"); if (s) s.innerHTML = modelSearchSummary();
+      }
+    }
     const card = document.querySelector(`.model-group[data-provider="${CSS.escape(providerId)}"]`);
     if (card) {
       card.classList.remove("collapsed");
+      modelCollapsedGroups.delete(providerId);
       card.scrollIntoView({ behavior: "smooth", block: "start" });
       card.classList.add("flash");
       setTimeout(() => card.classList.remove("flash"), 1200);
+    } else if (idx < 0) {
+      toast("Group not in this view", "The provider has no models matching the current search.", "warn");
     }
   };
 

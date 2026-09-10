@@ -131,6 +131,10 @@ export class ModelBenchmarkRepository extends DocumentRepository<ModelBenchmarkR
       (max, r) => (r.createdAt > (max ?? "") ? r.createdAt : max),
       undefined as string | undefined,
     );
+    // Most recent error message (for the "Unresponsive" cleanup list in the UI).
+    const lastError = results
+      .filter((r) => r.error)
+      .sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))[0]?.error;
     return {
       modelId,
       totalAttempts: results.length,
@@ -144,6 +148,7 @@ export class ModelBenchmarkRepository extends DocumentRepository<ModelBenchmarkR
       score, // filled with global speed normalisation by the caller
       byKind,
       lastTestedAt,
+      ...(lastError ? { lastError } : {}),
     };
   }
 

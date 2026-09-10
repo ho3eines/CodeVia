@@ -509,3 +509,10 @@ All checks now pass:
     restore failure no longer takes down `/start` or project selection.
 - **Test:** `opens a legacy project that has no repositories array` in
   `src/tests/telegram-bot.test.ts`. TypeScript 0 errors.
+
+## 2026-09-10 — Models page: tabs + pagination + Unresponsive cleanup + light-mode legibility
+- **User ask (Persian):** صفحه Models خیلی به‌هم‌ریخته است — بنچمارک را در منوی جدا با صفحه‌بندی بیاور، برای خود مدل‌ها هم صفحه‌بندی بگذار، لیستی از مدل‌های پاسخ‌گو-نیست با تیک و امکان حذف بده، و کم‌رنگی لیست در light mode را درست کن.
+- **UI (`public/app.js`):** صفحه Models حالا سه تب دارد — 🧠 Models (با جستجو + پیجر ۱۲/۲۴/۴۸/۹۶) | 🧪 Benchmark (جدول رتبه‌بندی با جستجو + پیجر ۱۰/۱۵/۲۵/۵۰، نقطه «در حال اجرا» روی تب، اجرای بنچمارک خودکار به این تب می‌پرد) | ⚠️ Unresponsive (آستانه خطا ۲۰/۵۰/۸۰/۱۰۰٪ + گزینه «never-tested» + تیک سطری/صفحه‌ای/کلی + حذف/غیرفعال‌سازی گروهی + پیجر). سلکشن چندتایی بین تب‌ها مشترک است؛ حذف گروهی از `/models/bulk` استفاده می‌کند.
+- **Backend:** `ModelPerformanceStats.lastError` اضافه شد (آخرین خطای بنچمارک هر مدل، از `aggregate`)؛ `/models/benchmark/stats` حالا مدل‌های inactive را هم برمی‌گرداند تا لیست پاک‌سازی آن‌ها را پیدا کند (روتر فقط activeها را lookup می‌کند، پس تغییری در مسیریابی نیست).
+- **CSS (`public/app.css`):** استایل پیجر + تب/کنترل‌های Unresponsive؛ در light mode کارت‌های مدل سطح سفید جامد و متن‌های ثانویه تیره‌تر (`#3b4270`) گرفتند تا خوانا شوند.
+- **Tests:** `src/tests/models-tabs.test.ts` (۴ تست jsdom: تب+پیجر مدل‌ها، رتبه‌بندی بنچمارک، لیست Unresponsive و حذف گروهی با purge تاریخچه). `ui-shell` کامل (۳۳ تست) سبز است. یک شکست از قبل موجود در `models-page.test.ts` (bulk → «database is not open») ربطی به این تغییر ندارد (روی درخت تمیز هم می‌شکند).
