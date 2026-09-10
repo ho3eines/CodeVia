@@ -2,7 +2,7 @@ import type { Agent, AgentType, MemoryEntry, Project, Skill, Task, Workflow } fr
 import type { GithubFile } from "../github/types.js";
 import type { StateRepositories, ProjectFilesService, PullSummary } from "../github/project-files.js";
 import { AGENTS_DIR, CONTEXT_FILE, MEMORY_FILE, PROJECT_FILE, SKILLS_FILE, parseMatter, renderAgentFile, renderMemoryFile, renderProjectFile, renderSkillsFile } from "../github/project-files.js";
-import { localId, renderRulesFile, renderSkillFile, renderWorkflowFile, RULES_FILE, SKILL_DIR, slugSchema, statePath, WORKFLOW_DIR } from "../github/state-codec.js";
+import { isStatePath, localId, renderRulesFile, renderSkillFile, renderWorkflowFile, RULES_FILE, SKILL_DIR, slugSchema, statePath, WORKFLOW_DIR } from "../github/state-codec.js";
 import { agentTypesForProject, hydrateProject, skillsForCapabilities } from "../domain/project-options.js";
 import { AgentGenerator } from "./generator.js";
 import { ProjectStateGenerator } from "./state-generator.js";
@@ -16,6 +16,11 @@ export interface ProjectStateDeps extends StateRepositories {
   files: ProjectFilesService; generator: AgentGenerator; ai: ProjectStateGenerator;
   github: (project: Project) => IGitHubService;
   inspect: (project: Project) => Promise<Project>;
+}
+
+/** Managed agent definition layout: CodeVia/agents/<slug>.md only. */
+function isAgentStatePath(path: string): boolean {
+  return isStatePath(path) && path.startsWith(`${AGENTS_DIR}/`) && path.endsWith(".md");
 }
 
 export function workflowDrafts(project: Project, agents: Agent[]): Workflow[] {
@@ -58,7 +63,7 @@ export class ProjectStateCoordinator {
         project = { ...project, settings: { ...project.settings, skills: selected, generatedSkills: selected.filter((s) => !stored.settings.skills.includes(s)) } };
       }
     }
-    const existingAgents = d.agentRepo.byProject(projectId);
+    let existingAgents = d.agentRepo.byProject(projectId);
     // (R03/R04) Tombstones carry identity. Deletion must survive repository
     // copies — where IDs are re-bound to a new project — so recognize
     // tombstones by slug/type and by both the current and the copied-from
@@ -80,8 +85,49 @@ export class ProjectStateCoordinator {
     // of initialization, before anything is allowed to prune DB-only records.
     const legacyAgentFiles: GithubFile[] = [];
     const legacyWorkflows: Workflow[] = [];
+    // (R05) Records upgraded from the pre-CodeVia layout still carry
+    // `.ai-engineering/agents/*.yaml` config paths. Such a path lives outside
+    // managed state: everything derived from it — prompt-history paths, agent
+    // sync, the bootstrap commit itself — fails "agent definition path must be
+    // inside CodeVia/agents/", and because bootstrap throws before restore can
+    // prune, the record is never cleaned up either. Every queued run for the
+    // project then dead-letters with the same error until someone intervenes.
+    // Heal the record instead: re-point it at the canonical
+    // CodeVia/agents/<type>.md path and author its full definition there in
+    // the bootstrap commit, preserving identity, enabled state, limits and
+    // prompt. When the repository already settles the identity — a live
+    // definition from another record, or an intentional tombstone — the
+    // repository wins and the stale duplicate record is deleted (the
+    // documented alternative for a record that cannot be represented).
+    const healedAgentIds = new Set<string>();
+    if (existingAgents.some((a) => a.configPath !== undefined && !isAgentStatePath(a.configPath))) {
+      const healedPaths = new Set<string>();
+      const live: Agent[] = [];
+      for (const stale of existingAgents) {
+        if (stale.configPath === undefined || isAgentStatePath(stale.configPath)) { live.push(stale); continue; }
+        let target: string;
+        try { target = statePath(AGENTS_DIR, stale.type); }
+        catch { d.agentRepo.deleteById(stale.id); continue; } // identity no layout can represent
+        const slug = stale.slug ?? stale.type;
+        const tombstoned = tombstonedPaths.has(target) || agentTombstones.some((t) => t.slug === slug && (!t.type || t.type === stale.type));
+        const targetFile = snapshot.contents.get(target);
+        const targetData = targetFile ? parseMatter(targetFile).data as Record<string, unknown> | undefined : undefined;
+        if (!tombstoned && !healedPaths.has(target) && (!targetData || targetData.id === stale.id)) {
+          const healed = { ...stale, configPath: target };
+          d.agentRepo.upsert(healed, { projectId });
+          healedPaths.add(target);
+          healedAgentIds.add(stale.id);
+          live.push(healed);
+          if (!targetData) legacyAgentFiles.push({ path: target, content: renderAgentFile(healed) });
+        } else {
+          d.agentRepo.deleteById(stale.id);
+        }
+      }
+      existingAgents = live;
+    }
     if (first || needsMigration) {
       for (const a of existingAgents) {
+        if (healedAgentIds.has(a.id)) continue; // already authored at the canonical path
         const path = a.configPath ?? statePath(AGENTS_DIR, a.type);
         if (!snapshot.contents.has(path) && !tombstonedPaths.has(path)) legacyAgentFiles.push({ path, content: renderAgentFile(a) });
       }
@@ -138,7 +184,7 @@ export class ProjectStateCoordinator {
     const missingRules = !snapshot.contents.has(RULES_FILE);
     const missingMemory = !snapshot.contents.has(MEMORY_FILE);
     const missingContext = !snapshot.contents.has(CONTEXT_FILE);
-    if (!first && !needsMigration && !missingAgents.length && !skillDrafts.size && !missingWorkflows.length && !missingRules && !missingMemory && !missingContext && snapshot.skillsLoaded && !missingPromptHistory) {
+    if (!first && !needsMigration && !missingAgents.length && !skillDrafts.size && !missingWorkflows.length && !missingRules && !missingMemory && !missingContext && snapshot.skillsLoaded && !missingPromptHistory && !legacyAgentFiles.length) {
       return { agents: agents.length, tasks: snapshot.tasks.length, memory: snapshot.memory.length, skills: project.settings.skills, files: snapshot.files, sha: snapshot.sha, workflows: existingWorkflows.length };
     }
     const github = d.github(project);
