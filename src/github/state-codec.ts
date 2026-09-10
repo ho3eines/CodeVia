@@ -51,7 +51,10 @@ export function repositorySafe<T>(value: T): T {
 export function projectDefinition(project: Project): Record<string, unknown> {
   return repositorySafe({
     name: project.name, description: project.description, capabilities: project.capabilities,
-    repositories: project.repositories, defaultModelId: project.defaultModelId ?? null,
+    // `repositories` is required by the manifest schema: writing a project that
+    // predates multi-repo support with `undefined` here would leave a definition
+    // file that can never be parsed again.
+    repositories: project.repositories ?? [], defaultModelId: project.defaultModelId ?? null,
     defaultAgentId: project.defaultAgentId ?? null, telegramChatId: project.telegramChatId ?? null,
     active: project.active, settings: project.settings, repositoryState: project.repositoryState,
   });

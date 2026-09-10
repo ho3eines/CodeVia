@@ -52,7 +52,14 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
   // An explicit mock-only installation remains offline. With real models
   // enabled, a failed real call must not be hidden by a trailing mock result.
   let available = models.filter((m) => !hasReal || deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
-  const assigned = new Set([deps.agent.models.primary, deps.agent.models.secondary, deps.agent.models.specialized[deps.category as keyof Agent["models"]["specialized"]], ...deps.agent.models.fallbacks].filter(Boolean));
+  // Legacy/partially-authored agent records may omit parts of `models`; treat a
+  // missing member as "nothing explicitly assigned" rather than crashing the run.
+  const assigned = new Set([
+    deps.agent.models.primary,
+    deps.agent.models.secondary,
+    (deps.agent.models.specialized ?? ({} as Agent["models"]["specialized"]))[deps.category as keyof Agent["models"]["specialized"]],
+    ...(deps.agent.models.fallbacks ?? []),
+  ].filter(Boolean));
   // Once real models are explicitly assigned, do not send project code to
   // unrelated global providers just because the chosen model is unavailable.
   const explicitModels = [...assigned].map((id) => deps.modelRepo.findById(id!)?.data);
