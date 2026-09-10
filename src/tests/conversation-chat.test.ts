@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { getEnvFresh } from "../config/env.js";
 import { Container } from "../app/container.js";
@@ -140,6 +141,62 @@ describe("project chat send", () => {
       const body = res.json();
       expect(body.messages.at(-1).role).toBe("assistant");
       expect(body.messages.at(-1).content).toBeTruthy();
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30000);
+
+  it("keeps the in-page thread after GET /projects restores a unique empty repo", async () => {
+    // Persist-spy 200 on a reused acme/legacy repo is a false green: restore
+    // throws "conversation identity crosses projects" before prune can run.
+    // A unique README-only repo lets restore succeed with an empty
+    // CodeVia/conversations tree — the path that used to wipe the live chat
+    // and 404 the next send. Spy persist so Git stays empty.
+    const name = `empty-wipe-${randomUUID().slice(0, 8)}`;
+    const repo = `acme/${name}`;
+    const gh = container.github as unknown as {
+      seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string }): unknown;
+    };
+    gh.seedRepo("acme", name, { files: [{ path: "README.md", content: `# ${name}\n` }], branch: "main" });
+
+    const project = legacyProject(`proj-${name}`, name, repo);
+    container.projectRepo.upsert(project, { key: project.slug });
+
+    const spy = vi.spyOn(container.projectFiles, "syncConversation").mockRejectedValue(
+      Object.assign(new Error("GitHub 404"), { status: 404 }),
+    );
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/conversations",
+        payload: { projectId: project.id, title: "Project Chat", userId: "local-user" },
+      });
+      expect(created.statusCode, created.body).toBe(200);
+      const conv = created.json();
+
+      const first = await app.inject({
+        method: "POST",
+        url: `/conversations/${conv.id}/messages`,
+        payload: { role: "user", content: "سلام" },
+      });
+      expect(first.statusCode, first.body).toBe(200);
+      expect(first.json().messages.at(-1).role).toBe("assistant");
+
+      const listed = await app.inject({ method: "GET", url: "/projects" });
+      expect(listed.statusCode, listed.body).toBe(200);
+      // Prove restore of THIS project succeeded (empty snapshot), not that
+      // GET /projects merely skipped a throwing restore.
+      await expect(container.agentManager.readProject(project.id)).resolves.toMatchObject({ id: project.id });
+      expect(container.conversationRepo.findById(conv.id)?.data).toBeTruthy();
+
+      const second = await app.inject({
+        method: "POST",
+        url: `/conversations/${conv.id}/messages`,
+        payload: { role: "user", content: "ادامه بده" },
+      });
+      expect(second.statusCode, second.body).toBe(200);
+      expect(second.json().messages.at(-1).role).toBe("assistant");
+      expect(second.json().messages.length).toBeGreaterThanOrEqual(4);
     } finally {
       spy.mockRestore();
     }
