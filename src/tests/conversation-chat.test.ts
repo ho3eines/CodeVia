@@ -408,3 +408,68 @@ describe("project chat send uses the owner's OAuth token, not GITHUB_TOKEN", () 
     });
   }, 30000);
 });
+
+/* ------------------------------------------------------------------ *
+ * Standalone chat: conversations without a projectId power the
+ * top-level Chat page (simple AI Q&A, no project needed). They answer
+ * with a generic assistant prompt and skip repo context, GitHub mirror
+ * and task dispatch — those stay in the project section.
+ * ------------------------------------------------------------------ */
+describe("standalone chat (no project)", () => {
+  it("creates a conversation without projectId", async () => {
+    const created = await app.inject({ method: "POST", url: "/conversations", payload: { title: "Hello", userId: "local-user" } });
+    expect(created.statusCode, created.body).toBe(200);
+    const conv = created.json();
+    expect(conv.id).toBeTruthy();
+    expect(conv.projectId).toBeUndefined();
+  }, 30000);
+
+  it("still 404s when given a bogus projectId", async () => {
+    const created = await app.inject({ method: "POST", url: "/conversations", payload: { projectId: "proj-nope", title: "x" } });
+    expect(created.statusCode).toBe(404);
+  }, 30000);
+
+  it("answers with a generic prompt and no repository context", async () => {
+    const created = await app.inject({ method: "POST", url: "/conversations", payload: { title: "General Q", userId: "local-user" } });
+    const conv = created.json();
+    const spy = vi.spyOn(container.aiText, "complete");
+    try {
+      const res = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "What is 2+2?" } });
+      expect(res.statusCode, res.body).toBe(200);
+      const body = res.json();
+      expect(body.messages.length).toBeGreaterThanOrEqual(2);
+      expect(body.messages.at(-1).role).toBe("assistant");
+      expect(spy).toHaveBeenCalled();
+      const system = spy.mock.calls[0][0].messages.find((m) => m.role === "system")?.content ?? "";
+      expect(system).toContain("general-purpose");
+      expect(system).not.toContain("project assistant AI for the project");
+      expect(system).not.toContain("Repository context");
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30000);
+
+  it("guides task execution modes to the project chat instead of dispatching", async () => {
+    const created = await app.inject({ method: "POST", url: "/conversations", payload: { title: "Tasks?", userId: "local-user" } });
+    const conv = created.json();
+    const tasksBefore = container.taskRepo.findMany().length;
+    const res = await app.inject({
+      method: "POST",
+      url: `/conversations/${conv.id}/messages`,
+      payload: { role: "user", content: "build it", executionMode: "autonomous" },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const last = res.json().messages.at(-1);
+    expect(last.role).toBe("assistant");
+    expect(last.content).toContain("need a project");
+    expect(container.taskRepo.findMany().length).toBe(tasksBefore);
+  }, 30000);
+
+  it("lists standalone chats for their owner", async () => {
+    const before = (await app.inject({ method: "GET", url: "/conversations" })).json();
+    await app.inject({ method: "POST", url: "/conversations", payload: { title: "List me", userId: "local-user" } });
+    const after = (await app.inject({ method: "GET", url: "/conversations" })).json();
+    expect(after.length).toBe(before.length + 1);
+    expect(after.some((c) => c.title === "List me" && !c.projectId)).toBe(true);
+  }, 30000);
+});
