@@ -458,3 +458,24 @@ All checks now pass:
   and the normal project + `executionMode: "agent"` dispatch still work.
   TypeScript 0 errors; the full suite's failing set is unchanged from the
   pre-change baseline (42 sandbox-only `database is not open` failures).
+
+## 1405-06-20 — Fix: Telegram project tap crashed with "Cannot read properties of undefined (reading 'map')"
+- **Symptom (user report):** in the Telegram bot, tapping 📚 Projects then a
+  project name replied:
+  `⚠️ Something went wrong while handling that: Cannot read properties of undefined (reading 'map')`.
+  `/start` still worked.
+- **Root cause:** same legacy-document class as the chat-send bug above.
+  `TelegramBot.ownedProject()` / `ownedProjects()` returned the **raw**
+  `projectRepo` record. `projectHeader()` then did `p.repositories.map(...)`.
+  Records written before multi-repository support have `configRepo`/`branch`
+  but no `repositories` array. Web list/detail endpoints hydrate, so the SPA
+  looked fine; the bot did not.
+- **Fix (`src/integrations/telegram-bot.ts`):**
+  - `ownedProjects()` / `ownedProject()` now run `hydrateProject()` (same as
+    `GET /projects`).
+  - `repoSummary()` / GitHub / issues / PRs views use `(p.repositories ?? [])`
+    so a missed hydrate cannot throw.
+  - Refreshing Git state before a view is best-effort: a single project's
+    restore failure no longer takes down `/start` or project selection.
+- **Test:** `opens a legacy project that has no repositories array` in
+  `src/tests/telegram-bot.test.ts`. TypeScript 0 errors.

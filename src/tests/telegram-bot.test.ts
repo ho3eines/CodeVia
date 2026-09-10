@@ -57,6 +57,56 @@ describe("Telegram bot (project-aware, keyboard-driven)", () => {
     expect(flat.map((b) => b.text)).toContain("🧠 Models");
   });
 
+  it("opens a legacy project that has no repositories array (callback_query)", async () => {
+    // Same bug class as project chat send: records written before multi-repo
+    // support have configRepo/branch but no `repositories`. Tapping the project
+    // name used to crash projectHeader with
+    // `Cannot read properties of undefined (reading 'map')`.
+    const now = new Date().toISOString();
+    const project = {
+      id: "proj-legacy-tg",
+      slug: "legacy-tg",
+      name: "Legacy TG",
+      description: "created before multi-repository support",
+      configRepo: "acme/legacy-tg",
+      branch: "main",
+      capabilities: {
+        platforms: [], languages: [], frameworks: [], databases: [],
+        deploymentTargets: [], features: [], integrations: [], agentTypes: [],
+      },
+      settings: {
+        environment: "development",
+        notifications: [],
+        rules: [],
+        skills: [],
+        workflows: [],
+        budget: { maxTokensPerRun: 20000, maxCallsPerRun: 20, maxCostUsdPerRun: 5, maxDurationMs: 600000 },
+        permissions: {},
+        metadata: {},
+      },
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+    container.projectRepo.upsert(project as never, { key: project.slug });
+
+    await bot.handle({
+      update_id: 2,
+      callback_query: {
+        id: "cb-legacy",
+        data: `project:${project.id}`,
+        from: { id: 123 },
+        message: { chat: { id: 777 }, message_id: 10 },
+      },
+    });
+    const sent = lastSent();
+    expect(sent.chatId).toBe("777");
+    expect(sent.text).not.toContain("Something went wrong");
+    expect(sent.text).not.toMatch(/reading 'map'/);
+    expect(sent.text).toContain("Legacy TG");
+    expect(sent.text).toContain("acme/legacy-tg");
+  });
+
   it("opens a project menu when an inline project button is pressed (callback_query)", async () => {
     const project = await container.agentManager.createProject({
       name: "Storefront",
