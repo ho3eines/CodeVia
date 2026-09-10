@@ -646,4 +646,6 @@ export interface ModelPerformanceStats {
   /** Category-specific accuracy breakdown. */
   byKind: Record<string, { attempts: number; correct: number; accuracy: number }>;
   lastTestedAt?: ISODate;
+  /** Most recent provider error for this model (timeout, HTTP error, …) — used by the \"Unresponsive\" cleanup list. */
+  lastError?: string;
 }

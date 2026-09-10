@@ -61,8 +61,10 @@ export function registerModelBenchRoutes(app: FastifyInstance, container: Contai
     const stats = container.benchRepo.computeStats();
     // Only show stats for models that still exist in the registry, so a model
     // that has since been deleted (individually or with its provider) never
-    // reappears in the benchmark table / routing signal.
-    const liveIds = new Set(container.modelRepo.listActive().map((m) => m.id));
+    // reappears in the benchmark table / routing signal. Inactive models ARE
+    // included — the "Unresponsive" cleanup list needs to find failing models
+    // even after they were deactivated (the router only looks up active ones).
+    const liveIds = new Set(container.modelRepo.findMany().map((r) => r.data.id));
     const liveStats = stats.filter((s) => liveIds.has(s.modelId));
     ModelBenchmarkRepository.addSpeedNormalisation(liveStats);
     return { stats: liveStats };
