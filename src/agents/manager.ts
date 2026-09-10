@@ -469,7 +469,7 @@ export class AgentManager {
   async inspectRepository(project: Project): Promise<{ capabilities: ProjectCapabilities; files: string[]; skills: Set<string> }> {
     const files: string[] = [];
     let fetched = 0;
-    for (const link of project.repositories) {
+    for (const link of project.repositories ?? []) {
       const ref = parseRepoFullName(link.repo);
       if (!ref) continue;
       try {
@@ -485,7 +485,7 @@ export class AgentManager {
     const read = async (paths: string[]): Promise<string[]> => {
       const out: string[] = [];
       for (const p of paths.slice(0, 24)) {
-        for (const link of project.repositories) {
+        for (const link of project.repositories ?? []) {
           const ref = parseRepoFullName(link.repo);
           if (!ref) continue;
           try {
@@ -582,7 +582,7 @@ export class AgentManager {
 
   /** Inspect/ensure the repository Agent.md file (the project's AI brief). */
   private async ensureAgentMd(project: Project, detectedFiles: string[]): Promise<void> {
-    const cfg = configRepoOf(project.repositories);
+    const cfg = configRepoOf(project.repositories ?? []);
     if (!cfg) return;
     const ref = parseRepoFullName(cfg.repo);
     if (!ref) return;
@@ -627,7 +627,7 @@ export class AgentManager {
       `- Integrations: ${labelList("integrations", c.integrations)}`,
       ``,
       `## Repositories`,
-      ...project.repositories.map((r) => `- ${r.repo} @ ${r.branch} (${r.role}${r.isConfigRepo ? ", config" : ""})`),
+      ...(project.repositories ?? []).map((r) => `- ${r.repo} @ ${r.branch} (${r.role}${r.isConfigRepo ? ", config" : ""})`),
       ``,
       `## Skills`,
       list(project.settings.skills),
@@ -654,8 +654,8 @@ export class AgentManager {
     const mock = github as unknown as {
       seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string; description?: string }): { owner: string; name: string };
     };
-    const links: Array<{ repo: string; branch: string; isConfigRepo?: boolean }> = project.repositories.length
-      ? project.repositories.map((r) => ({ repo: r.repo, branch: r.branch, isConfigRepo: r.isConfigRepo }))
+    const links: Array<{ repo: string; branch: string; isConfigRepo?: boolean }> = (project.repositories ?? []).length
+      ? (project.repositories ?? []).map((r) => ({ repo: r.repo, branch: r.branch, isConfigRepo: r.isConfigRepo }))
       : [{ repo: project.configRepo, branch: project.branch, isConfigRepo: true }];
     const existing = new Set((await github.listRepositories({ limit: 1000 })).map((r) => r.fullName.toLowerCase()));
     let seeded = false;
@@ -719,7 +719,7 @@ export class AgentManager {
       `  deployment:${list(c.deploymentTargets)}`,
       `  features:${list(c.features)}`,
       `  integrations:${list(c.integrations)}`,
-      `  repositories:${list(project.repositories.map((r) => `${r.repo}@${r.branch} (${r.role})`))}`,
+      `  repositories:${list((project.repositories ?? []).map((r) => `${r.repo}@${r.branch} (${r.role})`))}`,
     ].join("\n");
   }
 

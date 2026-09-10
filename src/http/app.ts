@@ -34,10 +34,12 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerBackupRoutes } from "./routes/backup.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerAuthRoutes } from "./routes/auth.js";
-import { authMiddleware, canAccessProject, DEMO_USER } from "./auth.js";
+import { authMiddleware, canAccessProject, DEMO_USER, resolveRequestUser } from "./auth.js";
 import { extractSessionToken, verifySession } from "../auth/github-oauth.js";
 import type { User } from "../domain/entities.js";
 import { registerProjectStateHook } from "./project-state-hook.js";
+import { getUserGitHubToken } from "../auth/github-tokens.js";
+import { runWithGitHubRequestActor } from "../github/request-actor.js";
 import { getEnv } from "../config/env.js";
 
 export interface BuildServerResult {
@@ -405,6 +407,23 @@ export async function buildServer(container: Container): Promise<BuildServerResu
       return;
     }
     await authMiddleware({ container })(request, reply);
+  });
+
+  // Bind the signed-in user's GitHub OAuth token for the rest of this request
+  // so projectFiles / readProject / chat persist use it even when they call
+  // githubForProject(project) without a requestUserId. GITHUB_TOKEN is login
+  // only — never the identity that writes the owner's repositories.
+  app.addHook("onRequest", (request, _reply, done) => {
+    try {
+      const { user, authenticated } = resolveRequestUser(request, container);
+      if (authenticated && getUserGitHubToken(container.kv, user.id)) {
+        runWithGitHubRequestActor(user.id, done);
+        return;
+      }
+    } catch {
+      /* never block a request over actor bookkeeping */
+    }
+    done();
   });
 
   registerProjectStateHook(app, container);

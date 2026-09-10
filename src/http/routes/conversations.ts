@@ -6,6 +6,7 @@ import { accessibleProjectIds } from "../project-access.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
 import { hydrateProject } from "../../domain/project-options.js";
+import { logger } from "../../logger.js";
 
 const SUMMARY_SYSTEM_PROMPT =
   "You compress a chat between a user and an AI engineering assistant into a concise memory summary. " +
@@ -55,10 +56,15 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
   const persist = async (conv: Conversation | undefined) => {
     if (!conv) return;
     const p = container.projectRepo.findById(conv.projectId)?.data;
-    if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
-    // hydrateProject() repairs records written before multi-repository support
-    // (no `repositories` array); the file sync below reads `p.repositories`.
-    await container.projectFiles.syncConversation(hydrateProject(p), conv);
+    if (!p) return;
+    // Mirror into CodeVia/conversations is best-effort: the AI reply is already
+    // in the database. A GitHub 401/404 from the wrong token (GITHUB_TOKEN vs
+    // the owner's OAuth token) must not 500 the send and hide the in-page reply.
+    try {
+      await container.projectFiles.syncConversation(hydrateProject(p), conv);
+    } catch (err) {
+      logger.warn("conversation GitHub sync failed", { conversationId: conv.id, projectId: conv.projectId, err: String(err) });
+    }
   };
   const userFor = (req: unknown): string => {
     const u = resolveRequestUser(req as FastifyRequest, container);
@@ -253,7 +259,7 @@ Be helpful, concise, and accurate. When relevant, reference project context, ski
               })
               .join("\n")
           : "");
-      const transcriptMsgs = updated.messages.slice(0, -1).map((m) => ({
+      const transcriptMsgs = (updated.messages ?? []).slice(0, -1).map((m) => ({
         role: m.role as "user" | "assistant" | "system",
         content: m.content,
       }));
@@ -300,7 +306,7 @@ Be helpful, concise, and accurate. When relevant, reference project context, ski
     }
 
     // Auto-summarize when a conversation grows long (AI Context Compression).
-    if (updated && updated.messages.length >= 20 && updated.messages.length % 20 === 0) {
+    if (updated && (updated.messages ?? []).length >= 20 && (updated.messages ?? []).length % 20 === 0) {
       const r = await summarizeConversation(container, updated);
       container.conversationRepo.updateSummary(id, r.summary);
     }
@@ -312,7 +318,7 @@ Be helpful, concise, and accurate. When relevant, reference project context, ski
     const { id } = req.params as { id: string };
     const conv = container.conversationRepo.findById(id);
     if (!conv) return { error: "conversation not found" };
-    if (conv.data.messages.length === 0) return { summary: "", method: "heuristic" };
+    if ((conv.data.messages ?? []).length === 0) return { summary: "", method: "heuristic" };
     const result = await summarizeConversation(container, conv.data);
     container.conversationRepo.updateSummary(id, result.summary);
     await persist(container.conversationRepo.findById(id)?.data);

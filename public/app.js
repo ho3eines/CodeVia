@@ -1455,7 +1455,7 @@
   async function getProjectChatConv(projectId) {
     // Use (or create) a conversation named "Project Chat" scoped to this project
     // so the Chat tab is ready instantly and survives reloads.
-    const list = await api(`/conversations?projectId=${encodeURIComponent(projectId)}`).catch(() => []);
+    const list = asArray(await api(`/conversations?projectId=${encodeURIComponent(projectId)}`).catch(() => []));
     const KEEP_TITLE = "Project Chat";
     let c = list.find((x) => x.title === KEEP_TITLE && x.source === "web");
     if (!c) c = await api("/conversations", { method: "POST", body: { projectId, title: KEEP_TITLE, source: "web" } });
@@ -1484,7 +1484,7 @@
 
   /* ---------- Project Chat Tab ---------- */
   function projectChatTabHtml(conv) {
-    const msgs = conv?.messages || [];
+    const msgs = asArray(conv && conv.messages);
     return `<div class="p-chat-wrap" style="display:flex;flex-direction:column;gap:10px">
       <div class="card card-body p-chat-card" style="flex:1;display:flex;flex-direction:column;padding:0;overflow:hidden">
         <div id="p-chat-msgs" class="p-chat-msgs">
@@ -1530,20 +1530,23 @@
     window._projectChatProject = projectId;
     let activeTaskIds = new Set();
     let lastMsgCount = 0;
+    const paintConv = (conv) => {
+      const msgs = asArray(conv && conv.messages);
+      const box = $("#p-chat-msgs");
+      if (box) {
+        box.innerHTML = msgs.length ? msgs.map(msgBubble).join("") : `<div class="p-chat-empty">💬 Start chatting with your project AI. Ask a question, attach a screenshot, or dispatch an autonomous task.</div>`;
+        box.scrollTop = box.scrollHeight;
+      }
+      for (const m of msgs) {
+        const tid = m.metadata?.dispatchedTaskId;
+        if (tid && !activeTaskIds.has(tid)) activeTaskIds.add(tid);
+      }
+      lastMsgCount = msgs.length;
+    };
     const refreshMessages = async () => {
       try {
         const conv = await api(`/conversations/${convId}`);
-        const box = $("#p-chat-msgs");
-        if (box) {
-          box.innerHTML = (conv.messages || []).length ? conv.messages.map(msgBubble).join("") : `<div class="p-chat-empty">💬 Start chatting with your project AI. Ask a question, attach a screenshot, or dispatch an autonomous task.</div>`;
-          box.scrollTop = box.scrollHeight;
-        }
-        // Track dispatched tasks so we can poll their progress and append status updates.
-        for (const m of conv.messages || []) {
-          const tid = m.metadata?.dispatchedTaskId;
-          if (tid && !activeTaskIds.has(tid)) activeTaskIds.add(tid);
-        }
-        lastMsgCount = (conv.messages || []).length;
+        paintConv(conv);
         return conv;
       } catch (e) { return null; }
     };
@@ -1552,20 +1555,23 @@
     // composer / scroll aren't disturbed while a task is streaming).
     window._projectChatRefresh = refreshMessages;
     const refreshModelsAgents = async () => {
-      const [allModels, agents, benchResp] = await Promise.all([
+      const [allModelsRaw, agentsRaw, benchResp] = await Promise.all([
         api("/models").catch(() => []),
         api(`/projects/${projectId}/agents`).catch(() => []),
         api("/models/benchmark/stats").catch(() => ({ stats: [] })),
       ]);
-      const stats = new Map((benchResp.stats || []).map((s) => [s.modelId, s]));
+      const allModels = asArray(allModelsRaw);
+      const agents = asArray(agentsRaw);
+      const stats = new Map(asArray(benchResp && benchResp.stats).map((s) => [s.modelId, s]));
       const active = allModels.filter((m) => m.active);
       const sel = $("#p-chat-model");
       if (sel && !sel.dataset.touched) {
         const prev = sel.value;
         sel.innerHTML = `<option value="">Auto (best per benchmark)</option>` + active.map((m) => {
           const s = stats.get(m.id);
-          const tag = s ? `score ${s.score.toFixed(2)} · ${s.p95LatencyMs||s.avgLatencyMs||"?"}ms` : "no data";
-          return `<option value="${m.id}" ${prev===m.id?"selected":""}>${esc(m.displayName)} · ${esc(m.providerId.replace("provider-",""))} · ${tag}</option>`;
+          const score = s && typeof s.score === "number" ? s.score.toFixed(2) : "—";
+          const tag = s ? `score ${score} · ${s.p95LatencyMs||s.avgLatencyMs||"?"}ms` : "no data";
+          return `<option value="${m.id}" ${prev===m.id?"selected":""}>${esc(m.displayName)} · ${esc(String(m.providerId || "").replace("provider-",""))} · ${tag}</option>`;
         }).join("");
       }
       const ag = $("#p-chat-agent");
@@ -1669,22 +1675,23 @@
       const attachments = pending.slice(); pending = []; renderChatAttachments();
       const body = {
         role: "user", content: content || "(attachment)",
-        modelId: $("#p-chat-model").value || undefined,
-        executionMode: $("#p-chat-mode").value || "chat",
-        agentType: $("#p-chat-agent").value || undefined,
-        temperature: Number($("#p-chat-temp").value) || 0.3,
+        modelId: $("#p-chat-model")?.value || undefined,
+        executionMode: $("#p-chat-mode")?.value || "chat",
+        agentType: $("#p-chat-agent")?.value || undefined,
+        temperature: Number($("#p-chat-temp")?.value) || 0.3,
         attachments,
       };
-      sendBtn.disabled = true; sendBtn.textContent = "…";
+      if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = "…"; }
       try {
-        await api(`/conversations/${convId}/messages`, { method: "POST", body });
-        await refreshMessages();
+        const updated = await api(`/conversations/${convId}/messages`, { method: "POST", body });
+        if (updated && (updated.id || asArray(updated.messages).length)) paintConv(updated);
+        else await refreshMessages();
         // Kick off progress polling immediately for dispatched tasks.
         if ((body.executionMode === "autonomous" || body.executionMode === "agent") && !pollTimer) {
           pollTimer = setTimeout(pollProgress, 1500);
         }
       } catch(e) { toast("Send failed", e.message, "err"); }
-      finally { sendBtn.disabled = false; sendBtn.textContent = "↑"; input.focus(); }
+      finally { if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = "↑"; } if (input) input.focus(); }
     };
     if (sendBtn) sendBtn.onclick = send;
     if (input) {
@@ -4563,22 +4570,22 @@
 
   /* CONVERSATIONS */
   on("/conversations", async () => {
-    const list = await api("/conversations");
+    const list = asArray(await api("/conversations"));
     $("#content").innerHTML = `<div class="overview"><div><h1>Conversations</h1><p>Project-aware conversations with auto-summarization</p></div></div>
       ${searchPanelHtml("conversation-search", "Search conversations by title, project, source, message text or updated time…")}
       <div class="card card-body"><div class="table-wrap"><table><thead><tr><th>Title</th><th>Project</th><th>Source</th><th>Messages</th><th>Updated</th><th></th></tr></thead><tbody id="conversation-tbody"></tbody></table></div></div>`;
     bindSearchPanel("conversation-search", list, conversationRows, "#conversation-tbody", "conversation", { emptyHtml: () => `<tr><td colspan="6">${emptyState("🔎", "No matching conversations", "Try searching by title, project, source or message content.")}</td></tr>` });
   });
   function conversationRows(list) {
-    return list.map((c) => `<tr><td><a href="#/conversations/${c.id}"><strong>${esc(c.title)}</strong></a>${c.summary ? `<div class="sub">${esc(c.summary.slice(0,100))}</div>` : ""}</td><td class="mono">${(c.projectId||"—").slice(0,12)}</td><td>${esc(c.source)}</td><td>${c.messages.length}</td><td>${timeAgo(c.updatedAt)}</td><td style="white-space:nowrap"><a class="btn btn-ghost" href="#/conversations/${esc(c.id)}">Open</a><button class="btn btn-ghost" title="Delete conversation" onclick="conversationDelete(${esc(JSON.stringify(c.id))})">🗑</button></td></tr>`).join("");
+    return list.map((c) => `<tr><td><a href="#/conversations/${c.id}"><strong>${esc(c.title)}</strong></a>${c.summary ? `<div class="sub">${esc(c.summary.slice(0,100))}</div>` : ""}</td><td class="mono">${(c.projectId||"—").slice(0,12)}</td><td>${esc(c.source)}</td><td>${asArray(c.messages).length}</td><td>${timeAgo(c.updatedAt)}</td><td style="white-space:nowrap"><a class="btn btn-ghost" href="#/conversations/${esc(c.id)}">Open</a><button class="btn btn-ghost" title="Delete conversation" onclick="conversationDelete(${esc(JSON.stringify(c.id))})">🗑</button></td></tr>`).join("");
   }
 
   /* CONVERSATION DETAIL (full-page chat view) */
   on("/conversations/:id", async (rest) => {
     const id = rest[0];
-    const render = async () => {
-      const c = await api(`/conversations/${id}`);
-      const msgs = c.messages || [];
+    const render = async (seed) => {
+      const c = seed && seed.id ? seed : await api(`/conversations/${id}`);
+      const msgs = asArray(c && c.messages);
       const projectIdShort = (c.projectId || "—").slice(0, 12);
       $("#content").innerHTML = `
         <div class="overview">
@@ -4615,7 +4622,7 @@
         sendBtn.textContent = "…";
         try {
           const updated = await api(`/conversations/${id}/messages`, { method: "POST", body: { role: "user", content } });
-          await render();
+          await render(updated && updated.id ? updated : undefined);
         } catch (e) {
           toast("Send failed", e.message, "err");
           sendBtn.disabled = false;

@@ -8,6 +8,7 @@ import type { ModelRepository } from "../ai/model-repo.js";
 import type { SkillRepository } from "../skills/registry.js";
 import type { JobQueue } from "../db/queue.js";
 import type { Project } from "../domain/entities.js";
+import { hydrateProject } from "../domain/project-options.js";
 import type { Logger } from "../logger.js";
 import type { TelegramRuntimeStatus } from "./telegram-runtime.js";
 import type { ApprovalService } from "../approvals/service.js";
@@ -186,7 +187,11 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
    * operator's global bot sees everything.
    */
   private ownedProjects(): Project[] {
-    const all = this.deps.projectRepo.findMany().map((r) => r.data);
+    // hydrateProject rebuilds `repositories`/`capabilities` on records written
+    // before multi-repo support. The raw document from findMany() can lack
+    // those arrays — calling `.map` on them is the "Something went wrong
+    // … reading 'map'" crash when a user taps a project in Telegram.
+    const all = this.deps.projectRepo.findMany().map((r) => hydrateProject(r.data));
     const userId = this.deps.userId;
     if (!userId) return all;
     return all.filter((p) => !p.ownerId || p.ownerId === userId);
@@ -197,13 +202,26 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     const found = this.deps.projectRepo.findById(id)?.data;
     if (!found) return undefined;
     if (this.deps.userId && found.ownerId && found.ownerId !== this.deps.userId) return undefined;
-    return found;
+    return hydrateProject(found);
   }
 
   private async resolveView(t: TelegramUpdate): Promise<View> {
     const chatId = t.chatId!;
     // Only after access gating: all project-backed views read fresh repository state.
-    if (!/^\/(?:stop|cancel)(?:@\w+)?(?:\s|$)/i.test(t.text ?? "")) for (const p of this.ownedProjects()) await this.deps.agentManager.readProject(p.id);
+    // Best-effort: a single project whose Git restore fails must not take down
+    // /start or project selection for every other project.
+    if (!/^\/(?:stop|cancel)(?:@\w+)?(?:\s|$)/i.test(t.text ?? "")) {
+      for (const p of this.ownedProjects()) {
+        try {
+          await this.deps.agentManager.readProject(p.id);
+        } catch (err) {
+          this.deps.logger.warn("telegram project refresh failed", {
+            projectId: p.id,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
     if (t.callbackData) {
       return this.resolveCallback(chatId, t.callbackData);
     }
@@ -418,8 +436,13 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     };
   }
 
+  private repoSummary(p: Project): string {
+    const repos = (p.repositories ?? []).map((r) => r.repo).filter(Boolean).join(", ");
+    return repos || p.configRepo || "—";
+  }
+
   private projectHeader(p: Project): string {
-    const repos = p.repositories.map((r) => r.repo).join(", ") || p.configRepo || "—";
+    const repos = this.repoSummary(p);
     return [
       `📁 *${p.name}*`,
       p.description ? p.description : "",
@@ -435,7 +458,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   }
 
   private projectKeyboard(p: Project): InlineKeyboard {
-    const agents = this.deps.agentRepo.byProject(p.id);
+    const agents = this.deps.agentRepo.byProject(p.id) ?? [];
     const agentRows = agents.slice(0, 6).map((a) => [{ text: `🤖 ${a.name}`, callback_data: `agent:${a.id}` }]);
     return this.adHocKeyboard([
       ...agentRows,
@@ -763,7 +786,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
         keyboard: this.homeKeyboard(),
       };
     }
-    const repos = p.repositories.map((r) => r.repo).join(", ") || p.configRepo || "—";
+    const repos = this.repoSummary(p);
     const text = [
       `📦 *GitHub — ${p.name}*`,
       "",
@@ -859,7 +882,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   }
 
   private async issuesView(p: Project): Promise<View> {
-    const ref = p.repositories[0]?.repo ?? p.configRepo;
+    const ref = p.repositories?.[0]?.repo ?? p.configRepo;
     const issues = ref ? await this.safeGithub(() => this.githubFor(p).listIssues({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" })) : undefined;
     const open = (issues ?? []).filter((i) => i.state !== "closed").slice(0, 10);
     const text = open.length
@@ -869,7 +892,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   }
 
   private async prsView(p: Project): Promise<View> {
-    const ref = p.repositories[0]?.repo ?? p.configRepo;
+    const ref = p.repositories?.[0]?.repo ?? p.configRepo;
     const prs = ref ? await this.safeGithub(() => this.githubFor(p).listPullRequests({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" })) : undefined;
     const open = (prs ?? []).filter((r) => r.state !== "closed" && r.state !== "merged").slice(0, 10);
     const text = open.length

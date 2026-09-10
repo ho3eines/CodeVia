@@ -648,7 +648,11 @@ export class ProjectFilesService {
           if (changed) repos.runRepo.upsert({ ...existing, summary: r.summary, verification: r.verification, error: r.error }, { projectId: p.id, parentId: id("task", r.taskId) });
         }
       }
-      if (repos.conversationRepo && project.repositoryState) {
+      // Chat is local-first. An empty CodeVia/conversations/ tree is the
+      // common case for a repo that never synced chats (or whose persist
+      // failed). Treating that as "delete every conversation" made
+      // POST /conversations/:id/messages 404 after a successful restore.
+      if (repos.conversationRepo && project.repositoryState && snapshot.conversations.length > 0) {
         const keep = new Set(snapshot.conversations.map((c) => id("conversation", c.id)));
         for (const r of repos.conversationRepo.findMany({ projectId: p.id })) if (!keep.has(r.data.id)) repos.conversationRepo.deleteById(r.data.id);
       }

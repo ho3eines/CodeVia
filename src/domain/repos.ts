@@ -69,7 +69,8 @@ export class ConversationRepository extends DocumentRepository<Conversation> {
   addMessage(convId: string, msg: ConversationMessage): Conversation | undefined {
     const rec = this.findById(convId);
     if (!rec) return undefined;
-    const updated: Conversation = { ...rec.data, messages: [...rec.data.messages, msg], updatedAt: new Date().toISOString() };
+    const prior = Array.isArray(rec.data.messages) ? rec.data.messages : [];
+    const updated: Conversation = { ...rec.data, messages: [...prior, msg], updatedAt: new Date().toISOString() };
     this.upsert(updated, { projectId: updated.projectId, parentId: updated.userId });
     return updated;
   }

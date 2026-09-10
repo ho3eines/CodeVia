@@ -458,3 +458,54 @@ All checks now pass:
   and the normal project + `executionMode: "agent"` dispatch still work.
   TypeScript 0 errors; the full suite's failing set is unchanged from the
   pre-change baseline (42 sandbox-only `database is not open` failures).
+
+## 1405-06-20 — Fix: project Chat send used GITHUB_TOKEN instead of the owner's OAuth token
+- **Symptom (user report):** after opening Chat from the home page (`#/chat`) as the
+  GitHub user who owns the repo, sending a message failed (no in-page reply).
+  The project/server token (`GITHUB_TOKEN` / OAuth-app credentials) was being
+  used for GitHub; that token is login-only and 404s on the owner's private repos.
+- **Root cause:** `POST /conversations/:id/messages` always `persist()` →
+  `projectFiles.syncConversation` → `githubForProject(p)` **without**
+  `requestUserId`. The project-state hook's `readProject` did the same. Project
+  REST routes wrap with `bindProjectConnection` + `githubForProject(p, requestUserId)`;
+  conversations did not. `adoptProjectConnection` also refused to replace a live
+  `server-token` connection while `GITHUB_TOKEN` was set, so chat restore/persist
+  kept the PAT. A GitHub 404 then 500'd the send *after* the AI reply was already
+  in the DB (toast "Send failed", empty/error instead of the reply). Listing
+  `/projects` restored every owned project the same way, so one 404 blanked Chat.
+- **Fix:**
+  - Request-scoped GitHub actor (`src/github/request-actor.ts` + `onRequest` in
+    `app.ts`): a signed-in user with a stored OAuth token is the identity for
+    every `githubForProject(project)` on that request, including chat persist.
+  - `resolveGitHubForProject`: ALS `requestUserId`; a `server-token` project
+    whose owner has an OAuth token uses that token, not `GITHUB_TOKEN`.
+  - `adoptProjectConnection` / `adoptStrandedProjects`: rebind the owner's (or
+    demo/shared) `server-token` projects onto their OAuth token; never steal
+    another user's PAT project.
+  - Conversation persist is best-effort (log, don't 500). Restore failures on
+    conversation routes and GET listing no longer 500 the Chat page.
+- **Tests:** conversation persist still returns the assistant reply when GitHub
+  sync throws; logged-in owner + `server-token` project + live `GITHUB_TOKEN`
+  sends with `tok-alice` (never the PAT) and rebinds the connection. Registry /
+  adopt regressions updated.
+
+## 1405-06-20 — Fix: Telegram project tap crashed with "Cannot read properties of undefined (reading 'map')"
+- **Symptom (user report):** in the Telegram bot, tapping 📚 Projects then a
+  project name replied:
+  `⚠️ Something went wrong while handling that: Cannot read properties of undefined (reading 'map')`.
+  `/start` still worked.
+- **Root cause:** same legacy-document class as the chat-send bug above.
+  `TelegramBot.ownedProject()` / `ownedProjects()` returned the **raw**
+  `projectRepo` record. `projectHeader()` then did `p.repositories.map(...)`.
+  Records written before multi-repository support have `configRepo`/`branch`
+  but no `repositories` array. Web list/detail endpoints hydrate, so the SPA
+  looked fine; the bot did not.
+- **Fix (`src/integrations/telegram-bot.ts`):**
+  - `ownedProjects()` / `ownedProject()` now run `hydrateProject()` (same as
+    `GET /projects`).
+  - `repoSummary()` / GitHub / issues / PRs views use `(p.repositories ?? [])`
+    so a missed hydrate cannot throw.
+  - Refreshing Git state before a view is best-effort: a single project's
+    restore failure no longer takes down `/start` or project selection.
+- **Test:** `opens a legacy project that has no repositories array` in
+  `src/tests/telegram-bot.test.ts`. TypeScript 0 errors.

@@ -2,7 +2,6 @@ import type { Project } from "../domain/entities.js";
 import type { ProjectRepository } from "../domain/repos.js";
 import type { KvStore } from "../db/kv.js";
 import { describeUserGitHubToken, getUserGitHubToken } from "./github-tokens.js";
-import { isServerGitHubEnabled } from "../github/registry.js";
 import { DEMO_USER_ID } from "./identity.js";
 
 /**
@@ -20,8 +19,9 @@ import { DEMO_USER_ID } from "./identity.js";
  * Guardrails keep accounts separate:
  *   - Only the project's own owner (or a shared/demo project) is ever rebound;
  *     a foreign account can never steal another owner's live connection.
- *   - A connection that still resolves to a usable token is never reassigned.
- *   - A live `server-token` connection is left alone while the server token is set.
+ *   - A working `user-oauth` connection is never reassigned to someone else.
+ *   - A `server-token` connection is rebound onto the owner's OAuth token
+ *     (`GITHUB_TOKEN` is login-only and must not write the owner's repos).
  *
  * Returns true when the stored connection was changed.
  */
@@ -40,8 +40,6 @@ export function adoptProjectConnection(deps: {
   const current = project.githubConnection;
   // A working per-owner connection is already correct — never touch it.
   if (current?.kind === "user-oauth" && current.userId && getUserGitHubToken(kv, current.userId)) return false;
-  // A server-token project keeps its connection as long as the server token is live.
-  if (current?.kind === "server-token" && isServerGitHubEnabled()) return false;
   // Without a caller or a caller token there is nothing to adopt to.
   if (!userId || !getUserGitHubToken(kv, userId)) return false;
   const login = describeUserGitHubToken(kv, userId).login;

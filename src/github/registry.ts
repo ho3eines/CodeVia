@@ -7,6 +7,7 @@ import type { KvStore } from "../db/kv.js";
 import { getUserGitHubToken, hasRepoScope, GITHUB_TOKEN_KV_PREFIX } from "../auth/github-tokens.js";
 import { getEffectiveOAuthConfig } from "../auth/admin-settings.js";
 import { DEMO_USER_ID } from "../auth/identity.js";
+import { githubRequestActorId } from "./request-actor.js";
 
 /** A configured GitHub connection bound to a project. */
 export interface GithubConnection {
@@ -160,9 +161,12 @@ export function resolveGitHubForProject(opts: {
 }): IGitHubService {
   // A signed-in user always acts as themselves, whoever owns the project. This
   // is also the safer default: the caller can only ever reach repositories
-  // their own token already grants.
-  if (opts.requestUserId && getUserGitHubToken(opts.kv, opts.requestUserId)) {
-    const userId = opts.requestUserId;
+  // their own token already grants. `requestUserId` is explicit (project
+  // routes); the AsyncLocalStorage actor covers chat persist / readProject,
+  // which have no request object to thread through.
+  const requestUserId = opts.requestUserId ?? githubRequestActorId();
+  if (requestUserId && getUserGitHubToken(opts.kv, requestUserId)) {
+    const userId = requestUserId;
     return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
   }
   const connection = opts.project.githubConnection;
@@ -175,6 +179,14 @@ export function resolveGitHubForProject(opts: {
     return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
   }
   if (connection.kind === "server-token") {
+    // GITHUB_TOKEN / OAuth-app credentials are for login, not repository
+    // writes. If the project owner (or the identity stored on the connection)
+    // has a user OAuth token, use that — the server PAT 404s on private
+    // user repos the PAT cannot see.
+    const ownerUserId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
+    if (ownerUserId) {
+      return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, ownerUserId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
+    }
     if (opts.fallback.kind === "real") return opts.fallback;
     if (isServerGitHubEnabled()) return new RealGitHubService();
     throw new Error(`Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`);
@@ -230,8 +242,13 @@ export function adoptStrandedProjects(opts: {
     const connection = project.githubConnection;
     // A working user-oauth connection belongs to someone else — never steal it.
     if (connection?.kind === "user-oauth" && connection.userId && getUserGitHubToken(opts.kv, connection.userId)) continue;
-    // A server-token project keeps working as long as the server token is set.
-    if (connection?.kind === "server-token" && isServerGitHubEnabled()) continue;
+    // A server-token project owned by a different real user is not stranded.
+    // The logging-in owner's own (or demo/shared) server-token projects switch
+    // onto their OAuth token so GITHUB_TOKEN is not used for repo writes.
+    if (connection?.kind === "server-token" && isServerGitHubEnabled()) {
+      const ownerId = project.ownerId;
+      if (ownerId && ownerId !== DEMO_USER_ID && ownerId !== opts.userId) continue;
+    }
     project.githubConnection = { kind: "user-oauth", userId: opts.userId, login: opts.login };
     // Hand the project over, not just its connection: a project still owned by
     // the pre-login demo owner would otherwise stay invisible to the adopter

@@ -213,8 +213,22 @@ describe("project-scoped connections", () => {
     getEnvFresh();
     expect(() => resolveGitHubForProject({ project: { ...project, githubConnection: { kind: "mock" } }, kv: c.kv, fallback: c.github })).toThrow(/Log in with GitHub/);
   });
-  it("keeps explicit server-token connections separate from stale mock promotion", () => {
+  it("prefers the owner's OAuth token over GITHUB_TOKEN for a server-token project", async () => {
     storeUserGitHubToken(c.kv, "owner-a", "owner-token");
+    const connected: Project = { ...project, ownerId: "owner-a", githubConnection: { kind: "server-token" } };
+    const fallback = { kind: "real" as const } as IGitHubService;
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer owner-token");
+      return json([{ name: "main", commit: { sha: "head" } }]);
+    });
+    setUserGitHubFetchForTest(fetcher as typeof fetch);
+    const bound = resolveGitHubForProject({ project: connected, kv: c.kv, fallback });
+    expect(bound).not.toBe(fallback);
+    expect(bound.kind).toBe("real");
+    await bound.listBranches(repo);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("keeps explicit server-token connections off the mock when the owner has no OAuth token", () => {
     const connected: Project = { ...project, ownerId: "owner-a", githubConnection: { kind: "server-token" } };
     const fallback = { kind: "real" as const } as IGitHubService;
     expect(resolveGitHubForProject({ project: connected, kv: c.kv, fallback })).toBe(fallback);
