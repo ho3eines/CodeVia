@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { getEnvFresh } from "../config/env.js";
 import { Container } from "../app/container.js";
@@ -6,6 +6,9 @@ import { buildServer } from "../http/app.js";
 import { freshDb } from "./test-helpers.js";
 import type { IGitHubService } from "../github/types.js";
 import type { Project } from "../domain/entities.js";
+import { signSession } from "../auth/github-oauth.js";
+import { storeUserGitHubToken } from "../auth/github-tokens.js";
+import { setUserGitHubFetchForTest } from "../github/registry.js";
 
 /* ------------------------------------------------------------------ *
  * Project chat send (POST /conversations/:id/messages).
@@ -122,5 +125,191 @@ describe("project chat send", () => {
     const dispatched = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "یک کار انجام بده", executionMode: "agent" } });
     expect(dispatched.statusCode, dispatched.body).toBe(200);
     expect(dispatched.json().messages.at(-1).metadata?.dispatchedTaskId).toBeTruthy();
+  }, 30000);
+
+  it("still returns the assistant reply when GitHub conversation sync fails", async () => {
+    const project = legacyProject("proj-legacy-persist", "legacy-persist", "acme/legacy");
+    container.projectRepo.upsert(project, { key: project.slug });
+    const created = await app.inject({ method: "POST", url: "/conversations", payload: { projectId: project.id, title: "Project Chat", userId: "local-user" } });
+    expect(created.statusCode, created.body).toBe(200);
+    const conv = created.json();
+    const spy = vi.spyOn(container.projectFiles, "syncConversation").mockRejectedValue(Object.assign(new Error("GitHub 404"), { status: 404 }));
+    try {
+      const res = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "سلام" } });
+      expect(res.statusCode, res.body).toBe(200);
+      const body = res.json();
+      expect(body.messages.at(-1).role).toBe("assistant");
+      expect(body.messages.at(-1).content).toBeTruthy();
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30000);
+});
+
+/**
+ * Logged-in owner + project stored as `server-token` + live GITHUB_TOKEN.
+ * Repo writes must use the owner's OAuth token (`tok-alice`), never the PAT
+ * (`ghs_server` is login-only and 404s on the owner's private repos).
+ */
+describe("project chat send uses the owner's OAuth token, not GITHUB_TOKEN", () => {
+  const ENV_KEYS = ["REQUIRE_AUTH", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "AUTH_SECRET", "GITHUB_TOKEN", "GITHUB_ENABLED"] as const;
+  let savedEnv: Record<string, string | undefined>;
+  let cleanupOwner: (() => void) | undefined;
+  let ownerApp: FastifyInstance | undefined;
+  let ownerContainer: Container;
+
+  function repoFake(seen: string[]): typeof fetch {
+    let head = "head-sha";
+    const files = new Map<string, string>();
+    let n = 0;
+    const json = (body: unknown, status = 200, headers?: Record<string, string>) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+    const listDir = (dir: string) => {
+      const prefix = dir ? `${dir.replace(/\/$/, "")}/` : "";
+      const names = new Set<string>();
+      const items: Array<{ path: string; type: string; size?: number }> = [];
+      for (const p of files.keys()) {
+        if (dir && p !== dir && !p.startsWith(prefix)) continue;
+        if (p === dir) continue;
+        const rest = dir ? p.slice(prefix.length) : p;
+        const name = rest.split("/")[0];
+        if (!name || names.has(name)) continue;
+        names.add(name);
+        const full = dir ? prefix + name : name;
+        const isFile = files.has(full);
+        items.push({ path: full, type: isFile ? "file" : "dir", size: isFile ? files.get(full)!.length : undefined });
+      }
+      return items;
+    };
+    return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      const auth = new Headers(init?.headers).get("authorization") ?? "";
+      seen.push(auth);
+      if (auth === "Bearer ghs_server") return json({ message: "Not Found" }, 404);
+      if (auth !== "Bearer tok-alice") return json({ message: "Bad credentials" }, 401);
+
+      if (url.endsWith("/user") && method === "GET") {
+        return json({ login: "alice", name: "Alice" }, 200, { "x-oauth-scopes": "repo, read:user, user:email" });
+      }
+      if (url.includes("/branches?") || /\/branches(?:\?|$)/.test(url)) {
+        return json([{ name: "main", commit: { sha: head } }]);
+      }
+      if (url.includes("/branches/main")) {
+        return json({ name: "main", commit: { sha: head } });
+      }
+      if (url.includes("/git/commits/") && method === "GET") {
+        return json({ sha: head, tree: { sha: `tree-${head}` } });
+      }
+      if (url.includes("/git/trees") && method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tree?: Array<{ path?: string; content?: string; sha?: string | null }> };
+        for (const entry of body.tree ?? []) {
+          if (!entry.path) continue;
+          if (entry.sha === null) files.delete(entry.path);
+          else if (typeof entry.content === "string") files.set(entry.path, entry.content);
+        }
+        return json({ sha: `tree-${++n}` });
+      }
+      if (url.includes("/git/commits") && method === "POST") {
+        head = `commit-${++n}`;
+        return json({ sha: head });
+      }
+      if (url.includes("/git/refs/") && method === "PATCH") {
+        return json({ object: { sha: head } });
+      }
+      if (url.includes("/contents/")) {
+        const pathMatch = url.match(/\/contents\/([^?]*)/);
+        const dir = decodeURIComponent(pathMatch?.[1] ?? "").replace(/\/$/, "");
+        if (dir && files.has(dir)) {
+          return json({ content: Buffer.from(files.get(dir)!).toString("base64"), sha: "blob" });
+        }
+        return json(listDir(dir));
+      }
+      return json({ message: `not found ${url}` }, 404);
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    savedEnv = {};
+    for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+    for (const k of ENV_KEYS) delete process.env[k];
+    process.env.AUTH_SECRET = "test-auth-secret-for-chat-oauth-0123456789";
+    process.env.GITHUB_TOKEN = "ghs_server";
+    process.env.GITHUB_ENABLED = "true";
+    getEnvFresh();
+    cleanupOwner = freshDb().cleanup;
+  });
+
+  afterEach(async () => {
+    setUserGitHubFetchForTest(undefined);
+    vi.unstubAllGlobals();
+    ownerContainer?.githubAutomation.stop();
+    if (ownerApp) {
+      await ownerApp.close();
+      ownerApp = undefined;
+    }
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+    getEnvFresh();
+    cleanupOwner?.();
+  });
+
+  it("sends with the owner's OAuth token and rebinds a server-token project", async () => {
+    const seen: string[] = [];
+    const fake = repoFake(seen);
+    setUserGitHubFetchForTest(fake);
+    vi.stubGlobal("fetch", fake);
+
+    ownerContainer = new Container();
+    await ownerContainer.ensureSeed();
+    ownerApp = (await buildServer(ownerContainer)).app;
+    await ownerApp.ready();
+
+    const alice = ownerContainer.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    storeUserGitHubToken(ownerContainer.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
+    const cookie = `cv_session=${signSession(alice.id)}`;
+
+    const now = new Date().toISOString();
+    const project = {
+      ...legacyProject("proj-owner-chat", "owner-chat", "alice/app"),
+      ownerId: alice.id,
+      githubConnection: { kind: "server-token" as const },
+      createdAt: now,
+      updatedAt: now,
+    } as unknown as Project;
+    ownerContainer.projectRepo.upsert(project, { key: project.slug });
+
+    const listed = await ownerApp.inject({ method: "GET", url: "/projects", headers: { cookie } });
+    expect(listed.statusCode, listed.body).toBe(200);
+
+    const created = await ownerApp.inject({
+      method: "POST",
+      url: "/conversations",
+      headers: { cookie },
+      payload: { projectId: project.id, title: "Project Chat" },
+    });
+    expect(created.statusCode, created.body).toBe(200);
+    const conv = created.json();
+
+    const res = await ownerApp.inject({
+      method: "POST",
+      url: `/conversations/${conv.id}/messages`,
+      headers: { cookie },
+      payload: { role: "user", content: "سلام" },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json();
+    expect(body.messages.at(-1).role).toBe("assistant");
+    expect(body.messages.at(-1).content).toBeTruthy();
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((auth) => auth === "Bearer tok-alice")).toBe(true);
+    expect(ownerContainer.projectRepo.findById(project.id)?.data.githubConnection).toMatchObject({
+      kind: "user-oauth",
+      userId: alice.id,
+      login: "alice",
+    });
   }, 30000);
 });

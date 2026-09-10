@@ -85,8 +85,19 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
       bind(p);
       // Live executor / cancellation routes never block on a repository read.
       if (isOfflineOk) return;
-      await c.agentManager.readProject(p.id);
-      await bootstrapMissingState(c, projectId);
+      try {
+        await c.agentManager.readProject(p.id);
+        await bootstrapMissingState(c, projectId);
+      } catch (err) {
+        // Chat is local-first: a GitHub 404 from the wrong token must not 500
+        // GET/POST /conversations and blank the Chat page. Writes to agents,
+        // workflows, etc. still fail closed.
+        if (resource === "conversations" || req.method === "GET") {
+          logger.warn("project restore skipped", { component: "project-state", projectId, resource, method: req.method, err: String(err) });
+          return;
+        }
+        throw err;
+      }
       return;
     }
     // /skills without projectId is intentionally the global TEMPLATE marketplace.
@@ -95,8 +106,13 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
       for (const { data: p } of c.projectRepo.findMany()) {
         if (!p.ownerId || p.ownerId === user.id) {
           bind(p);
-          await c.agentManager.readProject(p.id);
-          await bootstrapMissingState(c, p.id);
+          try {
+            await c.agentManager.readProject(p.id);
+            await bootstrapMissingState(c, p.id);
+          } catch (err) {
+            // One project's GitHub outage must not 500 the project/conversation list.
+            logger.warn("project restore skipped while listing", { component: "project-state", projectId: p.id, err: String(err) });
+          }
         }
       }
     }

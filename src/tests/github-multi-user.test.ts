@@ -7,6 +7,7 @@ import { signSession } from "../auth/github-oauth.js";
 import { storeUserGitHubToken } from "../auth/github-tokens.js";
 import { setUserGitHubFetchForTest, resolveGitHubForProject, adoptStrandedProjects } from "../github/registry.js";
 import { adoptProjectConnection } from "../auth/project-connection.js";
+import { runWithGitHubRequestActor } from "../github/request-actor.js";
 import type { Project } from "../domain/entities.js";
 import { freshDb } from "./test-helpers.js";
 
@@ -149,6 +150,34 @@ describe("each user acts as their own GitHub identity", () => {
     expect((await resolved.getViewer()).login).toBe("bob");
   });
 
+  it("uses the ALS request actor when githubForProject is called without requestUserId", async () => {
+    await boot();
+    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
+    storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
+    storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
+    setUserGitHubFetchForTest(
+      multiUserGitHub({
+        "tok-alice": { login: "alice", repos: ["alice/one"] },
+        "tok-bob": { login: "bob", repos: ["bob/only"] },
+        ghs_server: { login: "bot", repos: ["bot/shared"] },
+      }),
+    );
+
+    const project = {
+      id: "p-als",
+      ownerId: alice.id,
+      name: "PAT",
+      githubConnection: { kind: "server-token" as const },
+    } as unknown as Project;
+
+    const asBob = runWithGitHubRequestActor(bob.id, () =>
+      resolveGitHubForProject({ project, kv: container.kv, fallback: container.github }),
+    );
+    expect(asBob.kind).toBe("real");
+    expect((await asBob.getViewer()).login).toBe("bob");
+  });
+
   it("still uses the project's stored connection for background work (no request user)", async () => {
     await boot();
     const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
@@ -239,18 +268,30 @@ describe("stranded projects are handed to a connected user", () => {
     }
   });
 
-  it("leaves server-token projects alone while the server token is configured", async () => {
+  it("leaves another user's server-token projects alone while adopting the caller's own", async () => {
     process.env.GITHUB_TOKEN = "ghs_server";
     process.env.GITHUB_ENABLED = "true";
     getEnvFresh();
     await boot();
+    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "A", email: "a@e.com" }).user;
     const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "B", email: "b@e.com" }).user;
     storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
 
-    const serverProject = mkProject({ id: "s1", githubConnection: { kind: "server-token" } });
-    const adopted = adoptStrandedProjects({ kv: container.kv, projects: [serverProject], save: () => {}, userId: bob.id, login: "bob" });
-    expect(adopted).toEqual([]);
-    expect(serverProject.githubConnection).toMatchObject({ kind: "server-token" });
+    const aliceServer = mkProject({ id: "s1", ownerId: alice.id, githubConnection: { kind: "server-token" } });
+    const bobServer = mkProject({ id: "s2", ownerId: bob.id, githubConnection: { kind: "server-token" } });
+    const demoServer = mkProject({ id: "s3", ownerId: "user-demo", githubConnection: { kind: "server-token" } });
+    const saved: string[] = [];
+    const adopted = adoptStrandedProjects({
+      kv: container.kv,
+      projects: [aliceServer, bobServer, demoServer],
+      save: (p) => void saved.push(p.id),
+      userId: bob.id,
+      login: "bob",
+    });
+    expect(adopted).toEqual(["s2", "s3"]);
+    expect(aliceServer.githubConnection).toMatchObject({ kind: "server-token" });
+    expect(bobServer.githubConnection).toMatchObject({ kind: "user-oauth", userId: bob.id, login: "bob" });
+    expect(demoServer.githubConnection).toMatchObject({ kind: "user-oauth", userId: bob.id, login: "bob" });
   });
 });
 
@@ -352,6 +393,39 @@ describe("per-account isolation of definition sub-resources", () => {
 
     expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: alice.id })).toBe(true);
     expect(container.projectRepo.findById("ghost-owned")?.data.githubConnection).toMatchObject({ kind: "user-oauth", userId: alice.id, login: "alice" });
+  });
+
+  it("rebinds a server-token project onto the owner's OAuth token, never a foreign account", async () => {
+    process.env.GITHUB_TOKEN = "ghs_server";
+    process.env.GITHUB_ENABLED = "true";
+    getEnvFresh();
+    await boot();
+    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
+    storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
+    storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
+
+    const owned = {
+      id: "pat-owned",
+      ownerId: alice.id,
+      name: "PAT",
+      slug: "pat-owned",
+      description: "",
+      status: "active",
+      configRepo: "alice/one",
+      branch: "main",
+      repositories: [{ repo: "alice/one", branch: "main" }],
+      githubConnection: { kind: "server-token" as const },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as unknown as Project;
+    container.projectRepo.upsert(owned);
+
+    expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: bob.id })).toBe(false);
+    expect(container.projectRepo.findById("pat-owned")?.data.githubConnection).toMatchObject({ kind: "server-token" });
+
+    expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: alice.id })).toBe(true);
+    expect(container.projectRepo.findById("pat-owned")?.data.githubConnection).toMatchObject({ kind: "user-oauth", userId: alice.id, login: "alice" });
   });
 
   it("binds the acting owner before a workflow write and never steals a live foreign connection", async () => {
