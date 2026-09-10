@@ -75,6 +75,23 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   );
 
   await app.register(cors, { origin: true });
+  // The server is created with `logger: false`, so an unhandled 500 used to
+  // leave no trace anywhere but the client's error toast — the browser showed
+  // "Cannot read properties of undefined (reading 'map')" and the operator had
+  // nothing to go on. Log every server-side failure (with its stack) without
+  // changing the response the client receives.
+  app.addHook("onError", async (request, _reply, error) => {
+    const status = error.statusCode ?? 500;
+    if (status >= 500) {
+      logger.error("request failed", {
+        component: "http",
+        method: request.method,
+        url: request.url,
+        status,
+        err: error.stack ?? String(error),
+      });
+    }
+  });
   registerHardening(app);
   await app.register(swagger, {
     openapi: {

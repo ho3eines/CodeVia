@@ -26,7 +26,7 @@ export async function discoverProjectRules(
   project: Project,
   files: string[],
 ): Promise<DiscoveredRule[]> {
-  const ref = parseRepoFullName(project.repositories[0]?.repo ?? project.configRepo);
+  const ref = parseRepoFullName((project.repositories ?? [])[0]?.repo ?? project.configRepo);
   if (!ref) return [];
   const low = files.map((f) => [f, f.toLowerCase()] as const);
   const pick = (re: RegExp) => low.filter(([, l]) => re.test(l)).map(([f]) => f);

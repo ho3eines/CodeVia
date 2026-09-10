@@ -109,21 +109,24 @@ export class ModelRouter {
       const found = pool_base.find((m) => m.id === id);
       if (found) pool.push(found);
     };
+    // Agent records authored before the model-config defaults existed can carry
+    // a partial `models` object; routing must degrade to "no explicit choice"
+    // instead of throwing on a missing member.
+    const specialized = (agentModels.specialized ?? {}) as Partial<
+      Record<"research" | "coding" | "vision" | "fast" | "final-review" | "reasoning", string | undefined>
+    > & Record<string, string | undefined>;
     if (category !== "default") {
-      const indexed = agentModels.specialized as Partial<
-        Record<"research" | "coding" | "vision" | "fast" | "final-review" | "reasoning", string | undefined>
-      > & Record<string, string | undefined>;
       if (category === "research" || category === "coding" || category === "vision" || category === "fast") {
-        push(indexed[category]);
+        push(specialized[category]);
       } else if (category === "final-review") {
-        push(indexed["final-review"]);
+        push(specialized["final-review"]);
       } else if (category === "reasoning") {
-        push(indexed["reasoning"]);
+        push(specialized["reasoning"]);
       }
     }
     push(agentModels.primary);
     push(agentModels.secondary);
-    for (const f of agentModels.fallbacks) push(f);
+    for (const f of agentModels.fallbacks ?? []) push(f);
 
     // If the agent config produced nothing, fall back to the whole allow-list.
     if (pool.length === 0) pool.push(...pool_base);
@@ -193,6 +196,21 @@ export class ModelRouter {
 
 export const modelRouter = new ModelRouter();
 
+/**
+ * Models stored before the capability matrix existed can carry no
+ * `capabilities` object. Routing reads `caps.<feature>` directly, so an unknown
+ * matrix is normalised to "no explicit capability" rather than throwing (chat
+ * stays on the plain-text path; vision/reasoning routes simply skip the model).
+ */
+const NO_CAPABILITIES: CandidateModel["capabilities"] = {
+  vision: false,
+  tools: false,
+  structuredOutput: false,
+  code: false,
+  reasoning: false,
+  streaming: false,
+};
+
 /** Adapt a stored Model to a CandidateModel for routing. */
 export function toCandidate(m: Model): CandidateModel {
   return {
@@ -203,7 +221,7 @@ export function toCandidate(m: Model): CandidateModel {
     contextWindow: m.contextWindow,
     inputCostPer1k: m.inputCostPer1k,
     outputCostPer1k: m.outputCostPer1k,
-    capabilities: m.capabilities,
+    capabilities: m.capabilities ?? NO_CAPABILITIES,
     priority: m.priority,
     fallbackPriority: m.fallbackPriority,
     perfScore: 0.5,

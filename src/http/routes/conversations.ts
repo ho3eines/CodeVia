@@ -5,14 +5,15 @@ import type { Conversation, ConversationMessage } from "../../domain/entities.js
 import { accessibleProjectIds } from "../project-access.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
+import { hydrateProject } from "../../domain/project-options.js";
 
 const SUMMARY_SYSTEM_PROMPT =
   "You compress a chat between a user and an AI engineering assistant into a concise memory summary. " +
   "Keep: goals, decisions, constraints, open questions, file/branch/PR names, and unresolved bugs. " +
   "Drop pleasantries. Output 5-10 bullet points, no preamble, same language as the conversation.";
 
-function heuristicSummary(messages: ConversationMessage[], take: number): string {
-  return messages
+function heuristicSummary(messages: ConversationMessage[] | undefined, take: number): string {
+  return (messages ?? [])
     .slice(-take)
     .map((m) => `${m.role}: ${m.content.replace(/\s+/g, " ").slice(0, 150)}`)
     .join("\n");
@@ -21,9 +22,10 @@ function heuristicSummary(messages: ConversationMessage[], take: number): string
 /** AI-powered context compression with a deterministic fallback when no model is configured. */
 async function summarizeConversation(
   container: Container,
-  conv: { id: string; projectId: string; modelId?: string; summary?: string; messages: ConversationMessage[] },
+  conv: { id: string; projectId: string; modelId?: string; summary?: string; messages?: ConversationMessage[] },
 ): Promise<{ summary: string; method: "ai" | "heuristic"; modelId?: string }> {
-  const transcript = conv.messages
+  const messages = conv.messages ?? [];
+  const transcript = messages
     .slice(-60)
     .map((m) => `${m.role.toUpperCase()}: ${m.content.slice(0, 1500)}`)
     .join("\n\n");
@@ -54,7 +56,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     if (!conv) return;
     const p = container.projectRepo.findById(conv.projectId)?.data;
     if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
-    await container.projectFiles.syncConversation(p, conv);
+    // hydrateProject() repairs records written before multi-repository support
+    // (no `repositories` array); the file sync below reads `p.repositories`.
+    await container.projectFiles.syncConversation(hydrateProject(p), conv);
   };
   const userFor = (req: unknown): string => {
     const u = resolveRequestUser(req as FastifyRequest, container);
@@ -125,11 +129,14 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     };
     const role = b.role ?? "user";
     const content = (b.content ?? "").trim();
-    if (!content && !(b.attachments && b.attachments.length)) {
+    if (!content && !(Array.isArray(b.attachments) && b.attachments.length)) {
       reply.code(400);
       return { error: "Message content or an attachment is required" };
     }
-    const attachments = (b.attachments || []).slice(0, 8).map((a) => ({
+    // A non-array `attachments` (older clients / hand-crafted payloads) must not
+    // take the whole request down with "…slice is not a function".
+    const rawAttachments: Array<Record<string, unknown>> = Array.isArray(b.attachments) ? (b.attachments as Array<Record<string, unknown>>) : [];
+    const attachments = rawAttachments.slice(0, 8).map((a) => ({
       name: String(a.name || "file").slice(0, 200),
       contentType: String(a.contentType || "application/octet-stream").slice(0, 100),
       size: Number(a.size) || 0,
@@ -160,8 +167,15 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
 
     // Remember chosen model if just set
     updated = container.conversationRepo.findById(id)?.data ?? updated;
+    // hydrateProject() normalises the record the same way GET /projects does:
+    // projects created before multi-repository support have `configRepo`/
+    // `branch` but no `repositories` array, and the chat prompt below reads it
+    // directly (that crashed every send with "Cannot read properties of
+    // undefined (reading 'map')" while the rest of the UI — which hydrates —
+    // kept working).
     const project = container.projectRepo.findById(updated.projectId)?.data;
-    if (!project || !canAccessProject(resolveRequestUser(req, container).user, project)) {
+    const safeProject = project ? hydrateProject(project) : undefined;
+    if (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject)) {
       reply.code(404);
       return { error: "project not found" };
     }
@@ -169,8 +183,8 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     // If the user asked for an execution mode other than plain chat, dispatch
     // a task and return a status message instead of a normal chat reply.
     const mode = b.executionMode ?? "chat";
-    if (role === "user" && project && mode !== "chat") {
-      const result = dispatchProjectAsk(container, project.id, {
+    if (role === "user" && safeProject && mode !== "chat") {
+      const result = dispatchProjectAsk(container, safeProject.id, {
         title: content.slice(0, 80),
         description: content,
         executionMode: mode === "autonomous" || mode === "agent" || mode === "simulation" ? mode : "autonomous",
@@ -197,7 +211,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         } else {
           body = `▶ Task **${taskId?.slice(0, 8) || "?"}** dispatched to **${result.routedAgentType || b.agentType || "agent"}**.`;
         }
-        if (taskId) body += `\n\n[Open runs →](#/projects/${project.id}/runs)`;
+        if (taskId) body += `\n\n[Open runs →](#/projects/${safeProject.id}/runs)`;
         const statusMsg: ConversationMessage = {
           id: randomUUID(),
           role: "assistant",
@@ -207,7 +221,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         };
         updated = container.conversationRepo.addMessage(id, statusMsg);
       }
-    } else if (role === "user" && b.generateResponse !== false && project) {
+    } else if (role === "user" && b.generateResponse !== false && safeProject) {
       // Plain chat: build context including attachments for vision-capable models.
       const attachmentNote = attachments.length
         ? `\n\nThe user also attached ${attachments.length} file(s):\n` +
@@ -218,9 +232,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
             })
             .join("\n")
         : "";
-      const systemPrompt = `You are CodeVia's project assistant AI for the project "${project.name}".
-Project description: ${project.description || "No description provided"}
-Repositories: ${project.repositories.map((r) => r.repo).join(", ")}
+      const systemPrompt = `You are CodeVia's project assistant AI for the project "${safeProject.name}".
+Project description: ${safeProject.description || "No description provided"}
+Repositories: ${(safeProject.repositories ?? []).map((r) => r.repo).join(", ")}
 Language: Respond in the same language the user uses in their message.
 Be helpful, concise, and accurate. When relevant, reference project context, skills, and agents available.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}`;
 
@@ -254,7 +268,7 @@ Be helpful, concise, and accurate. When relevant, reference project context, ski
         if (!b.stream) {
           const res = await container.aiText.complete({
             category: "fast",
-            preferredModelId: b.modelId ?? updated.modelId ?? project.defaultModelId,
+            preferredModelId: b.modelId ?? updated.modelId ?? safeProject.defaultModelId,
             projectId: updated.projectId,
             correlationId: `conv-chat-${id}-${Date.now()}`,
             maxTokens: 2000,

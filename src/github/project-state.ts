@@ -132,7 +132,9 @@ export class ProjectFilesService {
   private async seedMissingMockRepos(p: Project): Promise<boolean> {
     const gh = this.github(p);
     if (gh.kind !== "mock") return false;
-    const links = p.repositories.length ? p.repositories : [{ repo: p.configRepo, branch: p.branch }];
+    // `repositories` is missing on records written before multi-repository
+    // support; fall back to the connected repository instead of throwing.
+    const links = (p.repositories ?? []).length ? p.repositories! : [{ repo: p.configRepo, branch: p.branch }];
     const mock = gh as unknown as { seedRepo(owner: string, name: string, opts?: { files?: GithubFile[]; branch?: string; description?: string }): unknown };
     const existing = new Set((await gh.listRepositories({ limit: 1000 })).map((r) => r.fullName.toLowerCase()));
     let seeded = false;

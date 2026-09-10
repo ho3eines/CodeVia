@@ -419,3 +419,42 @@ All checks now pass:
   registers the service worker on load. Vazirmatn font added for Persian glyphs.
 - TypeScript 0 errors, public/app.js parses, ui-shell 31/31 tests pass, dev
   server up on :8080 serving /manifest.json, /sw.js, /icon.svg (all 200).
+
+## 1405-06-20 — Fix: chat send failed with "Cannot read properties of undefined (reading 'map')"
+- **Symptom (user report, after updating):** the project Chat page loaded and
+  showed the thread, but pressing send showed a red toast
+  `Send failed · Cannot read properties of undefined (reading 'map')`.
+- **Root cause:** `POST /conversations/:id/messages` read the project with
+  `container.projectRepo.findById(...)` — the **raw** record — and built its
+  system prompt with `project.repositories.map((r) => r.repo)`. Projects created
+  before multi-repository support have `configRepo`/`branch` but **no
+  `repositories` array**. Every list/detail endpoint (and the SPA) runs
+  `hydrateProject()`, which rebuilds `repositories` from the connected repo, so
+  the UI looked healthy while every send returned 500. Reproduced against a
+  real-GitHub connection with a legacy project record.
+- **Fix (`src/http/routes/conversations.ts`):** the route now hydrates the
+  project exactly like `GET /projects` does (`hydrateProject`), so legacy
+  records are normalised for the request; the prompt also guards with
+  `(safeProject.repositories ?? [])`. `persist()` hydrates before the GitHub
+  conversation sync for the same reason. Non-array `attachments` are now
+  coerced (previously "…slice is not a function" → 500), and the
+  summary helpers tolerate a missing `messages` array.
+- **Same bug class hardened:**
+  - `ProjectFilesService.seedMissingMockRepos` — `p.repositories.length` crashed
+    Simulation/Mock installs with a 502 (`read/validation failed`); now falls
+    back to the connected repository.
+  - `projectDefinition()` (state-codec) never writes `repositories: undefined`
+    into `CodeVia/project.md` — that produced a manifest that could never be
+    parsed again.
+  - `discoverProjectRules`, `ModelRouter.route`, `realChatFor` and
+    `ProjectStateGenerator` tolerate partial legacy records (missing
+    `models.fallbacks`, `models.specialized`, `capabilities`, `workflow.nodes`).
+- **Observability:** Fastify runs with `logger: false`, so a 500 left no trace
+  anywhere but the browser toast. `buildServer` now installs an `onError` hook
+  that logs method, URL, status and the full stack for every 5xx (response
+  shape is unchanged), so the next failure is diagnosable from the logs.
+- **Tests:** new `src/tests/conversation-chat.test.ts` — legacy project without
+  `repositories` sends successfully (was 500), non-array attachments do not 500,
+  and the normal project + `executionMode: "agent"` dispatch still work.
+  TypeScript 0 errors; the full suite's failing set is unchanged from the
+  pre-change baseline (42 sandbox-only `database is not open` failures).
