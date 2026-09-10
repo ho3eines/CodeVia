@@ -6,7 +6,7 @@ import { buildContextPack, renderPromptContext } from "../agents/context.js";
 import { CONTEXT_FILE, PROJECT_FILE, matter, parseMatter, renderAgentFile, renderTaskFile } from "../github/project-files.js";
 import { renderRulesFile, renderRunFile } from "../github/state-codec.js";
 import { freshDb } from "./test-helpers.js";
-import type { Project } from "../domain/entities.js";
+import type { Agent, Project } from "../domain/entities.js";
 
 /* ------------------------------------------------------------------ *
  * Regression tests for docs/REPOSITORY_STATE_AUDIT.md R01–R08:
@@ -216,6 +216,73 @@ describe("R06 — legacy DB workflows migrate too", () => {
     const found = container.workflowRepo.byProject(legacy.id).find((item) => item.slug === w.slug);
     expect(found).toBeDefined();
     expect(found!.enabled).toBe(false);
+  });
+});
+
+describe("R05 — stale .ai-engineering config paths heal instead of dead-lettering agent.run", () => {
+  // A pre-CodeVia install records agent definitions under
+  // .ai-engineering/agents/*.yaml. When such a record survives into a migrated
+  // project, everything derived from its config path used to throw "agent
+  // definition path must be inside CodeVia/agents/" — including the project
+  // refresh at the start of every agent.run — and because bootstrap threw
+  // before restore could prune the record, the job dead-lettered on every
+  // attempt and the project stayed broken.
+  async function projectWithStaleRecord(): Promise<{ project: Project; stale: Agent }> {
+    // A legacy install: the repository still has no CodeVia/ manifest, and the
+    // database carries one agent record whose config path predates the layout.
+    const legacy: Project = {
+      ...project,
+      id: "stale-path-project",
+      slug: "stale-path-project",
+      configRepo: "audit/stale-path",
+      repositories: [{ repo: "audit/stale-path", branch: "main", role: "primary", isConfigRepo: true }],
+      repositoryState: undefined,
+      repositoryRevision: undefined,
+    };
+    seedRepo("stale-path", [{ path: "README.md", content: "Legacy project" }]);
+    container.projectRepo.upsert(legacy, { key: legacy.slug });
+    const source = container.agentRepo.byProject(project.id)[0];
+    const stale: Agent = { ...source, id: "agent-release-proj-6ac28e8e", projectId: legacy.id, type: "release", slug: "release", configPath: ".ai-engineering/agents/release.yaml", systemPrompt: "GENUINE_LEGACY_RELEASE_PROMPT", tokenBudget: 321, enabled: false, repositoryRevision: undefined };
+    container.agentRepo.upsert(stale, { projectId: legacy.id });
+    return { project: legacy, stale };
+  }
+
+  it("re-points the record at CodeVia/agents/, authors the definition there and lets the refresh succeed", async () => {
+    const { project, stale } = await projectWithStaleRecord();
+
+    // Before the heal this refresh — the first step of every agent.run — threw.
+    await container.agentManager.refreshProject(project.id);
+
+    const healed = container.agentRepo.findById(stale.id)?.data;
+    expect(healed?.configPath).toBe("CodeVia/agents/release.md");
+    expect(healed).toMatchObject({ type: "release", slug: "release", enabled: false, systemPrompt: "GENUINE_LEGACY_RELEASE_PROMPT", tokenBudget: 321 });
+    expect((await container.github.getFile(repo(project), "CodeVia/agents/release.md", project.branch))?.content).toContain("GENUINE_LEGACY_RELEASE_PROMPT");
+    // Nothing may be written at the legacy location.
+    expect(await container.github.getFile(repo(project), ".ai-engineering/agents/release.yaml", project.branch)).toBeUndefined();
+    // Healing is one-time: a second refresh neither rewrites nor drops the record.
+    await container.agentManager.refreshProject(project.id);
+    expect(container.agentRepo.findById(stale.id)?.data.configPath).toBe("CodeVia/agents/release.md");
+  });
+
+  it("defers to a live definition the repository already holds and drops the stale duplicate", async () => {
+    const { project, stale } = await projectWithStaleRecord();
+    const current = { ...stale, id: "agent-release-current", configPath: "CodeVia/agents/release.md", systemPrompt: "REPO_VERSION_PROMPT", enabled: true };
+    await container.github.commit(repo(project), project.branch, "Seed the current release definition", [{ path: "CodeVia/agents/release.md", content: renderAgentFile(current) }]);
+
+    await container.agentManager.refreshProject(project.id);
+
+    expect(container.agentRepo.findById(stale.id)?.data).toBeUndefined();
+    expect(container.agentRepo.findById("agent-release-current")?.data.systemPrompt).toBe("REPO_VERSION_PROMPT");
+  });
+
+  it("respects an intentional tombstone instead of resurrecting or regenerating the agent", async () => {
+    const { project, stale } = await projectWithStaleRecord();
+    await container.github.commit(repo(project), project.branch, "Tombstone the release agent", [{ path: "CodeVia/agents/release.md", content: matter({ deleted: true, kind: "agent", id: stale.id, slug: "release", type: "release" }, "Intentionally removed. Do not regenerate automatically.") }]);
+
+    await container.agentManager.refreshProject(project.id);
+
+    expect(container.agentRepo.findById(stale.id)?.data).toBeUndefined();
+    expect(container.agentRepo.byType(project.id, "release")).toBeUndefined();
   });
 });
 
