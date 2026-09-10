@@ -1676,9 +1676,24 @@
       box.innerHTML = pending.map((a,i) => `<span class="badge badge-info" style="display:inline-flex;gap:4px;align-items:center">📎 ${esc(a.name)} (${Math.round(a.size/1024)}KB) <button class="btn btn-ghost" style="padding:0 4px;font-size:12px" onclick="projectChatRemove(${i})">✕</button></span>`).join("");
     }
     window.projectChatRemove = (i) => { pending.splice(i,1); renderChatAttachments(); };
+    let chatSending = false;
+    let chatStreamAbort = null;
+    const setChatSendBtn = (streaming) => {
+      if (!sendBtn) return;
+      if (streaming) { sendBtn.disabled = false; sendBtn.textContent = "■"; sendBtn.title = "Stop generating"; }
+      else { sendBtn.disabled = false; sendBtn.textContent = "↑"; sendBtn.title = ""; }
+    };
+    const kickTaskPolling = (mode) => {
+      if ((mode === "autonomous" || mode === "agent") && !pollTimer) pollTimer = setTimeout(pollProgress, 1500);
+    };
     const send = async () => {
+      // While a reply streams, the send button doubles as a Stop button.
+      if (chatSending) { if (chatStreamAbort) chatStreamAbort.abort(); return; }
       const content = input.value.trim();
       if (!content && !pending.length) return;
+      const box = $("#p-chat-msgs");
+      chatSending = true;
+      setChatSendBtn(true);
       input.value = "";
       const attachments = pending.slice(); pending = []; renderChatAttachments();
       const body = {
@@ -1689,17 +1704,79 @@
         temperature: Number($("#p-chat-temp")?.value) || 0.3,
         attachments,
       };
-      if (sendBtn) { sendBtn.disabled = true; sendBtn.textContent = "…"; }
+      // 1) The user's own message appears instantly — no waiting on the model.
+      if (box && box.querySelector(".p-chat-empty")) box.innerHTML = "";
+      if (box) {
+        box.insertAdjacentHTML("beforeend", msgBubble({
+          role: "user", content: body.content, createdAt: new Date().toISOString(),
+          metadata: attachments.length ? { attachments } : undefined,
+        }));
+        box.scrollTop = box.scrollHeight;
+      }
+      // 2) Typing placeholder while the reply streams in token by token.
+      const uid = "pc-live-" + Date.now();
+      const isTaskMode = body.executionMode === "autonomous" || body.executionMode === "agent" || body.executionMode === "simulation";
+      if (box) {
+        box.insertAdjacentHTML("beforeend", streamingBubbleHtml(uid, isTaskMode ? "working…" : "thinking…"));
+        box.scrollTop = box.scrollHeight;
+      }
+      let finalConv = null;
+      let gotEvent = false;
+      chatStreamAbort = new AbortController();
       try {
-        const updated = await api(`/conversations/${convId}/messages`, { method: "POST", body });
-        if (updated && (updated.id || asArray(updated.messages).length)) paintConv(updated);
+        await streamConversationSend(convId, body, {
+          onUser: () => { gotEvent = true; },
+          onMeta: (ev) => {
+            gotEvent = true;
+            const s = document.getElementById(uid + "-status"); if (s) s.textContent = "typing…";
+            const mt = document.getElementById(uid + "-meta");
+            if (mt && ev.displayName) mt.innerHTML = `<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(ev.displayName)}</span>`;
+          },
+          onRetry: (ev) => { const s = document.getElementById(uid + "-status"); if (s) s.textContent = ev.message || "trying fallback…"; },
+          onDelta: (ev) => {
+            gotEvent = true;
+            const t = document.getElementById(uid + "-text");
+            if (t) {
+              const prev = t.dataset.acc || "";
+              const acc = prev + (ev.text || "");
+              t.dataset.acc = acc;
+              t.innerHTML = `${esc(acc)}<span class="chat-cursor">▍</span>`;
+              t.setAttribute("dir", dirForText(acc));
+            }
+            if (box) box.scrollTop = box.scrollHeight;
+          },
+          onMessage: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+          onDone: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+          onError: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+        }, { signal: chatStreamAbort.signal });
+        // Authoritative re-paint from the stored conversation (replaces the
+        // optimistic bubble and picks up the persisted assistant reply).
+        if (finalConv && finalConv.id) paintConv(finalConv);
         else await refreshMessages();
-        // Kick off progress polling immediately for dispatched tasks.
-        if ((body.executionMode === "autonomous" || body.executionMode === "agent") && !pollTimer) {
-          pollTimer = setTimeout(pollProgress, 1500);
+        kickTaskPolling(body.executionMode);
+      } catch (e) {
+        if (e && e.name === "AbortError") {
+          // Stopped by the user: the server kept the partial reply — show it.
+          await refreshMessages();
+          kickTaskPolling(body.executionMode);
+        } else if (!gotEvent) {
+          // The stream never started (older server / proxy buffering SSE) —
+          // fall back to the classic request/response send.
+          try {
+            const updated = await api(`/conversations/${convId}/messages`, { method: "POST", body });
+            if (updated && (updated.id || asArray(updated.messages).length)) paintConv(updated);
+            else await refreshMessages();
+            kickTaskPolling(body.executionMode);
+          } catch (e2) { toast("Send failed", e2.message, "err"); await refreshMessages(); }
+        } else {
+          toast("Connection interrupted", "Showing what was saved — send “continue” if the reply cut off.", "warn");
+          await refreshMessages();
         }
-      } catch(e) { toast("Send failed", e.message, "err"); }
-      finally { if (sendBtn) { sendBtn.disabled = false; sendBtn.textContent = "↑"; } if (input) input.focus(); }
+      } finally {
+        chatSending = false; chatStreamAbort = null;
+        setChatSendBtn(false);
+        if (input) input.focus();
+      }
     };
     if (sendBtn) sendBtn.onclick = send;
     if (input) {
@@ -2465,9 +2542,15 @@
       $("#pcv-send").onclick = async () => {
         const content = $("#pcv-msg").value.trim();
         if (!content) return;
+        const btn = $("#pcv-send");
+        btn.disabled = true;
+        btn.textContent = "Sending…";
         try { await api(`/conversations/${convId}/messages`, { method: "POST", body: { role: "user", content } }); render(); }
-        catch (e) { toast("Send failed", e.message, "err"); }
+        catch (e) { toast("Send failed", e.message, "err"); btn.disabled = false; btn.textContent = "Send"; }
       };
+      $("#pcv-msg").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#pcv-send").click(); }
+      });
       $("#pcv-sum").onclick = async () => {
         try { const s = await api(`/conversations/${convId}/summarize`, { method: "POST", body: {} }); toast("Summary updated", s.method || "", "ok"); render(); }
         catch (e) { toast("Summarize failed", e.message, "err"); }
@@ -5062,19 +5145,95 @@
       const input = $("#cv-input");
       const sendBtn = $("#cv-send");
       input.focus();
+      let sending = false;
+      let streamAbort = null;
+      const setSendBtn = (streaming) => {
+        if (streaming) { sendBtn.disabled = false; sendBtn.innerHTML = "■ Stop"; sendBtn.title = "Stop generating"; }
+        else { sendBtn.disabled = false; sendBtn.textContent = "Send ↵"; sendBtn.title = ""; }
+      };
       const doSend = async () => {
+        // While a reply streams, activating send stops the generation instead.
+        if (sending) { if (streamAbort) streamAbort.abort(); return; }
         const content = input.value.trim();
         if (!content) return;
+        const box = $("#cv-messages");
+        sending = true;
+        setSendBtn(true);
         input.value = "";
-        sendBtn.disabled = true;
-        sendBtn.textContent = "…";
+        // 1) The user's own message appears instantly — no waiting on the model.
+        if (box && msgs.length === 0) box.innerHTML = "";
+        if (box) {
+          box.insertAdjacentHTML("beforeend", msgBubble({ role: "user", content, createdAt: new Date().toISOString() }));
+          box.scrollTop = box.scrollHeight;
+        }
+        // 2) Typing placeholder while the reply streams in token by token.
+        const uid = "cv-live-" + Date.now();
+        if (box) {
+          box.insertAdjacentHTML("beforeend", streamingBubbleHtml(uid));
+          box.scrollTop = box.scrollHeight;
+        }
+        let finalConv = null;
+        let gotEvent = false;
+        streamAbort = new AbortController();
         try {
-          const updated = await api(`/conversations/${id}/messages`, { method: "POST", body: { role: "user", content } });
-          await render(updated && updated.id ? updated : undefined);
+          await streamConversationSend(id, { role: "user", content }, {
+            onUser: () => { gotEvent = true; },
+            onMeta: (ev) => {
+              gotEvent = true;
+              const s = document.getElementById(uid + "-status"); if (s) s.textContent = "typing…";
+              const mt = document.getElementById(uid + "-meta");
+              if (mt && ev.displayName) mt.innerHTML = `<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(ev.displayName)}</span>`;
+            },
+            onRetry: (ev) => { const s = document.getElementById(uid + "-status"); if (s) s.textContent = ev.message || "trying fallback…"; },
+            onDelta: (ev) => {
+              gotEvent = true;
+              const t = document.getElementById(uid + "-text");
+              if (t) {
+                const prev = t.dataset.acc || "";
+                const acc = prev + (ev.text || "");
+                t.dataset.acc = acc;
+                t.innerHTML = `${esc(acc)}<span class="chat-cursor">▍</span>`;
+                t.setAttribute("dir", dirForText(acc));
+              }
+              if (box) box.scrollTop = box.scrollHeight;
+            },
+            onMessage: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+            onDone: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+            onError: (ev) => { gotEvent = true; if (ev.conversation) finalConv = ev.conversation; },
+          }, { signal: streamAbort.signal });
+          // Authoritative re-render from the stored conversation.
+          if (finalConv && finalConv.id) await render(finalConv);
+          else {
+            const fresh = await api(`/conversations/${id}`).catch(() => null);
+            if (fresh && fresh.id) await render(fresh);
+            else { document.getElementById(uid)?.remove(); sending = false; streamAbort = null; setSendBtn(false); return; }
+          }
         } catch (e) {
-          toast("Send failed", e.message, "err");
-          sendBtn.disabled = false;
-          sendBtn.textContent = "Send ↵";
+          if (e && e.name === "AbortError") {
+            // Stopped by the user: the server kept the partial reply — show it.
+            const fresh = await api(`/conversations/${id}`).catch(() => null);
+            if (fresh && fresh.id) await render(fresh);
+          } else if (!gotEvent) {
+            // The stream never started (older server / proxy buffering SSE) —
+            // fall back to the classic request/response send.
+            try {
+              const updated = await api(`/conversations/${id}/messages`, { method: "POST", body: { role: "user", content } });
+              await render(updated && updated.id ? updated : undefined);
+            } catch (e2) {
+              toast("Send failed", e2.message, "err");
+              document.getElementById(uid)?.remove();
+              input.value = content;
+            }
+          } else {
+            toast("Connection interrupted", "Showing what was saved — send “continue” if the reply cut off.", "warn");
+            const fresh = await api(`/conversations/${id}`).catch(() => null);
+            if (fresh && fresh.id) await render(fresh);
+          }
+        } finally {
+          sending = false; streamAbort = null;
+          // `render()` rebuilds the DOM (new button + new closure); only reset
+          // the button if this closure's view is still mounted.
+          if (document.getElementById("cv-send") === sendBtn) setSendBtn(false);
         }
       };
       sendBtn.onclick = doSend;
@@ -5091,6 +5250,67 @@
     };
     await render();
   });
+
+  /**
+   * POST a message to a conversation over the SSE streaming endpoint and
+   * dispatch each frame to `handlers` (onUser/onMeta/onRetry/onDelta/
+   * onMessage/onDone/onError). Resolves when the stream ends; throws on
+   * transport errors (HTTP failure, network drop, abort) so the caller can
+   * fall back to the JSON endpoint or re-fetch the stored state.
+   */
+  async function streamConversationSend(convId, body, handlers = {}, opts = {}) {
+    const res = await fetch(`/conversations/${encodeURIComponent(convId)}/messages/stream`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
+    if (!res.ok || !res.body) {
+      let msg = res.statusText;
+      try { const jb = await res.json(); msg = jb.message || jb.error || msg; } catch (_) { /* ignore */ }
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      for (const part of parts) {
+        const line = part.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line.slice(5).trim()); } catch (_) { continue; }
+        if (!ev || typeof ev.type !== "string") continue;
+        const name = "on" + ev.type.charAt(0).toUpperCase() + ev.type.slice(1);
+        if (typeof handlers[name] === "function") {
+          try { handlers[name](ev); } catch (_) { /* a broken handler must not kill the stream */ }
+        }
+      }
+    }
+  }
+
+  /**
+   * Assistant bubble placeholder for a streaming reply: animated typing dots
+   * until the first `delta` arrives, then the accumulating text + cursor.
+   * `uid` prefixes the ids the send handlers update (`${uid}-text` etc.).
+   */
+  function streamingBubbleHtml(uid, statusText = "thinking…") {
+    return `<div id="${uid}" style="display:flex;gap:8px;justify-content:flex-start">
+      <span style="font-size:22px;line-height:1;align-self:flex-end">🤖</span>
+      <div style="max-width:min(78%,520px);background:var(--panel, var(--glass));color:var(--text);padding:10px 14px;border-radius:16px;border-bottom-left-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.2)">
+        <div style="font-size:11px;opacity:.7;margin-bottom:4px">CodeVia AI · <span id="${uid}-status">${esc(statusText)}</span></div>
+        <div id="${uid}-text" dir="auto" style="white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.55"><span class="cv-typing-dots"><span></span><span></span><span></span></span></div>
+        <div id="${uid}-meta" style="font-size:10px;opacity:.55;margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
+    </div>`;
+  }
 
   function msgBubble(m) {
     const isUser = m.role === "user";
