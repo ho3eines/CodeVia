@@ -6,6 +6,7 @@ import { accessibleProjectIds } from "../project-access.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
 import { hydrateProject } from "../../domain/project-options.js";
+import { buildRepoBrief } from "../../agents/context.js";
 import { logger } from "../../logger.js";
 
 const SUMMARY_SYSTEM_PROMPT =
@@ -238,11 +239,21 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
             })
             .join("\n")
         : "";
+      // Give the assistant real repository evidence (file tree, README, manifest
+      // excerpts) so questions like "review this project" or "read the README"
+      // are answered from the repo instead of invented from the project name.
+      // Advisory only: a missing/private repo must never break the send.
+      const repoBrief = safeProject.configRepo
+        ? await buildRepoBrief({
+            github: container.githubForProject(safeProject, resolveRequestUser(req, container).user.id),
+            project: safeProject,
+          }).catch(() => "")
+        : "";
       const systemPrompt = `You are CodeVia's project assistant AI for the project "${safeProject.name}".
 Project description: ${safeProject.description || "No description provided"}
 Repositories: ${(safeProject.repositories ?? []).map((r) => r.repo).join(", ")}
 Language: Respond in the same language the user uses in their message.
-Be helpful, concise, and accurate. When relevant, reference project context, skills, and agents available.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}`;
+Be helpful, concise, and accurate. When relevant, reference project context, skills, and agents available.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}${repoBrief ? `\n\nRepository context (read this before answering questions about the codebase; never claim a file is missing without checking this list):\n${repoBrief}` : ""}`;
 
       // Build multimodal-ish user message: put images inline as data URLs for
       // vision-capable models when possible; otherwise just list them in text.
