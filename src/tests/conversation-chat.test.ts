@@ -91,6 +91,44 @@ function modernProject(id: string, slug: string, configRepo: string): Project {
 }
 
 describe("project chat send", () => {
+  it("injects real repository evidence (README + tree) into the chat prompt", async () => {
+    const name = `blazor-${randomUUID().slice(0, 8)}`;
+    const repo = `acme/${name}`;
+    const gh = container.github as unknown as {
+      seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string }): unknown;
+    };
+    gh.seedRepo("acme", name, {
+      files: [
+        { path: "README.md", content: "# Pdd.ir — Blazor shop\nThis is a Blazor WebAssembly project." },
+        { path: "Pdd.ir.csproj", content: "<Project Sdk=\"Microsoft.NET.Sdk.BlazorWebAssembly\">" },
+        { path: "Program.cs", content: "var builder = WebAssemblyHostBuilder.CreateDefault(args);" },
+      ],
+      branch: "main",
+    });
+
+    const project = modernProject(`proj-${name}`, name, repo);
+    container.projectRepo.upsert(project, { key: project.slug });
+
+    const created = await app.inject({ method: "POST", url: "/conversations", payload: { projectId: project.id, title: "Project Chat", userId: "local-user" } });
+    expect(created.statusCode, created.body).toBe(200);
+    const conv = created.json();
+
+    const spy = vi.spyOn(container.aiText, "complete");
+    try {
+      const res = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "پروژه رو بررسی کن" } });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().messages.at(-1).role).toBe("assistant");
+      expect(spy).toHaveBeenCalled();
+      const messages = spy.mock.calls[0][0].messages;
+      const system = messages.find((m) => m.role === "system")?.content ?? "";
+      expect(system).toContain("Pdd.ir — Blazor shop");
+      expect(system).toContain("BlazorWebAssembly");
+      expect(system).toContain("Pdd.ir.csproj");
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30000);
+
   it("sends on a legacy project that has no repositories array", async () => {
     const project = legacyProject("proj-legacy1", "legacy1", "acme/legacy");
     container.projectRepo.upsert(project, { key: project.slug });

@@ -178,6 +178,101 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
   return empty;
 }
 
+export interface RepoBriefOptions {
+  github: IGitHubService;
+  project: Project;
+  branch?: string;
+  /** Cap on the file-tree lines shown (default 40). */
+  maxTree?: number;
+  /** Cap on the README/Agent.md excerpt (default 4000 chars). */
+  maxReadme?: number;
+  /** Cap per manifest excerpt (default 1500 chars). */
+  maxManifest?: number;
+}
+
+/**
+ * Compact repository brief for surfaces that answer questions without going
+ * through the full agent ContextEngine — most importantly the project chat.
+ *
+ * The chat assistant was previously given only the project record (name,
+ * description, repo list) and therefore answered "review this project" by
+ * hallucinating a generic structure (e.g. a Python `main.py`/`requirements.txt`)
+ * and, when asked to read the README, claimed it "doesn't exist" — even though
+ * the repository is a Blazor app with a real README. This brief supplies real
+ * evidence instead: the file tree, the README (or Agent.md), and manifest
+ * excerpts.
+ *
+ * Advisory only — never throws, so a missing/private repository can't break the
+ * surrounding call.
+ */
+export async function buildRepoBrief(opts: RepoBriefOptions): Promise<string> {
+  const { github, project } = opts;
+  const branch = opts.branch || project.branch || "main";
+  const maxTree = opts.maxTree ?? 40;
+  const maxReadme = opts.maxReadme ?? 4000;
+  const maxManifest = opts.maxManifest ?? 1500;
+  const [owner, ...rest] = String(project.configRepo ?? "").split("/");
+  const ref = { owner, name: rest.join("/") };
+  if (!owner || !ref.name) return "";
+
+  const getFile = async (path: string): Promise<string | undefined> => {
+    try {
+      return (await github.getFile(ref, path, branch))?.content;
+    } catch {
+      return undefined;
+    }
+  };
+
+  let paths: string[] = [];
+  try {
+    paths = (await github.listFiles(ref, branch))
+      .filter((e) => e.type === "blob")
+      .map((e) => e.path)
+      .filter((p) => !p.startsWith(".git/") && !p.startsWith("CodeVia/"));
+  } catch {
+    /* advisory */
+  }
+
+  const README_CANDIDATES = ["README.md", "readme.md", "README", "Agent.md", "AGENTS.md"];
+  const sections: string[] = [];
+
+  if (paths.length) {
+    sections.push(
+      `Repository files (${paths.length}):`,
+      ...paths.slice(0, maxTree).map((p) => `- ${p}`),
+      ...(paths.length > maxTree ? [`- … +${paths.length - maxTree} more`] : []),
+    );
+  }
+
+  // The README (or an agent-facing instruction file) is the single most
+  // valuable signal for "what is this project".
+  for (const candidate of README_CANDIDATES) {
+    const content = await getFile(candidate);
+    if (content) {
+      sections.push(`--- ${candidate} ---`, content.slice(0, maxReadme));
+      break;
+    }
+  }
+
+  // Manifest/config excerpts, excluding the README we already included.
+  const manifests = paths
+    .filter((p) => !README_CANDIDATES.includes(p))
+    .map((p) => {
+      const base = p.split("/").pop() ?? p;
+      const m = CONFIG_MATCHERS.find((c) => c.test(base));
+      return m ? { path: p, priority: m.priority } : undefined;
+    })
+    .filter((x): x is { path: string; priority: number } => !!x)
+    .sort((a, b) => a.priority - b.priority)
+    .slice(0, 3);
+  for (const { path } of manifests) {
+    const content = await getFile(path);
+    if (content) sections.push(`--- ${path} ---`, content.slice(0, maxManifest));
+  }
+
+  return sections.join("\n");
+}
+
 export function parseRegistry(markdown: string | undefined): Record<string, RegistryEntry> {
   const out: Record<string, RegistryEntry> = {};
   if (!markdown) return out;
