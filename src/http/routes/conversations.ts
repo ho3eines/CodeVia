@@ -371,6 +371,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         executionMode: mode === "autonomous" || mode === "agent" || mode === "simulation" ? mode : "autonomous",
         agentType: b.agentType,
         correlationId: `conv-chat-${id}-${Date.now()}`,
+        requestUserId: resolveRequestUser(req, container).authenticated ? resolveRequestUser(req, container).user.id : undefined,
       });
       if (isAskError(result)) {
         const errMsg: ConversationMessage = {
@@ -569,6 +570,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           executionMode: mode === "autonomous" || mode === "agent" || mode === "simulation" ? mode : "autonomous",
           agentType: b.agentType,
           correlationId: `conv-chat-${id}-${Date.now()}`,
+          requestUserId: resolveRequestUser(req, container).authenticated ? resolveRequestUser(req, container).user.id : undefined,
         });
         let statusMsg: ConversationMessage;
         if (isAskError(result)) {

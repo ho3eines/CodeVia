@@ -21,7 +21,7 @@ export interface WorkerDeps {
   approvalRepo: ApprovalRepository;
   github: IGitHubService;
   /** Per-project connection; falls back to `github` when a project has none. */
-  githubForProject?: (project: Project) => IGitHubService;
+  githubForProject?: (project: Project, requestUserId?: string) => IGitHubService;
   telegram: ITelegramService;
   notificationRepo: NotificationRepository;
   logger: Logger;

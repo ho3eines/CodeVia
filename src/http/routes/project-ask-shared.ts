@@ -20,6 +20,8 @@ export interface AskParams {
   agentType?: string;
   workflowId?: string;
   correlationId?: string;
+  /** The signed-in user behind the request, so the task uses their GitHub OAuth token. */
+  requestUserId?: string;
 }
 
 export interface AskResult {
@@ -107,7 +109,7 @@ export function dispatchProjectAsk(
     description,
     agentType: workflowId || mode === "autonomous" ? undefined : routedAgentType,
     workflowId,
-    input: { routedAgentType, agentHint: params.agentType, executionMode: mode },
+    input: { routedAgentType, agentHint: params.agentType, executionMode: mode, requestUserId: params.requestUserId },
   });
   const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: params.correlationId ?? task.correlationId });
   const queued = { ...task, status: "queued" as const, updatedAt: new Date().toISOString() };

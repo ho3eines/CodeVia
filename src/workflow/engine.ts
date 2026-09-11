@@ -17,7 +17,7 @@ export interface WorkflowEngineDeps {
   agentRunner: AgentRunner;
   toolRegistry: ToolRegistry;
   github: IGitHubService;
-  githubForProject?: (project: Project) => IGitHubService;
+  githubForProject?: (project: Project, requestUserId?: string) => IGitHubService;
   requestApproval?: (action: string, detail: Record<string, unknown>) => Promise<boolean>;
   checkActive?: (task: Task) => void;
 }
@@ -50,7 +50,7 @@ export interface WorkflowRunResult {
 export class WorkflowEngine {
   constructor(private readonly deps: WorkflowEngineDeps) {}
 
-  async run(workflow: Workflow, project: Project, task: Task, inputs: Record<string, unknown> = {}): Promise<WorkflowRunResult> {
+  async run(workflow: Workflow, project: Project, task: Task, inputs: Record<string, unknown> = {}, requestUserId?: string): Promise<WorkflowRunResult> {
     const correlationId = task.correlationId || generateCorrelationId();
     const outputs: Record<string, unknown> = Object.create(null);
     const trace: NodeTrace[] = [];
@@ -67,7 +67,7 @@ export class WorkflowEngine {
     } catch (err) {
       return { workflowId: workflow.id, status: err instanceof TaskCancelledError ? "cancelled" : "failed", outputs, repositories: [], error: String(err), trace: [{ id: "preflight", node: "Validate workflow", type: "validation", status: "failed", output: { error: String(err) } }] };
     }
-    const github = this.deps.githubForProject?.(project) ?? this.deps.github;
+    const github = this.deps.githubForProject?.(project, requestUserId) ?? this.deps.github;
     await eventBus.publish("workflow.started", { workflowId: workflow.id, projectId: project.id }, { correlationId, projectId: project.id });
     live.emit({ type: "task.updated", taskId: task.id, projectId: task.projectId, data: { status: "running" } });
     const nodes = new Map(workflow.nodes.map((node) => [node.id, node]));
@@ -153,7 +153,7 @@ export class WorkflowEngine {
             const reviewRef = !isWriter(agentType) ? [...implementations.values()][0] : undefined;
             if (reviewRef) runTask.input.files = reviewRef.files;
             const repository = reviewRef ? { repo: reviewRef.repo, branch: reviewRef.sha ?? reviewRef.branch, defaultBranch: reviewRef.baseBranch, role: "primary" as const, isConfigRepo: false } : undefined;
-            const run = await this.deps.agentRunner.run({ task: runTask, agent, project, taskBudget, plan, repository });
+            const run = await this.deps.agentRunner.run({ task: runTask, agent, project, taskBudget, plan, repository, requestUserId });
             for (const step of run.steps) {
               if (step.tool === "write_file" && step.status === "succeeded") recordWrite(repositoryForAgent(project, agentType).repo, step.data);
               if (step.tool === "run_tests" || step.tool === "run_build") recordEvidence(step.data);

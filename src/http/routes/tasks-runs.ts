@@ -4,6 +4,7 @@ import { executionTask } from "../../agents/execution.js";
 import type { Container } from "../../app/container.js";
 import { matter } from "../../github/project-files.js";
 import { accessibleProjectIds } from "../project-access.js";
+import { resolveRequestUser } from "../auth.js";
 
 export function registerTaskRoutes(app: FastifyInstance, container: Container): void {
   app.get("/tasks", { schema: { tags: ["tasks"] } }, async (req) => {
@@ -17,6 +18,9 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
 
   app.post("/tasks", { schema: { tags: ["tasks"] } }, async (req) => {
     const b = req.body as Record<string, unknown>;
+    const { user: reqUser, authenticated: reqAuth } = resolveRequestUser(req, container);
+    const input = (b.input as Record<string, unknown> | undefined) ?? {};
+    if (reqAuth) input.requestUserId = reqUser.id;
     const task = container.agentManager.createTask({
       projectId: String(b.projectId),
       title: String(b.title ?? "Task"),
@@ -24,7 +28,7 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       priority: (b.priority as "low" | "medium" | "high" | "critical" | undefined) ?? "medium",
       agentType: b.agentType as never,
       workflowId: b.workflowId as string | undefined,
-      input: b.input as Record<string, unknown> | undefined,
+      input,
     });
     const p = container.projectRepo.findById(task.projectId)?.data;
     if (p) await container.projectFiles.syncTask(p, task);
@@ -91,7 +95,12 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     if (task.status === "waiting_for_approval") {
       return reply.code(409).send({ error: "Task is waiting for approval; approve, reject, or cancel it before running again", taskId: task.id });
     }
-    container.taskRepo.upsert({ ...task, status: "queued", error: undefined, updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
+    // Store the signed-in user's id so the worker can use their GitHub OAuth
+    // token when resolving the project's GitHub connection (GITHUB_TOKEN is
+    // login-only and cannot write to the user's repositories).
+    const { user: reqUser, authenticated: reqAuth } = resolveRequestUser(req, container);
+    const inputWithUser = reqAuth ? { ...(task.input as Record<string, unknown> | undefined ?? {}), requestUserId: reqUser.id } : task.input;
+    container.taskRepo.upsert({ ...task, status: "queued", error: undefined, input: inputWithUser as typeof task.input, updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
     const p = container.projectRepo.findById(task.projectId)?.data;
     if (p) await container.projectFiles.syncTask(p, container.taskRepo.findById(task.id)!.data);
     const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
