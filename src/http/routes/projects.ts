@@ -710,6 +710,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       agentType: body.agentType as string | undefined,
       workflowId: typeof body.workflowId === "string" ? body.workflowId : undefined,
       correlationId: `project-ask-${id}-${Date.now()}`,
+      requestUserId: resolveRequestUser(req, container).authenticated ? resolveRequestUser(req, container).user.id : undefined,
     });
     if (isAskError(result)) return fail(reply, result.status, result.error);
     return result;

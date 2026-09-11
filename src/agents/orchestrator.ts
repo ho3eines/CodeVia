@@ -30,7 +30,7 @@ export interface AutonomousDeps {
   agentRouter: AgentRouter;
   skillsRegistry: SkillRegistry;
   github: IGitHubService;
-  githubForProject?: (project: Project) => IGitHubService;
+  githubForProject?: (project: Project, requestUserId?: string) => IGitHubService;
   modelRepo: ModelRepository;
   providerRepo: ProviderRepository;
   providerRegistry?: ProviderRegistry;
@@ -173,11 +173,14 @@ interface WorkingCopy extends ImplementationRepository {
   exists: boolean;
 }
 
-/** GitHub → research → specialized implementation → CI/QA → bounded fixes → human review. */
+  /** GitHub → research → specialized implementation → CI/QA → bounded fixes → human review. */
 export class AutonomousOrchestrator {
+  /** Stored at run time so all phases use the same user identity. */
+  private requestUserId?: string;
   constructor(private readonly deps: AutonomousDeps) {}
 
-  async run(taskId: string): Promise<AutonomousSummary> {
+  async run(taskId: string, requestUserId?: string): Promise<AutonomousSummary> {
+    this.requestUserId = requestUserId;
     try {
       return await this.execute(taskId);
     } catch (err) {
@@ -206,7 +209,7 @@ export class AutonomousOrchestrator {
       project = this.deps.projectRepo.findById(project.id)!.data;
     }
     active();
-    const github = this.deps.githubForProject?.(project) ?? this.deps.github;
+    const github = this.deps.githubForProject?.(project, this.requestUserId) ?? this.deps.github;
     const budget = new ExecutionBudget(project.settings.budget);
     const check = () => { active(); budget.check(); };
     const researchAgent = this.needAgent(project.id, "research");
@@ -532,7 +535,7 @@ export class AutonomousOrchestrator {
       this.deps.taskRepo.upsert({ ...current, status: "running", error: undefined, updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
       const run = this.deps.executor
         ? await this.deps.executor(task, agent, project, opts.plan)
-        : await this.deps.agentRunner.run({ ...opts, task, agent, project, providerRegistry: this.deps.providerRegistry });
+        : await this.deps.agentRunner.run({ ...opts, task, agent, project, providerRegistry: this.deps.providerRegistry, requestUserId: this.requestUserId });
       assertTaskActive(this.deps.taskRepo, task);
       const latest = this.deps.taskRepo.findById(task.id)!.data;
       this.deps.taskRepo.upsert({ ...latest, assignedAgentId: agent.id, result: {

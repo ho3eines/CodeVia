@@ -36,7 +36,7 @@ export interface AgentRunnerDeps {
   modelRouter: ModelRouter;
   contextEngine: ContextEngine;
   github: IGitHubService;
-  githubForProject?: (project: Project) => IGitHubService;
+  githubForProject?: (project: Project, requestUserId?: string) => IGitHubService;
   requestApproval?: (action: string, detail: Record<string, unknown>) => Promise<boolean>;
   memoryFor?: (project: Project) => IMemoryStore;
   memoryRepo?: MemoryRepository;
@@ -70,6 +70,8 @@ export interface RunRequest {
   providerRegistry?: ProviderRegistry;
   category?: TaskCategory;
   workspaceRoot?: string;
+  /** The signed-in user behind the current request, when there is one. */
+  requestUserId?: string;
 }
 
 /** Executes only grounded plans: model deliverables, permissioned tools and recorded evidence. */
@@ -94,7 +96,7 @@ export class AgentRunner {
     if (!agent.enabled) throw new Error(`Agent ${agent.name} (${agent.type}) is disabled`);
     if (agent.projectId !== project.id || task.projectId !== project.id) throw new Error("Agent, task and project must belong to the same project");
     const correlationId = task.correlationId || generateCorrelationId();
-    const github = this.deps.githubForProject?.(project) ?? this.deps.github;
+    const github = this.deps.githubForProject?.(project, req.requestUserId) ?? this.deps.github;
     const repository = req.repository ?? (isWriter(agent.type) ? repositoryForAgent(project, agent.type) : undefined);
     const executionProject = repository ? { ...project, configRepo: repository.repo, branch: repository.branch } : project;
     const budget = runBudget(project, agent);

@@ -109,7 +109,7 @@ export interface AgentManagerDeps {
   modelRepo: ModelRepository;
   providerRepo: ProviderRepository;
   github: IGitHubService;
-  githubForProject?: (project: Project) => IGitHubService;
+  githubForProject?: (project: Project, requestUserId?: string) => IGitHubService;
   /** Real-AI access for the autonomous task loop (optional — loop stays deterministic without it). */
   providerRegistry?: ProviderRegistry;
   /** DB memory index (optional — needed for the CodeVia/memory.md sync). */
@@ -127,7 +127,7 @@ export interface AgentManagerDeps {
 export class AgentManager {
   private readonly agentRouter: AgentRouter;
   private readonly inFlight = new Map<string, Promise<Task>>();
-  private githubFor(project: Project): IGitHubService { return this.deps.githubForProject?.(project) ?? this.deps.github; }
+  private githubFor(project: Project, requestUserId?: string): IGitHubService { return this.deps.githubForProject?.(project, requestUserId) ?? this.deps.github; }
   constructor(private readonly deps: AgentManagerDeps) {
     this.agentRouter = deps.agentRouter;
     if (deps.projectFiles && deps.memoryRepo && deps.providerRegistry) this.state = new ProjectStateCoordinator({
@@ -790,12 +790,17 @@ export class AgentManager {
     try { taskId = executionTask(this.deps.taskRepo, taskId).id; } catch (err) { return Promise.reject(err); }
     const existing = this.inFlight.get(taskId);
     if (existing) return existing;
-    const pending = this.executeTask(taskId).finally(() => this.inFlight.delete(taskId));
+    // Read the requestUserId stored on the task at creation time (set by HTTP
+    // routes so background execution uses the user's own GitHub OAuth token
+    // instead of the admin/server GITHUB_TOKEN).
+    const storedTask = this.deps.taskRepo.findById(taskId)?.data;
+    const requestUserId = (storedTask?.input as Record<string, unknown> | undefined)?.requestUserId as string | undefined;
+    const pending = this.executeTask(taskId, requestUserId).finally(() => this.inFlight.delete(taskId));
     this.inFlight.set(taskId, pending);
     return pending;
   }
 
-  private async executeTask(taskId: string): Promise<Task> {
+  private async executeTask(taskId: string, requestUserId?: string): Promise<Task> {
     const task = this.deps.taskRepo.findById(taskId)?.data;
     if (!task) throw new Error(`Task ${taskId} not found`);
     // Everything — including the project refresh, which can throw on repository
@@ -816,7 +821,7 @@ export class AgentManager {
           agentRepo: this.deps.agentRepo,
           agentRunner: this.deps.agentRunner,
           agentRouter: this.agentRouter,
-          github: this.githubFor(project),
+          github: this.githubFor(project, requestUserId),
           githubForProject: this.deps.githubForProject,
           modelRepo: this.deps.modelRepo,
           providerRepo: this.deps.providerRepo,
@@ -825,14 +830,14 @@ export class AgentManager {
           files: this.deps.projectFiles,
           memoryRepo: this.deps.memoryRepo,
         });
-        const summary = await orchestrator.run(taskId);
+        const summary = await orchestrator.run(taskId, requestUserId);
         assertTaskActive(this.deps.taskRepo, task);
         const current = this.deps.taskRepo.findById(taskId)!.data;
         this.deps.taskRepo.upsert({ ...current, result: { ...current.result, ...summary } }, { projectId: task.projectId, parentId: task.parentTaskId });
       } else if (task.workflowId) {
         const workflow = this.deps.workflowRepo.findById(task.workflowId)?.data;
         if (!workflow) throw new Error(`Workflow ${task.workflowId} not found`);
-        const result = await this.deps.workflowEngine.run(workflow, project, task, task.input);
+        const result = await this.deps.workflowEngine.run(workflow, project, task, task.input, requestUserId);
         const current = this.deps.taskRepo.findById(taskId)?.data;
         if (!current) throw new TaskCancelledError(taskId);
         this.deps.taskRepo.upsert({ ...current, result: { ...result } }, { projectId: task.projectId, parentId: task.parentTaskId });
@@ -850,7 +855,7 @@ export class AgentManager {
           ), { retryable: false });
         }
       } else {
-        await this.routeAndRun(task, project);
+        await this.routeAndRun(task, project, requestUserId);
       }
       const prev = this.deps.taskRepo.findById(taskId)?.data!;
       if (prev.status === "cancelled") throw new TaskCancelledError(taskId);
@@ -877,14 +882,14 @@ export class AgentManager {
     }
   }
 
-  private async routeAndRun(task: Task, project: Project): Promise<void> {
+  private async routeAndRun(task: Task, project: Project, requestUserId?: string): Promise<void> {
     const type = task.agentType ?? this.agentRouter.route(`${task.title} ${task.description}`);
     const agent = this.deps.agentRepo.byType(project.id, type);
     if (!agent) {
       throw new Error(`No enabled agent of type ${type} in project ${project.id}`);
     }
     this.deps.taskRepo.upsert({ ...this.deps.taskRepo.findById(task.id)!.data, assignedAgentId: agent.id }, { projectId: task.projectId, parentId: task.parentTaskId });
-    const run = await this.deps.agentRunner.run({ task, agent, project, repository: isWriter(type) ? repositoryForAgent(project, type) : undefined });
+    const run = await this.deps.agentRunner.run({ task, agent, project, repository: isWriter(type) ? repositoryForAgent(project, type) : undefined, requestUserId });
     assertTaskActive(this.deps.taskRepo, task);
     const current = this.deps.taskRepo.findById(task.id)!.data;
     this.deps.taskRepo.upsert({ ...current, result: { runId: run.id, summary: run.summary, verification: run.verification, skills: run.skills, artifacts: run.steps.filter((s) => ["write_file", "create_pull_request"].includes(s.tool ?? "")).map((s) => s.data) } }, { projectId: task.projectId, parentId: task.parentTaskId });
