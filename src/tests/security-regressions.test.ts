@@ -4,6 +4,7 @@ import { getEnvFresh } from "../config/env.js";
 import { Container } from "../app/container.js";
 import { buildServer } from "../http/app.js";
 import { signSession } from "../auth/github-oauth.js";
+import { storeUserGitHubToken } from "../auth/github-tokens.js";
 import { live } from "../realtime/live.js";
 import { freshDb } from "./test-helpers.js";
 import type { FastifyInstance } from "fastify";
@@ -179,18 +180,34 @@ describe("A02 — project routes enforce per-project ownership", () => {
     expect(patched.json().description).toBe("mine");
   });
 
-  it("keeps shared (unowned) projects accessible to other accounts", async () => {
+  it("hides shared (unowned) projects from other accounts — they are handed over at login instead", async () => {
     const srv = await boot();
     const alice = makeUser(103, "sharer-alice");
     const bob = makeUser(104, "reader-bob");
     const pid = await ownedProject(srv, alice, "Shared");
-    // Legacy/shared semantics: a project without an owner is visible to everyone.
+    // Legacy/shared rows: a project without an owner used to be visible to
+    // every account. That is exactly how one account ended up opening another
+    // account's repository and erroring out on the first GitHub call made with
+    // *its own* token (404 / no access). Unowned rows are now hidden from
+    // signed-in accounts; `adoptStrandedProjects` hands them to the account
+    // that logs in, so nothing disappears from the installation that owns them.
     const rec = container.projectRepo.findById(pid)!;
     container.projectRepo.upsert({ ...rec.data, ownerId: undefined }, { projectId: pid });
 
     const listForBob = (await srv.inject({ method: "GET", url: "/projects", headers: bob.bearer })).json() as Array<{ id: string }>;
-    expect(listForBob.some((p) => p.id === pid)).toBe(true);
-    expect((await srv.inject({ method: "GET", url: `/projects/${pid}`, headers: bob.bearer })).statusCode).toBe(200);
+    expect(listForBob.some((p) => p.id === pid)).toBe(false);
+    // Direct access reveals neither existence nor content (404, not 403).
+    expect((await srv.inject({ method: "GET", url: `/projects/${pid}`, headers: bob.bearer })).statusCode).toBe(404);
+    expect((await srv.inject({ method: "GET", url: `/projects/${pid}/agents`, headers: bob.bearer })).statusCode).toBe(404);
+    // The single-user/demo identity keeps seeing it, so an installation without
+    // login loses nothing.
+    expect((await srv.inject({ method: "GET", url: `/projects/${pid}` })).statusCode).toBe(200);
+    // Alice is not locked out of her own project by the missing owner row: a
+    // connected account that owns the repository can still take it back.
+    storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
+    const reclaimed = await srv.inject({ method: "GET", url: `/projects/${pid}`, headers: alice.bearer });
+    expect(reclaimed.statusCode).toBe(200);
+    expect(container.projectRepo.findById(pid)?.data.ownerId).toBe(alice.id);
   });
 });
 
@@ -295,17 +312,18 @@ describe("A03 — Socket.io handshakes authenticate and events stay project-scop
       await sleep(300);
       expect(bobEvents.seen).not.toContain("task-alice-only-2");
 
-      // Shared (unowned) projects remain visible to everyone — the SPA demo mode.
-      // Room membership is evaluated at subscribe time, so Bob re-subscribes
-      // (like the SPA does on reconnect) before the shared event arrives.
-      const rec = container.projectRepo.findById(pid)!;
-      container.projectRepo.upsert({ ...rec.data, ownerId: undefined }, { projectId: pid });
+      // Ownership is re-evaluated on every subscribe, so even a reconnecting
+      // client never joins another account's room: Bob re-subscribes (like the
+      // SPA does on reconnect) and still receives nothing, while Alice keeps
+      // receiving her own project's events.
       await new Promise<void>((resolve, reject) => {
         sBob.emit("subscribe_all", {}, (ack: { ok?: boolean } | undefined) => (ack?.ok ? resolve() : reject(new Error("re-subscribe failed"))));
       });
-      live.emit({ type: "task.updated", taskId: "task-shared", projectId: pid, data: { status: "running" } });
+      live.emit({ type: "task.updated", taskId: "task-alice-only-3", projectId: pid, data: { status: "running" } });
       await sleep(300);
-      expect(bobEvents.seen).toContain("task-shared");
+      expect(bobEvents.seen).not.toContain("task-alice-only-3");
+      expect(anonEvents.seen).not.toContain("task-alice-only-3");
+      expect(aliceEvents.seen).toContain("task-alice-only-3");
 
       aliceEvents.off();
       bobEvents.off();

@@ -241,7 +241,22 @@ export function adoptStrandedProjects(opts: {
   for (const project of opts.projects) {
     const connection = project.githubConnection;
     // A working user-oauth connection belongs to someone else — never steal it.
-    if (connection?.kind === "user-oauth" && connection.userId && getUserGitHubToken(opts.kv, connection.userId)) continue;
+    // If such a project has no owner at all (pre-login row), give it to the
+    // account that actually owns the connection: an ownerless project is
+    // invisible to every signed-in account now that project lists are
+    // strictly per-account.
+    if (connection?.kind === "user-oauth" && connection.userId && getUserGitHubToken(opts.kv, connection.userId)) {
+      if (!project.ownerId) {
+        project.ownerId = connection.userId;
+        try {
+          opts.save(project);
+          adopted.push(project.id);
+        } catch (err) {
+          logger.warn(`could not assign owner for project ${project.id}: ${String(err).slice(0, 200)}`);
+        }
+      }
+      continue;
+    }
     // A server-token project owned by a different real user is not stranded.
     // The logging-in owner's own (or demo/shared) server-token projects switch
     // onto their OAuth token so GITHUB_TOKEN is not used for repo writes.
@@ -251,10 +266,11 @@ export function adoptStrandedProjects(opts: {
     }
     project.githubConnection = { kind: "user-oauth", userId: opts.userId, login: opts.login };
     // Hand the project over, not just its connection: a project still owned by
-    // the pre-login demo owner would otherwise stay invisible to the adopter
-    // (project list and routes filter on ownerId). Projects owned by a real
-    // user keep their owner — only the dead connection is re-bound.
-    if (project.ownerId === DEMO_USER_ID) project.ownerId = opts.userId;
+    // the pre-login demo owner — or by nobody at all — would otherwise stay
+    // invisible to the adopter, because the project list and every project
+    // route filter on ownerId. Projects owned by a real user keep their
+    // owner — only the dead connection is re-bound.
+    if (!project.ownerId || project.ownerId === DEMO_USER_ID) project.ownerId = opts.userId;
     try {
       opts.save(project);
       adopted.push(project.id);

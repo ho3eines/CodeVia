@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { ApprovalStatus } from "../../approvals/service.js";
 import { resolveRequestUser } from "../auth.js";
+import { accessibleProjectIds } from "../project-access.js";
 
 /**
  * Human-in-the-loop approvals: list what is waiting, approve/reject from the
@@ -10,7 +11,13 @@ import { resolveRequestUser } from "../auth.js";
 export function registerApprovalRoutes(app: FastifyInstance, container: Container): void {
   app.get("/approvals", { schema: { tags: ["approvals"] } }, async (req) => {
     const q = req.query as { projectId?: string; status?: ApprovalStatus };
-    return container.approvals.list({ projectId: q.projectId, status: q.status });
+    // Per-account: an approval belongs to the project that requested it, so a
+    // foreign project's approval (its action name and correlation ids) must
+    // never show up in another account's bell.
+    const owned = accessibleProjectIds(req, container);
+    return container.approvals
+      .list({ projectId: q.projectId, status: q.status })
+      .filter((a) => !a.projectId || owned.has(a.projectId));
   });
 
   app.get("/approvals/:id", { schema: { tags: ["approvals"] } }, async (req, reply) => {

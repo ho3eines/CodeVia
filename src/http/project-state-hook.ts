@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Container } from "../app/container.js";
 import { hydrateProject } from "../domain/project-options.js";
 import { logger } from "../logger.js";
-import { adoptProjectConnection } from "../auth/project-connection.js";
+import { adoptProjectConnection, adoptStrandedProject } from "../auth/project-connection.js";
 import { getUserGitHubToken } from "../auth/github-tokens.js";
 import { canAccessProject, resolveRequestUser } from "./auth.js";
 
@@ -77,11 +77,18 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
     };
 
     if (projectId) {
-      const p = c.projectRepo.findById(projectId)?.data;
-      if (!p) notFound();
-      // Ownership gate — mirrors canAccessProject (demo/shared projects stay
-      // open in single-user mode; foreign owned projects are hidden).
-      if (!canAccessProject(user, p)) notFound();
+      const stored = c.projectRepo.findById(projectId)?.data;
+      if (!stored) notFound();
+      // Stranded projects (pre-login demo owner, or no owner at all) are handed
+      // to the connected account BEFORE the ownership gate — adopting after the
+      // gate is pointless, because the gate has already answered 404 for a
+      // project the caller is entitled to take over.
+      let p = stored;
+      if (!canAccessProject(user, p)) {
+        const adopted = adoptStrandedProject({ kv: c.kv, projectRepo: c.projectRepo, project: p, userId: actingUserId });
+        if (!adopted) notFound();
+        p = adopted;
+      }
       bind(p);
       // Live executor / cancellation routes never block on a repository read.
       if (isOfflineOk) return;
@@ -109,7 +116,10 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
     if (resource === "conversations") return;
     if (req.method === "GET") {
       for (const { data: p } of c.projectRepo.findMany()) {
-        if (!p.ownerId || p.ownerId === user.id) {
+        // Same rule as the project list: an account only restores (and binds)
+        // its own projects. Ownerless/legacy rows are handed over at login,
+        // not silently restored by whoever happens to load a page.
+        if (canAccessProject(user, p)) {
           bind(p);
           try {
             await c.agentManager.readProject(p.id);

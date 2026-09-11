@@ -188,6 +188,12 @@ export interface GenerateAgentOptions {
   /** Bootstrap drafts are validated and committed before indexing. */
   persist?: boolean;
   preserveExisting?: boolean;
+  /**
+   * The account whose models may be assigned (normally the project owner).
+   * Agents must never be generated pointing at another account's provider —
+   * see `src/ai/ownership.ts`.
+   */
+  ownerId?: string;
 }
 
 /**
@@ -205,6 +211,7 @@ export class AgentGenerator {
 
   generate(project: Project, opts: GenerateAgentOptions = {}): Agent[] {
     const defaultModelId = opts.defaultModelId ?? project.defaultModelId;
+    const ownerId = opts.ownerId ?? project.ownerId;
     const created: Agent[] = [];
     const skills = new SkillRegistry(this.skillsRepo);
     const roster = opts.agentTypes?.length ? AGENT_TYPES.filter((t) => opts.agentTypes!.includes(t)) : AGENT_TYPES;
@@ -240,7 +247,7 @@ export class AgentGenerator {
         generatedSkills: generatedSkills.filter((slug) => !manual.includes(slug)),
         tools: scaffold.tools,
         permissions: scaffold.permissions,
-        models: this.buildModels(defaultModelId, type),
+        models: this.buildModels(defaultModelId, type, ownerId),
         maxIterations: type === "backend-developer" ? 10 : 5,
         timeoutMs: 120000,
         tokenBudget: 20000,
@@ -267,8 +274,8 @@ export class AgentGenerator {
   }
 
   /** Default model assignment for one agent type (primary + fallbacks + specialized routing). */
-  modelsFor(defaultModelId: string | undefined, type: AgentType): Agent["models"] {
-    return this.buildModels(defaultModelId, type);
+  modelsFor(defaultModelId: string | undefined, type: AgentType, ownerId?: string): Agent["models"] {
+    return this.buildModels(defaultModelId, type, ownerId);
   }
 
   private buildSystemPrompt(type: AgentType, s: { role: string; mission: string }, project: Project): string {
@@ -298,8 +305,10 @@ export class AgentGenerator {
     return (project.repositories ?? []).length > 1 ? lines : lines.filter((l) => !l.startsWith("Repositories:"));
   }
 
-  private buildModels(defaultModelId: string | undefined, type: AgentType): Agent["models"] {
-    const all = this.modelRepo.listActive();
+  private buildModels(defaultModelId: string | undefined, type: AgentType, ownerId?: string): Agent["models"] {
+    // Only the owning account's models (plus the shared platform rows) are
+    // candidates: a generated agent must never route to a foreign provider.
+    const all = this.modelRepo.listActiveForOwner(ownerId);
     const primary = defaultModelId && all.some((m) => m.id === defaultModelId) ? defaultModelId : all[0]?.id ?? "";
     const selected = all.find((m) => m.id === primary);
     const reasoning = selected?.capabilities.reasoning ? primary : all.find((m) => m.capabilities.reasoning)?.id ?? primary;

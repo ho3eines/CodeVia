@@ -91,7 +91,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
       generatedSkills,
       tools: nonEmptyStrings(body.tools) ?? [...scaffold.tools],
       permissions: nonEmptyStrings(body.permissions) ?? [...scaffold.permissions],
-      models: (body.models as Agent["models"] | undefined) ?? generator.modelsFor(project.defaultModelId, type),
+      models: (body.models as Agent["models"] | undefined) ?? generator.modelsFor(project.defaultModelId, type, project.ownerId),
       maxIterations: Number(body.maxIterations ?? (type === "backend-developer" ? 10 : 5)),
       timeoutMs: Number(body.timeoutMs ?? 120000),
       tokenBudget: Number(body.tokenBudget ?? 20000),

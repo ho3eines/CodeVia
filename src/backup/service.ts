@@ -19,6 +19,8 @@ import {
   assertBackupSnapshot,
   type BackupSnapshot,
 } from "./snapshot.js";
+import { getUserGitHubToken } from "../auth/github-tokens.js";
+import { RealGitHubService } from "../github/real-service.js";
 
 const MAX_RUN_MS = 120_000;
 
@@ -111,6 +113,27 @@ export class BackupService {
 
   constructor(private readonly deps: BackupServiceDeps) {}
 
+  /**
+   * Which credential writes/reads the backup repository.
+   *
+   * Backups are unattended, so there is no request to borrow a token from — but
+   * the platform no longer needs a server-wide GITHUB_TOKEN for them either:
+   * the account that configured the backup repository stored a GitHub OAuth
+   * token at login, and that token is used here. The server PAT stays as the
+   * fallback for installs that never logged in.
+   */
+  private githubFor(settings: BackupSettings): IGitHubService {
+    const userId = settings.githubUserId;
+    if (userId && getUserGitHubToken(this.deps.kv, userId)) {
+      return new RealGitHubService({
+        token: () => getUserGitHubToken(this.deps.kv, userId)?.token,
+        label: "backup GitHub OAuth connection",
+      });
+    }
+    return this.deps.github;
+  }
+
+
   /** Create an in-memory snapshot (also used by /admin/backup/export). */
   async exportSnapshot(settings = getBackupSettings(this.deps.kv)): Promise<BackupSnapshot> {
     return createSnapshot(this.deps.db);
@@ -133,7 +156,7 @@ export class BackupService {
     }
     const branch = settings.branch ?? "main";
     const base = normalizeBasePath(settings.path);
-    const github = this.deps.github;
+    const github = this.githubFor(settings);
 
     this.running = true;
     const started = new Date();
@@ -232,7 +255,8 @@ export class BackupService {
     if (!settings.repo || !ref) return [];
     const base = normalizeBasePath(settings.path);
     const branch = settings.branch ?? "main";
-    const entries = await this.deps.github.listFiles(ref, branch, base);
+    const github = this.githubFor(settings);
+    const entries = await github.listFiles(ref, branch, base);
     const manifests = entries
       .filter((e) => e.type === "blob" && e.path.split("/").pop() === "manifest.json")
       .map((e) => e.path)
@@ -241,7 +265,7 @@ export class BackupService {
     for (const manifestPath of manifests.slice(-limit)) {
       const dir = manifestPath.replace(/\/manifest\.json$/, "");
       const id = dir.split("/").pop() ?? dir;
-      const f = await this.deps.github.getFile(ref, manifestPath, branch);
+      const f = await github.getFile(ref, manifestPath, branch);
       if (!f) continue;
       try {
         const manifest = JSON.parse(f.content) as { createdAt?: string; summary?: { records?: number; jobs?: number; kv?: number } };
@@ -287,7 +311,7 @@ export class BackupService {
     const dir = `${base}/${target}`;
     const files = [];
     for (const name of ["manifest.json", "records.json", "jobs.json", "kv.json"]) {
-      const f = await this.deps.github.getFile(ref, `${dir}/${name}`, branch);
+      const f = await this.githubFor(settings).getFile(ref, `${dir}/${name}`, branch);
       if (!f) {
         return { ok: false, from: "github", repo: settings.repo, branch, snapshot: target, records: 0, jobs: 0, kv: 0, replace: true, error: `Backup is incomplete: missing ${name}` };
       }

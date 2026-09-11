@@ -11,10 +11,10 @@ import {
   normalizeRepositories,
 } from "../../domain/project-options.js";
 import { parseRepoFullName } from "../../github/types.js";
-import { resolveGitHubForUser, isServerGitHubEnabled } from "../../github/registry.js";
-import { canAccessProject, DEMO_USER_ID, resolveRequestUser } from "../auth.js";
+import { resolveGitHubForUser } from "../../github/registry.js";
+import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken, getUserGitHubToken } from "../../auth/github-tokens.js";
-import { adoptProjectConnection as bindProjectConnection } from "../../auth/project-connection.js";
+import { adoptProjectConnection as bindProjectConnection, adoptStrandedProject } from "../../auth/project-connection.js";
 import { logger } from "../../logger.js";
 import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
@@ -42,34 +42,29 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
   /**
    * (A02) Ownership guard: missing AND foreign projects read as 404, so direct
    * access reveals neither existence nor content (matches the list filter).
-   * Shared (unowned) projects stay accessible to every account — the same
-   * rule the Socket.io realtime layer enforces via canAccessProject.
+   * A signed-in account reaches exactly the projects it owns — a project left
+   * unowned (or owned by the pre-login `user-demo`) used to be visible to
+   * every account, which is how one account opened another's repository and
+   * hit a GitHub 404 on the first call made with *its own* token.
    *
-   * Exception with repair: a project still owned by the pre-login demo owner
-   * is stranded. A connected GitHub user who touches it takes it over — the
-   * same handover `adoptStrandedProjects` performs at login — instead of the
-   * project reading as a foreign 404 nobody can reach. Never applies to a
-   * project with a live connection or a real (non-demo) owner.
+   * Exception with repair: such a stranded project is handed to the connected
+   * GitHub user who touches it — the same handover `adoptStrandedProjects`
+   * performs at login — instead of reading as a foreign 404 nobody can reach.
+   * The rule lives in `adoptStrandedProject` so the preHandler hook, which
+   * runs before this, adopts with exactly the same guardrails.
    */
   const canAccess = (req: Parameters<typeof resolveRequestUser>[0], p: Project): boolean => {
     const { user, authenticated } = resolveRequestUser(req, container);
     if (canAccessProject(user, p)) return true;
-    if (!authenticated || p.ownerId !== DEMO_USER_ID) return false;
-    if (!getUserGitHubToken(container.kv, user.id)) return false;
-    const connection = p.githubConnection;
-    // A working user-oauth connection belongs to someone else — never steal it.
-    if (connection?.kind === "user-oauth" && connection.userId && getUserGitHubToken(container.kv, connection.userId)) return false;
-    // A server-token project keeps working as long as the server token is set.
-    if (connection?.kind === "server-token" && isServerGitHubEnabled()) return false;
-    p.githubConnection = { kind: "user-oauth", userId: user.id, login: describeUserGitHubToken(container.kv, user.id).login };
-    p.ownerId = user.id;
-    try {
-      container.projectRepo.update(p);
-      logger.info(`adopted stranded project ${p.id} onto ${user.id} on request`);
-    } catch (err) {
-      // Never fail the request over bookkeeping — the token above still works.
-      logger.warn(`could not adopt stranded project ${p.id}: ${String(err).slice(0, 200)}`);
-    }
+    const adopted = adoptStrandedProject({
+      kv: container.kv,
+      projectRepo: container.projectRepo,
+      project: p,
+      userId: authenticated ? user.id : undefined,
+    });
+    if (!adopted) return false;
+    logger.info(`adopted stranded project ${p.id} onto ${user.id} on request`);
+    Object.assign(p, adopted);
     return true;
   };
 

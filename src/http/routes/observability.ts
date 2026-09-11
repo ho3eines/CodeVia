@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
+import { accessibleProjectIds } from "../project-access.js";
 
 export function registerObservabilityRoutes(app: FastifyInstance, container: Container): void {
   // Notifications
@@ -16,7 +17,9 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
   // Cost tracking
   app.get("/costs", { schema: { tags: ["observability"] } }, async (req) => {
     const q = req.query as { projectId?: string; agentId?: string };
-    let costs = container.costRepo.findMany().map((r) => r.data);
+    // Spend is per-account: only costs of projects this account may access.
+    const owned = accessibleProjectIds(req, container);
+    let costs = container.costRepo.findMany().map((r) => r.data).filter((c) => !c.projectId || owned.has(c.projectId));
     if (q.projectId) costs = costs.filter((c) => c.projectId === q.projectId);
     if (q.agentId) costs = costs.filter((c) => c.agentId === q.agentId);
     return costs;
@@ -24,7 +27,8 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
 
   app.get("/costs/summary", { schema: { tags: ["observability"] } }, async (req) => {
     const q = req.query as { projectId?: string };
-    const all = container.costRepo.findMany().map((r) => r.data);
+    const owned = accessibleProjectIds(req, container);
+    const all = container.costRepo.findMany().map((r) => r.data).filter((c) => !c.projectId || owned.has(c.projectId));
     const filtered = q.projectId ? all.filter((c) => c.projectId === q.projectId) : all;
     return {
       calls: filtered.length,
@@ -44,7 +48,8 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
   // Agent observability dashboard
   app.get("/observability/agents", { schema: { tags: ["observability"] } }, async (req) => {
     const q = req.query as { agentId?: string; projectId?: string };
-    let runs = container.runRepo.findMany().map((r) => r.data);
+    const owned = accessibleProjectIds(req, container);
+    let runs = container.runRepo.findMany().map((r) => r.data).filter((r) => owned.has(r.projectId));
     if (q.agentId) runs = runs.filter((r) => r.agentId === q.agentId);
     if (q.projectId) runs = runs.filter((r) => r.projectId === q.projectId);
     const byAgent = new Map<string, typeof runs>();

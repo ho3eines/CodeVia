@@ -31,6 +31,14 @@ const BackupSettingsSchema = z.object({
   path: z.string().trim().max(256).optional(),
   /** Five-field cron: minute hour day-of-month month day-of-week. */
   schedule: z.string().trim().max(64).optional(),
+  /**
+   * The connected account whose GitHub token should push/restore the backup.
+   * Backups run unattended, so there is no request to borrow a token from: the
+   * admin who configured the repository lends their OAuth token (encrypted at
+   * rest) instead of requiring a server-wide GITHUB_TOKEN. Falls back to the
+   * server token when this account has no stored credential.
+   */
+  githubUserId: z.string().trim().max(128).optional(),
   /** Number of backup directories to keep referenced (actual repo history is git-managed). */
   retain: z.number().int().min(1).max(500).optional(),
   updatedAt: z.string().optional(),
@@ -54,6 +62,7 @@ export type SaveBackupSettingsInput = Partial<{
   path: string;
   schedule: string;
   retain: number;
+  githubUserId: string;
 }>;
 
 const BRANCH_RE = /^[A-Za-z0-9._-]+$/;
@@ -116,6 +125,7 @@ export function saveBackupSettings(kv: KvStore, input: SaveBackupSettingsInput, 
     ...(path !== undefined ? { path } : {}),
     ...(schedule !== undefined ? { schedule } : {}),
     ...(retain !== undefined ? { retain } : {}),
+    ...(input.githubUserId !== undefined ? { githubUserId: clean(input.githubUserId) } : {}),
     updatedAt: new Date().toISOString(),
     ...(updatedBy ? { updatedBy } : {}),
   };

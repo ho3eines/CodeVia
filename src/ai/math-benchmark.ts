@@ -77,8 +77,10 @@ export class MathBenchmarkService {
   ) {}
 
   /** Compute the list of ACTIVE models whose provider is also currently active. */
-  private resolveTargets(modelIds?: string[]): BenchmarkTarget[] {
-    const active = this.deps.modelRepo.listActive().map(toCandidate);
+  private resolveTargets(modelIds?: string[], ownerId?: string): BenchmarkTarget[] {
+    // Per-account: only the requesting account's models (+ shared rows) are
+    // benchmarked — never another account's paid provider.
+    const active = this.deps.modelRepo.listActiveForOwner(ownerId).map(toCandidate);
     const picked = modelIds?.length ? active.filter((c) => modelIds!.includes(c.id)) : active;
     const out = [];
     for (const candidate of picked) {
@@ -126,12 +128,12 @@ export class MathBenchmarkService {
    * Kick off a benchmark run in the background and return immediately.
    * If one is already running, that run's id is returned instead (no double-run).
    */
-  start(opts: { problemsPerModel?: number; modelIds?: string[] } = {}): { started: boolean; runId: string; alreadyRunning: boolean } {
+  start(opts: { problemsPerModel?: number; modelIds?: string[]; ownerId?: string } = {}): { started: boolean; runId: string; alreadyRunning: boolean } {
     if (this.executing) {
       return { started: false, runId: this.progress.runId, alreadyRunning: true };
     }
     const problems = this.generateProblems(opts.problemsPerModel ?? 8);
-    const targets = this.resolveTargets(opts.modelIds);
+    const targets = this.resolveTargets(opts.modelIds, opts.ownerId);
     const runId = randomUUID();
     this.delayMs = envDelay();
     this.progress = {
@@ -293,14 +295,14 @@ export class MathBenchmarkService {
    * between), so it is meant for callers that genuinely need the synchronous
    * result. HTTP requests should use {@link start} + {@link getProgress} instead.
    */
-  async runBenchmark(opts: { problemsPerModel?: number; modelIds?: string[] } = {}): Promise<{
+  async runBenchmark(opts: { problemsPerModel?: number; modelIds?: string[]; ownerId?: string } = {}): Promise<{
     runId: string;
     results: ModelBenchmarkResult[];
     problemCount: number;
     modelCount: number;
   }> {
     const problems = this.generateProblems(opts.problemsPerModel ?? 8);
-    const targets = this.resolveTargets(opts.modelIds);
+    const targets = this.resolveTargets(opts.modelIds, opts.ownerId);
     const runId = randomUUID();
     const results = (await this.performRun(runId, problems, targets)).results;
     return {

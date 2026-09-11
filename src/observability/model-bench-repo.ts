@@ -173,7 +173,20 @@ export class ModelBenchmarkRepository extends DocumentRepository<ModelBenchmarkR
 }
 
 let repo: ModelBenchmarkRepository | null = null;
+let repoDb: unknown = null;
+/**
+ * The benchmark repository is a process-wide singleton, but `getDb()` is not:
+ * tests (and a reconfigured runtime) swap the active database behind it. Caching
+ * the repository without tracking the database it was built on left it holding a
+ * closed handle — every model call after the first database swap failed with
+ * "database is not open" (agent runs, chat, benchmark stats). Re-bind whenever
+ * the active database changes.
+ */
 export function getModelBenchmarkRepo(): ModelBenchmarkRepository {
-  if (!repo) repo = new ModelBenchmarkRepository();
+  const db = getDb();
+  if (!repo || repoDb !== db) {
+    repo = new ModelBenchmarkRepository(db);
+    repoDb = db;
+  }
   return repo;
 }

@@ -138,6 +138,9 @@ export class AgentRunner {
         category: req.category ?? (isWriter(agent.type) ? "coding" : agent.type === "research" ? "research" : "reasoning"),
         budget, taskBudget: req.taskBudget, checkActive,
         allowMock: !prepare && !req.plan,
+        // The project's owner pays: only their models (plus the shared
+        // platform rows) may serve this run.
+        ownerId: project.ownerId,
       }) : undefined;
       if (prepare) {
         plan = await prepare({
