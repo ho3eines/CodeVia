@@ -1,15 +1,30 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
 import { accessibleProjectIds } from "../project-access.js";
+import { ROLE_PERMISSIONS, resolveRequestUser } from "../auth.js";
 
 export function registerObservabilityRoutes(app: FastifyInstance, container: Container): void {
-  // Notifications
-  app.get("/notifications", { schema: { tags: ["observability"] } }, async () => {
-    return container.notificationRepo.findMany().map((r) => r.data);
+  // Notifications. Project notifications belong to the project's account;
+  // platform-wide ones (no projectId — backups, system health) stay visible to
+  // everyone, which is what the notification bell expects.
+  app.get("/notifications", { schema: { tags: ["observability"] } }, async (req) => {
+    const owned = accessibleProjectIds(req, container);
+    return container.notificationRepo
+      .findMany()
+      .map((r) => r.data)
+      .filter((n) => !n.projectId || owned.has(n.projectId));
   });
 
-  app.post("/notifications/:id/read", { schema: { tags: ["observability"] } }, async (req) => {
+  app.post("/notifications/:id/read", { schema: { tags: ["observability"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    const owned = accessibleProjectIds(req, container);
+    const notification = container.notificationRepo.findById(id)?.data;
+    // Marking another account's notification read is not an information-free
+    // no-op: it confirms the id exists. Answer 404 like the list does.
+    if (!notification || (notification.projectId && !owned.has(notification.projectId))) {
+      reply.code(404);
+      return { error: "notification not found" };
+    }
     container.notificationRepo.markRead(id);
     return { ok: true };
   });
@@ -40,9 +55,20 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
     };
   });
 
-  // Audit log
-  app.get("/audit", { schema: { tags: ["observability"] } }, async () => {
-    return container.auditRepo.findMany().map((r) => r.data);
+  /**
+   * Audit log. An entry is visible when it belongs to a project this account
+   * may access, or when it records this account's own action (logins, project
+   * creation). Platform-level entries with neither are admin-only — they leak
+   * other accounts' identities otherwise.
+   */
+  app.get("/audit", { schema: { tags: ["observability"] } }, async (req) => {
+    const { user } = resolveRequestUser(req, container);
+    const owned = accessibleProjectIds(req, container);
+    const isAdmin = (ROLE_PERMISSIONS[user.role] ?? []).includes("admin.read");
+    return container.auditRepo
+      .findMany()
+      .map((r) => r.data)
+      .filter((e) => e.projectId ? owned.has(e.projectId) : isAdmin || e.userId === user.id);
   });
 
   // Agent observability dashboard

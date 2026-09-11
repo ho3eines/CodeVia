@@ -111,6 +111,9 @@ Anything that still ends on the platform-wide service reports it (`source`,
 * **Backwards compatibility:** rows written before this change have no `ownerId`
   and stay visible to everyone (including the demo user), so an existing install
   keeps working; the first edit hands them to the account that made it.
+* **UI:** the Models and Providers pages mark those shared rows with a
+  `👥 shared` badge, and the Providers page explains that anything you add is
+  yours alone.
 
 ---
 
@@ -162,7 +165,7 @@ isolation).
 
 | Gap | Why it is still open |
 | --- | --- |
-| `/notifications` and `/audit` are global feeds | No ownership column; they carry platform events (logins, backups) that have no project. Needs a per-account feed or an admin-only gate. |
+| ~~`/notifications` and `/audit` are global feeds~~ | **Closed:** notifications are filtered to the account's projects (platform-wide ones with no project stay visible — that is what the bell expects), `/notifications/:id/read` answers 404 for a foreign id, and audit entries are visible when they belong to an accessible project, record your own action, or (for platform-level rows with neither) when your role has `admin.read`. |
 | Skills marketplace (`/skills` without `projectId`) | Global template catalogue by design; project-local skills *are* scoped. |
 | Telegram per-user bots still list **ownerless** projects | `ownedProjects()` keeps `!p.ownerId \|\| p.ownerId === userId` so an install with pre-login projects keeps working in the bot. It never exposes another account's owned projects. |
 | Admin settings, import/export, `/admin/usage` | Operator-level endpoints, gated by `admin.write`/`admin.read` roles, not by account. |

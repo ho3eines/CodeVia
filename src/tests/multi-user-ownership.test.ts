@@ -384,3 +384,74 @@ describe("projects, dashboard and search are per-account", () => {
     expect(bobCosts.some((c) => c.projectId === aliceProject)).toBe(false);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Notifications & audit trail
+ * ------------------------------------------------------------------ */
+describe("notifications and the audit trail are per-account", () => {
+  async function createProject(srv: FastifyInstance, user: TestUser, name: string): Promise<string> {
+    const res = await srv.inject({
+      method: "POST",
+      url: "/projects",
+      headers: user.bearer,
+      payload: { name, configRepo: `acme/${name.toLowerCase()}` },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    return res.json().id as string;
+  }
+
+  it("hides another account's project notifications but keeps platform-wide ones", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const alice = makeUser(41, "note-alice");
+    const bob = makeUser(42, "note-bob");
+    const aliceProject = await createProject(srv, alice, "NotesAlice");
+    const bobProject = await createProject(srv, bob, "NotesBob");
+
+    container.notificationRepo.create({ severity: "error", title: "Alice failed", message: "private", projectId: aliceProject });
+    container.notificationRepo.create({ severity: "info", title: "Platform", message: "backup done" });
+
+    const bobNotes = (await srv.inject({ method: "GET", url: "/notifications", headers: bob.bearer })).json() as Array<{ title: string; projectId?: string }>;
+    expect(bobNotes.some((n) => n.title === "Alice failed")).toBe(false);
+    expect(bobNotes.some((n) => n.title === "Platform")).toBe(true);
+
+    // Marking a foreign notification read must not confirm it exists.
+    const aliceNote = container.notificationRepo.findMany().find((n) => n.data.projectId === aliceProject)!;
+    const read = await srv.inject({ method: "POST", url: `/notifications/${aliceNote.data.id}/read`, headers: bob.bearer });
+    expect(read.statusCode).toBe(404);
+    expect(container.notificationRepo.findById(aliceNote.data.id)?.data.read).toBe(false);
+
+    // Its owner can.
+    expect((await srv.inject({ method: "POST", url: `/notifications/${aliceNote.data.id}/read`, headers: alice.bearer })).statusCode).toBe(200);
+    expect(container.notificationRepo.findById(aliceNote.data.id)?.data.read).toBe(true);
+    expect(bobProject).toBeTruthy();
+  });
+
+  it("scopes the audit trail to the account's projects (platform entries stay admin-only)", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const alice = makeUser(43, "audit-alice"); // first account ⇒ owner/admin
+    const bob = makeUser(44, "audit-bob"); // developer
+    const aliceProject = await createProject(srv, alice, "AuditAlice");
+    const bobProject = await createProject(srv, bob, "AuditBob");
+
+    container.auditRepo.record({ action: "alice.project", result: "success", source: "web", correlationId: "c1", metadata: {}, projectId: aliceProject });
+    container.auditRepo.record({ action: "bob.project", result: "success", source: "web", correlationId: "c2", metadata: {}, projectId: bobProject });
+    container.auditRepo.record({ action: "auth.github.login", result: "success", source: "web", correlationId: "c3", metadata: {}, userId: alice.id });
+    container.auditRepo.record({ action: "system.backup", result: "success", source: "system", correlationId: "c4", metadata: {} });
+
+    const bobAudit = (await srv.inject({ method: "GET", url: "/audit", headers: bob.bearer })).json() as Array<{ action: string }>;
+    expect(bobAudit.map((e) => e.action)).toContain("bob.project");
+    // Another account's project events, its logins and platform events are not
+    // Bob's business.
+    expect(bobAudit.map((e) => e.action)).not.toContain("alice.project");
+    expect(bobAudit.map((e) => e.action)).not.toContain("auth.github.login");
+    expect(bobAudit.map((e) => e.action)).not.toContain("system.backup");
+
+    // An admin-role account sees its own projects plus the platform trail.
+    const aliceAudit = (await srv.inject({ method: "GET", url: "/audit", headers: alice.bearer })).json() as Array<{ action: string }>;
+    expect(aliceAudit.map((e) => e.action)).toEqual(expect.arrayContaining(["alice.project", "auth.github.login", "system.backup"]));
+    // …but not another account's project, even as admin (projects stay private).
+    expect(aliceAudit.map((e) => e.action)).not.toContain("bob.project");
+  });
+});
