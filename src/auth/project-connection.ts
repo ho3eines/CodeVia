@@ -93,7 +93,13 @@ export function adoptStrandedProject(deps: {
   if (ownerId && ownerId !== DEMO_USER_ID && ownerId !== userId) return undefined;
   const connection = project.githubConnection;
   // A live connection of another account is not stranded.
-  if (connection?.kind === "user-oauth" && connection.userId && connection.userId !== userId && getUserGitHubToken(kv, connection.userId)) return undefined;
+  if (
+    connection?.kind === "user-oauth" &&
+    connection.userId &&
+    connection.userId !== userId &&
+    getUserGitHubToken(kv, connection.userId)
+  )
+    return undefined;
   // A server-token project still works while GITHUB_TOKEN is configured.
   if (connection?.kind === "server-token" && isServerGitHubEnabled()) return undefined;
   const login = describeUserGitHubToken(kv, userId).login;

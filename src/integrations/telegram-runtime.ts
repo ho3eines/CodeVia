@@ -164,16 +164,19 @@ export class TelegramRuntime {
     const signature = [this.currentMode, probeUrl ?? "", conn?.tokenProblem ?? ""].join("|");
     if (conn && this.started && signature === this.signature) {
       const healthy =
-        this.transport === "polling" ? !!this.poller?.status().running
-        : this.transport === "webhook" ? this.registeredWebhookUrl === probeUrl
-        : false;
+        this.transport === "polling"
+          ? !!this.poller?.status().running
+          : this.transport === "webhook"
+            ? this.registeredWebhookUrl === probeUrl
+            : false;
       if (healthy) return this.status();
     }
     if (!conn) {
       this.transport = "off";
-      this.note = this.deps.telegram.constructor.name === "MockTelegramService"
-        ? "mock Telegram mode — messages are logged, not sent. Set TELEGRAM_BOT_TOKEN for a real bot."
-        : "no Telegram service configured";
+      this.note =
+        this.deps.telegram.constructor.name === "MockTelegramService"
+          ? "mock Telegram mode — messages are logged, not sent. Set TELEGRAM_BOT_TOKEN for a real bot."
+          : "no Telegram service configured";
       this.started = true;
       return this.status();
     }
@@ -227,7 +230,8 @@ export class TelegramRuntime {
         this.webhookError = validateTelegramWebhookUrl(url).error;
         this.webhookSet(false);
         this.signature = "";
-        this.note = "TELEGRAM_MODE=webhook requires a public HTTPS URL — set PUBLIC_WEB_BASE_URL / TELEGRAM_WEBHOOK_URL, or switch TELEGRAM_MODE to auto/polling.";
+        this.note =
+          "TELEGRAM_MODE=webhook requires a public HTTPS URL — set PUBLIC_WEB_BASE_URL / TELEGRAM_WEBHOOK_URL, or switch TELEGRAM_MODE to auto/polling.";
         return this.status();
       }
       await this.registerWebhook(url);
@@ -236,7 +240,8 @@ export class TelegramRuntime {
 
     // auto: webhook when we have a URL Telegram can actually reach, else polling.
     if (!urlValid) {
-      this.note = "No public HTTPS URL is configured — the bot falls back to long polling, so it works without a tunnel.";
+      this.note =
+        "No public HTTPS URL is configured — the bot falls back to long polling, so it works without a tunnel.";
       await this.usePolling(true);
       this.signature = signature;
       return this.status();
@@ -453,7 +458,8 @@ export class TelegramRuntime {
         label: "Bot API endpoint",
         status: "fail",
         detail: `TELEGRAM_API_BASE points at ${telegramApiBase()}, so nothing below this line touched real Telegram — a token can "verify" here while the real bot stays untouched.`,
-        action: "Unset TELEGRAM_API_BASE to talk to api.telegram.org (that variable exists for the offline mock and for proxies/mirrors).",
+        action:
+          "Unset TELEGRAM_API_BASE to talk to api.telegram.org (that variable exists for the offline mock and for proxies/mirrors).",
       });
     }
 
@@ -465,11 +471,19 @@ export class TelegramRuntime {
         detail: "The platform is running the mock Telegram service.",
         action: "Set TELEGRAM_BOT_TOKEN (from @BotFather), or connect a bot in the UI, then restart.",
       });
-      return { steps, verdict: "blocked", summary: "No real Telegram connection is configured.", transport: this.transport, mode: this.currentMode };
+      return {
+        steps,
+        verdict: "blocked",
+        summary: "No real Telegram connection is configured.",
+        transport: this.transport,
+        mode: this.currentMode,
+      };
     }
 
     const me = await conn.getMe();
-    const networkish = /network error|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up/i.test(me.error ?? "");
+    const networkish = /network error|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up/i.test(
+      me.error ?? "",
+    );
     push({
       name: "token",
       label: "Bot token is accepted by Telegram",
@@ -518,21 +532,29 @@ export class TelegramRuntime {
         label: "Registered webhook points at this deployment",
         status: "fail",
         detail: `Telegram is posting to ${info.url}, this instance expects ${expected}.`,
-        action: "Two environments share one bot token. Give each its own bot, or press “Re-register webhook” here to point it at this deployment.",
+        action:
+          "Two environments share one bot token. Give each its own bot, or press “Re-register webhook” here to point it at this deployment.",
       });
     } else if (info.url) {
-      push({ name: "webhook", label: "Registered webhook points at this deployment", status: "pass", detail: info.url });
+      push({
+        name: "webhook",
+        label: "Registered webhook points at this deployment",
+        status: "pass",
+        detail: info.url,
+      });
     } else {
       push({
         name: "webhook",
         label: "Webhook registration",
         status: this.transport === "polling" ? "skip" : "fail",
-        detail: this.transport === "polling"
-          ? "No webhook — not needed while long polling is active."
-          : "Telegram has no webhook for this bot and polling is not running.",
-        action: this.transport === "polling"
-          ? undefined
-          : `Press 🔗 Use webhook (registers ${expected ?? "the public URL"}) or 📡 Use long polling.`,
+        detail:
+          this.transport === "polling"
+            ? "No webhook — not needed while long polling is active."
+            : "Telegram has no webhook for this bot and polling is not running.",
+        action:
+          this.transport === "polling"
+            ? undefined
+            : `Press 🔗 Use webhook (registers ${expected ?? "the public URL"}) or 📡 Use long polling.`,
       });
     }
 
@@ -545,8 +567,11 @@ export class TelegramRuntime {
         name: "endpoint",
         label: "Webhook endpoint answers 200",
         status: "skip",
-        detail: probeUrl ? `${probeUrl} is a loopback URL — Telegram cannot post to it, so it was not probed.` : "no public URL to probe",
-        action: "Set PUBLIC_WEB_BASE_URL to the public HTTPS URL of this deployment to enable this check — or use long polling.",
+        detail: probeUrl
+          ? `${probeUrl} is a loopback URL — Telegram cannot post to it, so it was not probed.`
+          : "no public URL to probe",
+        action:
+          "Set PUBLIC_WEB_BASE_URL to the public HTTPS URL of this deployment to enable this check — or use long polling.",
       });
     } else {
       try {
@@ -575,7 +600,8 @@ export class TelegramRuntime {
           label: "Webhook endpoint answers 200",
           status: "fail",
           detail: `self-request failed: ${err instanceof Error ? err.message : String(err)}`,
-          action: "This server cannot reach its own public URL (DNS/ingress/redirect). Fix the public route, or use long polling.",
+          action:
+            "This server cannot reach its own public URL (DNS/ingress/redirect). Fix the public route, or use long polling.",
         });
       }
     }
@@ -584,13 +610,26 @@ export class TelegramRuntime {
     push({
       name: "transport",
       label: "A receive path is running",
-      status: this.transport === "webhook" ? "pass" : this.transport === "polling" ? (polling?.running ? "pass" : "fail") : "fail",
-      detail: this.transport === "polling"
-        ? `long polling ${polling?.running ? `running — ${polling.updatesReceived} update(s) read, offset ${polling.offset ?? 0}` : "NOT running"}${polling?.lastError ? ` · last error: ${polling.lastError}` : ""}`
-        : this.transport === "webhook"
-          ? "webhook registered"
-          : "nothing is receiving updates",
-      action: this.transport === "off" ? 'Press 📡 Use long polling (works with only a token), or POST /integrations/telegram/transport {"mode":"auto"}.' : polling?.resolvingConflict ? "Polling is fighting a webhook/second instance for the same token — keep exactly one receiver." : undefined,
+      status:
+        this.transport === "webhook"
+          ? "pass"
+          : this.transport === "polling"
+            ? polling?.running
+              ? "pass"
+              : "fail"
+            : "fail",
+      detail:
+        this.transport === "polling"
+          ? `long polling ${polling?.running ? `running — ${polling.updatesReceived} update(s) read, offset ${polling.offset ?? 0}` : "NOT running"}${polling?.lastError ? ` · last error: ${polling.lastError}` : ""}`
+          : this.transport === "webhook"
+            ? "webhook registered"
+            : "nothing is receiving updates",
+      action:
+        this.transport === "off"
+          ? 'Press 📡 Use long polling (works with only a token), or POST /integrations/telegram/transport {"mode":"auto"}.'
+          : polling?.resolvingConflict
+            ? "Polling is fighting a webhook/second instance for the same token — keep exactly one receiver."
+            : undefined,
     });
 
     const fails = steps.filter((st) => st.status === "fail");
@@ -640,43 +679,53 @@ export class TelegramRuntime {
     // `ENABLE_TELEGRAM=false` used to be the kill switch for *receiving*, which
     // meant a perfectly good token produced a deaf bot. A token now means "the
     // user wants a bot"; say so instead of silently honouring the old flag.
-    const rawEnableFlag = String(process.env.ENABLE_TELEGRAM ?? "").trim().toLowerCase();
+    const rawEnableFlag = String(process.env.ENABLE_TELEGRAM ?? "")
+      .trim()
+      .toLowerCase();
     if (["false", "0", "no", "off"].includes(rawEnableFlag) && conn) {
-      fixes.push('ENABLE_TELEGRAM is false but a token is set, so the bot still runs (that flag no longer gates receiving). Use TELEGRAM_MODE=off to silence it.');
+      fixes.push(
+        "ENABLE_TELEGRAM is false but a token is set, so the bot still runs (that flag no longer gates receiving). Use TELEGRAM_MODE=off to silence it.",
+      );
     }
     if (this.webhookError) fixes.push(`Telegram: ${this.webhookError}`);
     if (this.transport === "polling" && this.fallbackReason) {
-      fixes.push(`Webhook not usable (${this.fallbackReason}) — the bot receives updates by long polling instead, which needs no public URL.`);
+      fixes.push(
+        `Webhook not usable (${this.fallbackReason}) — the bot receives updates by long polling instead, which needs no public URL.`,
+      );
     }
     const polling = this.poller?.status();
     if (polling?.lastError) fixes.push(`Polling error: ${polling.lastError}`);
     // A URL we rejected ourselves is the *only* thing to fix here — don't also
     // report Telegram's resulting "no webhook is set".
-    fixes.push(...telegramWebhookFixHints(
-      this.webhookInfo,
-      this.transport,
-      this.registeredWebhookUrl ? undefined : this.webhookError,
-      Boolean(this.registeredWebhookUrl),
-    ));
+    fixes.push(
+      ...telegramWebhookFixHints(
+        this.webhookInfo,
+        this.transport,
+        this.registeredWebhookUrl ? undefined : this.webhookError,
+        Boolean(this.registeredWebhookUrl),
+      ),
+    );
     // A non-default Bot API base means nothing here touched the real Telegram:
     // tokens "verify", webhooks "register", and yet no user ever gets a message.
     if (!isRealTelegramApi()) {
-      fixes.push(`TELEGRAM_API_BASE is set to ${telegramApiBase()} — this instance is talking to that endpoint, NOT to api.telegram.org. Unset it for a real bot (it exists for the offline mock and for proxies/mirrors).`);
+      fixes.push(
+        `TELEGRAM_API_BASE is set to ${telegramApiBase()} — this instance is talking to that endpoint, NOT to api.telegram.org. Unset it for a real bot (it exists for the offline mock and for proxies/mirrors).`,
+      );
     }
     // Only nag when a real bot is configured and *still* nothing is arriving —
     // in mock/off mode the note already explains the situation.
     const optedOut = this.currentMode === "off";
     if (this.transport === "off" && this.started && conn && !tokenProblem && fixes.length === 0 && !optedOut) {
-      fixes.push('Nothing is receiving updates — run POST /integrations/telegram/transport {"mode":"auto"} or press “Use polling”.');
+      fixes.push(
+        'Nothing is receiving updates — run POST /integrations/telegram/transport {"mode":"auto"} or press “Use polling”.',
+      );
     }
     // `ready` answers "is my bot alive?" — a transport is running *and* Telegram
     // accepted our last call. `enabled` only means "not turned off", which used to
     // let a rejected token or a half-registered webhook look healthy in the UI.
     const pollingRunning = Boolean(this.poller?.status().running);
-    const webhookLive = this.transport === "webhook"
-      && Boolean(this.registeredWebhookUrl)
-      && !this.webhookError
-      && !tokenProblem;
+    const webhookLive =
+      this.transport === "webhook" && Boolean(this.registeredWebhookUrl) && !this.webhookError && !tokenProblem;
     const ready = this.currentMode !== "off" && !!conn && !tokenProblem && (pollingRunning || webhookLive);
     return {
       enabled: !!conn && !tokenProblem,

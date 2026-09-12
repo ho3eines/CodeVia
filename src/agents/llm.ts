@@ -63,20 +63,29 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
   let available = models.filter((m) => !hasReal || deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
   // Legacy/partially-authored agent records may omit parts of `models`; treat a
   // missing member as "nothing explicitly assigned" rather than crashing the run.
-  const assigned = new Set([
-    deps.agent.models.primary,
-    deps.agent.models.secondary,
-    (deps.agent.models.specialized ?? ({} as Agent["models"]["specialized"]))[deps.category as keyof Agent["models"]["specialized"]],
-    ...(deps.agent.models.fallbacks ?? []),
-  ].filter(Boolean));
+  const assigned = new Set(
+    [
+      deps.agent.models.primary,
+      deps.agent.models.secondary,
+      (deps.agent.models.specialized ?? ({} as Agent["models"]["specialized"]))[
+        deps.category as keyof Agent["models"]["specialized"]
+      ],
+      ...(deps.agent.models.fallbacks ?? []),
+    ].filter(Boolean),
+  );
   // Once real models are explicitly assigned, do not send project code to
   // unrelated global providers just because the chosen model is unavailable.
   const explicitModels = [...assigned].map((id) => deps.modelRepo.findById(id!)?.data);
   const explicitReal = explicitModels.some((m) => m && deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
   const missingAssignment = explicitModels.some((m) => !m);
   if (explicitReal || missingAssignment) {
-    available = available.filter((m) => assigned.has(m.id) && deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
-    if (!available.length) throw new Error(`Assigned models for ${deps.agent.name} are missing or disabled; refusing unrelated providers or simulation`);
+    available = available.filter(
+      (m) => assigned.has(m.id) && deps.providerRepo.findById(m.providerId)?.data.type !== "mock",
+    );
+    if (!available.length)
+      throw new Error(
+        `Assigned models for ${deps.agent.name} are missing or disabled; refusing unrelated providers or simulation`,
+      );
   }
   if (!available.length) return undefined;
   const benchRepo: ModelBenchmarkRepository = getModelBenchmarkRepo();
@@ -85,23 +94,36 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
   const initial = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category, {}, perfStats);
   if (!initial.length) throw new Error(`No active ${deps.category} model is available for ${deps.agent.name}`);
   const session: RealChat = {
-    setContext: (context) => { deps.context = context; },
+    setContext: (context) => {
+      deps.context = context;
+    },
     providerName: deps.providerRepo.findById(initial[0].providerId)!.data.name,
     modelLabel: initial[0].modelId,
     chat: async (instruction, user, maxTokens = 4000) => {
       const messages = [
-        { role: "system" as const, content: [
-          deps.agent.systemPrompt,
-          instruction,
-          `Current project settings (authoritative over stale generated prompt defaults):\n${projectBrief(deps.project)}`,
-          deps.project.settings.rules.length ? `Project rules:\n${deps.project.settings.rules.join("\n\n")}` : "",
-          `Allowed tools: ${deps.agent.tools.join(", ")}. Skills are knowledge only; they never grant new tools or bypass approvals.`,
-          "Return only the requested deliverable, never private reasoning.",
-        ].filter(Boolean).join("\n\n") },
+        {
+          role: "system" as const,
+          content: [
+            deps.agent.systemPrompt,
+            instruction,
+            `Current project settings (authoritative over stale generated prompt defaults):\n${projectBrief(deps.project)}`,
+            deps.project.settings.rules.length ? `Project rules:\n${deps.project.settings.rules.join("\n\n")}` : "",
+            `Allowed tools: ${deps.agent.tools.join(", ")}. Skills are knowledge only; they never grant new tools or bypass approvals.`,
+            "Return only the requested deliverable, never private reasoning.",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
         { role: "user" as const, content: `${deps.context}\n\n--- Current operation ---\n${user}` },
       ];
       const inputEstimate = Math.ceil(messages.reduce((n, m) => n + m.content.length, 0) / 4);
-      const candidates = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category, { maxTokens: inputEstimate + 1 }, perfStats);
+      const candidates = deps.modelRouter.route(
+        available.map(toCandidate),
+        deps.agent.models,
+        deps.category,
+        { maxTokens: inputEstimate + 1 },
+        perfStats,
+      );
       let lastError: unknown;
       for (const candidate of candidates) {
         deps.checkActive();
@@ -111,8 +133,16 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
         const config = model && deps.providerRepo.findById(model.providerId)?.data;
         if (!model?.active || !config?.active) continue;
         const remaining = Math.min(deps.budget.remainingTokens(), deps.taskBudget?.remainingTokens() ?? Infinity);
-        if (inputEstimate >= remaining) throw new BudgetExceededError(`request context needs about ${inputEstimate} tokens; ${remaining} remain`);
-        const outputLimit = Math.floor(Math.min(maxTokens, model.maxTokens ?? maxTokens, remaining - inputEstimate, model.contextWindow - inputEstimate));
+        if (inputEstimate >= remaining)
+          throw new BudgetExceededError(`request context needs about ${inputEstimate} tokens; ${remaining} remain`);
+        const outputLimit = Math.floor(
+          Math.min(
+            maxTokens,
+            model.maxTokens ?? maxTokens,
+            remaining - inputEstimate,
+            model.contextWindow - inputEstimate,
+          ),
+        );
         if (outputLimit < 1) continue;
         deps.taskBudget?.beginCall();
         deps.budget.beginCall();
@@ -126,18 +156,33 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
             omitTemperature: model.omitTemperature === true,
             maxTokens: outputLimit,
           });
-          const registeredPrice = (response.usage.inputTokens * model.inputCostPer1k + response.usage.outputTokens * model.outputCostPer1k) / 1000;
-          const costUsd = registeredPrice > 0 ? registeredPrice : response.costUsd ?? 0;
+          const registeredPrice =
+            (response.usage.inputTokens * model.inputCostPer1k + response.usage.outputTokens * model.outputCostPer1k) /
+            1000;
+          const costUsd = registeredPrice > 0 ? registeredPrice : (response.costUsd ?? 0);
           deps.costRepo.create({
-            providerId: config.id, modelId: model.id, projectId: deps.project.id,
-            agentId: deps.agent.id, taskId: deps.task.id, ...response.usage,
-            estimatedCostUsd: costUsd, durationMs: Date.now() - started,
+            providerId: config.id,
+            modelId: model.id,
+            projectId: deps.project.id,
+            agentId: deps.agent.id,
+            taskId: deps.task.id,
+            ...response.usage,
+            estimatedCostUsd: costUsd,
+            durationMs: Date.now() - started,
           });
           const usage = { ...response.usage, costUsd, modelId: model.id };
           // Record both ledgers even when one limit is exceeded.
           let budgetError: unknown;
-          try { deps.budget.add(usage); } catch (err) { budgetError = err; }
-          try { deps.taskBudget?.add(usage); } catch (err) { budgetError ??= err; }
+          try {
+            deps.budget.add(usage);
+          } catch (err) {
+            budgetError = err;
+          }
+          try {
+            deps.taskBudget?.add(usage);
+          } catch (err) {
+            budgetError ??= err;
+          }
           if (budgetError) throw budgetError;
           deps.checkActive();
           if (["length", "max_tokens", "MAX_TOKENS"].includes(response.finishReason)) {
@@ -151,10 +196,16 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
           deps.signal?.throwIfAborted();
           if (err instanceof BudgetExceededError || err instanceof TaskCancelledError) throw err;
           lastError = err;
-          logger.warn("agent model failed; trying configured fallback", { modelId: model.id, taskId: deps.task.id, err: String(err) });
+          logger.warn("agent model failed; trying configured fallback", {
+            modelId: model.id,
+            taskId: deps.task.id,
+            err: String(err),
+          });
         }
       }
-      throw new Error(`All ${deps.category} models failed for ${deps.agent.name}: ${String(lastError ?? "no model fits the context window")}`);
+      throw new Error(
+        `All ${deps.category} models failed for ${deps.agent.name}: ${String(lastError ?? "no model fits the context window")}`,
+      );
     },
   };
   return session;
@@ -168,13 +219,21 @@ export function extractJson(text: string): unknown {
   const fence = src.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) candidates.unshift(fence[1].trim());
   for (const c of candidates) {
-    try { return JSON.parse(c); } catch { /* try embedded */ }
+    try {
+      return JSON.parse(c);
+    } catch {
+      /* try embedded */
+    }
     const object = c.indexOf("{");
     const array = c.indexOf("[");
     const start = object !== -1 && (array === -1 || object < array) ? object : array;
     const end = start === object ? c.lastIndexOf("}") : c.lastIndexOf("]");
     if (start !== -1 && end > start) {
-      try { return JSON.parse(c.slice(start, end + 1)); } catch { /* no valid JSON */ }
+      try {
+        return JSON.parse(c.slice(start, end + 1));
+      } catch {
+        /* no valid JSON */
+      }
     }
   }
   return undefined;

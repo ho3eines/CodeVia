@@ -60,7 +60,11 @@ describe("approvals — human in the loop", () => {
 
   it("blocks until a human approves from the web API and marks the task", async () => {
     container.approvals.setPolicy({ autoApprove: false, timeoutMs: 10_000 });
-    const project = await container.agentManager.createProject({ name: "Gate", description: "x", configRepo: "acme/gate" });
+    const project = await container.agentManager.createProject({
+      name: "Gate",
+      description: "x",
+      configRepo: "acme/gate",
+    });
     const task = container.agentManager.createTask({ projectId: project.id, title: "Deploy", description: "" });
     container.taskRepo.upsert({ ...task, status: "running" }, { projectId: project.id });
 
@@ -71,7 +75,11 @@ describe("approvals — human in the loop", () => {
     expect(req).toBeDefined();
     expect(container.taskRepo.findById(task.id)?.data.status).toBe("waiting_for_approval");
 
-    const res = await app!.inject({ method: "POST", url: `/approvals/${req.id}/approve`, payload: { note: "ship it" } });
+    const res = await app!.inject({
+      method: "POST",
+      url: `/approvals/${req.id}/approve`,
+      payload: { note: "ship it" },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe("approved");
     expect(await pending).toBe(true);
@@ -103,11 +111,22 @@ describe("approvals — human in the loop", () => {
 
     // /approvals lists it with buttons
     await bot.handle({ update_id: 1, message: { chat: { id: 5 }, from: { id: 5 }, text: "/approvals" } });
-    const listed = telegram.sent[telegram.sent.length - 1] as { text: string; inlineKeyboard?: Array<Array<{ callback_data?: string }>> };
+    const listed = telegram.sent[telegram.sent.length - 1] as {
+      text: string;
+      inlineKeyboard?: Array<Array<{ callback_data?: string }>>;
+    };
     expect(listed.text).toContain(req.id);
     expect(JSON.stringify(listed.inlineKeyboard)).toContain(`reject:${req.id}`);
 
-    await bot.handle({ update_id: 2, callback_query: { id: "cb", data: `reject:${req.id}`, message: { message_id: 9, chat: { id: 5 } }, from: { id: 5 } } });
+    await bot.handle({
+      update_id: 2,
+      callback_query: {
+        id: "cb",
+        data: `reject:${req.id}`,
+        message: { message_id: 9, chat: { id: 5 } },
+        from: { id: 5 },
+      },
+    });
     expect(await pending).toBe(false);
     expect(container.approvals.get(req.id)?.status).toBe("rejected");
     expect(container.approvals.get(req.id)?.decisionSource).toBe("telegram");
@@ -123,7 +142,10 @@ describe("approvals — human in the loop", () => {
   it("pushes pending approvals to the project's Telegram chat with Approve/Reject buttons", async () => {
     container.approvals.setPolicy({ autoApprove: false, timeoutMs: 2000 });
     const project = await container.agentManager.createProject({ name: "TG", description: "x", configRepo: "acme/tg" });
-    container.projectRepo.upsert({ ...container.projectRepo.findById(project.id)!.data, telegramChatId: "4242" }, { key: project.slug });
+    container.projectRepo.upsert(
+      { ...container.projectRepo.findById(project.id)!.data, telegramChatId: "4242" },
+      { key: project.slug },
+    );
     const mock = container.telegram as MockTelegramService;
     const before = mock.sent.length;
     const p = container.approvalChannel("Merge PR #7", { projectId: project.id });
@@ -137,7 +159,11 @@ describe("approvals — human in the loop", () => {
   });
 
   it("the settings endpoint reads and writes the policy", async () => {
-    const set = await app!.inject({ method: "POST", url: "/settings/approval", payload: { autoApprove: false, timeoutMs: 120000 } });
+    const set = await app!.inject({
+      method: "POST",
+      url: "/settings/approval",
+      payload: { autoApprove: false, timeoutMs: 120000 },
+    });
     expect(set.json()).toMatchObject({ autoApprove: false, timeoutMs: 120000 });
     const get = await app!.inject({ method: "GET", url: "/settings/approval" });
     expect(get.json().autoApprove).toBe(false);
@@ -153,12 +179,28 @@ describe("GitHub event automation", () => {
   });
 
   it("routes push → QA, PR opened → code reviewer, issue → research, and ignores duplicate deliveries", async () => {
-    const project = await container.agentManager.createProject({ name: "Auto", description: "node app", configRepo: "acme/auto" });
-    const publish = (name: "github.push" | "github.pull_request" | "github.issue", body: Record<string, unknown>, deliveryId: string) =>
-      eventBus.publish(name, { event: name.split(".")[1], body: { repository: { full_name: "acme/auto" }, ...body }, deliveryId }, { correlationId: generateCorrelationId() });
+    const project = await container.agentManager.createProject({
+      name: "Auto",
+      description: "node app",
+      configRepo: "acme/auto",
+    });
+    const publish = (
+      name: "github.push" | "github.pull_request" | "github.issue",
+      body: Record<string, unknown>,
+      deliveryId: string,
+    ) =>
+      eventBus.publish(
+        name,
+        { event: name.split(".")[1], body: { repository: { full_name: "acme/auto" }, ...body }, deliveryId },
+        { correlationId: generateCorrelationId() },
+      );
 
     await publish("github.push", { ref: "refs/heads/main", commits: [{ id: "abc1234", message: "fix login" }] }, "d1");
-    await publish("github.pull_request", { action: "opened", pull_request: { number: 12, title: "Add caching" } }, "d2");
+    await publish(
+      "github.pull_request",
+      { action: "opened", pull_request: { number: 12, title: "Add caching" } },
+      "d2",
+    );
     await publish("github.issue", { action: "opened", issue: { number: 3, title: "Crash on start" } }, "d3");
     // Redelivery of d1 must not create another task.
     await publish("github.push", { ref: "refs/heads/main" }, "d1");
@@ -175,13 +217,22 @@ describe("GitHub event automation", () => {
   });
 
   it("the webhook route forwards the delivery id into the event", async () => {
-    const project = await container.agentManager.createProject({ name: "Hook", description: "x", configRepo: "acme/hook" });
+    const project = await container.agentManager.createProject({
+      name: "Hook",
+      description: "x",
+      configRepo: "acme/hook",
+    });
     const body = JSON.stringify({ repository: { full_name: "acme/hook" }, ref: "refs/heads/dev" });
     const signature = "sha256=" + createHmac("sha256", process.env.GITHUB_WEBHOOK_SECRET!).update(body).digest("hex");
     const res = await app!.inject({
       method: "POST",
       url: "/webhooks/github",
-      headers: { "x-github-event": "push", "x-github-delivery": "uuid-1", "content-type": "application/json", "x-hub-signature-256": signature },
+      headers: {
+        "x-github-event": "push",
+        "x-github-delivery": "uuid-1",
+        "content-type": "application/json",
+        "x-hub-signature-256": signature,
+      },
       payload: body,
     });
     expect(res.statusCode).toBe(202);
@@ -204,19 +255,33 @@ describe("prompt versioning", () => {
     const agent = container.agentRepo.byProject(project.id)[0];
     const v0 = agent.systemPrompt;
 
-    let res = await app!.inject({ method: "PATCH", url: `/agents/${agent.id}`, payload: { systemPrompt: v0 + "\nAlways write tests." } });
+    const res = await app!.inject({
+      method: "PATCH",
+      url: `/agents/${agent.id}`,
+      payload: { systemPrompt: v0 + "\nAlways write tests." },
+    });
     expect(res.statusCode).toBe(200);
-    res = await app!.inject({ method: "PATCH", url: `/agents/${agent.id}`, payload: { systemPrompt: v0 + "\nAlways write tests.\nNever commit secrets." } });
+    await app!.inject({
+      method: "PATCH",
+      url: `/agents/${agent.id}`,
+      payload: { systemPrompt: v0 + "\nAlways write tests.\nNever commit secrets." },
+    });
 
     const versions = (await app!.inject({ method: "GET", url: `/agents/${agent.id}/prompt-versions` })).json();
     expect(versions.map((v: { version: number }) => v.version)).toEqual([1, 2, 3]);
     expect(versions[2].current).toBe(true);
 
-    const diff = (await app!.inject({ method: "GET", url: `/agents/${agent.id}/prompt-versions/diff?from=1&to=current` })).json();
+    const diff = (
+      await app!.inject({ method: "GET", url: `/agents/${agent.id}/prompt-versions/diff?from=1&to=current` })
+    ).json();
     expect(diff.summary.added).toBe(2);
-    expect(diff.lines.some((l: { type: string; text: string }) => l.type === "added" && l.text === "Never commit secrets.")).toBe(true);
+    expect(
+      diff.lines.some((l: { type: string; text: string }) => l.type === "added" && l.text === "Never commit secrets."),
+    ).toBe(true);
 
-    const restored = (await app!.inject({ method: "POST", url: `/agents/${agent.id}/prompt-versions/1/restore` })).json();
+    const restored = (
+      await app!.inject({ method: "POST", url: `/agents/${agent.id}/prompt-versions/1/restore` })
+    ).json();
     expect(restored.agent.systemPrompt).toBe(v0);
     expect(restored.version.version).toBe(4);
     expect(restored.version.derivedFrom).toBe(1);
@@ -238,18 +303,42 @@ describe("rules discovery, budget control, dry run", () => {
   });
 
   it("derives project rules from CONTRIBUTING/.editorconfig/package.json/CI and injects them on onboarding", async () => {
-    const mock = container.github as unknown as { seedRepo(o: string, n: string, opts: { files: Array<{ path: string; content: string }> }): void };
+    const mock = container.github as unknown as {
+      seedRepo(o: string, n: string, opts: { files: Array<{ path: string; content: string }> }): void;
+    };
     mock.seedRepo("acme", "rules", {
       files: [
-        { path: "CONTRIBUTING.md", content: "# Contributing\n- Use conventional commits for every change.\n- Open a PR against develop, never main.\n" },
-        { path: ".editorconfig", content: "root = true\n[*]\nindent_style = space\nindent_size = 2\nend_of_line = lf\n" },
-        { path: "package.json", content: JSON.stringify({ type: "module", engines: { node: ">=20" }, scripts: { test: "vitest run", lint: "eslint ." } }) },
+        {
+          path: "CONTRIBUTING.md",
+          content:
+            "# Contributing\n- Use conventional commits for every change.\n- Open a PR against develop, never main.\n",
+        },
+        {
+          path: ".editorconfig",
+          content: "root = true\n[*]\nindent_style = space\nindent_size = 2\nend_of_line = lf\n",
+        },
+        {
+          path: "package.json",
+          content: JSON.stringify({
+            type: "module",
+            engines: { node: ">=20" },
+            scripts: { test: "vitest run", lint: "eslint ." },
+          }),
+        },
         { path: ".github/workflows/ci.yml", content: "name: ci\n" },
         { path: "CODEOWNERS", content: "* @acme/core\nsrc/api @acme/backend\n" },
       ],
     });
-    const project = await container.agentManager.createProject({ name: "Rules", description: "node service", configRepo: "acme/rules" });
-    const rules = (await app!.inject({ method: "GET", url: `/projects/${project.id}/rules` })).json() as Array<{ category: string; discovered: boolean; text: string }>;
+    const project = await container.agentManager.createProject({
+      name: "Rules",
+      description: "node service",
+      configRepo: "acme/rules",
+    });
+    const rules = (await app!.inject({ method: "GET", url: `/projects/${project.id}/rules` })).json() as Array<{
+      category: string;
+      discovered: boolean;
+      text: string;
+    }>;
     const discovered = rules.filter((r) => r.discovered);
     const all = discovered.map((r) => r.text).join("\n");
     expect(all).toContain("conventional commits");
@@ -260,15 +349,27 @@ describe("rules discovery, budget control, dry run", () => {
     expect(new Set(discovered.map((r) => r.category))).toContain("testing");
 
     // Both manual and previously discovered rules survive re-onboarding unchanged.
-    await app!.inject({ method: "PUT", url: `/projects/${project.id}/rules`, payload: { rules: ["Use Persian for user-facing strings."] } });
+    await app!.inject({
+      method: "PUT",
+      url: `/projects/${project.id}/rules`,
+      payload: { rules: ["Use Persian for user-facing strings."] },
+    });
     await app!.inject({ method: "POST", url: `/projects/${project.id}/onboard`, payload: {} });
-    const after = (await app!.inject({ method: "GET", url: `/projects/${project.id}/rules` })).json() as Array<{ discovered: boolean; text: string }>;
+    const after = (await app!.inject({ method: "GET", url: `/projects/${project.id}/rules` })).json() as Array<{
+      discovered: boolean;
+      text: string;
+    }>;
     expect(after.filter((r) => !r.discovered).map((r) => r.text)).toEqual(["Use Persian for user-facing strings."]);
     expect(after.filter((r) => r.discovered).length).toBe(discovered.length);
 
     // The agent context carries the rules.
     const agent = container.agentRepo.byProject(project.id)[0];
-    const ctx = await container.contextEngine.build({ project: container.projectRepo.findById(project.id)!.data, agent, skills: container.skillsRegistry, github: container.github });
+    const ctx = await container.contextEngine.build({
+      project: container.projectRepo.findById(project.id)!.data,
+      agent,
+      skills: container.skillsRegistry,
+      github: container.github,
+    });
     expect(ctx.context).toContain("Use Persian for user-facing strings.");
     expect(ctx.context).toContain("conventional commits");
   });
@@ -285,11 +386,23 @@ describe("rules discovery, budget control, dry run", () => {
   });
 
   it("stops a run that exceeds the project duration budget", async () => {
-    const project = await container.agentManager.createProject({ name: "Budget", description: "x", configRepo: "acme/budget" });
+    const project = await container.agentManager.createProject({
+      name: "Budget",
+      description: "x",
+      configRepo: "acme/budget",
+    });
     const stored = container.projectRepo.findById(project.id)!.data;
-    container.projectRepo.upsert({ ...stored, settings: { ...stored.settings, budget: { ...stored.settings.budget, maxDurationMs: 1 } } }, { key: stored.slug });
+    container.projectRepo.upsert(
+      { ...stored, settings: { ...stored.settings, budget: { ...stored.settings.budget, maxDurationMs: 1 } } },
+      { key: stored.slug },
+    );
     await container.agentManager.syncProjectState(project.id);
-    const task = container.agentManager.createTask({ projectId: project.id, title: "Slow thing", description: "", agentType: "backend-developer" });
+    const task = container.agentManager.createTask({
+      projectId: project.id,
+      title: "Slow thing",
+      description: "",
+      agentType: "backend-developer",
+    });
     await new Promise((r) => setTimeout(r, 5));
     await expect(container.agentManager.runTask(task.id)).rejects.toThrow(/Budget exceeded/);
     const run = container.runRepo.byProject(project.id)[0];
@@ -298,8 +411,20 @@ describe("rules discovery, budget control, dry run", () => {
   });
 
   it("dry run previews the plan, writes and approvals without creating a task or run", async () => {
-    const project = await container.agentManager.createProject({ name: "Dry", description: "x", configRepo: "acme/dry" });
-    const res = await app!.inject({ method: "POST", url: `/projects/${project.id}/dry-run`, payload: { title: "Fix login bug", description: "login broken after last commit", agentType: "backend-developer" } });
+    const project = await container.agentManager.createProject({
+      name: "Dry",
+      description: "x",
+      configRepo: "acme/dry",
+    });
+    const res = await app!.inject({
+      method: "POST",
+      url: `/projects/${project.id}/dry-run`,
+      payload: {
+        title: "Fix login bug",
+        description: "login broken after last commit",
+        agentType: "backend-developer",
+      },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.simulation).toBe(true);

@@ -28,14 +28,26 @@ export const PLANNING_INSTRUCTION = [
   "Respect the research brief, configured stack and project rules. Do not add unrelated work or silently drop requirements. Flag impossible scope instead of inventing an agent or skill.",
 ].join("\n");
 
-export function planningRequest(project: Project, task: Task, brief: string, repositoryContext: string, agents: Agent[], skills: SkillRegistry): string {
+export function planningRequest(
+  project: Project,
+  task: Task,
+  brief: string,
+  repositoryContext: string,
+  agents: Agent[],
+  skills: SkillRegistry,
+): string {
   const roster = agents.map((agent) => {
     const repo = repositoryForAgent(project, agent.type);
     const catalog = skills.availableFor(project, agent);
     return {
-      agentType: agent.type, duty: agent.description,
+      agentType: agent.type,
+      duty: agent.description,
       repository: `${repo.repo}@${repo.branch}`,
-      skills: catalog.map((s) => ({ slug: s.slug, description: s.description.slice(0, 180), dependencies: s.dependencies })),
+      skills: catalog.map((s) => ({
+        slug: s.slug,
+        description: s.description.slice(0, 180),
+        dependencies: s.dependencies,
+      })),
     };
   });
   return [

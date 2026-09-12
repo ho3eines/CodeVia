@@ -19,19 +19,41 @@ function agent(type: Agent["type"]): Agent {
   const now = new Date().toISOString();
   const scaffold = scaffoldFor(type);
   return {
-    id: `a-${type}`, projectId: "p1", type, name: type, slug: type, role: "", description: "",
-    systemPrompt: "", skills: [...scaffold.skills], tools: [...scaffold.tools], permissions: [...scaffold.permissions],
+    id: `a-${type}`,
+    projectId: "p1",
+    type,
+    name: type,
+    slug: type,
+    role: "",
+    description: "",
+    systemPrompt: "",
+    skills: [...scaffold.skills],
+    tools: [...scaffold.tools],
+    permissions: [...scaffold.permissions],
     models: { primary: "m", fallbacks: [], specialized: {} },
-    maxIterations: 5, timeoutMs: 1000, tokenBudget: 100, memorySources: [],
-    enabled: true, version: 1, createdAt: now, updatedAt: now,
+    maxIterations: 5,
+    timeoutMs: 1000,
+    tokenBudget: 100,
+    memorySources: [],
+    enabled: true,
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
 function task(): Task {
   const now = new Date().toISOString();
   return {
-    id: "t1", projectId: "p1", title: "Fix login", description: "login broken", status: "created",
-    correlationId: "c", input: {}, createdAt: now, updatedAt: now,
+    id: "t1",
+    projectId: "p1",
+    title: "Fix login",
+    description: "login broken",
+    status: "created",
+    correlationId: "c",
+    input: {},
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
@@ -55,7 +77,9 @@ describe("defaultPlanFor executability (all 18 agent types)", () => {
 
   it("build/test steps request remote CI evidence and never pass host shell commands", () => {
     for (const type of types) {
-      for (const step of defaultPlanFor(agent(type), task()).filter((s) => s.tool === "run_tests" || s.tool === "run_build")) {
+      for (const step of defaultPlanFor(agent(type), task()).filter(
+        (s) => s.tool === "run_tests" || s.tool === "run_build",
+      )) {
         expect(step.input).not.toHaveProperty("command");
         expect(step.input).not.toHaveProperty("cwd");
       }
@@ -91,11 +115,21 @@ describe("defaultPlanFor executability (all 18 agent types)", () => {
 
 describe("read_file safe default", () => {
   const project = { configRepo: "acme/demo", branch: "main" } as Project;
-  const baseCtx = { project, agent: agent("research"), correlationId: "c", logger: { info() {}, warn() {} } } as unknown as Parameters<typeof readFileTool.execute>[0];
+  const baseCtx = {
+    project,
+    agent: agent("research"),
+    correlationId: "c",
+    logger: { info() {}, warn() {} },
+  } as unknown as Parameters<typeof readFileTool.execute>[0];
 
   it("reads the project brief when no path is given", async () => {
     const res = await readFileTool.execute(
-      { ...baseCtx, github: { getFile: async (_r: unknown, p: string) => (p === "Agent.md" ? { content: "# brief", sha: "1" } : undefined) } as never },
+      {
+        ...baseCtx,
+        github: {
+          getFile: async (_r: unknown, p: string) => (p === "Agent.md" ? { content: "# brief", sha: "1" } : undefined),
+        } as never,
+      },
       {},
     );
     expect(res.ok).toBe(true);
@@ -131,11 +165,15 @@ describe("agent run → memory DB index", () => {
 
   it("mirrors a qa-test run's saved findings into the memory index", async () => {
     const project = await container.agentManager.createProject({
-      name: "Memory App", description: "app", configRepo: "acme/memory",
+      name: "Memory App",
+      description: "app",
+      configRepo: "acme/memory",
     });
     const t = container.agentManager.createTask({
-      projectId: project.id, title: "Run the auth test suite",
-      description: "run tests", agentType: "qa-test",
+      projectId: project.id,
+      title: "Run the auth test suite",
+      description: "run tests",
+      agentType: "qa-test",
     });
     const result = await container.agentManager.runTask(t.id);
     expect(result.status).toBe("succeeded");
@@ -161,7 +199,8 @@ describe("project detail API", () => {
 
   async function makeProject(srv: FastifyInstance): Promise<string> {
     const res = await srv.inject({
-      method: "POST", url: "/projects",
+      method: "POST",
+      url: "/projects",
       payload: { name: "Detail App", description: "detail", configRepo: "acme/detail" },
     });
     expect(res.statusCode).toBe(201);
@@ -198,7 +237,19 @@ describe("project detail API", () => {
     const ov = await srv.inject({ method: "GET", url: `/projects/${id}/overview` });
     expect(ov.statusCode).toBe(200);
     const body = ov.json() as Record<string, unknown>;
-    for (const key of ["project", "status", "counts", "testStatus", "openIssues", "openPRs", "recentCommits", "recentRuns", "activity", "cost", "budget"]) {
+    for (const key of [
+      "project",
+      "status",
+      "counts",
+      "testStatus",
+      "openIssues",
+      "openPRs",
+      "recentCommits",
+      "recentRuns",
+      "activity",
+      "cost",
+      "budget",
+    ]) {
       expect(body, `overview.${key}`).toHaveProperty(key);
     }
     expect((body.counts as Record<string, number>).agents).toBeGreaterThanOrEqual(10);
@@ -218,21 +269,25 @@ describe("project detail API", () => {
     await srv.inject({ method: "POST", url: `/projects/${id}/onboard`, payload: {} });
 
     const issue = await srv.inject({
-      method: "POST", url: `/projects/${id}/issues`,
+      method: "POST",
+      url: `/projects/${id}/issues`,
       payload: { title: "Login broken", body: "repro" },
     });
     expect(issue.statusCode).toBe(201);
     expect((issue.json() as { number: number }).number).toBe(1);
 
     const pr = await srv.inject({
-      method: "POST", url: `/projects/${id}/pull-requests`,
+      method: "POST",
+      url: `/projects/${id}/pull-requests`,
       payload: { title: "Fix login", head: "fix/login", base: "main" },
     });
     expect(pr.statusCode).toBe(201);
     expect((pr.json() as { number: number }).number).toBe(1);
 
     const missing = await srv.inject({
-      method: "POST", url: `/projects/${id}/issues`, payload: { title: "" },
+      method: "POST",
+      url: `/projects/${id}/issues`,
+      payload: { title: "" },
     });
     expect(missing.statusCode).toBe(400);
   });
@@ -241,7 +296,9 @@ describe("project detail API", () => {
     const srv = await boot();
     const id = await makeProject(srv);
     const attach = await srv.inject({
-      method: "POST", url: `/projects/${id}/skills`, payload: { slug: "testing" },
+      method: "POST",
+      url: `/projects/${id}/skills`,
+      payload: { slug: "testing" },
     });
     expect(attach.statusCode).toBe(200);
     expect(attach.json()).toContain("testing");
@@ -251,7 +308,9 @@ describe("project detail API", () => {
     expect(detach.json()).not.toContain("testing");
 
     const unknown = await srv.inject({
-      method: "POST", url: `/projects/${id}/skills`, payload: { slug: "nope" },
+      method: "POST",
+      url: `/projects/${id}/skills`,
+      payload: { slug: "nope" },
     });
     expect(unknown.statusCode).toBe(404);
   });
@@ -260,7 +319,8 @@ describe("project detail API", () => {
     const srv = await boot();
     const id = await makeProject(srv);
     const created = await srv.inject({
-      method: "POST", url: "/tasks",
+      method: "POST",
+      url: "/tasks",
       payload: { projectId: id, title: "T", description: "d", priority: "high" },
     });
     expect(created.statusCode).toBe(200);
@@ -268,12 +328,16 @@ describe("project detail API", () => {
     expect((created.json() as { priority: string }).priority).toBe("high");
 
     const patched = await srv.inject({
-      method: "PATCH", url: `/tasks/${tid}`, payload: { title: "T2", priority: "critical" },
+      method: "PATCH",
+      url: `/tasks/${tid}`,
+      payload: { title: "T2", priority: "critical" },
     });
     expect(patched.statusCode).toBe(200);
     expect((patched.json() as { title: string }).title).toBe("T2");
 
-    expect((await srv.inject({ method: "PATCH", url: "/tasks/missing", payload: { title: "x" } })).statusCode).toBe(404);
+    expect((await srv.inject({ method: "PATCH", url: "/tasks/missing", payload: { title: "x" } })).statusCode).toBe(
+      404,
+    );
 
     const del = await srv.inject({ method: "DELETE", url: `/tasks/${tid}` });
     expect(del.statusCode).toBe(200);
@@ -284,14 +348,17 @@ describe("project detail API", () => {
     const srv = await boot();
     const id = await makeProject(srv);
     const created = await srv.inject({
-      method: "POST", url: "/memory",
+      method: "POST",
+      url: "/memory",
       payload: { projectId: id, scope: "project", type: "decision", key: "k", content: "v1" },
     });
     expect(created.statusCode).toBe(200);
     const mid = (created.json() as { id: string }).id;
 
     const patched = await srv.inject({
-      method: "PATCH", url: `/memory/${mid}`, payload: { content: "v2" },
+      method: "PATCH",
+      url: `/memory/${mid}`,
+      payload: { content: "v2" },
     });
     expect(patched.statusCode).toBe(200);
     const body = patched.json() as { content: string; version: number };
@@ -303,7 +370,9 @@ describe("project detail API", () => {
     const srv = await boot();
     const id = await makeProject(srv);
     const created = await srv.inject({
-      method: "POST", url: "/agents", payload: { projectId: id, type: "security" },
+      method: "POST",
+      url: "/agents",
+      payload: { projectId: id, type: "security" },
     });
     expect(created.statusCode).toBe(201);
     const body = created.json() as { tools: string[]; permissions: string[]; name: string };
@@ -311,8 +380,13 @@ describe("project detail API", () => {
     expect(body.tools.length).toBeGreaterThan(0);
     expect(body.permissions).toContain("github.read");
 
-    expect((await srv.inject({ method: "POST", url: "/agents", payload: { projectId: "nope", type: "security" } })).statusCode).toBe(404);
-    expect((await srv.inject({ method: "POST", url: "/agents", payload: { projectId: id, type: "nope" } })).statusCode).toBe(400);
+    expect(
+      (await srv.inject({ method: "POST", url: "/agents", payload: { projectId: "nope", type: "security" } }))
+        .statusCode,
+    ).toBe(404);
+    expect(
+      (await srv.inject({ method: "POST", url: "/agents", payload: { projectId: id, type: "nope" } })).statusCode,
+    ).toBe(400);
 
     const types = await srv.inject({ method: "GET", url: "/agents/types" });
     expect(types.statusCode).toBe(200);
@@ -326,23 +400,30 @@ describe("project detail API", () => {
   it("patches project defaults with validation", async () => {
     const srv = await boot();
     const id = await makeProject(srv);
-    const agents = (await srv.inject({ method: "GET", url: `/projects/${id}/agents` }).then((r) => r.json())) as Array<{ id: string }>;
+    const agents = (await srv.inject({ method: "GET", url: `/projects/${id}/agents` }).then((r) => r.json())) as Array<{
+      id: string;
+    }>;
     expect(agents.length).toBeGreaterThan(0);
 
     const ok = await srv.inject({
-      method: "PATCH", url: `/projects/${id}`,
+      method: "PATCH",
+      url: `/projects/${id}`,
       payload: { defaultAgentId: agents[0].id, memoryRepo: "acme/memory" },
     });
     expect(ok.statusCode).toBe(200);
     expect((ok.json() as { defaultAgentId: string }).defaultAgentId).toBe(agents[0].id);
 
     const badAgent = await srv.inject({
-      method: "PATCH", url: `/projects/${id}`, payload: { defaultAgentId: "nope" },
+      method: "PATCH",
+      url: `/projects/${id}`,
+      payload: { defaultAgentId: "nope" },
     });
     expect(badAgent.statusCode).toBe(400);
 
     const badRepo = await srv.inject({
-      method: "PATCH", url: `/projects/${id}`, payload: { memoryRepo: "not-a-repo" },
+      method: "PATCH",
+      url: `/projects/${id}`,
+      payload: { memoryRepo: "not-a-repo" },
     });
     expect(badRepo.statusCode).toBe(400);
   });

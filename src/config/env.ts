@@ -39,24 +39,20 @@ const envBoolean = (defaultValue: boolean) =>
   );
 
 /** Blank or whitespace-only env values mean "unset", not "" or 0. */
-const blankToUndefined = (v: unknown): unknown =>
-  typeof v === "string" && v.trim() === "" ? undefined : v;
+const blankToUndefined = (v: unknown): unknown => (typeof v === "string" && v.trim() === "" ? undefined : v);
 
 const envEnum = <T extends readonly [string, ...string[]]>(values: T, defaultValue: T[number]) =>
   z.preprocess(blankToUndefined, z.enum(values).default(defaultValue));
 
 const envNumber = (defaultValue: number, min?: number) =>
-  z.preprocess(
-    (v) => {
-      const u = blankToUndefined(v);
-      if (u === undefined) return undefined;
-      const n = Number(u);
-      if (!Number.isFinite(n)) return u; // let zod report the error
-      if (min !== undefined && n < min) return min;
-      return n;
-    },
-    z.coerce.number().default(defaultValue),
-  );
+  z.preprocess((v) => {
+    const u = blankToUndefined(v);
+    if (u === undefined) return undefined;
+    const n = Number(u);
+    if (!Number.isFinite(n)) return u; // let zod report the error
+    if (min !== undefined && n < min) return min;
+    return n;
+  }, z.coerce.number().default(defaultValue));
 
 /**
  * Environment variable contract. All secrets come from environment variables /
@@ -64,9 +60,7 @@ const envNumber = (defaultValue: number, min?: number) =>
  * NEVER stored in the Git repository or in project config — only secret *refs* are.
  */
 const EnvSchema = z.object({
-  NODE_ENV: z
-    .enum(["development", "staging", "production", "test"])
-    .default("development"),
+  NODE_ENV: z.enum(["development", "staging", "production", "test"]).default("development"),
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().default(8080),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
@@ -151,9 +145,7 @@ export function getEnv(): EnvConfig {
   const result = EnvSchema.safeParse(process.env);
   if (!result.success) {
     // Collect a readable summary of what's wrong.
-    const issues = result.error.issues
-      .map((i) => `${i.path.join(".")}: ${i.message}`)
-      .join("; ");
+    const issues = result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
     throw new Error(`Invalid environment configuration: ${issues}`);
   }
   cached = result.data;

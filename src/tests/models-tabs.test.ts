@@ -22,29 +22,54 @@ function seedModels(n: number): string[] {
   for (let i = 0; i < n; i++) {
     const id = `model-tabqa-${i}`;
     container.modelRepo.upsert({
-      id, providerId: PROVIDER, modelId: `tabqa-${i}`, displayName: `TabQA ${i}`,
-      contextWindow: 128000, inputCostPer1k: 0, outputCostPer1k: 0, capabilities: { ...CAPS },
-      active: true, priority: 100, fallbackPriority: 100, tags: ["tabqa"],
-      createdAt: now, updatedAt: now,
+      id,
+      providerId: PROVIDER,
+      modelId: `tabqa-${i}`,
+      displayName: `TabQA ${i}`,
+      contextWindow: 128000,
+      inputCostPer1k: 0,
+      outputCostPer1k: 0,
+      capabilities: { ...CAPS },
+      active: true,
+      priority: 100,
+      fallbackPriority: 100,
+      tags: ["tabqa"],
+      createdAt: now,
+      updatedAt: now,
     });
     ids.push(id);
   }
   return ids;
 }
 
-function seedBench(modelId: string, kind: "all-error" | "half-error" | "all-good" | "inactive-error", inactive = false) {
+function seedBench(
+  modelId: string,
+  kind: "all-error" | "half-error" | "all-good" | "inactive-error",
+  inactive = false,
+) {
   if (inactive) {
     const row = container.modelRepo.findById(modelId);
     if (row) container.modelRepo.upsert({ ...row.data, active: false, updatedAt: new Date().toISOString() });
   }
   for (let i = 0; i < 4; i++) {
-    const isErr = kind === "all-error" || kind === "inactive-error" ? true : kind === "half-error" ? i % 2 === 0 : false;
+    const isErr =
+      kind === "all-error" || kind === "inactive-error" ? true : kind === "half-error" ? i % 2 === 0 : false;
     container.benchRepo.record({
-      benchmarkRunId: "run-tabqa", modelId, providerId: PROVIDER,
-      problemId: `p-${i}`, problemKind: "arithmetic",
-      question: "1+1", expectedAnswer: "2",
-      modelAnswer: isErr ? "" : "2", correct: !isErr, answered: !isErr,
-      latencyMs: 50, inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0,
+      benchmarkRunId: "run-tabqa",
+      modelId,
+      providerId: PROVIDER,
+      problemId: `p-${i}`,
+      problemKind: "arithmetic",
+      question: "1+1",
+      expectedAnswer: "2",
+      modelAnswer: isErr ? "" : "2",
+      correct: !isErr,
+      answered: !isErr,
+      latencyMs: 50,
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      costUsd: 0,
       ...(isErr ? { error: kind === "inactive-error" ? "HTTP 500 boom" : "timeout after 60000ms" } : {}),
     });
   }
@@ -75,7 +100,9 @@ afterAll(async () => {
 async function boot() {
   const pub = resolve(process.cwd(), "public");
   const dom = new JSDOM(readFileSync(resolve(pub, "index.html"), "utf8"), {
-    url: `${baseUrl}/#/models`, runScripts: "outside-only", pretendToBeVisual: true,
+    url: `${baseUrl}/#/models`,
+    runScripts: "outside-only",
+    pretendToBeVisual: true,
   });
   const win = dom.window as unknown as Record<string, any>;
   win.fetch = (u: string, o?: RequestInit) => fetch(new URL(String(u), baseUrl), o);

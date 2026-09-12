@@ -112,7 +112,9 @@ const ENTITY_RULES: Array<[RegExp, string]> = [
 ];
 
 const STOPWORDS = new Set(
-  "add new create update delete fix implement build make page api app the and for with from into your our this that page screen button form data list view get set all".split(" "),
+  "add new create update delete fix implement build make page api app the and for with from into your our this that page screen button form data list view get set all".split(
+    " ",
+  ),
 );
 
 export function entityFor(title: string, description = ""): Entity {
@@ -141,7 +143,13 @@ export function notePathFor(parentTaskId: string, short: string, slug: string): 
   return `docs/tasks/${parentTaskId}-${short}-${slug}.md`;
 }
 
-export function changeNote(agentName: string, child: Task, description: string, brief: string, fixContext?: string): string {
+export function changeNote(
+  agentName: string,
+  child: Task,
+  description: string,
+  brief: string,
+  fixContext?: string,
+): string {
   return [
     `# ${child.title}`,
     ``,

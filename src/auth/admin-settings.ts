@@ -194,23 +194,32 @@ export function getEffectiveGitHubLoginSettings(kv?: KvStore): EffectiveGitHubLo
   if (!configured) {
     if (!clientId && !clientSecretConfigured) {
       setupHint = "GitHub login is not configured: Client ID and Client Secret are both missing.";
-      setupSteps.push("1) Create a GitHub OAuth App at https://github.com/settings/developers → OAuth Apps → New OAuth App");
+      setupSteps.push(
+        "1) Create a GitHub OAuth App at https://github.com/settings/developers → OAuth Apps → New OAuth App",
+      );
       setupSteps.push(`2) Authorization callback URL must be exactly: ${redirectUri}`);
       setupSteps.push("3) Set Client ID in Admin → GitHub Login (this page) OR as GITHUB_CLIENT_ID env variable");
-      setupSteps.push("4) Set GITHUB_CLIENT_SECRET and AUTH_SECRET (any random 32+ char string) in Railway Variables / .env and redeploy");
+      setupSteps.push(
+        "4) Set GITHUB_CLIENT_SECRET and AUTH_SECRET (any random 32+ char string) in Railway Variables / .env and redeploy",
+      );
     } else if (!clientId) {
       setupHint = "Client ID is missing — set it below (or as GITHUB_CLIENT_ID env).";
       setupSteps.push("Set the Client ID from your GitHub OAuth App here and Save.");
       if (!clientSecretConfigured) setupSteps.push("Also set GITHUB_CLIENT_SECRET in environment and redeploy.");
     } else if (!clientSecretConfigured) {
-      setupHint = "Client ID is set, but GITHUB_CLIENT_SECRET is missing in environment — login will fail until it is set.";
-      setupSteps.push("Go to Railway → Your Service → Variables (or .env locally) and add GITHUB_CLIENT_SECRET=<your OAuth App Client Secret>");
+      setupHint =
+        "Client ID is set, but GITHUB_CLIENT_SECRET is missing in environment — login will fail until it is set.";
+      setupSteps.push(
+        "Go to Railway → Your Service → Variables (or .env locally) and add GITHUB_CLIENT_SECRET=<your OAuth App Client Secret>",
+      );
       setupSteps.push("Also ensure AUTH_SECRET is set (e.g. openssl rand -hex 32) — required to sign sessions");
       setupSteps.push("Redeploy / restart the service after adding variables");
       setupSteps.push(`Verify: Authorization callback URL in GitHub OAuth App must be exactly ${redirectUri}`);
     }
     if (diagnostics.authSecretMissing && env.NODE_ENV === "production") {
-      setupSteps.push("⚠️ AUTH_SECRET is missing in production — sessions cannot be signed. Set AUTH_SECRET env (any 32+ random chars).");
+      setupSteps.push(
+        "⚠️ AUTH_SECRET is missing in production — sessions cannot be signed. Set AUTH_SECRET env (any 32+ random chars).",
+      );
     }
   } else if (diagnostics.authSecretMissing) {
     setupHint = "GitHub login is configured, but AUTH_SECRET is missing in production — sessions will fail.";
@@ -226,7 +235,9 @@ export function getEffectiveGitHubLoginSettings(kv?: KvStore): EffectiveGitHubLo
         setupSteps.push(`Ensure GitHub OAuth App → Authorization callback URL = ${redirectUri}`);
       }
     }
-  } catch {}
+  } catch {
+    /* best-effort config introspection — a parse failure must not break settings */
+  }
 
   return {
     configured,

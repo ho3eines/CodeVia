@@ -38,9 +38,7 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
     can(tool, ...required) ? tool : undefined;
 
   const inspectTool =
-    maybe("list_branches", "github.read") ??
-    maybe("list_commits", "github.read") ??
-    maybe("read_file", "github.read");
+    maybe("list_branches", "github.read") ?? maybe("list_commits", "github.read") ?? maybe("read_file", "github.read");
   const readTool = maybe("read_file", "github.read");
   const canWrite = can("write_file", "github.write", "repository.write");
   const canPR = can("create_pull_request", "github.write");
@@ -61,20 +59,22 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
     },
   });
   const rememberType =
-    agent.type === "debugging" ? "bug"
-    : agent.type === "system-architect" ? "architecture"
-    : agent.type === "qa-test" ? "technical"
-    : agent.type === "research" ? "knowledge"
-    : "knowledge";
+    agent.type === "debugging"
+      ? "bug"
+      : agent.type === "system-architect"
+        ? "architecture"
+        : agent.type === "qa-test"
+          ? "technical"
+          : agent.type === "research"
+            ? "knowledge"
+            : "knowledge";
 
   const staticSteps: PlanStep[] = [
     { label: "Understand request" },
-    inspectTool
-      ? { label: "Inspect repository", tool: inspectTool }
-      : { label: "Review project context" },
+    inspectTool ? { label: "Inspect repository", tool: inspectTool } : { label: "Review project context" },
   ];
 
-  let core: PlanStep[] = [];
+  let core: PlanStep[];
   switch (agent.type) {
     case "research":
       core = [
@@ -97,7 +97,10 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
           label: "Implement the change",
           ...(canWrite ? { tool: "write_file" } : {}),
         },
-        { label: "Verify build (GitHub CI)", ...(can("run_build", "github.read") ? { tool: "run_build", input: ciInput } : {}) },
+        {
+          label: "Verify build (GitHub CI)",
+          ...(can("run_build", "github.read") ? { tool: "run_build", input: ciInput } : {}),
+        },
       ];
       break;
     case "debugging":
@@ -126,7 +129,13 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
       core = [{ label: "Review architecture" }, { label: "Propose design" }];
       break;
     case "devops":
-      core = [{ label: "Verify build (GitHub CI)", ...(can("run_build", "github.read") ? { tool: "run_build", input: ciInput } : {}) }, { label: "Review deployment configuration" }];
+      core = [
+        {
+          label: "Verify build (GitHub CI)",
+          ...(can("run_build", "github.read") ? { tool: "run_build", input: ciInput } : {}),
+        },
+        { label: "Review deployment configuration" },
+      ];
       break;
     case "release":
       core = [
@@ -145,7 +154,10 @@ export function defaultPlanFor(agent: Agent, task: Task): PlanStep[] {
   // finishes with a summary, persisted to memory when the agent is allowed to.
   const endSteps: PlanStep[] = canPR
     ? [
-        { label: "Verify tests (GitHub CI)", ...(can("run_tests", "github.read") ? { tool: "run_tests", input: ciInput } : {}) },
+        {
+          label: "Verify tests (GitHub CI)",
+          ...(can("run_tests", "github.read") ? { tool: "run_tests", input: ciInput } : {}),
+        },
         { label: "Prepare for human code review" },
         { label: "Create pull request", tool: "create_pull_request", requiresApproval: true },
       ]

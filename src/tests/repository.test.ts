@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { DocumentRepository } from "../db/repository.js";
 import { freshDb } from "./test-helpers.js";
 
-interface Doc { id: string; name: string; value: number }
+interface Doc {
+  id: string;
+  name: string;
+  value: number;
+}
 
 describe("DocumentRepository", () => {
   let fx: ReturnType<typeof freshDb>;

@@ -60,6 +60,8 @@ export interface GithubPullRequest {
   base: string;
   htmlUrl: string;
   createdAt: string;
+  /** Head commit SHA — set when the adapter can report it (used to bind merge approvals to the exact reviewed commit). */
+  headSha?: string;
 }
 
 export interface GithubIssue {
@@ -128,16 +130,44 @@ export interface IGitHubService {
    * state when the project itself is deleted, so a later project reusing the
    * same repo does not resurrect stale definitions.
    */
-  deleteFiles?(repo: GithubRepoRef, branch: string, message: string, paths: string[], parentSha?: string): Promise<GithubCommit>;
-  createPullRequest(repo: GithubRepoRef, title: string, body: string, head: string, base: string, opts?: { draft?: boolean }): Promise<GithubPullRequest>;
+  deleteFiles?(
+    repo: GithubRepoRef,
+    branch: string,
+    message: string,
+    paths: string[],
+    parentSha?: string,
+  ): Promise<GithubCommit>;
+  createPullRequest(
+    repo: GithubRepoRef,
+    title: string,
+    body: string,
+    head: string,
+    base: string,
+    opts?: { draft?: boolean },
+  ): Promise<GithubPullRequest>;
+  /**
+   * Fetch one pull request including its head SHA. Used to bind a merge
+   * approval to the exact commit that was reviewed, so a PR that moves on
+   * after approval can never be merged under the stale authorization.
+   * Legacy adapters without this method simply can't record a commit SHA.
+   */
+  getPullRequest?(repo: GithubRepoRef, number: number): Promise<GithubPullRequest | undefined>;
   /** CI evidence for the exact committed SHA. Legacy adapters without this cannot attest tests. */
   getChecks?(repo: GithubRepoRef, sha: string): Promise<GithubCheck[]>;
-  updatePullRequest(repo: GithubRepoRef, number: number, patch: Partial<{ title: string; body: string; state: string }>): Promise<GithubPullRequest>;
+  updatePullRequest(
+    repo: GithubRepoRef,
+    number: number,
+    patch: Partial<{ title: string; body: string; state: string }>,
+  ): Promise<GithubPullRequest>;
   createIssue(repo: GithubRepoRef, title: string, body: string): Promise<GithubIssue>;
   commentOnIssue(repo: GithubRepoRef, number: number, body: string): Promise<void>;
   commentOnPullRequest(repo: GithubRepoRef, number: number, body: string): Promise<void>;
   /** Merge a pull request (dangerous — always approval-gated by the tool layer). */
-  mergePullRequest(repo: GithubRepoRef, number: number, opts?: { method?: "merge" | "squash" | "rebase"; commitTitle?: string }): Promise<{ merged: boolean; sha?: string; message?: string }>;
+  mergePullRequest(
+    repo: GithubRepoRef,
+    number: number,
+    opts?: { method?: "merge" | "squash" | "rebase"; commitTitle?: string },
+  ): Promise<{ merged: boolean; sha?: string; message?: string }>;
 }
 
 /** Verified webhook payload + headers passed to the platform. */
@@ -152,7 +182,11 @@ export interface GithubWebhookEnvelope {
 /** Parse `owner/name` into a repo ref (undefined when malformed). */
 export function parseRepoFullName(fullName: string | undefined | null): GithubRepoRef | undefined {
   if (!fullName) return undefined;
-  const trimmed = String(fullName).trim().replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "").replace(/\/+$/, "");
+  const trimmed = String(fullName)
+    .trim()
+    .replace(/^https?:\/\/github\.com\//i, "")
+    .replace(/\.git$/i, "")
+    .replace(/\/+$/, "");
   const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(trimmed);
   if (!m) return undefined;
   return { owner: m[1], name: m[2] };

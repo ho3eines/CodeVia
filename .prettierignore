@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+data/
+package-lock.json
+# The SPA bundle is split into modules as part of the roadmap before it is
+# formatted (public/app.js is a single hand-written IIFE; app.css is generated).
+# client/app/*.js are byte-exact slices of that same bundle — format them only
+# together with the bundle, never independently.
+public/
+client/app/
+docs/
+*.md
+*.db
+*.log

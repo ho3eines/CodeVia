@@ -6,14 +6,21 @@ import { buildServer } from "../http/app.js";
 import { MockGitHubService } from "../github/mock-service.js";
 import {
   ProjectFilesService,
-  matter, parseMatter, parseSections,
-  renderAgentFile, parseAgentFile,
-  renderTaskFile, parseTaskFile,
-  renderMemoryFile, parseMemoryFile,
+  matter,
+  parseMatter,
+  parseSections,
+  renderAgentFile,
+  parseAgentFile,
+  renderTaskFile,
+  parseTaskFile,
+  renderMemoryFile,
+  parseMemoryFile,
   renderProjectFile,
-  PROJECT_FILE, SKILLS_FILE, MEMORY_FILE,
+  PROJECT_FILE,
+  SKILLS_FILE,
+  MEMORY_FILE,
 } from "../github/project-files.js";
-import type { Agent, MemoryEntry, Project, Task } from "../domain/entities.js";
+import type { Agent, MemoryEntry, Task } from "../domain/entities.js";
 import { freshDb } from "./test-helpers.js";
 
 /* ------------------------------------------------------------------ *
@@ -24,7 +31,9 @@ import { freshDb } from "./test-helpers.js";
 
 describe("front-matter", () => {
   it("round-trips JSON values losslessly", () => {
-    const { data } = parseMatter(matter({ s: "a:b\nc", n: 3, b: false, nil: null, a: ["x", "y"], o: { k: "v" } }, "body"));
+    const { data } = parseMatter(
+      matter({ s: "a:b\nc", n: 3, b: false, nil: null, a: ["x", "y"], o: { k: "v" } }, "body"),
+    );
     expect(data).toEqual({ s: "a:b\nc", n: 3, b: false, nil: null, a: ["x", "y"], o: { k: "v" } });
   });
 
@@ -42,30 +51,60 @@ describe("front-matter", () => {
 function agent(): Agent {
   const now = new Date().toISOString();
   return {
-    id: "a1", projectId: "p1", type: "research", name: "Research Agent", slug: "research",
-    role: "Research", description: "mission", systemPrompt: "You are research.\nLine two.",
-    skills: ["research"], tools: ["search"], permissions: ["github.read"],
+    id: "a1",
+    projectId: "p1",
+    type: "research",
+    name: "Research Agent",
+    slug: "research",
+    role: "Research",
+    description: "mission",
+    systemPrompt: "You are research.\nLine two.",
+    skills: ["research"],
+    tools: ["search"],
+    permissions: ["github.read"],
     models: { primary: "m", fallbacks: ["f"], specialized: {} },
-    maxIterations: 5, timeoutMs: 1000, tokenBudget: 100, memorySources: ["project"],
-    enabled: true, version: 2, createdAt: now, updatedAt: now,
+    maxIterations: 5,
+    timeoutMs: 1000,
+    tokenBudget: 100,
+    memorySources: ["project"],
+    enabled: true,
+    version: 2,
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
 function task(): Task {
   const now = new Date().toISOString();
   return {
-    id: "task-1", projectId: "p1", title: "Do it", description: "Do the thing.\nCarefully.",
-    status: "succeeded", agentType: "qa-test", correlationId: "c",
+    id: "task-1",
+    projectId: "p1",
+    title: "Do it",
+    description: "Do the thing.\nCarefully.",
+    status: "succeeded",
+    agentType: "qa-test",
+    correlationId: "c",
     input: { executionMode: "autonomous", researchBrief: "Brief body here" },
-    createdAt: now, updatedAt: now,
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
 function memoryEntries(): MemoryEntry[] {
   const now = new Date().toISOString();
   const e = (type: MemoryEntry["type"], key: string, content: string): MemoryEntry => ({
-    id: `m-${key}`, projectId: "p1", scope: "project", type, key, content,
-    tags: ["t1"], refs: [], source: "web", version: 2, createdAt: now, updatedAt: now,
+    id: `m-${key}`,
+    projectId: "p1",
+    scope: "project",
+    type,
+    key,
+    content,
+    tags: ["t1"],
+    refs: [],
+    source: "web",
+    version: 2,
+    createdAt: now,
+    updatedAt: now,
   });
   return [e("decision", "auth.strategy", "Use JWT."), e("bug", "login.crash", "Fixed null ref.\nMulti-line.")];
 }
@@ -120,7 +159,11 @@ describe("sync + pull + restore (mock GitHub)", () => {
   afterEach(() => fx.cleanup());
 
   it("syncs the whole folder in one commit and pulls it back", async () => {
-    const project = await container.agentManager.createProject({ name: "Files", description: "d", configRepo: "acme/files" });
+    const project = await container.agentManager.createProject({
+      name: "Files",
+      description: "d",
+      configRepo: "acme/files",
+    });
     const task = container.agentManager.createTask({ projectId: project.id, title: "T", description: "d" });
     await container.agentManager.syncProjectState(project.id);
 
@@ -139,13 +182,26 @@ describe("sync + pull + restore (mock GitHub)", () => {
   });
 
   it("restores wiped database state from the repo folder", async () => {
-    const project = await container.agentManager.createProject({ name: "Restore", description: "d", configRepo: "acme/restore" });
+    const project = await container.agentManager.createProject({
+      name: "Restore",
+      description: "d",
+      configRepo: "acme/restore",
+    });
     container.agentManager.createTask({ projectId: project.id, title: "T", description: "d" });
     container.memoryRepo.upsert(
       {
-        id: "mem-1", projectId: project.id, scope: "project", type: "decision", key: "auth.strategy",
-        content: "Use JWT", tags: ["auth"], refs: [], source: "web", version: 1,
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        id: "mem-1",
+        projectId: project.id,
+        scope: "project",
+        type: "decision",
+        key: "auth.strategy",
+        content: "Use JWT",
+        tags: ["auth"],
+        refs: [],
+        source: "web",
+        version: 1,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       },
       { projectId: project.id, key: "auth.strategy" },
     );
@@ -173,7 +229,7 @@ describe("sync + pull + restore (mock GitHub)", () => {
   });
 
   it("manifest carries the definition brief and counts", async () => {
-    const project = await container.agentManager.createProject({ name: "Manifest", description: "d", configRepo: "acme/manifest" });
+    await container.agentManager.createProject({ name: "Manifest", description: "d", configRepo: "acme/manifest" });
     const content = await container.github.getFile({ owner: "acme", name: "manifest" }, PROJECT_FILE, "main");
     expect(content?.content).toContain("# Manifest — CodeVia project state");
     expect(content?.content).toContain("## Units (");
@@ -183,9 +239,15 @@ describe("sync + pull + restore (mock GitHub)", () => {
 
   it("delete purges the repo folder so a new project on the same repo starts clean", async () => {
     // Create a project on a repo, let onboarding write CodeVia/* to the mock repo.
-    const first = await container.agentManager.createProject({ name: "Delete Me", description: "stale state", configRepo: "acme/reuse" });
+    const first = await container.agentManager.createProject({
+      name: "Delete Me",
+      description: "stale state",
+      configRepo: "acme/reuse",
+    });
     await container.agentManager.syncProjectState(first.id);
-    expect((await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content).toContain("Delete Me");
+    expect((await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content).toContain(
+      "Delete Me",
+    );
 
     // Delete it (DB + repository state).
     container.projectRepo.deleteById(first.id);
@@ -197,12 +259,20 @@ describe("sync + pull + restore (mock GitHub)", () => {
     expect(files.filter((f) => f.path.startsWith("CodeVia/")).length).toBe(0);
 
     // Recreate on the same repo: the new project's own definition must win.
-    const second = await container.agentManager.createProject({ name: "Fresh Start", description: "clean", configRepo: "acme/reuse" });
+    const second = await container.agentManager.createProject({
+      name: "Fresh Start",
+      description: "clean",
+      configRepo: "acme/reuse",
+    });
     const stored = container.projectRepo.findById(second.id)?.data;
     expect(stored?.name).toBe("Fresh Start");
     expect(stored?.description).toBe("clean");
-    expect((await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content).toContain("Fresh Start");
-    expect((await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content).not.toContain("Delete Me");
+    expect((await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content).toContain(
+      "Fresh Start",
+    );
+    expect(
+      (await container.github.getFile({ owner: "acme", name: "reuse" }, PROJECT_FILE, "main"))?.content,
+    ).not.toContain("Delete Me");
   });
 });
 
@@ -243,7 +313,11 @@ describe("project folder API", () => {
 
   it("creates the folder on project creation, syncs memory, browses and pulls", async () => {
     const srv = await boot();
-    const created = await srv.inject({ method: "POST", url: "/projects", payload: { name: "Folder", description: "d", configRepo: "acme/folder" } });
+    const created = await srv.inject({
+      method: "POST",
+      url: "/projects",
+      payload: { name: "Folder", description: "d", configRepo: "acme/folder" },
+    });
     expect(created.statusCode).toBe(201);
     const id = (created.json() as { id: string }).id;
 
@@ -253,7 +327,11 @@ describe("project folder API", () => {
     expect(paths).toContain(PROJECT_FILE);
     expect(paths).toContain("CodeVia/agents/research.md");
 
-    const mem = await srv.inject({ method: "POST", url: "/memory", payload: { projectId: id, scope: "project", type: "decision", key: "ui.theme", content: "Dark mode" } });
+    const mem = await srv.inject({
+      method: "POST",
+      url: "/memory",
+      payload: { projectId: id, scope: "project", type: "decision", key: "ui.theme", content: "Dark mode" },
+    });
     expect(mem.statusCode).toBe(200);
 
     const memFile = await srv.inject({ method: "GET", url: `/projects/${id}/file?path=${MEMORY_FILE}` });

@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Container } from "../app/container.js";
-import { AutonomousOrchestrator, deterministicBreakdown, deterministicBrief, type PhaseExecutor } from "../agents/orchestrator.js";
+import {
+  AutonomousOrchestrator,
+  deterministicBreakdown,
+  deterministicBrief,
+  type PhaseExecutor,
+} from "../agents/orchestrator.js";
 import { extractJson } from "../agents/llm.js";
 import type { Agent, Project, Run, Task } from "../domain/entities.js";
 import type { IModelProvider } from "../ai/types.js";
@@ -22,7 +27,16 @@ function stubRun(task: Task, status: Run["status"], failedLabel?: string): Run {
     agentType: task.agentType ?? "backend-developer",
     status,
     steps: failedLabel
-      ? [{ index: 0, label: "Do work", status: "running" }, { index: 1, label: failedLabel, status: "failed", detail: "boom: assertion failed", data: task.agentType === "qa-test" ? { verification: "failed", fixable: true } : undefined }]
+      ? [
+          { index: 0, label: "Do work", status: "running" },
+          {
+            index: 1,
+            label: failedLabel,
+            status: "failed",
+            detail: "boom: assertion failed",
+            data: task.agentType === "qa-test" ? { verification: "failed", fixable: true } : undefined,
+          },
+        ]
       : [{ index: 0, label: "Do work", status: "succeeded" }],
   } as Run;
 }
@@ -67,13 +81,27 @@ describe("deterministicBreakdown", () => {
 
 describe("deterministicBrief", () => {
   const project = {
-    id: "p1", name: "Shop", slug: "shop", description: "store", branch: "main", configRepo: "acme/shop",
+    id: "p1",
+    name: "Shop",
+    slug: "shop",
+    description: "store",
+    branch: "main",
+    configRepo: "acme/shop",
     repositories: [{ repo: "acme/shop", branch: "main", role: "primary", isConfigRepo: true }],
     capabilities: {
-      platforms: ["web"], languages: ["csharp"], frameworks: ["dotnet"], databases: ["sqlserver"],
-      deploymentTargets: ["docker"], features: ["auth"], integrations: ["telegram"], agentTypes: [],
+      platforms: ["web"],
+      languages: ["csharp"],
+      frameworks: ["dotnet"],
+      databases: ["sqlserver"],
+      deploymentTargets: ["docker"],
+      features: ["auth"],
+      integrations: ["telegram"],
+      agentTypes: [],
     },
-    settings: {}, active: true, createdAt: "", updatedAt: "",
+    settings: {},
+    active: true,
+    createdAt: "",
+    updatedAt: "",
   } as unknown as Project;
   const task = { id: "t1", title: "Add login page", description: "Build the login screen. Validate input." } as Task;
 
@@ -119,10 +147,14 @@ describe("AutonomousOrchestrator with stub executor", () => {
 
   async function parentTask(): Promise<Task> {
     const project = await container.agentManager.createProject({
-      name: "Loop App", description: "app", configRepo: "acme/loop",
+      name: "Loop App",
+      description: "app",
+      configRepo: "acme/loop",
     });
     return container.agentManager.createTask({
-      projectId: project.id, title: "Add login page and API", description: "full login feature",
+      projectId: project.id,
+      title: "Add login page and API",
+      description: "full login feature",
     });
   }
 
@@ -164,7 +196,13 @@ describe("AutonomousOrchestrator with stub executor", () => {
 
   it("gives up after maxFixLoops and reports the QA error", async () => {
     const parent = await parentTask();
-    const orch = build((task) => stubRun(task, task.agentType === "qa-test" ? "failed" : "succeeded", task.agentType === "qa-test" ? "Run test suite" : undefined));
+    const orch = build((task) =>
+      stubRun(
+        task,
+        task.agentType === "qa-test" ? "failed" : "succeeded",
+        task.agentType === "qa-test" ? "Run test suite" : undefined,
+      ),
+    );
     await expect(orch.run(parent.id)).rejects.toThrow(/QA still failing after 2 fix loop/);
     const kids = container.taskRepo.findMany({ parentId: parent.id }).map((k) => k.data);
     expect(kids.filter((k) => k.title.startsWith("Fix (attempt")).length).toBe(2);
@@ -195,7 +233,13 @@ describe("AutonomousOrchestrator with stub executor", () => {
 
   it("fails fast when an implementer fails", async () => {
     const parent = await parentTask();
-    const orch = build((task) => stubRun(task, task.agentType === "backend-developer" ? "failed" : "succeeded", task.agentType === "backend-developer" ? "Implement the change" : undefined));
+    const orch = build((task) =>
+      stubRun(
+        task,
+        task.agentType === "backend-developer" ? "failed" : "succeeded",
+        task.agentType === "backend-developer" ? "Implement the change" : undefined,
+      ),
+    );
     await expect(orch.run(parent.id)).rejects.toThrow(/failed/);
   });
 });
@@ -213,7 +257,9 @@ describe("autonomous loop end-to-end (mock AI + mock GitHub)", () => {
 
   it("completes a task through research, implementers, git and QA", async () => {
     const project = await container.agentManager.createProject({
-      name: "E2E App", description: "A web app", configRepo: "acme/e2e",
+      name: "E2E App",
+      description: "A web app",
+      configRepo: "acme/e2e",
     });
     const task = container.agentManager.createTask({
       projectId: project.id,
@@ -287,18 +333,31 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
         const system = req.messages.find((m) => m.role === "system")?.content ?? "";
         const user = req.messages.find((m) => m.role === "user")?.content ?? "";
         prompts.push({ system, user });
-        let content = "canned";
+        let content: string;
         if (system.includes("business analyst")) content = "CANNED BRIEF: throttle logins, reuse the login handler.";
         else if (system.includes("engineering manager")) content = breakdownJson;
         else if (user.includes("--- START CURRENT FILE ---")) {
-          content = JSON.stringify({ edits: [{ oldText: "public class LoginHandler {}", newText: "public class LoginHandler { public bool Throttle() => true; }" }] });
+          content = JSON.stringify({
+            edits: [
+              {
+                oldText: "public class LoginHandler {}",
+                newText: "public class LoginHandler { public bool Throttle() => true; }",
+              },
+            ],
+          });
         } else {
           const target = user.match(/complete content of "([^"]+)"/)?.[1] ?? "file";
           content = target.startsWith("docs/tasks/")
             ? `# note for ${target}\n\ncanned note\n`
             : `// CANNED CODE for ${target}\n// built on existing project context\npublic class Canned {}\n`;
         }
-        return { content, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, modelId: req.modelId, providerId };
+        return {
+          content,
+          finishReason: "stop",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          modelId: req.modelId,
+          providerId,
+        };
       },
       listModels: async () => [],
       resolveApiKey: () => undefined,
@@ -317,7 +376,9 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
   /** Real AI path, end to end: canned model drives breakdown + codegen. */
   it("reads context, remaps invented paths to owned files, commits model output", async () => {
     const project = await container.agentManager.createProject({
-      name: "Canned App", description: "d", configRepo: "acme/canned",
+      name: "Canned App",
+      description: "d",
+      configRepo: "acme/canned",
       capabilities: { languages: ["csharp"], frameworks: ["dotnet"] } as Project["capabilities"],
     });
     const gh = container.github as unknown as MockGitHubService;
@@ -325,38 +386,71 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
     const owned = "src/CannedApp.Api/Handlers/LoginHandler.cs";
 
     // Merged reality: a handwritten login handler + a registry claiming it.
-    await gh.commit(ref, "main", "handwritten login", [{ path: owned, content: "// HANDWRITTEN v1\npublic class LoginHandler {}\n" }]);
-    await gh.commit(ref, "main", "seed context", [{
-      path: CONTEXT_FILE,
-      content: `---\nregistry: {"Login":{"entity":"Login","path":"${owned}","paths":{"backend-developer":"${owned}"},"agentType":"backend-developer","subtaskId":"task-old","at":"t"}}\n---\n\n# ctx\n`,
-    }]);
+    await gh.commit(ref, "main", "handwritten login", [
+      { path: owned, content: "// HANDWRITTEN v1\npublic class LoginHandler {}\n" },
+    ]);
+    await gh.commit(ref, "main", "seed context", [
+      {
+        path: CONTEXT_FILE,
+        content: `---\nregistry: {"Login":{"entity":"Login","path":"${owned}","paths":{"backend-developer":"${owned}"},"agentType":"backend-developer","subtaskId":"task-old","at":"t"}}\n---\n\n# ctx\n`,
+      },
+    ]);
     // External memory edit in git (never synced to the DB) — pre-sync must adopt it.
-    await gh.commit(ref, "main", "external memory edit", [{
-      path: MEMORY_FILE,
-      content: `---\nupdatedAt: "t"\ncount: 1\n---\n\n# Project memory (1)\n\n## decision\n\n### auth.strategy (v1)\n_tags: auth · updated: t · source: human_\n\nUse JWT everywhere\n`,
-    }]);
+    await gh.commit(ref, "main", "external memory edit", [
+      {
+        path: MEMORY_FILE,
+        content: `---\nupdatedAt: "t"\ncount: 1\n---\n\n# Project memory (1)\n\n## decision\n\n### auth.strategy (v1)\n_tags: auth · updated: t · source: human_\n\nUse JWT everywhere\n`,
+      },
+    ]);
 
     // The model invents a parallel path for the already-owned Login entity…
-    breakdownJson = JSON.stringify([{
-      agentType: "backend-developer", title: "Implement login throttling",
-      description: "Throttle login attempts", files: ["src/Invented/LoginStuff.cs"],
-    }]);
+    breakdownJson = JSON.stringify([
+      {
+        agentType: "backend-developer",
+        title: "Implement login throttling",
+        description: "Throttle login attempts",
+        files: ["src/Invented/LoginStuff.cs"],
+      },
+    ]);
 
     const provider = container.providerRepo.create({
-      name: "Canned", type: "openai", authType: "none", apiFormat: "openai",
-      timeoutMs: 1000, maxTokensDefault: 1000, defaultTemperature: 0, rateLimitPerMinute: 100, active: true,
+      name: "Canned",
+      type: "openai",
+      authType: "none",
+      apiFormat: "openai",
+      timeoutMs: 1000,
+      maxTokensDefault: 1000,
+      defaultTemperature: 0,
+      rateLimitPerMinute: 100,
+      active: true,
     });
     container.modelRepo.create({
-      providerId: provider.id, modelId: "canned-1", displayName: "Canned",
-      contextWindow: 8000, inputCostPer1k: 0, outputCostPer1k: 0,
-      capabilities: { vision: false, tools: false, structuredOutput: true, code: true, reasoning: true, streaming: false },
-      active: true, priority: 1, fallbackPriority: 1, tags: [],
+      providerId: provider.id,
+      modelId: "canned-1",
+      displayName: "Canned",
+      contextWindow: 8000,
+      inputCostPer1k: 0,
+      outputCostPer1k: 0,
+      capabilities: {
+        vision: false,
+        tools: false,
+        structuredOutput: true,
+        code: true,
+        reasoning: true,
+        streaming: false,
+      },
+      active: true,
+      priority: 1,
+      fallbackPriority: 1,
+      tags: [],
     });
     const registry = new ProviderRegistry();
     registry.register(cannedRuntime(provider.id));
 
     const task = container.agentManager.createTask({
-      projectId: project.id, title: "Add login rate limiting", description: "Throttle login attempts",
+      projectId: project.id,
+      title: "Add login rate limiting",
+      description: "Throttle login attempts",
     });
     const orch = new AutonomousOrchestrator({
       projectRepo: container.projectRepo,
@@ -408,24 +502,142 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
     );
     const re = await container.projectFiles.restore(
       project,
-      { projectRepo: container.projectRepo, agentRepo: container.agentRepo, taskRepo: container.taskRepo, memoryRepo: container.memoryRepo },
+      {
+        projectRepo: container.projectRepo,
+        agentRepo: container.agentRepo,
+        taskRepo: container.taskRepo,
+        memoryRepo: container.memoryRepo,
+      },
       { includeTasks: false },
     );
     expect(re.tasks).toBe(0);
     expect(container.taskRepo.findById(task.id)!.data.status).toBe("running");
   }, 90000);
 
+  it("parks a blocked task for clarification and performs no source writes (A13)", async () => {
+    const project = await container.agentManager.createProject({
+      name: "Blocked App",
+      description: "d",
+      configRepo: "acme/blocked",
+      capabilities: { languages: ["typescript"], frameworks: ["react", "fastify"] } as Project["capabilities"],
+    });
+    const provider = container.providerRepo.create({
+      name: "Blocker",
+      type: "openai",
+      authType: "none",
+      apiFormat: "openai",
+      timeoutMs: 1000,
+      maxTokensDefault: 1000,
+      defaultTemperature: 0,
+      rateLimitPerMinute: 100,
+      active: true,
+    });
+    container.modelRepo.create({
+      providerId: provider.id,
+      modelId: "blocker-1",
+      displayName: "Blocker",
+      contextWindow: 8000,
+      inputCostPer1k: 0,
+      outputCostPer1k: 0,
+      capabilities: {
+        vision: false,
+        tools: false,
+        structuredOutput: true,
+        code: true,
+        reasoning: true,
+        streaming: false,
+      },
+      active: true,
+      priority: 1,
+      fallbackPriority: 1,
+      tags: [],
+    });
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: provider.id,
+      type: "openai",
+      name: "Blocker",
+      chat: async (req) => {
+        const system = req.messages.find((m) => m.role === "system")?.content ?? "";
+        const content = system.includes("business analyst")
+          ? "BLOCKER: the authentication contract is unknown. Ask the user for clarification. Do not implement any file until answered."
+          : JSON.stringify([
+              {
+                id: "api",
+                agentType: "backend-developer",
+                title: "Implement login",
+                description: "Reject invalid credentials",
+                files: ["src/login.ts"],
+                acceptanceCriteria: ["Reject invalid credentials"],
+              },
+            ]);
+        return {
+          content,
+          finishReason: "stop",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          modelId: req.modelId,
+          providerId: provider.id,
+        };
+      },
+      listModels: async () => [],
+      resolveApiKey: () => undefined,
+      health: async () => true,
+    });
+    const task = container.agentManager.createTask({
+      projectId: project.id,
+      title: "Add login",
+      description: "Reject invalid credentials",
+      input: { executionMode: "autonomous" },
+    });
+    const orch = new AutonomousOrchestrator({
+      projectRepo: container.projectRepo,
+      taskRepo: container.taskRepo,
+      agentRepo: container.agentRepo,
+      agentRunner: container.agentRunner,
+      agentRouter: container.agentRouter,
+      skillsRegistry: container.skillsRegistry,
+      github: container.github,
+      modelRepo: container.modelRepo,
+      providerRepo: container.providerRepo,
+      providerRegistry: registry,
+      files: container.projectFiles,
+      memoryRepo: container.memoryRepo,
+    });
+    const summary = await orch.run(task.id);
+    expect(summary.outcome).toBe("waiting_for_approval");
+    expect(summary.blockedQuestion).toContain("authentication contract");
+    expect(container.taskRepo.findById(task.id)!.data.status).toBe("waiting_for_approval");
+    const writes = container.runRepo
+      .byProject(project.id)
+      .flatMap((r) => r.steps)
+      .filter((s) => s.tool === "write_file" && s.status === "succeeded").length;
+    expect(writes).toBe(0);
+  });
+
   it("deterministic breakdown reuses registry-owned files", () => {
     const items = deterministicBreakdown(
       { capabilities: { languages: ["csharp"], frameworks: ["dotnet"] } } as Project,
       { id: "t1", title: "Add login rate limiting", description: "throttle" } as Task,
-      { Login: { entity: "Login", path: "src/Custom/LoginHandler.cs", paths: { "backend-developer": "src/Custom/LoginHandler.cs" }, agentType: "backend-developer", subtaskId: "t", at: "t" } },
+      {
+        Login: {
+          entity: "Login",
+          path: "src/Custom/LoginHandler.cs",
+          paths: { "backend-developer": "src/Custom/LoginHandler.cs" },
+          agentType: "backend-developer",
+          subtaskId: "t",
+          at: "t",
+        },
+      },
     );
     expect(items.find((i) => i.agentType === "backend-developer")!.files[0]).toBe("src/Custom/LoginHandler.cs");
   });
 
   it("pre-sync restore skips tasks but adopts agents/memory/skills", async () => {
-    const project = await container.agentManager.createProject({ name: "Pre", description: "d", configRepo: "acme/pre" });
+    const project = await container.agentManager.createProject({
+      name: "Pre",
+      description: "d",
+      configRepo: "acme/pre",
+    });
     const task = container.agentManager.createTask({ projectId: project.id, title: "T", description: "d" });
     await container.agentManager.syncProjectState(project.id);
     const gh = container.github as unknown as MockGitHubService;
@@ -439,7 +651,12 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
 
     const summary = await container.projectFiles.restore(
       project,
-      { projectRepo: container.projectRepo, agentRepo: container.agentRepo, taskRepo: container.taskRepo, memoryRepo: container.memoryRepo },
+      {
+        projectRepo: container.projectRepo,
+        agentRepo: container.agentRepo,
+        taskRepo: container.taskRepo,
+        memoryRepo: container.memoryRepo,
+      },
       { includeTasks: false },
     );
     expect(summary.tasks).toBe(0);

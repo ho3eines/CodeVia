@@ -2,14 +2,7 @@ import type { Model } from "../domain/entities.js";
 import type { AgentModelConfig } from "../domain/entities.js";
 import type { ModelPerformanceStats } from "../domain/entities.js";
 
-export type TaskCategory =
-  | "research"
-  | "coding"
-  | "vision"
-  | "fast"
-  | "final-review"
-  | "reasoning"
-  | "default";
+export type TaskCategory = "research" | "coding" | "vision" | "fast" | "final-review" | "reasoning" | "default";
 
 /** Preferences that bias routing (from budget, user preference, context size). */
 export interface RoutingPreference {
@@ -114,7 +107,8 @@ export class ModelRouter {
     // instead of throwing on a missing member.
     const specialized = (agentModels.specialized ?? {}) as Partial<
       Record<"research" | "coding" | "vision" | "fast" | "final-review" | "reasoning", string | undefined>
-    > & Record<string, string | undefined>;
+    > &
+      Record<string, string | undefined>;
     if (category !== "default") {
       if (category === "research" || category === "coding" || category === "vision" || category === "fast") {
         push(specialized[category]);
@@ -146,8 +140,7 @@ export class ModelRouter {
     // best-performing unused model is always the first fallback. Explicitly-
     // listed primary/secondary are NOT re-sorted (user intent preserved).
     const chosen = new Set(candidates.map((m) => m.id));
-    const remaining = pool_base
-      .filter((m) => !chosen.has(m.id) && this.matches(m, category, preference));
+    const remaining = pool_base.filter((m) => !chosen.has(m.id) && this.matches(m, category, preference));
     // Sort remaining by: error rate penalty first, then accuracy/latency score,
     // then static priority as a final tiebreaker.
     remaining.sort((a, b) => {

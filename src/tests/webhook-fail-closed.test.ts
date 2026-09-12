@@ -65,7 +65,11 @@ describe("GitHub webhook route fails closed without a signing secret", () => {
   it("rejects deliveries with 503 and runs no automation", async () => {
     setWebhookSecret(undefined);
     const srv = await boot();
-    const project = await container.agentManager.createProject({ name: "Hook", description: "x", configRepo: "acme/hook" });
+    const project = await container.agentManager.createProject({
+      name: "Hook",
+      description: "x",
+      configRepo: "acme/hook",
+    });
     const res = await srv.inject({
       method: "POST",
       url: "/webhooks/github",
@@ -86,7 +90,11 @@ describe("GitHub webhook route with a signing secret configured", () => {
 
   it("accepts a validly signed delivery and routes the event", async () => {
     const srv = await boot();
-    const project = await container.agentManager.createProject({ name: "Signed", description: "x", configRepo: "acme/signed" });
+    const project = await container.agentManager.createProject({
+      name: "Signed",
+      description: "x",
+      configRepo: "acme/signed",
+    });
     const body = JSON.stringify({ repository: { full_name: "acme/signed" }, ref: "refs/heads/main" });
     const res = await srv.inject({
       method: "POST",
@@ -101,7 +109,11 @@ describe("GitHub webhook route with a signing secret configured", () => {
 
   it("rejects a tampered delivery with 401 and runs no automation", async () => {
     const srv = await boot();
-    const project = await container.agentManager.createProject({ name: "Tamper", description: "x", configRepo: "acme/tamper" });
+    const project = await container.agentManager.createProject({
+      name: "Tamper",
+      description: "x",
+      configRepo: "acme/tamper",
+    });
     const body = JSON.stringify({ repository: { full_name: "acme/tamper" }, ref: "refs/heads/main" });
     const res = await srv.inject({
       method: "POST",

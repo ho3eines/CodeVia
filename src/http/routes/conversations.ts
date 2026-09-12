@@ -160,7 +160,9 @@ Be helpful, concise, and accurate. Answer questions directly; if a question need
   }));
   return [
     { role: "system" as const, content: systemPrompt },
-    ...(updated.summary ? [{ role: "system" as const, content: `Conversation summary so far:\n${updated.summary}` }] : []),
+    ...(updated.summary
+      ? [{ role: "system" as const, content: `Conversation summary so far:\n${updated.summary}` }]
+      : []),
     ...transcriptMsgs.slice(-49),
     { role: "user" as const, content: lastUserContent },
   ];
@@ -220,7 +222,11 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     try {
       await container.projectFiles.syncConversation(hydrateProject(p), conv);
     } catch (err) {
-      logger.warn("conversation GitHub sync failed", { conversationId: conv.id, projectId: conv.projectId, err: String(err) });
+      logger.warn("conversation GitHub sync failed", {
+        conversationId: conv.id,
+        projectId: conv.projectId,
+        err: String(err),
+      });
     }
   };
   /** Fire-and-forget GitHub mirror — never blocks the HTTP response. */
@@ -236,7 +242,11 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     const current = container.conversationRepo.findById(convId)?.data;
     const len = current?.messages?.length ?? 0;
     if (!current || len < 20 || len % 20 !== 0) return;
-    void summarizeConversation(container, current, current.projectId ? container.projectRepo.findById(current.projectId)?.data.ownerId : undefined)
+    void summarizeConversation(
+      container,
+      current,
+      current.projectId ? container.projectRepo.findById(current.projectId)?.data.ownerId : undefined,
+    )
       .then((r) => {
         container.conversationRepo.updateSummary(convId, r.summary);
         persistAsync(container.conversationRepo.findById(convId)?.data);
@@ -304,7 +314,10 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
   app.get("/conversations/:id", { schema: { tags: ["conversations"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const conv = loadAllowedConv(req, id);
-    if (!conv) { reply.code(404); return { error: "conversation not found" }; }
+    if (!conv) {
+      reply.code(404);
+      return { error: "conversation not found" };
+    }
     return conv;
   });
 
@@ -350,7 +363,10 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     // kept working).
     const project = updated.projectId ? container.projectRepo.findById(updated.projectId)?.data : undefined;
     const safeProject = project ? hydrateProject(project) : undefined;
-    if (updated.projectId && (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject))) {
+    if (
+      updated.projectId &&
+      (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject))
+    ) {
       reply.code(404);
       return { error: "project not found" };
     }
@@ -363,7 +379,8 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       const errMsg: ConversationMessage = {
         id: randomUUID(),
         role: "assistant",
-        content: "💡 Task modes (autonomous / agent / simulation) need a project. Use the Chat tab inside a project to dispatch work — or keep chatting here for plain Q&A.",
+        content:
+          "💡 Task modes (autonomous / agent / simulation) need a project. Use the Chat tab inside a project to dispatch work — or keep chatting here for plain Q&A.",
         createdAt: new Date().toISOString(),
         metadata: { executionMode: mode, error: true },
       };
@@ -375,7 +392,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         executionMode: mode === "autonomous" || mode === "agent" || mode === "simulation" ? mode : "autonomous",
         agentType: b.agentType,
         correlationId: `conv-chat-${id}-${Date.now()}`,
-        requestUserId: resolveRequestUser(req, container).authenticated ? resolveRequestUser(req, container).user.id : undefined,
+        requestUserId: resolveRequestUser(req, container).authenticated
+          ? resolveRequestUser(req, container).user.id
+          : undefined,
       });
       if (isAskError(result)) {
         const errMsg: ConversationMessage = {
@@ -390,7 +409,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         const taskId = (result.task as { id?: string } | undefined)?.id;
         let body: string;
         if (result.simulation) {
-          const steps = (result.plan || []).map((s, i) => `${i + 1}. ${s.label}${s.requiresApproval ? " 🛑" : ""}`).join("\n");
+          const steps = (result.plan || [])
+            .map((s, i) => `${i + 1}. ${s.label}${s.requiresApproval ? " 🛑" : ""}`)
+            .join("\n");
           body = `🧪 Simulation plan ready · routed to **${result.routedAgentType || "auto"}**\n\n${steps}`;
         } else if (mode === "autonomous") {
           body = `🚀 Autonomous task **${taskId?.slice(0, 8) || "?"}** queued.\nResearch → implementation → QA will run automatically; updates appear below as the task progresses.`;
@@ -403,7 +424,12 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           role: "assistant",
           content: body,
           createdAt: new Date().toISOString(),
-          metadata: { modelId: b.modelId ?? updated.modelId, executionMode: mode, dispatchedTaskId: taskId, simulationPlan: result.simulation ? result.plan : undefined },
+          metadata: {
+            modelId: b.modelId ?? updated.modelId,
+            executionMode: mode,
+            dispatchedTaskId: taskId,
+            simulationPlan: result.simulation ? result.plan : undefined,
+          },
         };
         updated = container.conversationRepo.addMessage(id, statusMsg);
       }
@@ -496,7 +522,10 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     }
     const project = existing.projectId ? container.projectRepo.findById(existing.projectId)?.data : undefined;
     const safeProject = project ? hydrateProject(project) : undefined;
-    if (existing.projectId && (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject))) {
+    if (
+      existing.projectId &&
+      (!safeProject || !canAccessProject(resolveRequestUser(req, container).user, safeProject))
+    ) {
       reply.code(404);
       return { error: "project not found" };
     }
@@ -558,7 +587,8 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         const statusMsg: ConversationMessage = {
           id: randomUUID(),
           role: "assistant",
-          content: "💡 Task modes (autonomous / agent / simulation) need a project. Use the Chat tab inside a project to dispatch work — or keep chatting here for plain Q&A.",
+          content:
+            "💡 Task modes (autonomous / agent / simulation) need a project. Use the Chat tab inside a project to dispatch work — or keep chatting here for plain Q&A.",
           createdAt: new Date().toISOString(),
           metadata: { executionMode: mode, error: true },
         };
@@ -575,7 +605,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           executionMode: mode === "autonomous" || mode === "agent" || mode === "simulation" ? mode : "autonomous",
           agentType: b.agentType,
           correlationId: `conv-chat-${id}-${Date.now()}`,
-          requestUserId: resolveRequestUser(req, container).authenticated ? resolveRequestUser(req, container).user.id : undefined,
+          requestUserId: resolveRequestUser(req, container).authenticated
+            ? resolveRequestUser(req, container).user.id
+            : undefined,
         });
         let statusMsg: ConversationMessage;
         if (isAskError(result)) {
@@ -590,7 +622,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           const taskId = (result.task as { id?: string } | undefined)?.id;
           let body: string;
           if (result.simulation) {
-            const steps = (result.plan || []).map((s, i) => `${i + 1}. ${s.label}${s.requiresApproval ? " 🛑" : ""}`).join("\n");
+            const steps = (result.plan || [])
+              .map((s, i) => `${i + 1}. ${s.label}${s.requiresApproval ? " 🛑" : ""}`)
+              .join("\n");
             body = `🧪 Simulation plan ready · routed to **${result.routedAgentType || "auto"}**\n\n${steps}`;
           } else if (mode === "autonomous") {
             body = `🚀 Autonomous task **${taskId?.slice(0, 8) || "?"}** queued.\nResearch → implementation → QA will run automatically; updates appear below as the task progresses.`;
@@ -637,12 +671,17 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       const messages = buildChatMessages({ safeProject, updated: current, content, attachments, repoBrief });
       // The project owner's models serve project chats; a standalone chat
       // uses the signed-in user's own models.
-      const ordered = resolveOrderedModels(container, b.modelId ?? current.modelId ?? safeProject?.defaultModelId, safeProject?.ownerId ?? resolveRequestUser(req, container).user.id);
+      const ordered = resolveOrderedModels(
+        container,
+        b.modelId ?? current.modelId ?? safeProject?.defaultModelId,
+        safeProject?.ownerId ?? resolveRequestUser(req, container).user.id,
+      );
       if (!ordered.length) {
         const errMsg: ConversationMessage = {
           id: randomUUID(),
           role: "assistant",
-          content: "⚠️ No active model is available. Activate a provider and a model first (Settings → Providers / Models).",
+          content:
+            "⚠️ No active model is available. Activate a provider and a model first (Settings → Providers / Models).",
           createdAt: new Date().toISOString(),
           metadata: { error: true },
         };
@@ -722,7 +761,8 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
               inputTokens,
               outputTokens,
               totalTokens: inputTokens + outputTokens,
-              estimatedCostUsd: (inputTokens / 1000) * (m.inputCostPer1k ?? 0) + (outputTokens / 1000) * (m.outputCostPer1k ?? 0),
+              estimatedCostUsd:
+                (inputTokens / 1000) * (m.inputCostPer1k ?? 0) + (outputTokens / 1000) * (m.outputCostPer1k ?? 0),
               durationMs: Date.now() - started,
             });
           }
@@ -754,7 +794,11 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     const conv = container.conversationRepo.findById(id);
     if (!conv) return { error: "conversation not found" };
     if ((conv.data.messages ?? []).length === 0) return { summary: "", method: "heuristic" };
-    const result = await summarizeConversation(container, conv.data, conv.data.projectId ? container.projectRepo.findById(conv.data.projectId)?.data.ownerId : undefined);
+    const result = await summarizeConversation(
+      container,
+      conv.data,
+      conv.data.projectId ? container.projectRepo.findById(conv.data.projectId)?.data.ownerId : undefined,
+    );
     container.conversationRepo.updateSummary(id, result.summary);
     persistAsync(container.conversationRepo.findById(id)?.data);
     return result;

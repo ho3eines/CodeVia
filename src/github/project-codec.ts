@@ -27,7 +27,16 @@ export const MEMORY_FILE = `${CODEVIA_DIR}/memory.md`;
 export const CONTEXT_FILE = `${CODEVIA_DIR}/context.md`;
 export const RUNTIME_CONTEXT_FILE = `${CODEVIA_DIR}/runtime/context.md`;
 
-const KNOWN_MEMORY_TYPES = ["architecture", "business", "technical", "decision", "bug", "knowledge", "lesson", "conversation"];
+const KNOWN_MEMORY_TYPES = [
+  "architecture",
+  "business",
+  "technical",
+  "decision",
+  "bug",
+  "knowledge",
+  "lesson",
+  "conversation",
+];
 
 /* ---------------- front-matter (JSON values → lossless round-trip) ---------------- */
 
@@ -64,7 +73,10 @@ export function renderProjectFile(project: Project, agents: Agent[], tasks: Task
   const taskRows = [...tasks]
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
     .slice(0, 30)
-    .map((t) => `| \`${t.id}\` | ${oneLine(t.title).slice(0, 60)} | ${t.agentType ?? (t.parentTaskId ? "sub" : "auto")} | ${t.status} | ${t.updatedAt} |`)
+    .map(
+      (t) =>
+        `| \`${t.id}\` | ${oneLine(t.title).slice(0, 60)} | ${t.agentType ?? (t.parentTaskId ? "sub" : "auto")} | ${t.status} | ${t.updatedAt} |`,
+    )
     .join("\n");
   const memRows = [...memory]
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
@@ -80,7 +92,11 @@ export function renderProjectFile(project: Project, agents: Agent[], tasks: Task
       name: project.name,
       description: project.description,
       // Only prompt-facing settings, never credentials or arbitrary metadata.
-      promptSettings: { environment: project.settings.environment, rules: project.settings.rules, generatedSkills: project.settings.generatedSkills },
+      promptSettings: {
+        environment: project.settings.environment,
+        rules: project.settings.rules,
+        generatedSkills: project.settings.generatedSkills,
+      },
       configRepo: project.configRepo,
       branch: project.branch,
       updatedAt: project.updatedAt,
@@ -111,10 +127,14 @@ export function renderProjectFile(project: Project, agents: Agent[], tasks: Task
       skillLines,
       ``,
       `## Tasks (${tasks.length}${tasks.length > 30 ? ", recent 30" : ""})`,
-      tasks.length ? `| ID | Title | Unit | Status | Updated |\n| -- | ----- | ---- | ------ | ------- |\n${taskRows}` : `_(no tasks)_`,
+      tasks.length
+        ? `| ID | Title | Unit | Status | Updated |\n| -- | ----- | ---- | ------ | ------- |\n${taskRows}`
+        : `_(no tasks)_`,
       ``,
       `## Memory (${memory.length}${memory.length > 30 ? ", recent 30" : ""})`,
-      memory.length ? `| Type | Key | Version | Updated |\n| ---- | --- | ------- | ------- |\n${memRows}` : `_(no memory entries)_`,
+      memory.length
+        ? `| Type | Key | Version | Updated |\n| ---- | --- | ------- | ------- |\n${memRows}`
+        : `_(no memory entries)_`,
       ``,
     ].join("\n"),
   );
@@ -227,8 +247,12 @@ export function renderTaskFile(task: Task): string {
       task.description || "_(no description)_",
       ``,
       ...(brief ? [`## Research brief`, brief, ``] : []),
-      ...(Array.isArray(task.input?.skills) ? [`## Assigned skills`, task.input.skills.map((s) => `- \`${String(s)}\``).join("\n") || "_(none)_", ``] : []),
-      ...(Array.isArray(task.input?.acceptanceCriteria) ? [`## Acceptance criteria`, task.input.acceptanceCriteria.map((c) => `- ${String(c)}`).join("\n"), ``] : []),
+      ...(Array.isArray(task.input?.skills)
+        ? [`## Assigned skills`, task.input.skills.map((s) => `- \`${String(s)}\``).join("\n") || "_(none)_", ``]
+        : []),
+      ...(Array.isArray(task.input?.acceptanceCriteria)
+        ? [`## Acceptance criteria`, task.input.acceptanceCriteria.map((c) => `- ${String(c)}`).join("\n"), ``]
+        : []),
       ...(task.error ? [`## Error`, task.error, ``] : []),
     ].join("\n"),
   );
@@ -255,18 +279,42 @@ export function renderMemoryFile(entries: MemoryEntry[]): string {
   }
   return matter(
     { schemaVersion: STATE_VERSION, count: entries.length, entries: repositorySafe(entries) },
-    [`# Project memory (${entries.length})`, ``, `> Canonical memory is the complete entries array in front matter; the body is a readable projection. Agents append losslessly through save_memory.`, ``, ...sections].join("\n"),
+    [
+      `# Project memory (${entries.length})`,
+      ``,
+      `> Canonical memory is the complete entries array in front matter; the body is a readable projection. Agents append losslessly through save_memory.`,
+      ``,
+      ...sections,
+    ].join("\n"),
   );
 }
 
 /* ---------------- parsers (restore) ---------------- */
 
 export interface ParsedAgent {
-  id: string; type: string; name: string; role: string; description: string; enabled: boolean;
-  projectId?: string; slug?: string; configPath?: string; createdAt?: string; updatedAt?: string;
-  version: number; tools: string[]; permissions: string[]; skills: string[]; generatedSkills?: string[];
-  models: Agent["models"]; maxIterations: number; timeoutMs: number; tokenBudget: number;
-  memorySources: string[]; systemPrompt: string; projectPrompt?: string;
+  id: string;
+  type: string;
+  name: string;
+  role: string;
+  description: string;
+  enabled: boolean;
+  projectId?: string;
+  slug?: string;
+  configPath?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  version: number;
+  tools: string[];
+  permissions: string[];
+  skills: string[];
+  generatedSkills?: string[];
+  models: Agent["models"];
+  maxIterations: number;
+  timeoutMs: number;
+  tokenBudget: number;
+  memorySources: string[];
+  systemPrompt: string;
+  projectPrompt?: string;
 }
 
 export function parseAgentFile(content: string): ParsedAgent | undefined {
@@ -284,29 +332,55 @@ export function parseAgentFile(content: string): ParsedAgent | undefined {
     const min = opts.min ?? 0;
     if (typeof v === "number" && Number.isFinite(v) && v >= min && (!opts.integer || Number.isInteger(v))) return v;
     if (!strict) return num(v, fallback);
-    throw new Error(`CodeVia agent file: ${key} must be ${opts.integer ? `an integer >= ${min}` : `a finite number >= ${min}`}, got ${JSON.stringify(v) ?? String(v)}`);
+    throw new Error(
+      `CodeVia agent file: ${key} must be ${opts.integer ? `an integer >= ${min}` : `a finite number >= ${min}`}, got ${JSON.stringify(v) ?? String(v)}`,
+    );
   };
   return {
-    projectId: str(data.projectId) || undefined, slug: str(data.slug) || undefined, configPath: str(data.configPath) || undefined, createdAt: str(data.createdAt) || undefined, updatedAt: str(data.updatedAt) || undefined,
-    id: str(data.id), type: str(data.type), name: str(data.name, str(data.type)),
-    role: str(data.role), description: str(data.description),
-    enabled: data.enabled !== false, version: requireNumber("version", 1, { integer: true, min: 1 }),
-    tools: arr(data.tools), permissions: arr(data.permissions), skills: arr(data.skills),
+    projectId: str(data.projectId) || undefined,
+    slug: str(data.slug) || undefined,
+    configPath: str(data.configPath) || undefined,
+    createdAt: str(data.createdAt) || undefined,
+    updatedAt: str(data.updatedAt) || undefined,
+    id: str(data.id),
+    type: str(data.type),
+    name: str(data.name, str(data.type)),
+    role: str(data.role),
+    description: str(data.description),
+    enabled: data.enabled !== false,
+    version: requireNumber("version", 1, { integer: true, min: 1 }),
+    tools: arr(data.tools),
+    permissions: arr(data.permissions),
+    skills: arr(data.skills),
     generatedSkills: Array.isArray(data.generatedSkills) ? arr(data.generatedSkills) : undefined,
     models: (data.models as Agent["models"]) ?? { primary: "", fallbacks: [], specialized: {} },
-    maxIterations: requireNumber("maxIterations", 5), timeoutMs: requireNumber("timeoutMs", 120000),
-    tokenBudget: requireNumber("tokenBudget", 20000), memorySources: arr(data.memorySources),
+    maxIterations: requireNumber("maxIterations", 5),
+    timeoutMs: requireNumber("timeoutMs", 120000),
+    tokenBudget: requireNumber("tokenBudget", 20000),
+    memorySources: arr(data.memorySources),
     systemPrompt: str(data.systemPrompt),
     projectPrompt: typeof data.projectPrompt === "string" ? data.projectPrompt : undefined,
   };
 }
 
 export interface ParsedTask {
-  projectId?: string; correlationId?: string; id: string; title: string; status: Task["status"]; agentType?: string; parentTaskId?: string;
-  priority?: Task["priority"]; error?: string; description: string; researchBrief?: string;
-  assignedAgentId?: string; workflowId?: string;
-  createdAt: string; updatedAt: string;
-  input?: Record<string, unknown>; result?: Record<string, unknown>;
+  projectId?: string;
+  correlationId?: string;
+  id: string;
+  title: string;
+  status: Task["status"];
+  agentType?: string;
+  parentTaskId?: string;
+  priority?: Task["priority"];
+  error?: string;
+  description: string;
+  researchBrief?: string;
+  assignedAgentId?: string;
+  workflowId?: string;
+  createdAt: string;
+  updatedAt: string;
+  input?: Record<string, unknown>;
+  result?: Record<string, unknown>;
 }
 
 export function parseTaskFile(content: string): ParsedTask | undefined {
@@ -314,8 +388,10 @@ export function parseTaskFile(content: string): ParsedTask | undefined {
   if (!str(data.id)) return undefined;
   const sections = parseSections(body);
   return {
-    projectId: str(data.projectId) || undefined, correlationId: str(data.correlationId) || undefined,
-    id: str(data.id), title: str(data.title, str(data.id)),
+    projectId: str(data.projectId) || undefined,
+    correlationId: str(data.correlationId) || undefined,
+    id: str(data.id),
+    title: str(data.title, str(data.id)),
     status: (str(data.status) || "created") as Task["status"],
     agentType: str(data.agentType) || undefined,
     parentTaskId: str(data.parentTaskId) || undefined,
@@ -325,18 +401,40 @@ export function parseTaskFile(content: string): ParsedTask | undefined {
     error: str(data.error) || undefined,
     // Prefer machine state: model briefs and requests can contain their own
     // Markdown headings, which must not be split by the human-body parser.
-    description: typeof data.description === "string" ? data.description : sections["Request"] && sections["Request"] !== "_(no description)_" ? sections["Request"] : "",
-    researchBrief: typeof data.researchBrief === "string" ? data.researchBrief : sections["Research brief"] || undefined,
-    input: data.input && typeof data.input === "object" && !Array.isArray(data.input) ? data.input as Record<string, unknown> : undefined,
-    result: data.result && typeof data.result === "object" && !Array.isArray(data.result) ? data.result as Record<string, unknown> : undefined,
+    description:
+      typeof data.description === "string"
+        ? data.description
+        : sections["Request"] && sections["Request"] !== "_(no description)_"
+          ? sections["Request"]
+          : "",
+    researchBrief:
+      typeof data.researchBrief === "string" ? data.researchBrief : sections["Research brief"] || undefined,
+    input:
+      data.input && typeof data.input === "object" && !Array.isArray(data.input)
+        ? (data.input as Record<string, unknown>)
+        : undefined,
+    result:
+      data.result && typeof data.result === "object" && !Array.isArray(data.result)
+        ? (data.result as Record<string, unknown>)
+        : undefined,
     createdAt: str(data.createdAt) || new Date().toISOString(),
     updatedAt: str(data.updatedAt) || new Date().toISOString(),
   };
 }
 
 export interface ParsedMemoryEntry {
-  id?: string; projectId?: string; scope?: MemoryEntry["scope"]; refs?: string[]; createdAt?: string;
-  type: string; key: string; version: number; tags: string[]; source: string; updatedAt: string; content: string;
+  id?: string;
+  projectId?: string;
+  scope?: MemoryEntry["scope"];
+  refs?: string[];
+  createdAt?: string;
+  type: string;
+  key: string;
+  version: number;
+  tags: string[];
+  source: string;
+  updatedAt: string;
+  content: string;
 }
 
 export function parseMemoryFile(content: string): ParsedMemoryEntry[] {
@@ -344,7 +442,9 @@ export function parseMemoryFile(content: string): ParsedMemoryEntry[] {
   if (state) return state;
   const { body } = parseMatter(content);
   const out: ParsedMemoryEntry[] = [];
-  const typeBlocks = String(body ?? "").split(/^## (?=(?:architecture|business|technical|decision|bug|knowledge|lesson|conversation)\s*$)/m).slice(1);
+  const typeBlocks = String(body ?? "")
+    .split(/^## (?=(?:architecture|business|technical|decision|bug|knowledge|lesson|conversation)\s*$)/m)
+    .slice(1);
   for (const block of typeBlocks) {
     const nl = block.indexOf("\n");
     const type = block.slice(0, nl).trim().toLowerCase();
@@ -363,14 +463,25 @@ export function parseMemoryFile(content: string): ParsedMemoryEntry[] {
       let start = 0;
       const meta = (lines[0] ?? "").match(/^_tags:\s*(.*?)\s*·\s*updated:\s*(.*?)\s*·\s*source:\s*(.*?)_$/);
       if (meta) {
-        tags = meta[1] === "—" ? [] : meta[1].split(",").map((t) => t.trim()).filter(Boolean);
+        tags =
+          meta[1] === "—"
+            ? []
+            : meta[1]
+                .split(",")
+                .map((t) => t.trim())
+                .filter(Boolean);
         updatedAt = meta[2];
         source = meta[3] === "—" ? "" : meta[3];
         start = 1;
       }
       const content = lines.slice(start).join("\n").trim();
       out.push({
-        type, key: hm[1], version: Number(hm[2]) || 1, tags, source, updatedAt,
+        type,
+        key: hm[1],
+        version: Number(hm[2]) || 1,
+        tags,
+        source,
+        updatedAt,
         content: content === "_(empty)_" ? "" : content,
       });
     }
@@ -378,8 +489,20 @@ export function parseMemoryFile(content: string): ParsedMemoryEntry[] {
   // A legacy heading layout is inherently ambiguous. Keep the original document
   // as well, including prose outside headings, so no existing knowledge is lost.
   if (content.trim()) {
-    const key = out.some((e) => e.type === "knowledge" && e.key === "_legacy/CodeVia-memory.md") ? "_legacy/CodeVia-memory.md.raw" : "_legacy/CodeVia-memory.md";
-    out.push({ type: "knowledge", key, content, tags: ["legacy-import", "raw-document"], refs: [MEMORY_FILE], scope: "project", source: "legacy:CodeVia/memory.md", version: 1, updatedAt: "" });
+    const key = out.some((e) => e.type === "knowledge" && e.key === "_legacy/CodeVia-memory.md")
+      ? "_legacy/CodeVia-memory.md.raw"
+      : "_legacy/CodeVia-memory.md";
+    out.push({
+      type: "knowledge",
+      key,
+      content,
+      tags: ["legacy-import", "raw-document"],
+      refs: [MEMORY_FILE],
+      scope: "project",
+      source: "legacy:CodeVia/memory.md",
+      version: 1,
+      updatedAt: "",
+    });
   }
   return out;
 }

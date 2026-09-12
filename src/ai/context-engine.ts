@@ -44,7 +44,15 @@ export class ContextEngine {
   async build(opts: BuildContextOptions): Promise<BuildContextResult> {
     const { project, agent, task } = opts;
     const github = opts.github ?? resolveGitHubService();
-    const memory = opts.memory ?? memoryResolver.resolve({ project, repo: this.toRepoRef(project), branch: project.branch, localRoot: `./data/memory/${project.id}`, github });
+    const memory =
+      opts.memory ??
+      memoryResolver.resolve({
+        project,
+        repo: this.toRepoRef(project),
+        branch: project.branch,
+        localRoot: `./data/memory/${project.id}`,
+        github,
+      });
     const sources: ContextSource[] = [];
 
     // 1. Agent system + role
@@ -98,9 +106,7 @@ export class ContextEngine {
     const memoryContext = await this.memoryContext(task, memory);
     if (memoryContext) sources.push({ label: "memory", content: memoryContext });
 
-    const context = sources
-      .map((s) => `## ${s.label}\n${s.content}`)
-      .join("\n\n---\n\n");
+    const context = sources.map((s) => `## ${s.label}\n${s.content}`).join("\n\n---\n\n");
 
     const tokens = Math.ceil(context.length / 4);
     logger.debug("context built", { sources: sources.map((s) => s.label), tokens });
@@ -114,7 +120,9 @@ export class ContextEngine {
       agent.role,
       `You are the ${agent.name} agent for project context.`,
       `Max iterations: ${agent.maxIterations}. Timeout: ${agent.timeoutMs}ms.`,
-    ].filter(Boolean).join("\n\n");
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   private buildTaskRequest(project: Project, task: Task): string {
@@ -134,7 +142,9 @@ export class ContextEngine {
       "- Never write plaintext secrets. Use secret references such as OPENAI_API_KEY or TELEGRAM_BOT_TOKEN.",
       "- Sensitive operations (merge, deploy, migration, destructive change, costly run) require human approval.",
       "- Prefer a practical Plan → Implement/Simulate → Test → Review → Commit/PR result shape.",
-    ].filter(Boolean).join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   private toRepoRef(project: Project): GithubRepoRef | undefined {
@@ -162,11 +172,7 @@ export class ContextEngine {
     return [];
   }
 
-  private async readRelevantFiles(
-    project: Project,
-    fileList: string[],
-    github: IGitHubService,
-  ): Promise<string> {
+  private async readRelevantFiles(project: Project, fileList: string[], github: IGitHubService): Promise<string> {
     const repo = this.toRepoRef(project);
     if (!repo) return "";
     const parts: string[] = [];
@@ -214,7 +220,20 @@ export class ContextEngine {
   private extractTerms(task: Task | undefined): string[] {
     if (!task) return [];
     const text = `${task.title} ${task.description}`.toLowerCase();
-    const common = ["login", "auth", "api", "database", "test", "bug", "ui", "build", "deploy", "error", "performance", "security"];
+    const common = [
+      "login",
+      "auth",
+      "api",
+      "database",
+      "test",
+      "bug",
+      "ui",
+      "build",
+      "deploy",
+      "error",
+      "performance",
+      "security",
+    ];
     return common.filter((w) => text.includes(w));
   }
 

@@ -55,7 +55,11 @@ export class BackupScheduler {
     this.deps.logger.info("system backup scheduler is due", { schedule: settings.schedule });
     const result = await this.deps.backup.runNow();
     if (result.ok) {
-      this.deps.logger.info("scheduled system backup completed", { commit: result.commit, files: result.files, warning: result.warning });
+      this.deps.logger.info("scheduled system backup completed", {
+        commit: result.commit,
+        files: result.files,
+        warning: result.warning,
+      });
     } else {
       this.deps.logger.warn("scheduled system backup failed", { error: result.error, warning: result.warning });
     }
@@ -63,5 +67,11 @@ export class BackupScheduler {
 }
 
 function minuteKey(d: Date): number {
-  return d.getFullYear() * 100000000 + (d.getMonth() + 1) * 1000000 + d.getDate() * 10000 + d.getHours() * 100 + d.getMinutes();
+  return (
+    d.getFullYear() * 100000000 +
+    (d.getMonth() + 1) * 1000000 +
+    d.getDate() * 10000 +
+    d.getHours() * 100 +
+    d.getMinutes()
+  );
 }

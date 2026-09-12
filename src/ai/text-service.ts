@@ -127,10 +127,14 @@ export class AiTextService {
         };
       } catch (err) {
         lastError = err;
-        logger.warn(`text-service: model ${candidate.id} failed, trying next`, { err: String(err), correlationId: req.correlationId });
+        logger.warn(`text-service: model ${candidate.id} failed, trying next`, {
+          err: String(err),
+          correlationId: req.correlationId,
+        });
       }
     }
-    if (lastError) logger.error("text-service: all models failed", { err: String(lastError), correlationId: req.correlationId });
+    if (lastError)
+      logger.error("text-service: all models failed", { err: String(lastError), correlationId: req.correlationId });
     return null;
   }
 }

@@ -10,13 +10,22 @@ import { resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken } from "../../auth/github-tokens.js";
 import { getEnv } from "../../config/env.js";
 
-function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
+function fail(
+  reply: FastifyReply,
+  status: number,
+  message: string,
+  extra: Record<string, unknown> = {},
+): { error: string } {
   reply.code(status);
   return { error: message, ...extra };
 }
 
 /** Map a GitHub failure to a proper HTTP status + actionable message (never a 200 with `{error}`). */
-function githubError(reply: FastifyReply, err: unknown, resolved?: ResolvedGitHub): { error: string; source?: string; hint?: string } {
+function githubError(
+  reply: FastifyReply,
+  err: unknown,
+  resolved?: ResolvedGitHub,
+): { error: string; source?: string; hint?: string } {
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof GitHubAuthError) {
     reply.code(err.status === 403 ? 403 : 401);
@@ -42,7 +51,9 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
     const { isGitHubOAuthConfigured } = await import("../../auth/github-oauth.js");
     const { user, authenticated } = resolveRequestUser(req, container);
     const resolved = resolveFor(req);
-    const userToken = authenticated ? describeUserGitHubToken(container.kv, user.id) : { stored: false, scopes: [], canReadPrivateRepos: false };
+    const userToken = authenticated
+      ? describeUserGitHubToken(container.kv, user.id)
+      : { stored: false, scopes: [], canReadPrivateRepos: false };
     let repoCount = 0;
     let repoError: string | undefined;
     let viewer: { login: string; name?: string; scopes: string[] } | undefined;
@@ -92,7 +103,13 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
         query: q.q,
         limit: q.limit ? Number(q.limit) : undefined,
       });
-      return { repositories, source: resolved.source, scopes: resolved.scopes, hint: resolved.hint, count: repositories.length };
+      return {
+        repositories,
+        source: resolved.source,
+        scopes: resolved.scopes,
+        hint: resolved.hint,
+        count: repositories.length,
+      };
     } catch (err) {
       return githubError(reply, err, resolved);
     }
@@ -102,7 +119,8 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
   app.post("/github/repositories", { schema: { tags: ["github"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const name = String(b.name ?? "").trim();
-    if (!/^[A-Za-z0-9_.-]+$/.test(name)) return fail(reply, 400, "Repository name is required and can only contain letters, digits, '.', '_', '-'");
+    if (!/^[A-Za-z0-9_.-]+$/.test(name))
+      return fail(reply, 400, "Repository name is required and can only contain letters, digits, '.', '_', '-'");
     const resolved = resolveFor(req);
     try {
       const repo = await resolved.service.createRepository({
@@ -183,7 +201,7 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
 
   // Incoming GitHub webhook — signature validated.
   app.post("/webhooks/github", { schema: { tags: ["github"] } }, async (req, reply) => {
-    const raw = (req.body as unknown) as string | Record<string, unknown>;
+    const raw = req.body as unknown as string | Record<string, unknown>;
     const headers = req.headers;
     const rawBody = typeof raw === "string" ? raw : JSON.stringify(raw);
     const signature = String(headers["x-hub-signature-256"] ?? "");
@@ -195,7 +213,10 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
       // in the GitHub webhook settings) to enable webhook processing.
       logger.warn("github webhook rejected: no signing secret configured (fail closed)");
       reply.code(503);
-      return { ok: false, error: "GitHub webhook secret is not configured (set GITHUB_WEBHOOK_SECRET); delivery rejected" };
+      return {
+        ok: false,
+        error: "GitHub webhook secret is not configured (set GITHUB_WEBHOOK_SECRET); delivery rejected",
+      };
     }
     if (!verifyGithubSignature(secret, signature, rawBody)) {
       logger.warn("github webhook signature invalid");
@@ -204,17 +225,26 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
     }
     const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
     const deliveryId = String(headers["x-github-delivery"] ?? "") || undefined;
-    await eventBus.publish(normalizeEvent(event), {
-      event,
-      body: parsed,
-      deliveryId,
-    }, { correlationId: generateCorrelationId(), projectId: (parsed as { repository?: { full_name?: string } })?.repository?.full_name });
+    await eventBus.publish(
+      normalizeEvent(event),
+      {
+        event,
+        body: parsed,
+        deliveryId,
+      },
+      {
+        correlationId: generateCorrelationId(),
+        projectId: (parsed as { repository?: { full_name?: string } })?.repository?.full_name,
+      },
+    );
     reply.code(202);
     return { ok: true, event };
   });
 }
 
-function normalizeEvent(event: string): "github.push" | "github.pull_request" | "github.issue" | "github.release" | "github.workflow_completed" {
+function normalizeEvent(
+  event: string,
+): "github.push" | "github.pull_request" | "github.issue" | "github.release" | "github.workflow_completed" {
   if (event === "push") return "github.push";
   if (event === "pull_request") return "github.pull_request";
   if (event === "issues") return "github.issue";

@@ -10,9 +10,30 @@ import { parseTaskFile, renderTaskFile, SKILLS_FILE } from "../github/project-fi
 import { freshDb } from "./test-helpers.js";
 
 const API_GUIDANCE = "Validate the session API's inputs; reject expired credentials and preserve its JSON contract.";
-const UI_GUIDANCE = "Implement the accessible login form with loading/error states and the backend's exact response type.";
-const apiItem: BreakdownItem = { id: "api", agentType: "backend-developer", title: "Implement login API", description: "Return an authenticated session", files: ["src/server/login.ts"], dependsOn: [], acceptanceCriteria: ["Invalid credentials return 401 without leaking details"], skills: ["nodejs", "typescript", "security"], skillInstructions: { security: API_GUIDANCE } };
-const uiItem: BreakdownItem = { id: "ui", agentType: "frontend-developer", title: "Implement login form", description: "Consume the session API", files: ["src/ui/LoginPage.tsx"], dependsOn: ["api"], acceptanceCriteria: ["Keyboard users can submit and see validation errors"], skills: ["react", "typescript", "ui-design"], skillInstructions: { react: UI_GUIDANCE } };
+const UI_GUIDANCE =
+  "Implement the accessible login form with loading/error states and the backend's exact response type.";
+const apiItem: BreakdownItem = {
+  id: "api",
+  agentType: "backend-developer",
+  title: "Implement login API",
+  description: "Return an authenticated session",
+  files: ["src/server/login.ts"],
+  dependsOn: [],
+  acceptanceCriteria: ["Invalid credentials return 401 without leaking details"],
+  skills: ["nodejs", "typescript", "security"],
+  skillInstructions: { security: API_GUIDANCE },
+};
+const uiItem: BreakdownItem = {
+  id: "ui",
+  agentType: "frontend-developer",
+  title: "Implement login form",
+  description: "Consume the session API",
+  files: ["src/ui/LoginPage.tsx"],
+  dependsOn: ["api"],
+  acceptanceCriteria: ["Keyboard users can submit and see validation errors"],
+  skills: ["react", "typescript", "ui-design"],
+  skillInstructions: { react: UI_GUIDANCE },
+};
 
 let fx: ReturnType<typeof freshDb>;
 let c: Container;
@@ -29,7 +50,20 @@ beforeEach(async () => {
   await c.ensureSeed();
   app = (await buildServer(c)).app;
   await app.ready();
-  p = await c.agentManager.createProject({ name: "Request Pipeline", description: "Store", configRepo: "acme/request-pipeline", capabilities: { platforms: ["web"], languages: ["typescript"], frameworks: ["react", "fastify"], databases: ["postgresql"], features: ["authentication"], deploymentTargets: ["docker"], integrations: ["telegram"] } });
+  p = await c.agentManager.createProject({
+    name: "Request Pipeline",
+    description: "Store",
+    configRepo: "acme/request-pipeline",
+    capabilities: {
+      platforms: ["web"],
+      languages: ["typescript"],
+      frameworks: ["react", "fastify"],
+      databases: ["postgresql"],
+      features: ["authentication"],
+      deploymentTargets: ["docker"],
+      integrations: ["telegram"],
+    },
+  });
   requests = [];
   plan = structuredClone([uiItem, apiItem]); // deliberately reversed
   beforeCode = undefined;
@@ -43,39 +77,105 @@ afterEach(async () => {
 });
 
 async function cannedModels(): Promise<void> {
-  const provider = c.providerRepo.create({ name: "Pipeline fixture (no network)", type: "openai", authType: "none", apiFormat: "openai", timeoutMs: 1000, maxTokensDefault: 8000, defaultTemperature: 0.2, rateLimitPerMinute: 100, active: true });
+  const provider = c.providerRepo.create({
+    name: "Pipeline fixture (no network)",
+    type: "openai",
+    authType: "none",
+    apiFormat: "openai",
+    timeoutMs: 1000,
+    maxTokensDefault: 8000,
+    defaultTemperature: 0.2,
+    rateLimitPerMinute: 100,
+    active: true,
+  });
   const runtime: IModelProvider = {
-    id: provider.id, type: "openai", name: "Fixture",
-    listModels: async () => [], health: async () => true, resolveApiKey: () => undefined,
+    id: provider.id,
+    type: "openai",
+    name: "Fixture",
+    listModels: async () => [],
+    health: async () => true,
+    resolveApiKey: () => undefined,
     chat: async (req) => {
       requests.push(req);
       const system = req.messages[0].content;
       let content: string;
-      if (system.includes("business analyst writing")) content = "## Objective\nImplement session login.\n## Acceptance criteria\nReturn 401 for invalid credentials; show accessible validation in the form.\n## Assumptions\nReuse the existing session contract.";
-      else if (system.includes("engineering manager") || system.includes("single-agent implementation")) content = JSON.stringify(plan);
+      if (system.includes("business analyst writing"))
+        content =
+          "## Objective\nImplement session login.\n## Acceptance criteria\nReturn 401 for invalid credentials; show accessible validation in the form.\n## Assumptions\nReuse the existing session contract.";
+      else if (system.includes("engineering manager") || system.includes("single-agent implementation"))
+        content = JSON.stringify(plan);
       else {
         beforeCode?.();
-        content = req.messages[1].content.includes('complete content of "src/ui/LoginPage.tsx"') ? "export const formContract = 'SESSION_CONTRACT';\n" : "// SESSION_CONTRACT\nexport const session = true;\n";
+        content = req.messages[1].content.includes('complete content of "src/ui/LoginPage.tsx"')
+          ? "export const formContract = 'SESSION_CONTRACT';\n"
+          : "// SESSION_CONTRACT\nexport const session = true;\n";
       }
-      return { content, finishReason: "stop", usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 }, modelId: req.modelId, providerId: provider.id };
+      return {
+        content,
+        finishReason: "stop",
+        usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 },
+        modelId: req.modelId,
+        providerId: provider.id,
+      };
     },
   };
   c.providerRegistry.register(runtime);
   for (const type of ["research", "backend-developer", "frontend-developer"] as AgentType[]) {
-    const model = c.modelRepo.create({ providerId: provider.id, modelId: `${type}-model`, displayName: type, contextWindow: 128000, inputCostPer1k: 0, outputCostPer1k: 0, capabilities: { code: true, reasoning: true, structuredOutput: true, tools: false, streaming: false, vision: false }, active: true, priority: 1, fallbackPriority: 1, tags: [] });
+    const model = c.modelRepo.create({
+      providerId: provider.id,
+      modelId: `${type}-model`,
+      displayName: type,
+      contextWindow: 128000,
+      inputCostPer1k: 0,
+      outputCostPer1k: 0,
+      capabilities: {
+        code: true,
+        reasoning: true,
+        structuredOutput: true,
+        tools: false,
+        streaming: false,
+        vision: false,
+      },
+      active: true,
+      priority: 1,
+      fallbackPriority: 1,
+      tags: [],
+    });
     const agent = c.agentRepo.byType(p.id, type)!;
-    c.agentRepo.upsert({ ...agent, models: { primary: model.id, fallbacks: [], specialized: {} }, systemPrompt: `${agent.systemPrompt}\nCUSTOM_${type}_PROMPT` }, { projectId: p.id });
+    c.agentRepo.upsert(
+      {
+        ...agent,
+        models: { primary: model.id, fallbacks: [], specialized: {} },
+        systemPrompt: `${agent.systemPrompt}\nCUSTOM_${type}_PROMPT`,
+      },
+      { projectId: p.id },
+    );
   }
   await c.agentManager.syncProjectState(p.id);
 }
 
 async function ask(extra: Record<string, unknown> = {}) {
-  return app.inject({ method: "POST", url: `/projects/${p.id}/ask`, payload: { prompt: "صفحه ورود و API نشست را کامل کن", ...extra } });
+  return app.inject({
+    method: "POST",
+    url: `/projects/${p.id}/ask`,
+    payload: { prompt: "صفحه ورود و API نشست را کامل کن", ...extra },
+  });
 }
 
 it("defaults API requests to research → planned owners/skills → execution, preserving project settings", async () => {
-  await app.inject({ method: "PATCH", url: `/projects/${p.id}`, payload: { description: `${"Business context. ".repeat(30)}IMPORTANT_DESCRIPTION_TAIL`, settings: { environment: "staging" } } });
-  await app.inject({ method: "PUT", url: `/projects/${p.id}/rules`, payload: { rules: ["PERSIAN_PROJECT_RULE: preserve RTL behavior; do not change the database."] } });
+  await app.inject({
+    method: "PATCH",
+    url: `/projects/${p.id}`,
+    payload: {
+      description: `${"Business context. ".repeat(30)}IMPORTANT_DESCRIPTION_TAIL`,
+      settings: { environment: "staging" },
+    },
+  });
+  await app.inject({
+    method: "PUT",
+    url: `/projects/${p.id}/rules`,
+    payload: { rules: ["PERSIAN_PROJECT_RULE: preserve RTL behavior; do not change the database."] },
+  });
   await cannedModels();
   const definitions = c.agentRepo.byProject(p.id);
   const baseSecurity = c.skillRepo.findBySlug("security")!;
@@ -118,10 +218,27 @@ it("defaults API requests to research → planned owners/skills → execution, p
   const planner = requests[1];
   for (const request of [research, planner]) {
     const text = JSON.stringify(request.messages);
-    for (const marker of ["IMPORTANT_DESCRIPTION_TAIL", "PERSIAN_PROJECT_RULE", "staging", "postgresql", "telegram", "صفحه ورود", "CUSTOM_research_PROMPT"]) expect(text).toContain(marker);
+    for (const marker of [
+      "IMPORTANT_DESCRIPTION_TAIL",
+      "PERSIAN_PROJECT_RULE",
+      "staging",
+      "postgresql",
+      "telegram",
+      "صفحه ورود",
+      "CUSTOM_research_PROMPT",
+    ])
+      expect(text).toContain(marker);
     expect(request.modelId).toBe("research-model");
   }
-  for (const marker of ["acceptanceCriteria", "dependsOn", "skillInstructions", "Owner/skill catalog", "backend-developer", "frontend-developer"]) expect(planner.messages[1].content).toContain(marker);
+  for (const marker of [
+    "acceptanceCriteria",
+    "dependsOn",
+    "skillInstructions",
+    "Owner/skill catalog",
+    "backend-developer",
+    "frontend-developer",
+  ])
+    expect(planner.messages[1].content).toContain(marker);
   const backendCall = requests.find((r) => r.modelId === "backend-developer-model")!;
   const frontendCall = requests.find((r) => r.modelId === "frontend-developer-model")!;
   expect(backendCall.messages[1].content).toContain(API_GUIDANCE);
@@ -134,7 +251,11 @@ it("defaults API requests to research → planned owners/skills → execution, p
   expect(backendCall.messages[1].content).not.toContain("[Skill: .NET Development]");
 
   const run = c.runRepo.byTask(frontend.id).find((r) => r.summary?.includes("Implementation"))!;
-  expect(run.skills?.find((s) => s.slug === "react")).toMatchObject({ version: baseReact.version, instructions: baseReact.instructions, guidance: expect.stringContaining(UI_GUIDANCE) });
+  expect(run.skills?.find((s) => s.slug === "react")).toMatchObject({
+    version: baseReact.version,
+    instructions: baseReact.instructions,
+    guidance: expect.stringContaining(UI_GUIDANCE),
+  });
   const console = await app.inject({ method: "GET", url: `/runs/${run.id}/console` });
   expect(console.json().skills).toEqual(run.skills);
   expect(c.skillRepo.findBySlug("security")).toEqual(baseSecurity);
@@ -147,7 +268,11 @@ it("defaults API requests to research → planned owners/skills → execution, p
     expect(current.permissions).toEqual(original.permissions);
   }
 
-  const file = await c.github.getFile({ owner: "acme", name: "request-pipeline" }, `CodeVia/tasks/${frontend.id}.md`, "main");
+  const file = await c.github.getFile(
+    { owner: "acme", name: "request-pipeline" },
+    `CodeVia/tasks/${frontend.id}.md`,
+    "main",
+  );
   const restored = parseTaskFile(file!.content)!;
   expect(restored.assignedAgentId).toBe(frontend.assignedAgentId);
   expect(restored.input?.skills).toEqual(frontend.input.skills);
@@ -157,11 +282,31 @@ it("defaults API requests to research → planned owners/skills → execution, p
 });
 
 it("uses a newly attached custom skill without re-onboarding and never grants its tools", async () => {
-  const created = await app.inject({ method: "POST", url: "/skills", payload: { slug: "company-contract", name: "Company Contract", instructions: "COMPANY_CONTRACT_BASE", compatibleAgentTypes: ["backend-developer"], dependencies: ["restapi"], tools: ["shell", "deploy"] } });
+  const created = await app.inject({
+    method: "POST",
+    url: "/skills",
+    payload: {
+      slug: "company-contract",
+      name: "Company Contract",
+      instructions: "COMPANY_CONTRACT_BASE",
+      compatibleAgentTypes: ["backend-developer"],
+      dependencies: ["restapi"],
+      tools: ["shell", "deploy"],
+    },
+  });
   expect(created.statusCode).toBe(200);
-  expect((await app.inject({ method: "POST", url: `/projects/${p.id}/skills`, payload: { slug: "company-contract" } })).statusCode).toBe(200);
+  expect(
+    (await app.inject({ method: "POST", url: `/projects/${p.id}/skills`, payload: { slug: "company-contract" } }))
+      .statusCode,
+  ).toBe(200);
   const backend = c.agentRepo.byType(p.id, "backend-developer")!;
-  plan = [{ ...structuredClone(apiItem), skills: ["company-contract"], skillInstructions: { "company-contract": "Use the approved session error envelope." } }];
+  plan = [
+    {
+      ...structuredClone(apiItem),
+      skills: ["company-contract"],
+      skillInstructions: { "company-contract": "Use the approved session error envelope." },
+    },
+  ];
   await cannedModels();
   const { task } = (await ask()).json();
   await c.agentManager.runTask(task.id);
@@ -173,15 +318,22 @@ it("uses a newly attached custom skill without re-onboarding and never grants it
   expect(c.agentRepo.byType(p.id, "backend-developer")!.permissions).toEqual(backend.permissions);
 });
 
-it.each(["unknown-skill", "blazor", "security"])("rejects invalid frontend skill %s before any implementation starts", async (slug) => {
-  plan[0].skills = [slug];
-  plan[0].skillInstructions = {};
-  await cannedModels();
-  const { task } = (await ask()).json();
-  await expect(c.agentManager.runTask(task.id)).rejects.toThrow(/unavailable|incompatible/);
-  expect((await c.github.listBranches({ owner: "acme", name: "request-pipeline" })).some((b) => b.name.startsWith("agent-"))).toBe(false);
-  expect(requests.every((r) => r.modelId === "research-model")).toBe(true);
-});
+it.each(["unknown-skill", "blazor", "security"])(
+  "rejects invalid frontend skill %s before any implementation starts",
+  async (slug) => {
+    plan[0].skills = [slug];
+    plan[0].skillInstructions = {};
+    await cannedModels();
+    const { task } = (await ask()).json();
+    await expect(c.agentManager.runTask(task.id)).rejects.toThrow(/unavailable|incompatible/);
+    expect(
+      (await c.github.listBranches({ owner: "acme", name: "request-pipeline" })).some((b) =>
+        b.name.startsWith("agent-"),
+      ),
+    ).toBe(false);
+    expect(requests.every((r) => r.modelId === "research-model")).toBe(true);
+  },
+);
 
 it("rejects a disabled planned skill before writing source files", async () => {
   const react = c.skillRepo.findBySlug("react", p.id)!;
@@ -214,7 +366,9 @@ it("applies a single-agent plan's task-specific skills to code generation too", 
 
 it("cancels undispatched dependants after an upstream implementation failure", async () => {
   await cannedModels();
-  beforeCode = () => { throw new Error("canned coding provider unavailable"); };
+  beforeCode = () => {
+    throw new Error("canned coding provider unavailable");
+  };
   const { task } = (await ask()).json();
   await expect(c.agentManager.runTask(task.id)).rejects.toThrow(/unavailable/);
   const children = c.taskRepo.findMany({ parentId: task.id }).map((r) => r.data);
@@ -238,16 +392,30 @@ it("keeps explicit single-agent/workflow modes and rejects silent read-only hint
 
 it("restores an intentionally empty project skill list rather than reviving detached skills", async () => {
   const ref = { owner: "acme", name: "request-pipeline" };
-  await c.github.commit(ref, "main", "detach all project skills", [{ path: SKILLS_FILE, content: '---\nskills: []\n---\n\nNo project attachments.\n' }]);
-  await c.projectFiles.restore(p, { projectRepo: c.projectRepo, agentRepo: c.agentRepo, taskRepo: c.taskRepo, memoryRepo: c.memoryRepo }, { includeTasks: false });
+  await c.github.commit(ref, "main", "detach all project skills", [
+    { path: SKILLS_FILE, content: "---\nskills: []\n---\n\nNo project attachments.\n" },
+  ]);
+  await c.projectFiles.restore(
+    p,
+    { projectRepo: c.projectRepo, agentRepo: c.agentRepo, taskRepo: c.taskRepo, memoryRepo: c.memoryRepo },
+    { includeTasks: false },
+  );
   expect(c.projectRepo.findById(p.id)!.data.settings.skills).toEqual([]);
 });
 
 describe("structured plan validation", () => {
   it("supports more than four bounded tasks and honors dependencies over role ordering", () => {
-    const items = Array.from({ length: 6 }, (_, i) => ({ ...apiItem, id: `t${i}`, dependsOn: i ? [`t${i - 1}`] : [], files: [`src/${i}.ts`] }));
+    const items = Array.from({ length: 6 }, (_, i) => ({
+      ...apiItem,
+      id: `t${i}`,
+      dependsOn: i ? [`t${i - 1}`] : [],
+      files: [`src/${i}.ts`],
+    }));
     expect(parseBreakdown(JSON.stringify(items), ["backend-developer"])).toHaveLength(6);
-    const inverse = [{ ...apiItem, dependsOn: ["ui"] }, { ...uiItem, dependsOn: [] }];
+    const inverse = [
+      { ...apiItem, dependsOn: ["ui"] },
+      { ...uiItem, dependsOn: [] },
+    ];
     expect(orderBreakdown(inverse).map((i) => i.id)).toEqual(["ui", "api"]);
   });
   it.each([
@@ -260,8 +428,34 @@ describe("structured plan validation", () => {
     expect(() => parseBreakdown(JSON.stringify(items), ["backend-developer", "frontend-developer"])).toThrow();
   });
   it("round-trips task-local skills and nested markdown losslessly", () => {
-    const assigned: AssignedSkill = { slug: "security", name: "Security", version: "1", instructions: "BASE", guidance: API_GUIDANCE, source: "task" };
-    const task: Task = { id: "t", projectId: "p", parentTaskId: "parent", assignedAgentId: "a", title: "API", description: "Request\n## Details\nKeep this section.", status: "succeeded", correlationId: "c", input: { researchBrief: "## Findings\nFacts\n## Risks\nRisks", skills: ["security"], skillInstructions: { security: API_GUIDANCE }, skillAssignments: [assigned], acceptanceCriteria: ["Returns 401"], dependsOn: ["other"] }, createdAt: "", updatedAt: "" };
+    const assigned: AssignedSkill = {
+      slug: "security",
+      name: "Security",
+      version: "1",
+      instructions: "BASE",
+      guidance: API_GUIDANCE,
+      source: "task",
+    };
+    const task: Task = {
+      id: "t",
+      projectId: "p",
+      parentTaskId: "parent",
+      assignedAgentId: "a",
+      title: "API",
+      description: "Request\n## Details\nKeep this section.",
+      status: "succeeded",
+      correlationId: "c",
+      input: {
+        researchBrief: "## Findings\nFacts\n## Risks\nRisks",
+        skills: ["security"],
+        skillInstructions: { security: API_GUIDANCE },
+        skillAssignments: [assigned],
+        acceptanceCriteria: ["Returns 401"],
+        dependsOn: ["other"],
+      },
+      createdAt: "",
+      updatedAt: "",
+    };
     const parsed = parseTaskFile(renderTaskFile(task))!;
     expect(parsed.description).toBe(task.description);
     expect(parsed.researchBrief).toBe(task.input.researchBrief);

@@ -50,7 +50,7 @@ export function getOAuthRedirectUri(): string {
  * fine (or cannot be parsed).
  */
 export function getLocalhostCallbackWarning(redirectUri: string): string | undefined {
-  let host = "";
+  let host: string;
   try {
     host = new URL(redirectUri).hostname;
   } catch {
@@ -115,7 +115,7 @@ function verifySignedPayload(token: string, secret: string): Record<string, unkn
   const [payloadB64, sig] = parts;
   const expected = signPayload(payloadB64, secret);
   if (sig.length !== expected.length) return undefined;
-  let equal = false;
+  let equal: boolean;
   try {
     equal = Buffer.from(sig).equals(Buffer.from(expected));
   } catch {
@@ -250,10 +250,7 @@ export interface GitHubProfile {
   avatarUrl?: string;
 }
 
-export async function fetchGitHubUser(
-  accessToken: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<GitHubProfile> {
+export async function fetchGitHubUser(accessToken: string, fetchImpl: typeof fetch = fetch): Promise<GitHubProfile> {
   const res = await fetchImpl(`${GITHUB_API_BASE}/user`, {
     headers: {
       Accept: "application/vnd.github+json",

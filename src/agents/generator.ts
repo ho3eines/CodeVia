@@ -2,7 +2,6 @@ import type { Agent, AgentType, Project } from "../domain/entities.js";
 import type { AgentRepository } from "./agent-repo.js";
 import { SkillRegistry, type SkillRepository } from "../skills/registry.js";
 import type { ModelRepository } from "../ai/model-repo.js";
-import type { IModelProvider } from "../ai/types.js";
 import { logger } from "../logger.js";
 import { randomUUID } from "node:crypto";
 import { projectBriefLines } from "../domain/project-brief.js";
@@ -19,7 +18,8 @@ export interface AgentScaffold {
 export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
   orchestrator: {
     role: "Orchestrator",
-    mission: "Decide which agent, model, skill, tool, memory, and workflow to use for each task. Coordinate agent chains and approvals.",
+    mission:
+      "Decide which agent, model, skill, tool, memory, and workflow to use for each task. Coordinate agent chains and approvals.",
     skills: ["task-planning"],
     tools: [],
     permissions: ["github.read", "memory.read"],
@@ -33,7 +33,8 @@ export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
   },
   research: {
     role: "Research Agent",
-    mission: "Analyze the problem, extract requirements, research sources, compare architectures, and produce structured findings in knowledge memory.",
+    mission:
+      "Analyze the problem, extract requirements, research sources, compare architectures, and produce structured findings in knowledge memory.",
     skills: ["research", "task-planning"],
     tools: ["read_file", "search", "save_memory"],
     permissions: ["github.read", "memory.read", "memory.write"],
@@ -47,28 +48,43 @@ export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
   },
   "system-architect": {
     role: "System Architect",
-    mission: "Define architecture, boundaries, and high-level design. Preserve the existing architecture unless there is a clear reason to change it.",
+    mission:
+      "Define architecture, boundaries, and high-level design. Preserve the existing architecture unless there is a clear reason to change it.",
     skills: ["microservices", "restapi"],
     tools: ["list_branches", "read_file", "save_memory"],
     permissions: ["github.read", "memory.read", "memory.write"],
   },
   "backend-developer": {
     role: "Backend Developer",
-    mission: "Inspect the repository before writing code; implement, build, and test backend changes; commit on a branch and open a PR.",
+    mission:
+      "Inspect the repository before writing code; implement, build, and test backend changes; commit on a branch and open a PR.",
     skills: ["dotnet", "csharp", "aspnetcore", "nodejs", "restapi", "testing"],
-    tools: ["list_branches", "list_commits", "read_file", "write_file", "run_build", "run_tests", "create_pull_request", "create_branch", "search", "save_memory"],
+    tools: [
+      "list_branches",
+      "list_commits",
+      "read_file",
+      "write_file",
+      "run_build",
+      "run_tests",
+      "create_pull_request",
+      "create_branch",
+      "search",
+      "save_memory",
+    ],
     permissions: ["github.read", "github.write", "repository.write", "memory.write"],
   },
   "frontend-developer": {
     role: "Frontend Developer",
-    mission: "Inspect existing UI/components/styling before changing code; implement frontend changes and verify them with tests/build.",
+    mission:
+      "Inspect existing UI/components/styling before changing code; implement frontend changes and verify them with tests/build.",
     skills: ["react", "blazor", "ui-design", "testing"],
     tools: ["read_file", "write_file", "run_build", "run_tests", "create_branch", "create_pull_request"],
     permissions: ["github.read", "github.write", "repository.write"],
   },
   uiux: {
     role: "UI/UX Agent",
-    mission: "Review existing UI and design system, find UX problems, propose and implement UI improvements, keep accessibility and responsive design in mind.",
+    mission:
+      "Review existing UI and design system, find UX problems, propose and implement UI improvements, keep accessibility and responsive design in mind.",
     skills: ["ui-design", "ux", "react", "blazor"],
     tools: ["read_file", "write_file", "run_tests", "create_branch", "create_pull_request"],
     permissions: ["github.read", "github.write", "memory.write"],
@@ -89,14 +105,16 @@ export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
   },
   "qa-test": {
     role: "QA/Test Agent",
-    mission: "Detect affected files, run tests/static analysis/security scans, classify failures, and route them to the responsible agent.",
+    mission:
+      "Detect affected files, run tests/static analysis/security scans, classify failures, and route them to the responsible agent.",
     skills: ["testing", "playwright"],
     tools: ["list_commits", "read_file", "run_tests", "run_build", "search", "save_memory"],
     permissions: ["github.read", "memory.read", "memory.write"],
   },
   security: {
     role: "Security Agent",
-    mission: "Audit for vulnerabilities, secrets hygiene, input validation, and OWASP issues. Flag dangerous changes for approval. Read-first.",
+    mission:
+      "Audit for vulnerabilities, secrets hygiene, input validation, and OWASP issues. Flag dangerous changes for approval. Read-first.",
     skills: ["security"],
     tools: ["read_file", "search"],
     permissions: ["github.read", "memory.read"],
@@ -117,7 +135,8 @@ export const AGENT_SCAFFOLD: Record<AgentType, AgentScaffold> = {
   },
   debugging: {
     role: "Debugging Agent",
-    mission: "Reproduce and diagnose failures, find root cause, and hand off to the appropriate fixer agent with a diagnosis.",
+    mission:
+      "Reproduce and diagnose failures, find root cause, and hand off to the appropriate fixer agent with a diagnosis.",
     skills: ["testing"],
     tools: ["list_commits", "read_file", "run_tests", "search", "save_memory"],
     permissions: ["github.read", "memory.read", "memory.write"],
@@ -216,7 +235,9 @@ export class AgentGenerator {
     const skills = new SkillRegistry(this.skillsRepo);
     const roster = opts.agentTypes?.length ? AGENT_TYPES.filter((t) => opts.agentTypes!.includes(t)) : AGENT_TYPES;
     // Agents outside the selected roster are switched off (kept for history).
-    for (const a of opts.persist === false || opts.preserveExisting !== false ? [] : this.agentRepo.byProject(project.id)) {
+    for (const a of opts.persist === false || opts.preserveExisting !== false
+      ? []
+      : this.agentRepo.byProject(project.id)) {
       if (!roster.includes(a.type) && a.enabled) {
         this.agentRepo.upsert({ ...a, enabled: false, updatedAt: new Date().toISOString() }, { projectId: project.id });
       }
@@ -224,11 +245,16 @@ export class AgentGenerator {
     for (const type of roster) {
       const scaffold = AGENT_SCAFFOLD[type];
       const existing = this.agentRepo.byType(project.id, type);
-      if (existing && opts.preserveExisting !== false) { created.push(existing); continue; }
+      if (existing && opts.preserveExisting !== false) {
+        created.push(existing);
+        continue;
+      }
       const generatedSkills = skills.forTask(project, { type, name: scaffold.role, skills: scaffold.skills }).skills;
       const previousDefaults = existing?.generatedSkills ?? scaffold.skills;
       const manual = existing?.skills.filter((slug) => !previousDefaults.includes(slug)) ?? [];
-      const removed = existing?.generatedSkills ? previousDefaults.filter((slug) => !existing.skills.includes(slug)) : [];
+      const removed = existing?.generatedSkills
+        ? previousDefaults.filter((slug) => !existing.skills.includes(slug))
+        : [];
 
       // Agents are per-project, so ids must be project-unique (a fixed
       // `agent-<type>` id would collide across projects and wipe other rosters).
@@ -309,20 +335,25 @@ export class AgentGenerator {
     // Only the owning account's models (plus the shared platform rows) are
     // candidates: a generated agent must never route to a foreign provider.
     const all = this.modelRepo.listActiveForOwner(ownerId);
-    const primary = defaultModelId && all.some((m) => m.id === defaultModelId) ? defaultModelId : all[0]?.id ?? "";
+    const primary = defaultModelId && all.some((m) => m.id === defaultModelId) ? defaultModelId : (all[0]?.id ?? "");
     const selected = all.find((m) => m.id === primary);
-    const reasoning = selected?.capabilities.reasoning ? primary : all.find((m) => m.capabilities.reasoning)?.id ?? primary;
-    const coding = selected?.capabilities.code ? primary : all.find((m) => m.capabilities.code)?.id ?? primary;
+    const reasoning = selected?.capabilities.reasoning
+      ? primary
+      : (all.find((m) => m.capabilities.reasoning)?.id ?? primary);
+    const coding = selected?.capabilities.code ? primary : (all.find((m) => m.capabilities.code)?.id ?? primary);
     const fast = primary;
-    const vision = selected?.capabilities.vision ? primary : all.find((m) => m.capabilities.vision)?.id ?? primary;
+    const vision = selected?.capabilities.vision ? primary : (all.find((m) => m.capabilities.vision)?.id ?? primary);
     return {
       primary,
-      fallbacks: all.map((m) => m.id).filter((id) => id !== primary).slice(0, 2),
+      fallbacks: all
+        .map((m) => m.id)
+        .filter((id) => id !== primary)
+        .slice(0, 2),
       specialized: {
         research: reasoning,
         coding,
         vision,
-        "fast": fast,
+        fast: fast,
         "final-review": reasoning,
         reasoning,
       },

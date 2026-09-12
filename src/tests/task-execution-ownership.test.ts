@@ -20,16 +20,39 @@ beforeEach(async () => {
   fx = freshDb();
   c = new Container();
   await c.ensureSeed();
-  project = await c.agentManager.createProject({ name: "Task ownership", description: "A web app", configRepo: "acme/ownership" });
+  project = await c.agentManager.createProject({
+    name: "Task ownership",
+    description: "A web app",
+    configRepo: "acme/ownership",
+  });
   app = (await buildServer(c)).app;
   await app.ready();
 });
-afterEach(async () => { vi.restoreAllMocks(); c.githubAutomation.stop(); await app.close(); await new Promise<void>((resolve) => setImmediate(resolve)); fx.cleanup(); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  c.githubAutomation.stop();
+  await app.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  fx.cleanup();
+});
 
 function parentAndChild(status: Task["status"] = "failed") {
-  const created = c.agentManager.createTask({ projectId: project.id, title: "Add login", description: "Build API and UI", input: { executionMode: "autonomous" } });
+  const created = c.agentManager.createTask({
+    projectId: project.id,
+    title: "Add login",
+    description: "Build API and UI",
+    input: { executionMode: "autonomous" },
+  });
   const parent: Task = { ...created, status };
-  const child: Task = { ...parent, id: "child-implementation", parentTaskId: parent.id, title: "Implement frontend", agentType: "frontend-developer", status: "failed", input: { autonomous: true } };
+  const child: Task = {
+    ...parent,
+    id: "child-implementation",
+    parentTaskId: parent.id,
+    title: "Implement frontend",
+    agentType: "frontend-developer",
+    status: "failed",
+    input: { autonomous: true },
+  };
   c.taskRepo.upsert(parent, { projectId: project.id });
   c.taskRepo.upsert(child, { projectId: project.id, parentId: parent.id });
   return { parent, child };
@@ -60,7 +83,11 @@ describe("task ownership and retries", () => {
   it("does not silently remove workflow routing on an unrelated task edit", async () => {
     const workflow = c.workflowRepo.byProject(project.id)[0];
     const task = c.agentManager.createTask({ projectId: project.id, title: "Run workflow", workflowId: workflow.id });
-    const response = await app.inject({ method: "PATCH", url: `/tasks/${task.id}`, payload: { title: "Updated title" } });
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/tasks/${task.id}`,
+      payload: { title: "Updated title" },
+    });
     expect(response.statusCode).toBe(200);
     expect(response.json().workflowId).toBe(workflow.id);
     const clear = await app.inject({ method: "PATCH", url: `/tasks/${task.id}`, payload: { workflowId: null } });
@@ -99,8 +126,16 @@ describe("task ownership and retries", () => {
   });
 
   it("does not lose a decision arriving synchronously through the notification hook", async () => {
-    let service: ApprovalService;
-    service = new ApprovalService({ repo: c.approvalRepo, kv: c.kv, taskRepo: c.taskRepo, auditRepo: c.auditRepo, notificationRepo: c.notificationRepo, notify: async (request) => { service.decide(request.id, "approve", { source: "system" }); } });
+    const service: ApprovalService = new ApprovalService({
+      repo: c.approvalRepo,
+      kv: c.kv,
+      taskRepo: c.taskRepo,
+      auditRepo: c.auditRepo,
+      notificationRepo: c.notificationRepo,
+      notify: async (request) => {
+        service.decide(request.id, "approve", { source: "system" });
+      },
+    });
     service.setPolicy({ autoApprove: false, timeoutMs: 10000 });
     expect(await service.request("Approve immediately")).toBe(true);
   });
@@ -109,10 +144,14 @@ describe("task ownership and retries", () => {
     const task = c.agentManager.createTask({ projectId: project.id, title: "Hold", agentType: "backend-developer" });
     let release!: () => void;
     let started!: () => void;
-    const reached = new Promise<void>((resolve) => { started = resolve; });
+    const reached = new Promise<void>((resolve) => {
+      started = resolve;
+    });
     vi.spyOn(c.agentRunner, "run").mockImplementation(async () => {
       started();
-      await new Promise<void>((resolve) => { release = resolve; });
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
       return { status: "succeeded", steps: [], id: "held" } as unknown as Run;
     });
     const pending = c.agentManager.runTask(task.id);
@@ -134,7 +173,11 @@ describe("task ownership and retries", () => {
   });
 
   it("re-runs a task left stranded as 'queued' after its job was dead-lettered", async () => {
-    const task = c.agentManager.createTask({ projectId: project.id, title: "Stranded queued task", description: "plain single-agent" });
+    const task = c.agentManager.createTask({
+      projectId: project.id,
+      title: "Stranded queued task",
+      description: "plain single-agent",
+    });
     // Reproduce the pre-fix failure mode: a job was enqueued, dead-lettered, and
     // the task was left non-terminal ("queued") with no live work behind it.
     const dead = c.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
@@ -193,7 +236,10 @@ describe("task ownership and retries", () => {
       competing ??= other.claim(1);
       expect(mine.length + competing.length).toBe(1);
       expect(mine.some((job) => competing!.some((j) => j.id === job.id))).toBe(false);
-    } finally { spy.mockRestore(); otherDb.close(); }
+    } finally {
+      spy.mockRestore();
+      otherDb.close();
+    }
   });
 
   it("routes both Run Agent UI entry points to single-agent execution", () => {

@@ -71,29 +71,33 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
   // Restore admin-managed settings from a backup blob (POST /settings/backup
   // output). Only the validated, non-secret GitHub login settings are written
   // back — secrets stay environment-only by design.
-  app.post("/settings/restore", { schema: { tags: ["settings"] } }, async (req: FastifyRequest, reply: FastifyReply) => {
-    const b = (req.body ?? {}) as { adminSettings?: Partial<SaveGitHubAdminSettingsInput> };
-    if (!b.adminSettings || typeof b.adminSettings !== "object") {
-      reply.code(400);
-      return { error: "Restore payload missing adminSettings" };
-    }
-    try {
-      const stored = saveGitHubAdminSettings(container.kv, b.adminSettings, req.user.id);
-      await container.auditRepo.record({
-        userId: req.user.id,
-        action: "admin.settings.restore",
-        result: "success",
-        source: "web",
-        correlationId: `restore-${Date.now()}`,
-        metadata: { keys: Object.keys(b.adminSettings) },
-      });
-      return { ok: true, stored };
-    } catch (err) {
-      const status = (err as { statusCode?: number }).statusCode ?? 400;
-      reply.code(status);
-      return { error: err instanceof Error ? err.message : "Restore failed" };
-    }
-  });
+  app.post(
+    "/settings/restore",
+    { schema: { tags: ["settings"] } },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const b = (req.body ?? {}) as { adminSettings?: Partial<SaveGitHubAdminSettingsInput> };
+      if (!b.adminSettings || typeof b.adminSettings !== "object") {
+        reply.code(400);
+        return { error: "Restore payload missing adminSettings" };
+      }
+      try {
+        const stored = saveGitHubAdminSettings(container.kv, b.adminSettings, req.user.id);
+        await container.auditRepo.record({
+          userId: req.user.id,
+          action: "admin.settings.restore",
+          result: "success",
+          source: "web",
+          correlationId: `restore-${Date.now()}`,
+          metadata: { keys: Object.keys(b.adminSettings) },
+        });
+        return { ok: true, stored };
+      } catch (err) {
+        const status = (err as { statusCode?: number }).statusCode ?? 400;
+        reply.code(status);
+        return { error: err instanceof Error ? err.message : "Restore failed" };
+      }
+    },
+  );
 
   // Project export (config + agents + prompts + skills + workflows + rules; no secrets).
   app.get("/projects/:id/export", { schema: { tags: ["settings"] } }, async (req) => {
@@ -140,7 +144,8 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
     let project: Project | undefined;
     const conflicts: Array<{ kind: string; key: string; action: "skip" | "overwrite" | "rename" }> = [];
     if (mode === "merge") {
-      if (b.targetProjectId && container.projectRepo.findById(b.targetProjectId)) await container.agentManager.readProject(b.targetProjectId);
+      if (b.targetProjectId && container.projectRepo.findById(b.targetProjectId))
+        await container.agentManager.readProject(b.targetProjectId);
       project = b.targetProjectId ? container.projectRepo.findById(b.targetProjectId)?.data : undefined;
       if (!project) return reply.code(404).send({ error: "targetProjectId not found (required for mode=merge)" });
     } else {
@@ -163,7 +168,12 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
       memory: { create: 0, overwrite: 0, skip: 0 },
       skills: { add: 0 },
     };
-    const decide = (bucket: { create: number; overwrite: number; skip: number }, kind: string, key: string, exists: boolean) => {
+    const decide = (
+      bucket: { create: number; overwrite: number; skip: number },
+      kind: string,
+      key: string,
+      exists: boolean,
+    ) => {
       if (!exists) {
         bucket.create++;
         return "create" as const;
@@ -174,9 +184,18 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
       else bucket.skip++;
       return action;
     };
-    const agentPlan = agents.map((a) => ({ a, action: decide(plan.agents, "agent", String(a.slug ?? a.name ?? "?"), agentBySlug.has(String(a.slug))) }));
-    const workflowPlan = workflows.map((w) => ({ w, action: decide(plan.workflows, "workflow", String(w.name ?? "?"), workflowByName.has(String(w.name))) }));
-    const memoryPlan = memory.map((m) => ({ m, action: decide(plan.memory, "memory", `${m.type}/${m.key}`, memoryByKey.has(`${m.type}/${m.key}`)) }));
+    const agentPlan = agents.map((a) => ({
+      a,
+      action: decide(plan.agents, "agent", String(a.slug ?? a.name ?? "?"), agentBySlug.has(String(a.slug))),
+    }));
+    const workflowPlan = workflows.map((w) => ({
+      w,
+      action: decide(plan.workflows, "workflow", String(w.name ?? "?"), workflowByName.has(String(w.name))),
+    }));
+    const memoryPlan = memory.map((m) => ({
+      m,
+      action: decide(plan.memory, "memory", `${m.type}/${m.key}`, memoryByKey.has(`${m.type}/${m.key}`)),
+    }));
     const currentSkills = new Set(project?.settings.skills ?? []);
     const newSkills = skills.filter((sk) => !currentSkills.has(sk));
     plan.skills.add = newSkills.length;
@@ -187,7 +206,10 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
     if (mode === "create") {
       const src = b.project;
       const baseSlug = String(src.slug ?? "").trim() || undefined;
-      const slug = baseSlug && container.projectRepo.findBySlug(baseSlug) ? `${baseSlug}-${Date.now().toString(36).slice(-4)}` : baseSlug;
+      const slug =
+        baseSlug && container.projectRepo.findBySlug(baseSlug)
+          ? `${baseSlug}-${Date.now().toString(36).slice(-4)}`
+          : baseSlug;
       const settings = (src.settings as Project["settings"] | undefined) ?? undefined;
       project = await container.agentManager.createProject({
         name: String(src.name ?? "Imported"),
@@ -198,7 +220,9 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
         repositories: src.repositories as never,
         capabilities: src.capabilities as never,
         defaultModelId: src.defaultModelId as string | undefined,
-        settings: settings ? { ...settings, skills: Array.from(new Set([...(settings.skills ?? []), ...skills])) } : undefined,
+        settings: settings
+          ? { ...settings, skills: Array.from(new Set([...(settings.skills ?? []), ...skills])) }
+          : undefined,
       });
       // Onboarding scaffolds default agents/workflows; imported entities replace
       // same-slug/name scaffolds instead of duplicating them in the new project.
@@ -286,7 +310,11 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
       const fresh = container.projectRepo.findById(projectId)?.data;
       if (fresh) {
         container.projectRepo.upsert(
-          { ...fresh, settings: { ...fresh.settings, skills: Array.from(new Set([...(fresh.settings.skills ?? []), ...skills])) }, updatedAt: now },
+          {
+            ...fresh,
+            settings: { ...fresh.settings, skills: Array.from(new Set([...(fresh.settings.skills ?? []), ...skills])) },
+            updatedAt: now,
+          },
           { key: fresh.slug },
         );
         result.skills = newSkills.length;

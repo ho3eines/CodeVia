@@ -40,6 +40,7 @@ import type { User } from "../domain/entities.js";
 import { registerProjectStateHook } from "./project-state-hook.js";
 import { getUserGitHubToken } from "../auth/github-tokens.js";
 import { runWithGitHubRequestActor } from "../github/request-actor.js";
+import { correlationId, runWithCorrelation } from "../correlation.js";
 import { getEnv } from "../config/env.js";
 
 export interface BuildServerResult {
@@ -62,19 +63,15 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   // Accept empty JSON bodies (e.g. POST /tasks/:id/run, /projects/:id/activate)
   // so body-less requests with a `Content-Type: application/json` header (as the
   // SPA sends) don't trip Fastify's `FST_ERR_CTP_EMPTY_JSON_BODY`.
-  app.addContentTypeParser(
-    "application/json",
-    { parseAs: "string" },
-    (_req, body, done) => {
-      const text = body == null ? "" : String(body);
-      if (!text.trim()) return done(null, {});
-      try {
-        done(null, JSON.parse(text));
-      } catch (err) {
-        done(err as Error, undefined);
-      }
-    },
-  );
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    const text = body == null ? "" : String(body);
+    if (!text.trim()) return done(null, {});
+    try {
+      done(null, JSON.parse(text));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
 
   await app.register(cors, { origin: true });
   // The server is created with `logger: false`, so an unhandled 500 used to
@@ -93,6 +90,17 @@ export async function buildServer(container: Container): Promise<BuildServerResu
         err: error.stack ?? String(error),
       });
     }
+  });
+
+  // Correlation id: honour an inbound id (distributed tracing from the SPA,
+  // Telegram, or an upstream proxy) or mint one, echo it back on the response,
+  // and keep it active for the rest of the request so jobs/approvals/runs
+  // enqueued anywhere in the call stack share a single trace id.
+  app.addHook("onRequest", (request, reply, done) => {
+    const inbound = request.headers["x-correlation-id"];
+    const cid = typeof inbound === "string" && inbound.length > 0 && inbound.length <= 128 ? inbound : correlationId();
+    reply.header("x-correlation-id", cid);
+    runWithCorrelation(cid, () => done());
   });
   registerHardening(app);
   await app.register(swagger, {
@@ -191,7 +199,11 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   });
   io.on("connection", (socket) => {
     const user = (socket.data.user as User | undefined) ?? DEMO_USER;
-    logger.debug("client connected", { socketId: socket.id, userId: user.id, authenticated: socket.data.authenticated === true });
+    logger.debug("client connected", {
+      socketId: socket.id,
+      userId: user.id,
+      authenticated: socket.data.authenticated === true,
+    });
     socket.on("disconnect", () => logger.debug("client disconnected", { socketId: socket.id }));
 
     // HTTP routes stay permissive for the demo user (single-user installs see
@@ -376,7 +388,11 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   const requestPath = (url: string): string => {
     const raw = url.split("?")[0];
     if (/^https?:\/\//i.test(raw)) {
-      try { return new URL(raw).pathname; } catch { /* use raw below */ }
+      try {
+        return new URL(raw).pathname;
+      } catch {
+        /* use raw below */
+      }
     }
     return raw;
   };

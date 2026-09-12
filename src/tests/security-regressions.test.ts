@@ -152,7 +152,9 @@ describe("A02 — project routes enforce per-project ownership", () => {
     const bobHeaders = { ...bob.bearer };
 
     // List filter hides it…
-    const listForBob = (await srv.inject({ method: "GET", url: "/projects", headers: bobHeaders })).json() as Array<{ id: string }>;
+    const listForBob = (await srv.inject({ method: "GET", url: "/projects", headers: bobHeaders })).json() as Array<{
+      id: string;
+    }>;
     expect(listForBob.some((p) => p.id === pid)).toBe(false);
 
     // …and direct access denies (404 — no existence leak), without mutating.
@@ -175,7 +177,12 @@ describe("A02 — project routes enforce per-project ownership", () => {
     expect(asOwner.description).toBe("");
 
     // The owner keeps full access.
-    const patched = await srv.inject({ method: "PATCH", url: `/projects/${pid}`, headers: alice.bearer, payload: { description: "mine" } });
+    const patched = await srv.inject({
+      method: "PATCH",
+      url: `/projects/${pid}`,
+      headers: alice.bearer,
+      payload: { description: "mine" },
+    });
     expect(patched.statusCode).toBe(200);
     expect(patched.json().description).toBe("mine");
   });
@@ -194,11 +201,15 @@ describe("A02 — project routes enforce per-project ownership", () => {
     const rec = container.projectRepo.findById(pid)!;
     container.projectRepo.upsert({ ...rec.data, ownerId: undefined }, { projectId: pid });
 
-    const listForBob = (await srv.inject({ method: "GET", url: "/projects", headers: bob.bearer })).json() as Array<{ id: string }>;
+    const listForBob = (await srv.inject({ method: "GET", url: "/projects", headers: bob.bearer })).json() as Array<{
+      id: string;
+    }>;
     expect(listForBob.some((p) => p.id === pid)).toBe(false);
     // Direct access reveals neither existence nor content (404, not 403).
     expect((await srv.inject({ method: "GET", url: `/projects/${pid}`, headers: bob.bearer })).statusCode).toBe(404);
-    expect((await srv.inject({ method: "GET", url: `/projects/${pid}/agents`, headers: bob.bearer })).statusCode).toBe(404);
+    expect((await srv.inject({ method: "GET", url: `/projects/${pid}/agents`, headers: bob.bearer })).statusCode).toBe(
+      404,
+    );
     // The single-user/demo identity keeps seeing it, so an installation without
     // login loses nothing.
     expect((await srv.inject({ method: "GET", url: `/projects/${pid}` })).statusCode).toBe(200);
@@ -317,7 +328,9 @@ describe("A03 — Socket.io handshakes authenticate and events stay project-scop
       // SPA does on reconnect) and still receives nothing, while Alice keeps
       // receiving her own project's events.
       await new Promise<void>((resolve, reject) => {
-        sBob.emit("subscribe_all", {}, (ack: { ok?: boolean } | undefined) => (ack?.ok ? resolve() : reject(new Error("re-subscribe failed"))));
+        sBob.emit("subscribe_all", {}, (ack: { ok?: boolean } | undefined) =>
+          ack?.ok ? resolve() : reject(new Error("re-subscribe failed")),
+        );
       });
       live.emit({ type: "task.updated", taskId: "task-alice-only-3", projectId: pid, data: { status: "running" } });
       await sleep(300);

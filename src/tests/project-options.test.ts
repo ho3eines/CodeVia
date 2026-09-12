@@ -16,7 +16,16 @@ import type { Project } from "../domain/entities.js";
 describe("project option catalog", () => {
   it("exposes every multi-select dimension with stable ids", () => {
     const c = getProjectOptionCatalog();
-    for (const key of ["platforms", "languages", "frameworks", "databases", "deploymentTargets", "features", "integrations", "agentTypes"] as const) {
+    for (const key of [
+      "platforms",
+      "languages",
+      "frameworks",
+      "databases",
+      "deploymentTargets",
+      "features",
+      "integrations",
+      "agentTypes",
+    ] as const) {
       expect(c[key].length, key).toBeGreaterThan(3);
       const ids = c[key].map((o) => o.value);
       expect(new Set(ids).size, `${key} ids unique`).toBe(ids.length);
@@ -49,7 +58,12 @@ describe("normalizeCapabilities (multi-select)", () => {
   });
 
   it("derives legacy single-value labels from the first selection", () => {
-    const caps = normalizeCapabilities({ languages: ["typescript", "go"], frameworks: ["nextjs"], databases: ["postgresql"], deploymentTargets: ["kubernetes"] });
+    const caps = normalizeCapabilities({
+      languages: ["typescript", "go"],
+      frameworks: ["nextjs"],
+      databases: ["postgresql"],
+      deploymentTargets: ["kubernetes"],
+    });
     expect(legacyFieldsFromCapabilities(caps)).toEqual({
       primaryLanguage: "TypeScript",
       framework: "Next.js",
@@ -72,7 +86,9 @@ describe("agentTypesForProject", () => {
   });
 
   it("derives a roster from the selected stack", () => {
-    const roster = agentTypesForProject(normalizeCapabilities({ platforms: ["web"], databases: ["postgresql"], deploymentTargets: ["kubernetes"] }));
+    const roster = agentTypesForProject(
+      normalizeCapabilities({ platforms: ["web"], databases: ["postgresql"], deploymentTargets: ["kubernetes"] }),
+    );
     expect(roster).toContain("frontend-developer");
     expect(roster).toContain("database");
     expect(roster).toContain("devops");
@@ -132,7 +148,9 @@ describe("hydrateProject (upgrade of old single-repo documents)", () => {
       updatedAt: "2024-01-01T00:00:00.000Z",
     } as unknown as Project;
     const p = hydrateProject(legacy);
-    expect(p.repositories).toEqual([expect.objectContaining({ repo: "acme/old", branch: "master", isConfigRepo: true })]);
+    expect(p.repositories).toEqual([
+      expect.objectContaining({ repo: "acme/old", branch: "master", isConfigRepo: true }),
+    ]);
     expect(p.capabilities.frameworks).toEqual(["dotnet"]);
     expect(p.capabilities.databases).toEqual(["sqlserver"]);
     expect(p.capabilities.languages).toEqual(["csharp"]);

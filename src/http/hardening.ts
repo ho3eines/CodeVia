@@ -31,7 +31,15 @@ export function registerHardening(app: FastifyInstance): void {
   if (limit > 0) {
     const windowMs = 60_000;
     const buckets = new Map<string, { count: number; resetAt: number }>();
-    const exemptPrefixes = ["/health", "/ready", "/live", "/webhooks/", "/integrations/telegram/webhook", "/docs", "/socket.io"];
+    const exemptPrefixes = [
+      "/health",
+      "/ready",
+      "/live",
+      "/webhooks/",
+      "/integrations/telegram/webhook",
+      "/docs",
+      "/socket.io",
+    ];
     const exempt = (rawUrl: string, method: string) => {
       const url = rawUrl.split("?")[0];
       if (url === "/" || exemptPrefixes.some((p) => url.startsWith(p))) return true;

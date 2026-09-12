@@ -1,7 +1,17 @@
-import type { Agent, Run, Skill, AgentType, Project, ProjectCapabilities, ProjectGithubConnection, ProjectRepositoryLink, Task, Workflow, WorkflowNode } from "../domain/entities.js";
+import type {
+  Agent,
+  Run,
+  Skill,
+  AgentType,
+  Project,
+  ProjectCapabilities,
+  ProjectGithubConnection,
+  ProjectRepositoryLink,
+  Task,
+  Workflow,
+  WorkflowNode,
+} from "../domain/entities.js";
 import {
-  agentTypesForProject,
-  canonicalOption,
   configRepoOf,
   hydrateProject,
   legacyFieldsFromCapabilities,
@@ -10,7 +20,13 @@ import {
   optionLabel,
   skillsForCapabilities,
 } from "../domain/project-options.js";
-import type { ConversationRepository, MemoryRepository, ProjectRepository, TaskRepository, WorkflowRepository } from "../domain/repos.js";
+import type {
+  ConversationRepository,
+  MemoryRepository,
+  ProjectRepository,
+  TaskRepository,
+  WorkflowRepository,
+} from "../domain/repos.js";
 import type { ProjectFilesService } from "../github/project-files.js";
 import type { AgentRepository } from "./agent-repo.js";
 import type { RunRepository, CostRepository, AuditRepository, NotificationRepository } from "../observability/repos.js";
@@ -34,17 +50,35 @@ import { eventBus, generateCorrelationId } from "../events/bus.js";
 import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
 import { randomUUID } from "node:crypto";
-import { discoverProjectRules, rulesToStrings } from "./rules-discovery.js";
 
 /** Marker prefix for rules produced by automatic discovery (re-generated on re-onboard). */
 export const DISCOVERED_RULE_TAG = "<!-- discovered -->";
 
 const ALL_PERMISSIONS: Permission[] = [
-  "project.read", "project.write", "agent.read", "agent.write", "workflow.read", "workflow.write",
-  "model.read", "model.write", "provider.read", "provider.write", "skill.read", "skill.write",
-  "memory.read", "memory.write", "repository.read", "repository.write", "deployment.read",
-  "deployment.write", "secret.read", "secret.write", "telegram.read", "telegram.write",
-  "admin.read", "admin.write",
+  "project.read",
+  "project.write",
+  "agent.read",
+  "agent.write",
+  "workflow.read",
+  "workflow.write",
+  "model.read",
+  "model.write",
+  "provider.read",
+  "provider.write",
+  "skill.read",
+  "skill.write",
+  "memory.read",
+  "memory.write",
+  "repository.read",
+  "repository.write",
+  "deployment.read",
+  "deployment.write",
+  "secret.read",
+  "secret.write",
+  "telegram.read",
+  "telegram.write",
+  "admin.read",
+  "admin.write",
 ];
 
 function defaultPermissions(): Record<Permission, boolean> {
@@ -127,21 +161,35 @@ export interface AgentManagerDeps {
 export class AgentManager {
   private readonly agentRouter: AgentRouter;
   private readonly inFlight = new Map<string, Promise<Task>>();
-  private githubFor(project: Project, requestUserId?: string): IGitHubService { return this.deps.githubForProject?.(project, requestUserId) ?? this.deps.github; }
+  private githubFor(project: Project, requestUserId?: string): IGitHubService {
+    return this.deps.githubForProject?.(project, requestUserId) ?? this.deps.github;
+  }
   constructor(private readonly deps: AgentManagerDeps) {
     this.agentRouter = deps.agentRouter;
-    if (deps.projectFiles && deps.memoryRepo && deps.providerRegistry) this.state = new ProjectStateCoordinator({
-      projectRepo: deps.projectRepo, agentRepo: deps.agentRepo, taskRepo: deps.taskRepo, memoryRepo: deps.memoryRepo,
-      skillRepo: deps.skillsRepo, workflowRepo: deps.workflowRepo, runRepo: deps.runRepo,
-      files: deps.projectFiles, generator: deps.agentGenerator,
-      ai: new ProjectStateGenerator({ modelRepo: deps.modelRepo, providerRepo: deps.providerRepo, providerRegistry: deps.providerRegistry, costRepo: deps.costRepo }),
-      github: (p) => this.githubFor(p),
-      inspect: async (p) => {
-        const detected = await this.inspectRepository(p);
-        const capabilities = this.mergeDetectedCapabilities(p.capabilities, detected.capabilities);
-        return hydrateProject({ ...p, capabilities, ...legacyFieldsFromCapabilities(capabilities) });
-      },
-    });
+    if (deps.projectFiles && deps.memoryRepo && deps.providerRegistry)
+      this.state = new ProjectStateCoordinator({
+        projectRepo: deps.projectRepo,
+        agentRepo: deps.agentRepo,
+        taskRepo: deps.taskRepo,
+        memoryRepo: deps.memoryRepo,
+        skillRepo: deps.skillsRepo,
+        workflowRepo: deps.workflowRepo,
+        runRepo: deps.runRepo,
+        files: deps.projectFiles,
+        generator: deps.agentGenerator,
+        ai: new ProjectStateGenerator({
+          modelRepo: deps.modelRepo,
+          providerRepo: deps.providerRepo,
+          providerRegistry: deps.providerRegistry,
+          costRepo: deps.costRepo,
+        }),
+        github: (p) => this.githubFor(p),
+        inspect: async (p) => {
+          const detected = await this.inspectRepository(p);
+          const capabilities = this.mergeDetectedCapabilities(p.capabilities, detected.capabilities);
+          return hydrateProject({ ...p, capabilities, ...legacyFieldsFromCapabilities(capabilities) });
+        },
+      });
   }
   private readonly state?: ProjectStateCoordinator;
 
@@ -196,9 +244,18 @@ export class AgentManager {
     const repositories = normalizeRepositories(input.repositories, { repo: input.configRepo, branch: input.branch });
     const cfg = configRepoOf(repositories);
     if (!cfg) {
-      throw Object.assign(new Error("A GitHub repository (owner/name) is required — pick one from the connected account"), { statusCode: 400 });
+      throw Object.assign(
+        new Error("A GitHub repository (owner/name) is required — pick one from the connected account"),
+        { statusCode: 400 },
+      );
     }
-    if (this.deps.projectRepo.findMany().some(({ data: p }) => p.configRepo === cfg.repo && p.branch === cfg.branch)) throw Object.assign(new Error("This repository/branch is already linked. Reuse that project or select an independent repository/branch."), { statusCode: 409 });
+    if (this.deps.projectRepo.findMany().some(({ data: p }) => p.configRepo === cfg.repo && p.branch === cfg.branch))
+      throw Object.assign(
+        new Error(
+          "This repository/branch is already linked. Reuse that project or select an independent repository/branch.",
+        ),
+        { statusCode: 409 },
+      );
     const capabilities = normalizeCapabilities(input.capabilities, {
       primaryLanguage: input.primaryLanguage,
       framework: input.framework,
@@ -229,18 +286,16 @@ export class AgentManager {
       database: legacy.database,
       deploymentTarget: legacy.deploymentTarget,
       defaultModelId: input.defaultModelId,
-      settings:
-        input.settings ??
-        {
-          environment: "development",
-          notifications: [],
-          rules: [],
-          skills: [],
-          workflows: [],
-          budget: { maxTokensPerRun: 20000, maxCallsPerRun: 20, maxCostUsdPerRun: 5, maxDurationMs: 600000 },
-          permissions: defaultPermissions(),
-          metadata: {},
-        },
+      settings: input.settings ?? {
+        environment: "development",
+        notifications: [],
+        rules: [],
+        skills: [],
+        workflows: [],
+        budget: { maxTokensPerRun: 20000, maxCallsPerRun: 20, maxCostUsdPerRun: 5, maxDurationMs: 600000 },
+        permissions: defaultPermissions(),
+        metadata: {},
+      },
       active: true,
       createdAt: now,
       updatedAt: now,
@@ -262,7 +317,10 @@ export class AgentManager {
   }
 
   /** Restore first; author and commit ONLY missing definitions. Never regenerate existing agents. */
-  async onboardProject(projectId: string, _tech: string[] = []): Promise<{ agents: number; skills: number; seeded: number }> {
+  async onboardProject(
+    projectId: string,
+    _tech: string[] = [],
+  ): Promise<{ agents: number; skills: number; seeded: number }> {
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!stored) throw new Error(`Project ${projectId} not found`);
     // Preserve restored definitions before starter seeding makes a lost mock
@@ -276,10 +334,38 @@ export class AgentManager {
   /** AI fills new, omitted instructions; explicit user-authored text is never replaced. */
   async authorDefinition<T extends Agent | Skill>(project: Project, value: T, kind: "agent" | "skill"): Promise<T> {
     if (!this.deps.providerRegistry) throw new Error("AI provider registry is unavailable");
-    const generator = new ProjectStateGenerator({ modelRepo: this.deps.modelRepo, providerRepo: this.deps.providerRepo, providerRegistry: this.deps.providerRegistry, costRepo: this.deps.costRepo });
-    const reference = this.deps.agentRepo.byType(project.id, "research") ?? this.deps.agentGenerator.generate(project, { agentTypes: ["research"], persist: false, ownerId: project.ownerId })[0];
-    const author = { ...reference, models: project.defaultModelId ? { primary: project.defaultModelId, fallbacks: [], specialized: {} } : kind === "agent" ? (value as Agent).models : reference.models };
-    const result = await generator.generate(project, { agents: kind === "agent" ? [value as Agent] : [], skills: kind === "skill" ? [value as Skill] : [], workflows: [] }, author, project.description, this.githubFor(project).kind === "mock");
+    const generator = new ProjectStateGenerator({
+      modelRepo: this.deps.modelRepo,
+      providerRepo: this.deps.providerRepo,
+      providerRegistry: this.deps.providerRegistry,
+      costRepo: this.deps.costRepo,
+    });
+    const reference =
+      this.deps.agentRepo.byType(project.id, "research") ??
+      this.deps.agentGenerator.generate(project, {
+        agentTypes: ["research"],
+        persist: false,
+        ownerId: project.ownerId,
+      })[0];
+    const author = {
+      ...reference,
+      models: project.defaultModelId
+        ? { primary: project.defaultModelId, fallbacks: [], specialized: {} }
+        : kind === "agent"
+          ? (value as Agent).models
+          : reference.models,
+    };
+    const result = await generator.generate(
+      project,
+      {
+        agents: kind === "agent" ? [value as Agent] : [],
+        skills: kind === "skill" ? [value as Skill] : [],
+        workflows: [],
+      },
+      author,
+      project.description,
+      this.githubFor(project).kind === "mock",
+    );
     return (kind === "agent" ? result.draft.agents[0] : result.draft.skills[0]) as T;
   }
 
@@ -301,26 +387,40 @@ export class AgentManager {
         try {
           await this.deps.projectFiles!.restore(next, undefined, { snapshot });
           return hydrateProject(this.deps.projectRepo.findById(next.id)!.data);
-        } catch (error) { this.deps.projectRepo.upsert(old, { key: old.slug }); throw error; }
+        } catch (error) {
+          this.deps.projectRepo.upsert(old, { key: old.slug });
+          throw error;
+        }
       }
     }
     this.deps.projectRepo.upsert(next, { key: next.slug });
-    try { await this.syncProjectState(next.id, targetRevision); }
-    catch (error) { this.deps.projectRepo.upsert(old, { key: old.slug }); throw error; }
+    try {
+      await this.syncProjectState(next.id, targetRevision);
+    } catch (error) {
+      this.deps.projectRepo.upsert(old, { key: old.slug });
+      throw error;
+    }
     return next;
   }
 
   /** Explicit user save/export. Runtime completion must use syncRuntimeState instead. */
-  async syncProjectState(projectId: string, targetRevision?: string, opts: { recoverMissingMock?: boolean } = {}): Promise<boolean> {
+  async syncProjectState(
+    projectId: string,
+    targetRevision?: string,
+    opts: { recoverMissingMock?: boolean } = {},
+  ): Promise<boolean> {
     const files = this.deps.projectFiles;
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!files || !stored) return false;
     const p = hydrateProject(stored);
-    const agents = this.deps.agentRepo.byProject(projectId).map((a) => targetRevision ? { ...a, repositoryRevision: targetRevision } : a);
+    const agents = this.deps.agentRepo
+      .byProject(projectId)
+      .map((a) => (targetRevision ? { ...a, repositoryRevision: targetRevision } : a));
     const catalog = new Map(this.deps.skillsRepo.byProject(projectId).map((s) => [s.slug, s]));
     const visiting = new Set<string>();
     const include = (slug: string) => {
-      if (visiting.has(slug)) return; visiting.add(slug);
+      if (visiting.has(slug)) return;
+      visiting.add(slug);
       if (files.isTombstoned(p, `CodeVia/skills/${slug}.md`)) return;
       const skill = catalog.get(slug) ?? this.deps.skillsRepo.findBySlug(slug);
       if (!skill) throw new Error(`No definition for skill ${slug}; initialize missing repository state first`);
@@ -328,7 +428,28 @@ export class AgentManager {
       for (const dependency of skill.dependencies) include(dependency);
     };
     for (const slug of [...p.settings.skills, ...agents.flatMap((a) => a.skills)]) include(slug);
-    return files.syncAll(p, { promptVersions: this.deps.promptVersionRepo?.byProject(projectId).map((v) => targetRevision ? { ...v, repositoryRevision: targetRevision } : v), agents, tasks: this.deps.taskRepo.byProject(projectId), memory: this.deps.memoryRepo?.byProject(projectId) ?? [], skillCatalog: [...catalog.values()].map((s) => targetRevision ? { ...s, repositoryRevision: targetRevision } : s), workflows: this.deps.workflowRepo.byProject(projectId).map((w) => targetRevision ? { ...w, repositoryRevision: targetRevision } : w), runs: this.deps.runRepo.byProject(projectId), conversations: this.deps.conversationRepo?.findMany({ projectId }).map((r) => targetRevision ? { ...r.data, repositoryRevision: targetRevision } : r.data) }, opts);
+    return files.syncAll(
+      p,
+      {
+        promptVersions: this.deps.promptVersionRepo
+          ?.byProject(projectId)
+          .map((v) => (targetRevision ? { ...v, repositoryRevision: targetRevision } : v)),
+        agents,
+        tasks: this.deps.taskRepo.byProject(projectId),
+        memory: this.deps.memoryRepo?.byProject(projectId) ?? [],
+        skillCatalog: [...catalog.values()].map((s) =>
+          targetRevision ? { ...s, repositoryRevision: targetRevision } : s,
+        ),
+        workflows: this.deps.workflowRepo
+          .byProject(projectId)
+          .map((w) => (targetRevision ? { ...w, repositoryRevision: targetRevision } : w)),
+        runs: this.deps.runRepo.byProject(projectId),
+        conversations: this.deps.conversationRepo
+          ?.findMany({ projectId })
+          .map((r) => (targetRevision ? { ...r.data, repositoryRevision: targetRevision } : r.data)),
+      },
+      opts,
+    );
   }
 
   /**
@@ -420,18 +541,36 @@ export class AgentManager {
   private ensureDefaultWorkflows(project: Project): void {
     const existing = this.deps.workflowRepo.byProject(project.id);
     const existingSlugs = new Set(existing.map((w) => w.slug));
-    const enabledTypes = new Set(this.deps.agentRepo.byProject(project.id).filter((a) => a.enabled).map((a) => a.type));
-    const create = (slug: string, name: string, description: string, orderedAgents: AgentType[]): Workflow | undefined => {
+    const enabledTypes = new Set(
+      this.deps.agentRepo
+        .byProject(project.id)
+        .filter((a) => a.enabled)
+        .map((a) => a.type),
+    );
+    const create = (
+      slug: string,
+      name: string,
+      description: string,
+      orderedAgents: AgentType[],
+    ): Workflow | undefined => {
       if (existingSlugs.has(slug)) return undefined;
       const agentNodes: WorkflowNode[] = orderedAgents
         .filter((type, index, arr) => enabledTypes.has(type) && arr.indexOf(type) === index)
-        .map((type, i) => ({ id: `${slug}-${i + 1}-${type}`, type: "agent", name: type, config: { agentType: type }, retries: 1 }));
+        .map((type, i) => ({
+          id: `${slug}-${i + 1}-${type}`,
+          type: "agent",
+          name: type,
+          config: { agentType: type },
+          retries: 1,
+        }));
       if (!agentNodes.length) return undefined;
       const approval: WorkflowNode = {
         id: `${slug}-approval`,
         type: "approval",
         name: "Human approval before PR / merge / deploy",
-        config: { message: "Review the agent result before any merge, deployment, migration, or other sensitive operation." },
+        config: {
+          message: "Review the agent result before any merge, deployment, migration, or other sensitive operation.",
+        },
         retries: 0,
       };
       const nodes = [...agentNodes, approval];
@@ -449,13 +588,41 @@ export class AgentManager {
       return workflow;
     };
     const created = [
-      create("autonomous-development-loop", "Autonomous Development Loop", "Research → architecture → implementation → QA → security → code review → human approval.", ["research", "business-analyst", "system-architect", "backend-developer", "frontend-developer", "uiux", "documentation", "qa-test", "security", "code-reviewer"]),
-      create("bug-diagnosis-loop", "Bug Diagnosis Loop", "Issue/test failure → diagnosis → responsible agent → QA → review → approval.", ["debugging", "database", "backend-developer", "frontend-developer", "uiux", "qa-test", "code-reviewer"]),
+      create(
+        "autonomous-development-loop",
+        "Autonomous Development Loop",
+        "Research → architecture → implementation → QA → security → code review → human approval.",
+        [
+          "research",
+          "business-analyst",
+          "system-architect",
+          "backend-developer",
+          "frontend-developer",
+          "uiux",
+          "documentation",
+          "qa-test",
+          "security",
+          "code-reviewer",
+        ],
+      ),
+      create(
+        "bug-diagnosis-loop",
+        "Bug Diagnosis Loop",
+        "Issue/test failure → diagnosis → responsible agent → QA → review → approval.",
+        ["debugging", "database", "backend-developer", "frontend-developer", "uiux", "qa-test", "code-reviewer"],
+      ),
     ].filter(Boolean) as Workflow[];
     if (created.length) {
       const current = this.deps.projectRepo.findById(project.id)?.data ?? project;
       this.deps.projectRepo.upsert(
-        { ...current, settings: { ...current.settings, workflows: [...new Set([...(current.settings.workflows ?? []), ...created.map((w) => w.id)])] }, updatedAt: new Date().toISOString() },
+        {
+          ...current,
+          settings: {
+            ...current.settings,
+            workflows: [...new Set([...(current.settings.workflows ?? []), ...created.map((w) => w.id)])],
+          },
+          updatedAt: new Date().toISOString(),
+        },
         { key: current.slug },
       );
     }
@@ -466,7 +633,9 @@ export class AgentManager {
    * ------------------------------------------------------------------ */
 
   /** Inspect linked repositories and return a stack profile + skill slugs. */
-  async inspectRepository(project: Project): Promise<{ capabilities: ProjectCapabilities; files: string[]; skills: Set<string> }> {
+  async inspectRepository(
+    project: Project,
+  ): Promise<{ capabilities: ProjectCapabilities; files: string[]; skills: Set<string> }> {
     const files: string[] = [];
     let fetched = 0;
     for (const link of project.repositories ?? []) {
@@ -490,15 +659,31 @@ export class AgentManager {
           if (!ref) continue;
           try {
             const f = await this.githubFor(project).getFile(ref, p, link.branch);
-            if (f) { out.push(f.content); break; }
-          } catch { /* ignore individual misses during advisory onboarding */ }
+            if (f) {
+              out.push(f.content);
+              break;
+            }
+          } catch {
+            /* ignore individual misses during advisory onboarding */
+          }
         }
       }
       return out;
     };
 
     // Files that commonly define the stack.
-    const configFiles = files.filter((path) => { const p = path.split("/").pop()!.toLowerCase(); return /^appsettings(\.[^/]+)?\.json$/.test(p) || /\.(csproj|fsproj|vbp)$/.test(p) || /^package\.json$/.test(p) || /^go\.mod$/.test(p) || /^pyproject\.toml$/.test(p) || /^requirements\.txt$/.test(p) || p.endsWith(".sql"); });
+    const configFiles = files.filter((path) => {
+      const p = path.split("/").pop()!.toLowerCase();
+      return (
+        /^appsettings(\.[^/]+)?\.json$/.test(p) ||
+        /\.(csproj|fsproj|vbp)$/.test(p) ||
+        /^package\.json$/.test(p) ||
+        /^go\.mod$/.test(p) ||
+        /^pyproject\.toml$/.test(p) ||
+        /^requirements\.txt$/.test(p) ||
+        p.endsWith(".sql")
+      );
+    });
     const contents = await read(configFiles);
     const combined = `${contents.join("\n").toLowerCase()}\n${files.join("\n").toLowerCase()}\n${project.description} ${project.name}`;
 
@@ -531,7 +716,7 @@ export class AgentManager {
       [/\bmudblazor\b/, "mudblazor"],
       [/\.razor$|\.cshtml$|\bblazor\b/, "blazor"],
       [/\bdotnet\b|\.csproj|\.sln/, "dotnet"],
-      [/\"react\"|'react'|react-dom/, "react"],
+      [/"react"|'react'|react-dom/, "react"],
       [/\bnext\.js|nextjs\b/, "nextjs"],
       [/\bvue\b|\.vue$/, "vue"],
       [/\bangular\b/, "angular"],
@@ -591,7 +776,9 @@ export class AgentManager {
     try {
       const existing = await this.githubFor(project).getFile(ref, path, cfg.branch);
       if (existing && this.agentMdLooksCurrent(existing.content, project.capabilities)) return;
-      await this.githubFor(project).commit(ref, cfg.branch, `docs: ensure Agent.md for ${project.name}`, [{ path, content: body }]);
+      await this.githubFor(project).commit(ref, cfg.branch, `docs: ensure Agent.md for ${project.name}`, [
+        { path, content: body },
+      ]);
       logger.info("Agent.md ensured", { repo: cfg.repo, branch: cfg.branch });
     } catch (err) {
       logger.warn("could not create/update Agent.md", { repo: cfg.repo, err: String(err) });
@@ -607,8 +794,10 @@ export class AgentManager {
   private buildAgentMd(project: Project, files: string[]): string {
     const c = project.capabilities;
     const list = (v: string[]) => (v.length ? v.join(", ") : "—");
-    const labelList = (dim: "languages" | "frameworks" | "databases" | "platforms" | "deploymentTargets" | "features" | "integrations", v: string[]) =>
-      v.length ? v.map((x) => optionLabel(dim, x)).join(", ") : "—";
+    const labelList = (
+      dim: "languages" | "frameworks" | "databases" | "platforms" | "deploymentTargets" | "features" | "integrations",
+      v: string[],
+    ) => (v.length ? v.map((x) => optionLabel(dim, x)).join(", ") : "—");
     return [
       `# Project`,
       ``,
@@ -627,7 +816,9 @@ export class AgentManager {
       `- Integrations: ${labelList("integrations", c.integrations)}`,
       ``,
       `## Repositories`,
-      ...(project.repositories ?? []).map((r) => `- ${r.repo} @ ${r.branch} (${r.role}${r.isConfigRepo ? ", config" : ""})`),
+      ...(project.repositories ?? []).map(
+        (r) => `- ${r.repo} @ ${r.branch} (${r.role}${r.isConfigRepo ? ", config" : ""})`,
+      ),
       ``,
       `## Skills`,
       list(project.settings.skills),
@@ -652,7 +843,11 @@ export class AgentManager {
     const github = this.githubFor(project);
     if (github.kind !== "mock") return false;
     const mock = github as unknown as {
-      seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string; description?: string }): { owner: string; name: string };
+      seedRepo(
+        owner: string,
+        name: string,
+        opts?: { files?: Array<{ path: string; content: string }>; branch?: string; description?: string },
+      ): { owner: string; name: string };
     };
     const links: Array<{ repo: string; branch: string; isConfigRepo?: boolean }> = (project.repositories ?? []).length
       ? (project.repositories ?? []).map((r) => ({ repo: r.repo, branch: r.branch, isConfigRepo: r.isConfigRepo }))
@@ -668,9 +863,13 @@ export class AgentManager {
       const starter = [{ path: "README.md", content: `# ${project.name}\n\n${project.description}\n` }];
       starter.push(...this.mockStackFiles(project));
       if (link.isConfigRepo) {
-        starter.push(
-          { path: "Agent.md", content: this.buildAgentMd(project, starter.map((f) => f.path)) },
-        );
+        starter.push({
+          path: "Agent.md",
+          content: this.buildAgentMd(
+            project,
+            starter.map((f) => f.path),
+          ),
+        });
       }
       // seedRepo merges missing files into an existing simulated repo, so demo
       // repositories get the same starter/stack signals as newly created ones.
@@ -686,19 +885,47 @@ export class AgentManager {
     const files: Array<{ path: string; content: string }> = [];
     const has = (items: string[], v: string) => items.some((x) => x === v || x.includes(v));
     if (has(c.frameworks, "mudblazor") || has(c.frameworks, "blazor") || has(c.frameworks, "dotnet")) {
-      const mud = has(c.frameworks, "mudblazor") ? `\n    <PackageReference Include="MudBlazor" Version="7.0.0" />` : "";
-      files.push({ path: "src/MyApp/MyApp.csproj", content: `<Project Sdk="Microsoft.NET.Sdk.Web">\n  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n  <ItemGroup>${mud}</ItemGroup>\n</Project>\n` });
+      const mud = has(c.frameworks, "mudblazor")
+        ? `\n    <PackageReference Include="MudBlazor" Version="7.0.0" />`
+        : "";
+      files.push({
+        path: "src/MyApp/MyApp.csproj",
+        content: `<Project Sdk="Microsoft.NET.Sdk.Web">\n  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n  <ItemGroup>${mud}</ItemGroup>\n</Project>\n`,
+      });
     }
-    if (has(c.databases, "sqlserver") || has(c.databases, "sqlite") || has(c.databases, "oracle") || has(c.databases, "postgresql")) {
+    if (
+      has(c.databases, "sqlserver") ||
+      has(c.databases, "sqlite") ||
+      has(c.databases, "oracle") ||
+      has(c.databases, "postgresql")
+    ) {
       const db = c.databases[0];
-      const cs = db === "sqlserver" ? "Server=.;Database=app;Trusted_Connection=True" : db === "sqlite" ? "Data Source=app.db" : db === "oracle" ? "User Id=app;Password=****;Data Source=ORCL" : "Host=localhost;Database=app";
-      files.push({ path: "src/MyApp/appsettings.json", content: JSON.stringify({ ConnectionStrings: { Default: cs } }, null, 2) + "\n" });
+      const cs =
+        db === "sqlserver"
+          ? "Server=.;Database=app;Trusted_Connection=True"
+          : db === "sqlite"
+            ? "Data Source=app.db"
+            : db === "oracle"
+              ? "User Id=app;Password=****;Data Source=ORCL"
+              : "Host=localhost;Database=app";
+      files.push({
+        path: "src/MyApp/appsettings.json",
+        content: JSON.stringify({ ConnectionStrings: { Default: cs } }, null, 2) + "\n",
+      });
     }
     if (has(c.frameworks, "react") || has(c.frameworks, "nextjs") || has(c.languages, "typescript")) {
-      files.push({ path: "package.json", content: JSON.stringify({ name: project.slug, dependencies: { react: "^18.0.0", "react-dom": "^18.0.0" } }, null, 2) + "\n" });
+      files.push({
+        path: "package.json",
+        content:
+          JSON.stringify({ name: project.slug, dependencies: { react: "^18.0.0", "react-dom": "^18.0.0" } }, null, 2) +
+          "\n",
+      });
     }
     if (has(c.frameworks, "html") || has(c.frameworks, "css")) {
-      files.push({ path: "index.html", content: `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><h1>${project.name}</h1></body></html>\n` });
+      files.push({
+        path: "index.html",
+        content: `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><h1>${project.name}</h1></body></html>\n`,
+      });
       files.push({ path: "styles.css", content: `body { font-family: sans-serif; }\n` });
     }
     return files;
@@ -733,7 +960,15 @@ export class AgentManager {
    */
   private skillsRelevant(slug: string, tech: string[], project: Project): boolean {
     const c = project.capabilities;
-    const capText = [...c.platforms, ...c.languages, ...c.frameworks, ...c.databases, ...c.deploymentTargets, ...c.features, ...c.integrations].join(" ");
+    const capText = [
+      ...c.platforms,
+      ...c.languages,
+      ...c.frameworks,
+      ...c.databases,
+      ...c.deploymentTargets,
+      ...c.features,
+      ...c.integrations,
+    ].join(" ");
     const projText =
       `${project.description} ${project.framework ?? ""} ${project.database ?? ""} ${project.primaryLanguage ?? ""} ${capText} ${tech.join(" ")}`.toLowerCase();
     const keywords = slug
@@ -777,24 +1012,35 @@ export class AgentManager {
       updatedAt: now,
     };
     this.deps.taskRepo.upsert(task, { projectId: input.projectId, parentId: input.parentTaskId });
-    void eventBus.publish("task.created", { taskId: task.id, projectId: input.projectId }, { correlationId: task.correlationId, projectId: input.projectId });
+    void eventBus.publish(
+      "task.created",
+      { taskId: task.id, projectId: input.projectId },
+      { correlationId: task.correlationId, projectId: input.projectId },
+    );
     // Fire-and-forget: the task file appears in the repo folder (createTask stays sync).
     void this.syncTaskFile(input.projectId, task);
     return task;
   }
 
   /** Execute a task by routing to the right agent or running a workflow. */
-  isTaskRunning(taskId: string): boolean { return this.inFlight.has(taskId); }
+  isTaskRunning(taskId: string): boolean {
+    return this.inFlight.has(taskId);
+  }
 
   runTask(taskId: string): Promise<Task> {
-    try { taskId = executionTask(this.deps.taskRepo, taskId).id; } catch (err) { return Promise.reject(err); }
+    try {
+      taskId = executionTask(this.deps.taskRepo, taskId).id;
+    } catch (err) {
+      return Promise.reject(err);
+    }
     const existing = this.inFlight.get(taskId);
     if (existing) return existing;
     // Read the requestUserId stored on the task at creation time (set by HTTP
     // routes so background execution uses the user's own GitHub OAuth token
     // instead of the admin/server GITHUB_TOKEN).
     const storedTask = this.deps.taskRepo.findById(taskId)?.data;
-    const requestUserId = (storedTask?.input as Record<string, unknown> | undefined)?.requestUserId as string | undefined;
+    const requestUserId = (storedTask?.input as Record<string, unknown> | undefined)?.requestUserId as
+      string | undefined;
     const pending = this.executeTask(taskId, requestUserId).finally(() => this.inFlight.delete(taskId));
     this.inFlight.set(taskId, pending);
     return pending;
@@ -810,7 +1056,10 @@ export class AgentManager {
     try {
       const project = await this.refreshProject(task.projectId);
       assertTaskActive(this.deps.taskRepo, task);
-      this.deps.taskRepo.upsert({ ...task, status: "running", error: undefined }, { projectId: task.projectId, parentId: task.parentTaskId });
+      this.deps.taskRepo.upsert(
+        { ...task, status: "running", error: undefined },
+        { projectId: task.projectId, parentId: task.parentTaskId },
+      );
       live.emit({ type: "task.updated", taskId, projectId: task.projectId, data: { status: "running" } });
 
       if ((task.input as Record<string, unknown> | undefined)?.executionMode === "autonomous" && !task.workflowId) {
@@ -833,31 +1082,66 @@ export class AgentManager {
         const summary = await orchestrator.run(taskId, requestUserId);
         assertTaskActive(this.deps.taskRepo, task);
         const current = this.deps.taskRepo.findById(taskId)!.data;
-        this.deps.taskRepo.upsert({ ...current, result: { ...current.result, ...summary } }, { projectId: task.projectId, parentId: task.parentTaskId });
+        this.deps.taskRepo.upsert(
+          { ...current, result: { ...current.result, ...summary } },
+          { projectId: task.projectId, parentId: task.parentTaskId },
+        );
+        if (summary.outcome === "waiting_for_approval") {
+          const waiting: Task = {
+            ...this.deps.taskRepo.findById(taskId)!.data,
+            status: "waiting_for_approval",
+            approvalRequired: true,
+            updatedAt: new Date().toISOString(),
+          };
+          this.deps.taskRepo.upsert(waiting, { projectId: task.projectId, parentId: task.parentTaskId });
+          live.emit({
+            type: "task.updated",
+            taskId,
+            projectId: task.projectId,
+            data: { status: "waiting_for_approval" },
+          });
+          return waiting;
+        }
       } else if (task.workflowId) {
         const workflow = this.deps.workflowRepo.findById(task.workflowId)?.data;
         if (!workflow) throw new Error(`Workflow ${task.workflowId} not found`);
         const result = await this.deps.workflowEngine.run(workflow, project, task, task.input, requestUserId);
         const current = this.deps.taskRepo.findById(taskId)?.data;
         if (!current) throw new TaskCancelledError(taskId);
-        this.deps.taskRepo.upsert({ ...current, result: { ...result } }, { projectId: task.projectId, parentId: task.parentTaskId });
+        this.deps.taskRepo.upsert(
+          { ...current, result: { ...result } },
+          { projectId: task.projectId, parentId: task.parentTaskId },
+        );
         if (result.status === "cancelled") throw new TaskCancelledError(taskId);
         if (result.status === "waiting_for_approval") {
-          const waiting: Task = { ...this.deps.taskRepo.findById(taskId)!.data, status: "waiting_for_approval", approvalRequired: true, updatedAt: new Date().toISOString() };
+          const waiting: Task = {
+            ...this.deps.taskRepo.findById(taskId)!.data,
+            status: "waiting_for_approval",
+            approvalRequired: true,
+            updatedAt: new Date().toISOString(),
+          };
           this.deps.taskRepo.upsert(waiting, { projectId: task.projectId, parentId: task.parentTaskId });
-          live.emit({ type: "task.updated", taskId, projectId: task.projectId, data: { status: "waiting_for_approval" } });
+          live.emit({
+            type: "task.updated",
+            taskId,
+            projectId: task.projectId,
+            data: { status: "waiting_for_approval" },
+          });
           return waiting;
         }
         if (result.status === "failed") {
           const failedNodes = result.trace.filter((t) => t.status === "failed").map((t) => t.node);
-          throw Object.assign(new Error(
-            `Workflow "${workflow.name}" failed${failedNodes.length ? ` at: ${failedNodes.join(", ")}` : ""}${result.error ? `: ${result.error}` : ""}`,
-          ), { retryable: false });
+          throw Object.assign(
+            new Error(
+              `Workflow "${workflow.name}" failed${failedNodes.length ? ` at: ${failedNodes.join(", ")}` : ""}${result.error ? `: ${result.error}` : ""}`,
+            ),
+            { retryable: false },
+          );
         }
       } else {
         await this.routeAndRun(task, project, requestUserId);
       }
-      const prev = this.deps.taskRepo.findById(taskId)?.data!;
+      const prev = this.deps.taskRepo.findById(taskId)!.data;
       if (prev.status === "cancelled") throw new TaskCancelledError(taskId);
       const done: Task = { ...prev, status: "succeeded", error: undefined, updatedAt: new Date().toISOString() };
       this.deps.taskRepo.upsert(done, { projectId: task.projectId, parentId: task.parentTaskId });
@@ -865,18 +1149,29 @@ export class AgentManager {
       await this.syncRuntimeState(task.projectId);
       return done;
     } catch (err) {
-      const failed = this.deps.taskRepo.findById(taskId)?.data!;
+      const failed = this.deps.taskRepo.findById(taskId)?.data;
       if (!failed) throw err;
       if (err instanceof TaskCancelledError || failed.status === "cancelled") {
         logger.info("runTask cancelled", { taskId });
-        this.deps.taskRepo.upsert({ ...failed, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
+        this.deps.taskRepo.upsert(
+          { ...failed, status: "cancelled", updatedAt: new Date().toISOString() },
+          { projectId: task.projectId, parentId: task.parentTaskId },
+        );
         live.emit({ type: "task.updated", taskId, projectId: failed.projectId, data: { status: "cancelled" } });
         await this.syncRuntimeState(task.projectId);
         return this.deps.taskRepo.findById(taskId)!.data;
       }
       logger.error("runTask failed", { taskId, err: String(err) });
-      this.deps.taskRepo.upsert({ ...failed, status: "failed", error: String(err), updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
-      live.emit({ type: "task.updated", taskId, projectId: failed.projectId, data: { status: "failed", error: String(err) } });
+      this.deps.taskRepo.upsert(
+        { ...failed, status: "failed", error: String(err), updatedAt: new Date().toISOString() },
+        { projectId: task.projectId, parentId: task.parentTaskId },
+      );
+      live.emit({
+        type: "task.updated",
+        taskId,
+        projectId: failed.projectId,
+        data: { status: "failed", error: String(err) },
+      });
       await this.syncRuntimeState(task.projectId);
       throw err;
     }
@@ -888,21 +1183,46 @@ export class AgentManager {
     if (!agent) {
       throw new Error(`No enabled agent of type ${type} in project ${project.id}`);
     }
-    this.deps.taskRepo.upsert({ ...this.deps.taskRepo.findById(task.id)!.data, assignedAgentId: agent.id }, { projectId: task.projectId, parentId: task.parentTaskId });
-    const run = await this.deps.agentRunner.run({ task, agent, project, repository: isWriter(type) ? repositoryForAgent(project, type) : undefined, requestUserId });
+    this.deps.taskRepo.upsert(
+      { ...this.deps.taskRepo.findById(task.id)!.data, assignedAgentId: agent.id },
+      { projectId: task.projectId, parentId: task.parentTaskId },
+    );
+    const run = await this.deps.agentRunner.run({
+      task,
+      agent,
+      project,
+      repository: isWriter(type) ? repositoryForAgent(project, type) : undefined,
+      requestUserId,
+    });
     assertTaskActive(this.deps.taskRepo, task);
     const current = this.deps.taskRepo.findById(task.id)!.data;
-    this.deps.taskRepo.upsert({ ...current, result: { runId: run.id, summary: run.summary, verification: run.verification, skills: run.skills, artifacts: run.steps.filter((s) => ["write_file", "create_pull_request"].includes(s.tool ?? "")).map((s) => s.data) } }, { projectId: task.projectId, parentId: task.parentTaskId });
+    this.deps.taskRepo.upsert(
+      {
+        ...current,
+        result: {
+          runId: run.id,
+          summary: run.summary,
+          verification: run.verification,
+          skills: run.skills,
+          artifacts: run.steps
+            .filter((s) => ["write_file", "create_pull_request"].includes(s.tool ?? ""))
+            .map((s) => s.data),
+        },
+      },
+      { projectId: task.projectId, parentId: task.parentTaskId },
+    );
     if (run.status !== "succeeded") {
       throw Object.assign(new Error(run.error ?? `${agent.name} failed`), { retryable: false });
     }
   }
 
   private slugify(name: string): string {
-    return name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 64) || `project-${Date.now()}`;
+    return (
+      name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 64) || `project-${Date.now()}`
+    );
   }
 }

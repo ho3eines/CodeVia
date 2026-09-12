@@ -22,7 +22,14 @@ import { freshDb } from "./test-helpers.js";
  * project fell back to a foreign token or to the mock.
  * ------------------------------------------------------------------ */
 
-const ENV_KEYS = ["REQUIRE_AUTH", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "AUTH_SECRET", "GITHUB_TOKEN", "GITHUB_ENABLED"] as const;
+const ENV_KEYS = [
+  "REQUIRE_AUTH",
+  "GITHUB_CLIENT_ID",
+  "GITHUB_CLIENT_SECRET",
+  "AUTH_SECRET",
+  "GITHUB_TOKEN",
+  "GITHUB_ENABLED",
+] as const;
 let savedEnv: Record<string, string | undefined>;
 let cleanup: (() => void) | undefined;
 let app: FastifyInstance | undefined;
@@ -103,7 +110,12 @@ afterEach(async () => {
 describe("each user acts as their own GitHub identity", () => {
   it("lists only the signed-in user's repositories, per session", async () => {
     const srv = await boot();
-    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = container.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
     storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
     storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
@@ -114,24 +126,50 @@ describe("each user acts as their own GitHub identity", () => {
       }),
     );
 
-    const asAlice = await srv.inject({ method: "GET", url: "/github/repositories", headers: { cookie: `cv_session=${signSession(alice.id)}` } });
-    expect(asAlice.json().repositories.map((r: { fullName: string }) => r.fullName)).toEqual(["alice/one", "alice/two"]);
+    const asAlice = await srv.inject({
+      method: "GET",
+      url: "/github/repositories",
+      headers: { cookie: `cv_session=${signSession(alice.id)}` },
+    });
+    expect(asAlice.json().repositories.map((r: { fullName: string }) => r.fullName)).toEqual([
+      "alice/one",
+      "alice/two",
+    ]);
 
-    const asBob = await srv.inject({ method: "GET", url: "/github/repositories", headers: { cookie: `cv_session=${signSession(bob.id)}` } });
+    const asBob = await srv.inject({
+      method: "GET",
+      url: "/github/repositories",
+      headers: { cookie: `cv_session=${signSession(bob.id)}` },
+    });
     expect(asBob.json().repositories.map((r: { fullName: string }) => r.fullName)).toEqual(["bob/only"]);
   });
 
   it("uses the requesting user's token for a project owned by someone else", async () => {
     await boot();
-    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = container.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
     storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
     setUserGitHubFetchForTest(multiUserGitHub({ "tok-bob": { login: "bob", repos: ["bob/only"] } }));
 
     // Owned by Alice, but Bob is the one making the request.
-    const project = { id: "p1", ownerId: alice.id, name: "Shared", githubConnection: { kind: "user-oauth" as const, userId: alice.id, login: "alice" } } as unknown as Project;
+    const project = {
+      id: "p1",
+      ownerId: alice.id,
+      name: "Shared",
+      githubConnection: { kind: "user-oauth" as const, userId: alice.id, login: "alice" },
+    } as unknown as Project;
 
-    const asBob = resolveGitHubForProject({ project, kv: container.kv, fallback: container.github, requestUserId: bob.id });
+    const asBob = resolveGitHubForProject({
+      project,
+      kv: container.kv,
+      fallback: container.github,
+      requestUserId: bob.id,
+    });
     expect(asBob.kind).toBe("real");
     expect((await asBob.getViewer()).login).toBe("bob");
   });
@@ -143,16 +181,31 @@ describe("each user acts as their own GitHub identity", () => {
     setUserGitHubFetchForTest(multiUserGitHub({ "tok-bob": { login: "bob", repos: ["bob/only"] } }));
 
     // Exactly the shape produced before GitHub login existed.
-    const legacy = { id: "p2", ownerId: "user-demo", name: "Legacy", githubConnection: { kind: "mock" as const } } as unknown as Project;
+    const legacy = {
+      id: "p2",
+      ownerId: "user-demo",
+      name: "Legacy",
+      githubConnection: { kind: "mock" as const },
+    } as unknown as Project;
 
-    const resolved = resolveGitHubForProject({ project: legacy, kv: container.kv, fallback: container.github, requestUserId: bob.id });
+    const resolved = resolveGitHubForProject({
+      project: legacy,
+      kv: container.kv,
+      fallback: container.github,
+      requestUserId: bob.id,
+    });
     expect(resolved.kind).toBe("real");
     expect((await resolved.getViewer()).login).toBe("bob");
   });
 
   it("uses the ALS request actor when githubForProject is called without requestUserId", async () => {
     await boot();
-    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = container.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
     storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
     storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
@@ -180,11 +233,21 @@ describe("each user acts as their own GitHub identity", () => {
 
   it("still uses the project's stored connection for background work (no request user)", async () => {
     await boot();
-    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = container.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
     setUserGitHubFetchForTest(multiUserGitHub({ "tok-alice": { login: "alice", repos: ["alice/one"] } }));
 
-    const project = { id: "p3", ownerId: alice.id, name: "Owned", githubConnection: { kind: "user-oauth" as const, userId: alice.id, login: "alice" } } as unknown as Project;
+    const project = {
+      id: "p3",
+      ownerId: alice.id,
+      name: "Owned",
+      githubConnection: { kind: "user-oauth" as const, userId: alice.id, login: "alice" },
+    } as unknown as Project;
 
     const background = resolveGitHubForProject({ project, kv: container.kv, fallback: container.github });
     expect(background.kind).toBe("real");
@@ -214,7 +277,11 @@ describe("each user acts as their own GitHub identity", () => {
     expect(created.data.githubConnection?.kind).toBe("mock");
 
     // Any authenticated project request re-binds the connection.
-    await srv.inject({ method: "GET", url: "/projects/p4/files", headers: { cookie: `cv_session=${signSession(bob.id)}` } });
+    await srv.inject({
+      method: "GET",
+      url: "/projects/p4/files",
+      headers: { cookie: `cv_session=${signSession(bob.id)}` },
+    });
 
     const after = container.projectRepo.findById("p4")?.data;
     expect(after?.githubConnection).toMatchObject({ kind: "user-oauth", userId: bob.id, login: "bob" });
@@ -247,8 +314,15 @@ describe("stranded projects are handed to a connected user", () => {
 
     const legacyMock = mkProject({ id: "m1", githubConnection: { kind: "mock" } });
     const noConnection = mkProject({ id: "m2", githubConnection: undefined });
-    const goneUser = mkProject({ id: "m3", githubConnection: { kind: "user-oauth", userId: "vanished", login: "ghost" } });
-    const aliceLive = mkProject({ id: "m4", ownerId: alice.id, githubConnection: { kind: "user-oauth", userId: alice.id, login: "alice" } });
+    const goneUser = mkProject({
+      id: "m3",
+      githubConnection: { kind: "user-oauth", userId: "vanished", login: "ghost" },
+    });
+    const aliceLive = mkProject({
+      id: "m4",
+      ownerId: alice.id,
+      githubConnection: { kind: "user-oauth", userId: alice.id, login: "alice" },
+    });
 
     const saved: Project[] = [];
     const adopted = adoptStrandedProjects({
@@ -323,13 +397,24 @@ describe("status endpoints reflect the caller's own credential", () => {
 describe("per-account isolation of definition sub-resources", () => {
   it("hides another account's workflows and refuses writes", async () => {
     const srv = await boot();
-    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = container.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
     const aliceProj = await container.agentManager.createProject({
-      ownerId: alice.id, name: "Alice App", description: "private", configRepo: "alice/one",
+      ownerId: alice.id,
+      name: "Alice App",
+      description: "private",
+      configRepo: "alice/one",
     });
     const bobProj = await container.agentManager.createProject({
-      ownerId: bob.id, name: "Bob App", description: "private", configRepo: "bob/only",
+      ownerId: bob.id,
+      name: "Bob App",
+      description: "private",
+      configRepo: "bob/only",
     });
     const aliceWf = container.workflowRepo.byProject(aliceProj.id)[0];
     expect(aliceWf).toBeDefined();
@@ -344,19 +429,28 @@ describe("per-account isolation of definition sub-resources", () => {
     expect(get.statusCode).toBe(404);
 
     const patch = await srv.inject({
-      method: "PATCH", url: `/workflows/${aliceWf.id}`, headers: { cookie: cookieBob },
+      method: "PATCH",
+      url: `/workflows/${aliceWf.id}`,
+      headers: { cookie: cookieBob },
       payload: { name: "Hijacked" },
     });
     expect(patch.statusCode).toBe(404);
 
-    const run = await srv.inject({ method: "POST", url: `/workflows/${aliceWf.id}/run`, headers: { cookie: cookieBob }, payload: {} });
+    const run = await srv.inject({
+      method: "POST",
+      url: `/workflows/${aliceWf.id}/run`,
+      headers: { cookie: cookieBob },
+      payload: {},
+    });
     expect(run.statusCode).toBe(404);
 
     const del = await srv.inject({ method: "DELETE", url: `/workflows/${aliceWf.id}`, headers: { cookie: cookieBob } });
     expect(del.statusCode).toBe(404);
 
     const create = await srv.inject({
-      method: "POST", url: "/workflows", headers: { cookie: cookieBob },
+      method: "POST",
+      url: "/workflows",
+      headers: { cookie: cookieBob },
       payload: { projectId: aliceProj.id, name: "Stolen", slug: "stolen" },
     });
     expect(create.statusCode).toBe(404);
@@ -367,7 +461,12 @@ describe("per-account isolation of definition sub-resources", () => {
 
   it("adopts a ghost connection onto the owner only, never a foreign account", async () => {
     await boot();
-    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = container.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
     storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
     storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
@@ -388,11 +487,27 @@ describe("per-account isolation of definition sub-resources", () => {
     } as unknown as Project;
     container.projectRepo.upsert(owned);
 
-    expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: bob.id })).toBe(false);
-    expect(container.projectRepo.findById("ghost-owned")?.data.githubConnection).toMatchObject({ userId: "vanished", login: "ghost" });
+    expect(
+      adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: bob.id }),
+    ).toBe(false);
+    expect(container.projectRepo.findById("ghost-owned")?.data.githubConnection).toMatchObject({
+      userId: "vanished",
+      login: "ghost",
+    });
 
-    expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: alice.id })).toBe(true);
-    expect(container.projectRepo.findById("ghost-owned")?.data.githubConnection).toMatchObject({ kind: "user-oauth", userId: alice.id, login: "alice" });
+    expect(
+      adoptProjectConnection({
+        kv: container.kv,
+        projectRepo: container.projectRepo,
+        project: owned,
+        userId: alice.id,
+      }),
+    ).toBe(true);
+    expect(container.projectRepo.findById("ghost-owned")?.data.githubConnection).toMatchObject({
+      kind: "user-oauth",
+      userId: alice.id,
+      login: "alice",
+    });
   });
 
   it("rebinds a server-token project onto the owner's OAuth token, never a foreign account", async () => {
@@ -400,7 +515,12 @@ describe("per-account isolation of definition sub-resources", () => {
     process.env.GITHUB_ENABLED = "true";
     getEnvFresh();
     await boot();
-    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = container.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
     storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
     storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
@@ -421,27 +541,49 @@ describe("per-account isolation of definition sub-resources", () => {
     } as unknown as Project;
     container.projectRepo.upsert(owned);
 
-    expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: bob.id })).toBe(false);
+    expect(
+      adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: bob.id }),
+    ).toBe(false);
     expect(container.projectRepo.findById("pat-owned")?.data.githubConnection).toMatchObject({ kind: "server-token" });
 
-    expect(adoptProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: owned, userId: alice.id })).toBe(true);
-    expect(container.projectRepo.findById("pat-owned")?.data.githubConnection).toMatchObject({ kind: "user-oauth", userId: alice.id, login: "alice" });
+    expect(
+      adoptProjectConnection({
+        kv: container.kv,
+        projectRepo: container.projectRepo,
+        project: owned,
+        userId: alice.id,
+      }),
+    ).toBe(true);
+    expect(container.projectRepo.findById("pat-owned")?.data.githubConnection).toMatchObject({
+      kind: "user-oauth",
+      userId: alice.id,
+      login: "alice",
+    });
   });
 
   it("binds the acting owner before a workflow write and never steals a live foreign connection", async () => {
     const srv = await boot();
-    const alice = container.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = container.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     const bob = container.userRepo.upsertGitHubUser({ id: 2, login: "bob", name: "Bob", email: "b@example.com" }).user;
     storeUserGitHubToken(container.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
     storeUserGitHubToken(container.kv, bob.id, "tok-bob", { scopes: "repo", login: "bob" });
 
     const aliceProj = await container.agentManager.createProject({
-      ownerId: alice.id, name: "Alice Bind", description: "d", configRepo: "alice/bind",
+      ownerId: alice.id,
+      name: "Alice Bind",
+      description: "d",
+      configRepo: "alice/bind",
     });
     container.projectRepo.update({ ...aliceProj, githubConnection: { kind: "mock" } });
 
     await srv.inject({
-      method: "POST", url: "/workflows",
+      method: "POST",
+      url: "/workflows",
       headers: { cookie: `cv_session=${signSession(alice.id)}` },
       payload: { projectId: aliceProj.id, name: "Bound", slug: "bound-flow" },
     });
@@ -450,11 +592,15 @@ describe("per-account isolation of definition sub-resources", () => {
 
     // Bob cannot take over Alice's now-live connection even by guessing the id.
     await srv.inject({
-      method: "POST", url: "/workflows",
+      method: "POST",
+      url: "/workflows",
       headers: { cookie: `cv_session=${signSession(bob.id)}` },
       payload: { projectId: aliceProj.id, name: "Hijack", slug: "hijack" },
     });
-    expect(container.projectRepo.findById(aliceProj.id)?.data.githubConnection).toMatchObject({ userId: alice.id, login: "alice" });
+    expect(container.projectRepo.findById(aliceProj.id)?.data.githubConnection).toMatchObject({
+      userId: alice.id,
+      login: "alice",
+    });
   });
 });
 
@@ -469,7 +615,8 @@ describe("background jobs use the project's connection, not the platform mock", 
     setUserGitHubFetchForTest((async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const url = String(input);
       seen.push({ url, auth: new Headers(init?.headers).get("authorization") ?? "" });
-      if (url.includes("/issues")) return new Response(JSON.stringify({ number: 7, title: "t", state: "open", html_url: "u" }), { status: 201 });
+      if (url.includes("/issues"))
+        return new Response(JSON.stringify({ number: 7, title: "t", state: "open", html_url: "u" }), { status: 201 });
       return new Response("{}", { status: 200 });
     }) as typeof fetch);
 
@@ -491,7 +638,13 @@ describe("background jobs use the project's connection, not the platform mock", 
     // The platform-wide service is the mock — a mock would never issue a request.
     expect(container.github.kind).toBe("mock");
 
-    const job = container.queue.enqueue("github.op", { op: "create_issue", projectId: "w1", repo: "bob/only", title: "From worker", body: "b" });
+    const job = container.queue.enqueue("github.op", {
+      op: "create_issue",
+      projectId: "w1",
+      repo: "bob/only",
+      title: "From worker",
+      body: "b",
+    });
     await container.worker.process(job.id);
 
     expect(container.queue.getById(job.id)?.status).toBe("succeeded");

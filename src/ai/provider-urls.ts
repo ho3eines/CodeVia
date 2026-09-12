@@ -208,11 +208,11 @@ export function estimateContextWindow(modelId: string): number {
 }
 
 export function displayNameFromModelId(modelId: string): string {
-  const id = String(modelId || "").replace(/^models\//, "").trim();
+  const id = String(modelId || "")
+    .replace(/^models\//, "")
+    .trim();
   if (!id) return id;
-  const pretty = id
-    .replace(/[-_/]+/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const pretty = id.replace(/[-_/]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   return pretty.length <= 40 ? pretty : id;
 }
 
@@ -225,7 +225,9 @@ export interface DetectedModelInfo {
 
 /** Build a full model descriptor (id + inferred metadata) for a vendor model id. */
 export function detectModelInfo(modelId: string): DetectedModelInfo {
-  const id = String(modelId || "").replace(/^models\//, "").trim();
+  const id = String(modelId || "")
+    .replace(/^models\//, "")
+    .trim();
   return {
     id,
     displayName: displayNameFromModelId(id),

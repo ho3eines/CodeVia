@@ -16,7 +16,10 @@ export class AnthropicProvider implements IModelProvider {
   }
 
   resolveApiKey(): string | undefined {
-    return decryptSecret(this.config.secretValueEnc, "provider-secret") ?? (this.config.secretRef ? process.env[this.config.secretRef] : undefined);
+    return (
+      decryptSecret(this.config.secretValueEnc, "provider-secret") ??
+      (this.config.secretRef ? process.env[this.config.secretRef] : undefined)
+    );
   }
 
   async health(): Promise<boolean> {
@@ -31,14 +34,24 @@ export class AnthropicProvider implements IModelProvider {
         contextWindow: 200_000,
         inputCostPer1k: 0,
         outputCostPer1k: 0,
-        capabilities: { vision: true, tools: true, structuredOutput: true, code: true, reasoning: true, streaming: true },
+        capabilities: {
+          vision: true,
+          tools: true,
+          structuredOutput: true,
+          code: true,
+          reasoning: true,
+          streaming: true,
+        },
       },
     ];
   }
 
   async chat(req: ChatRequest): Promise<ChatResponse> {
     const key = this.resolveApiKey();
-    const system = req.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+    const system = req.messages
+      .filter((m) => m.role === "system")
+      .map((m) => m.content)
+      .join("\n\n");
     const messages = req.messages
       .filter((m) => m.role !== "system")
       .map((m) => ({ role: m.role === "tool" ? "user" : m.role, content: m.content }));
@@ -59,7 +72,9 @@ export class AnthropicProvider implements IModelProvider {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify(body),
-      signal: req.signal ? AbortSignal.any([req.signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs),
+      signal: req.signal
+        ? AbortSignal.any([req.signal, AbortSignal.timeout(this.config.timeoutMs)])
+        : AbortSignal.timeout(this.config.timeoutMs),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");

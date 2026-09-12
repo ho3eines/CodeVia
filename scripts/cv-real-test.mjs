@@ -33,17 +33,25 @@ function opt(name, dflt) {
   const i = args.indexOf(name);
   return i >= 0 && args[i + 1] ? args[i + 1] : dflt;
 }
-const NAMES = opt("--names", "OpenRouter,nvidia,Qween").split(",").map((s) => s.trim()).filter(Boolean);
+const NAMES = opt("--names", "OpenRouter,nvidia,Qween")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const FILTER = opt("--filter", "");
 const LIMIT = Number(opt("--limit", "0")) || Infinity;
 const CONC = Math.max(1, Number(opt("--conc", "4")) || 4);
 const OUT = opt("--out", "./cv-real-test-results.json");
-const TIMEOUT = Number(opt("--timeout", "20000")) || 20000;
 const SESSION = process.env.SESSION_TOKEN;
 
 let aborted = false;
 const ctrl = new AbortController();
-setTimeout(() => { aborted = true; ctrl.abort(); }, 10 * 60 * 1000).unref(); // hard stop 10 min
+setTimeout(
+  () => {
+    aborted = true;
+    ctrl.abort();
+  },
+  10 * 60 * 1000,
+).unref(); // hard stop 10 min
 
 async function api(path, method = "GET", body) {
   const res = await fetch(BASE + path, {
@@ -57,12 +65,18 @@ async function api(path, method = "GET", body) {
   });
   const text = await res.text();
   let json;
-  try { json = JSON.parse(text); } catch { json = undefined; }
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = undefined;
+  }
   return { status: res.status, json, text };
 }
 
 function short(s, n = 160) {
-  s = String(s ?? "").replace(/\s+/g, " ").trim();
+  s = String(s ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
@@ -88,8 +102,14 @@ async function main() {
   const stP = await api("/providers");
   const pList = Array.isArray(stP.json) ? stP.json : (stP.json?.providers ?? []);
   const targets = pList.filter((p) => NAMES.includes(p.name));
-  if (!targets.length) throw new Error(`none of the requested providers found: ${NAMES.join(",")} (have: ${pList.map((p) => p.name).join(", ")})`);
-  for (const t of targets) console.log(`[provider] ${t.name} -> ${t.baseUrl} (secretRef=${t.secretRef || "none"}, keyPresent=${t.keyPresent})`);
+  if (!targets.length)
+    throw new Error(
+      `none of the requested providers found: ${NAMES.join(",")} (have: ${pList.map((p) => p.name).join(", ")})`,
+    );
+  for (const t of targets)
+    console.log(
+      `[provider] ${t.name} -> ${t.baseUrl} (secretRef=${t.secretRef || "none"}, keyPresent=${t.keyPresent})`,
+    );
 
   // 3. models of the targets
   const stM = await api("/models");
@@ -99,7 +119,9 @@ async function main() {
   const total = models.length;
   if (models.length > LIMIT) models = models.slice(0, LIMIT);
   const pName = Object.fromEntries(targets.map((t) => [t.id, t.name]));
-  console.log(`[plan] catalog tests=${targets.length}, model chat tests=${models.length} of ${total} (concurrency ${CONC})`);
+  console.log(
+    `[plan] catalog tests=${targets.length}, model chat tests=${models.length} of ${total} (concurrency ${CONC})`,
+  );
 
   // 4. catalog tests (one per provider, uses that provider's first model id)
   for (const t of targets) {
@@ -110,7 +132,9 @@ async function main() {
       row.catalog = r.json;
       report.providers.push(row);
       const c = r.json ?? {};
-      console.log(`[catalog] ${t.name}: ok=${c.ok} checked=${c.checked} status=${c.status ?? "-"} latency=${c.latencyMs ?? "-"}ms modelsFound=${Array.isArray(c.models) ? c.models.length : "-"} :: ${short(c.message)}`);
+      console.log(
+        `[catalog] ${t.name}: ok=${c.ok} checked=${c.checked} status=${c.status ?? "-"} latency=${c.latencyMs ?? "-"}ms modelsFound=${Array.isArray(c.models) ? c.models.length : "-"} :: ${short(c.message)}`,
+      );
     } catch (e) {
       row.error = String(e);
       report.providers.push(row);
@@ -119,7 +143,8 @@ async function main() {
   }
 
   // 5. model chat tests — one REAL completion each
-  let i = 0, done = 0;
+  let i = 0,
+    done = 0;
   report.models = new Array(models.length);
   const t0 = Date.now();
   async function worker() {
@@ -148,8 +173,11 @@ async function main() {
       report.models[idx] = row;
       done++;
       const mark = row.ok ? "✔" : row.checked ? "✘" : "◌";
-      console.log(`${mark} ${row.provider}/${row.modelId}  ok=${row.ok ?? "-"} http=${row.http ?? "-"} status=${row.status ?? "-"} ${row.latencyMs != null ? row.latencyMs + "ms" : ""}  ${short(row.responseText ? "reply: " + row.responseText : row.message ?? row.error, 110)}`);
-      if (done % 25 === 0) console.log(`  …${done}/${models.length} (${((Date.now() - t0) / 1000).toFixed(0)}s elapsed)`);
+      console.log(
+        `${mark} ${row.provider}/${row.modelId}  ok=${row.ok ?? "-"} http=${row.http ?? "-"} status=${row.status ?? "-"} ${row.latencyMs != null ? row.latencyMs + "ms" : ""}  ${short(row.responseText ? "reply: " + row.responseText : (row.message ?? row.error), 110)}`,
+      );
+      if (done % 25 === 0)
+        console.log(`  …${done}/${models.length} (${((Date.now() - t0) / 1000).toFixed(0)}s elapsed)`);
     }
   }
   await Promise.all(Array.from({ length: CONC }, worker));
@@ -161,12 +189,16 @@ async function main() {
     by[k] ??= { total: 0, ok: 0, networkFail: 0, notChecked: 0, byStatus: {} };
     by[k].total++;
     if (r.ok) by[k].ok++;
-    else if (r.checked) { by[k].networkFail++; by[k].byStatus[r.status ?? "err"] = (by[k].byStatus[r.status ?? "err"] ?? 0) + 1; }
-    else by[k].notChecked++;
+    else if (r.checked) {
+      by[k].networkFail++;
+      by[k].byStatus[r.status ?? "err"] = (by[k].byStatus[r.status ?? "err"] ?? 0) + 1;
+    } else by[k].notChecked++;
   }
   console.log("\n=== SUMMARY ===");
   for (const [k, v] of Object.entries(by)) {
-    console.log(`${k}: ok=${v.ok}/${v.total} networkFail=${v.networkFail} notChecked=${v.notChecked} statuses=${JSON.stringify(v.byStatus)}`);
+    console.log(
+      `${k}: ok=${v.ok}/${v.total} networkFail=${v.networkFail} notChecked=${v.notChecked} statuses=${JSON.stringify(v.byStatus)}`,
+    );
   }
   const fs = await import("node:fs");
   fs.writeFileSync(OUT, JSON.stringify(report, null, 2));
@@ -175,4 +207,7 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((e) => { console.error("FATAL:", e.message); process.exit(1); });
+main().catch((e) => {
+  console.error("FATAL:", e.message);
+  process.exit(1);
+});

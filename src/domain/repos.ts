@@ -1,14 +1,7 @@
 import { DocumentRepository } from "../db/repository.js";
 import { getDb } from "../db/client.js";
 import type { Db } from "../db/client.js";
-import type {
-  Conversation,
-  ConversationMessage,
-  MemoryEntry,
-  Project,
-  Task,
-  Workflow,
-} from "./entities.js";
+import type { Conversation, ConversationMessage, MemoryEntry, Project, Task, Workflow } from "./entities.js";
 import { randomUUID } from "node:crypto";
 
 export class ProjectRepository extends DocumentRepository<Project> {

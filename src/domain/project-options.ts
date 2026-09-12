@@ -1,4 +1,10 @@
-import type { AgentType, Project, ProjectCapabilities, ProjectRepositoryLink, ProjectRepositoryRole } from "./entities.js";
+import type {
+  AgentType,
+  Project,
+  ProjectCapabilities,
+  ProjectRepositoryLink,
+  ProjectRepositoryRole,
+} from "./entities.js";
 
 /* ------------------------------------------------------------------ *
  * Project option catalog.
@@ -29,7 +35,13 @@ export const PLATFORM_OPTIONS: ProjectOption[] = [
   { value: "desktop", label: "Desktop app", icon: "🖥️", agents: ["frontend-developer"] },
   { value: "cli", label: "CLI tool", icon: "⌨️" },
   { value: "library", label: "Library / SDK", icon: "📦", agents: ["documentation"] },
-  { value: "microservices", label: "Microservices", icon: "🧩", skills: ["microservices"], agents: ["system-architect", "devops"] },
+  {
+    value: "microservices",
+    label: "Microservices",
+    icon: "🧩",
+    skills: ["microservices"],
+    agents: ["system-architect", "devops"],
+  },
   { value: "serverless", label: "Serverless / Functions", icon: "⚡", agents: ["devops"] },
   { value: "data-ml", label: "Data / ML pipeline", icon: "📊", agents: ["research", "performance"] },
   { value: "iot", label: "IoT / Embedded", icon: "📡" },
@@ -64,7 +76,12 @@ export const FRAMEWORK_OPTIONS: ProjectOption[] = [
   { value: "dotnet", label: ".NET", skills: ["dotnet", "csharp"], agents: ["backend-developer"] },
   { value: "aspnetcore", label: "ASP.NET Core", skills: ["aspnetcore", "dotnet", "csharp"] },
   { value: "blazor", label: "Blazor", skills: ["blazor", "dotnet", "csharp"] },
-  { value: "mudblazor", label: "MudBlazor", skills: ["mudblazor", "blazor", "dotnet", "csharp"], agents: ["backend-developer", "frontend-developer"] },
+  {
+    value: "mudblazor",
+    label: "MudBlazor",
+    skills: ["mudblazor", "blazor", "dotnet", "csharp"],
+    agents: ["backend-developer", "frontend-developer"],
+  },
   { value: "dotnet-maui", label: ".NET MAUI / WPF", skills: ["dotnet", "csharp"] },
   { value: "html", label: "HTML", skills: ["ui-design", "html"] },
   { value: "css", label: "CSS", skills: ["ui-design", "css"] },
@@ -186,7 +203,14 @@ export const REPOSITORY_ROLE_OPTIONS: Array<{ value: ProjectRepositoryRole; labe
 ];
 
 /** Agents every project always gets, regardless of the selection. */
-export const CORE_AGENT_TYPES: AgentType[] = ["orchestrator", "project-manager", "research", "code-reviewer", "qa-test", "debugging"];
+export const CORE_AGENT_TYPES: AgentType[] = [
+  "orchestrator",
+  "project-manager",
+  "research",
+  "code-reviewer",
+  "qa-test",
+  "debugging",
+];
 
 export const ALL_AGENT_TYPES: AgentType[] = AGENT_TYPE_OPTIONS.map((a) => a.value);
 
@@ -261,15 +285,55 @@ export function canonicalOption(dimension: keyof typeof OPTION_INDEX, value: str
   // Aliases may list several candidates; the first one that exists in this
   // dimension wins (".NET" is the C# *language* and the .NET *framework*).
   const aliases: Record<string, string[]> = {
-    ".net": ["dotnet", "csharp"], "dotnet": ["dotnet", "csharp"], ".net core": ["dotnet", "csharp"], "c#": ["csharp"], "c-sharp": ["csharp"],
-    "asp.net": ["aspnetcore"], "asp.net core": ["aspnetcore"], "aspnet": ["aspnetcore"],
-    "node": ["nodejs-express", "javascript"], "nodejs": ["nodejs-express", "javascript"], "node.js": ["nodejs-express", "javascript"], "express": ["nodejs-express"],
-    "sql server": ["sqlserver"], "mssql": ["sqlserver"], "sql-server": ["sqlserver"], "postgres": ["postgresql"], "pg": ["postgresql"], "mongo": ["mongodb"],
-    "sqlite": ["sqlite"], "sql-lite": ["sqlite"], "sql lite": ["sqlite"], "sqlite3": ["sqlite"], "oracle": ["oracle"],
-    "mudblazor": ["mudblazor"], "mud": ["mudblazor"], "html": ["html"], "css": ["css"], "html5": ["html"], "css3": ["css"],
-    "maria": ["mysql"], "mariadb": ["mysql"], "k8s": ["kubernetes"], "next": ["nextjs"], "next.js": ["nextjs"], "ts": ["typescript"], "js": ["javascript"],
-    "react native": ["react-native"], "android": ["mobile-android"], "ios": ["mobile-ios"], "website": ["web"], "webapp": ["web"], "web app": ["web"],
-    "golang": ["go"], "py": ["python"], "spring": ["spring-boot"], "springboot": ["spring-boot"], "vuejs": ["vue"], "nuxt": ["vue"], "sveltekit": ["svelte"],
+    ".net": ["dotnet", "csharp"],
+    dotnet: ["dotnet", "csharp"],
+    ".net core": ["dotnet", "csharp"],
+    "c#": ["csharp"],
+    "c-sharp": ["csharp"],
+    "asp.net": ["aspnetcore"],
+    "asp.net core": ["aspnetcore"],
+    aspnet: ["aspnetcore"],
+    node: ["nodejs-express", "javascript"],
+    nodejs: ["nodejs-express", "javascript"],
+    "node.js": ["nodejs-express", "javascript"],
+    express: ["nodejs-express"],
+    "sql server": ["sqlserver"],
+    mssql: ["sqlserver"],
+    "sql-server": ["sqlserver"],
+    postgres: ["postgresql"],
+    pg: ["postgresql"],
+    mongo: ["mongodb"],
+    sqlite: ["sqlite"],
+    "sql-lite": ["sqlite"],
+    "sql lite": ["sqlite"],
+    sqlite3: ["sqlite"],
+    oracle: ["oracle"],
+    mudblazor: ["mudblazor"],
+    mud: ["mudblazor"],
+    html: ["html"],
+    css: ["css"],
+    html5: ["html"],
+    css3: ["css"],
+    maria: ["mysql"],
+    mariadb: ["mysql"],
+    k8s: ["kubernetes"],
+    next: ["nextjs"],
+    "next.js": ["nextjs"],
+    ts: ["typescript"],
+    js: ["javascript"],
+    "react native": ["react-native"],
+    android: ["mobile-android"],
+    ios: ["mobile-ios"],
+    website: ["web"],
+    webapp: ["web"],
+    "web app": ["web"],
+    golang: ["go"],
+    py: ["python"],
+    spring: ["spring-boot"],
+    springboot: ["spring-boot"],
+    vuejs: ["vue"],
+    nuxt: ["vue"],
+    sveltekit: ["svelte"],
   };
   const alias = (aliases[lower] ?? []).find((candidate) => list.some((o) => o.value === candidate));
   if (alias) return alias;
@@ -283,13 +347,16 @@ export function normalizeAgentTypes(input: unknown): AgentType[] {
 }
 
 /** Build a fully-populated capabilities object from partial/legacy input. */
-export function normalizeCapabilities(input: Partial<Record<keyof ProjectCapabilities, unknown>> | undefined, legacy?: {
-  primaryLanguage?: string;
-  framework?: string;
-  database?: string;
-  deploymentTarget?: string;
-  tech?: string[];
-}): ProjectCapabilities {
+export function normalizeCapabilities(
+  input: Partial<Record<keyof ProjectCapabilities, unknown>> | undefined,
+  legacy?: {
+    primaryLanguage?: string;
+    framework?: string;
+    database?: string;
+    deploymentTarget?: string;
+    tech?: string[];
+  },
+): ProjectCapabilities {
   const dim = (key: keyof typeof OPTION_INDEX, extra: Array<string | undefined> = []): string[] => {
     const values = [...toStringList(input?.[key]), ...extra.filter((x): x is string => !!x && x.trim().length > 0)];
     const out: string[] = [];
@@ -350,9 +417,19 @@ export function agentTypesForProject(c: ProjectCapabilities): AgentType[] {
   }
   if (!anySelection) return [...ALL_AGENT_TYPES];
   // A real software project always needs these regardless of the stack.
-  for (const a of ["system-architect", "backend-developer", "security", "documentation", "refactoring", "release"] as AgentType[]) implied.add(a);
+  for (const a of [
+    "system-architect",
+    "backend-developer",
+    "security",
+    "documentation",
+    "refactoring",
+    "release",
+  ] as AgentType[])
+    implied.add(a);
   if (c.databases.some((d) => d !== "none")) implied.add("database");
-  const hasUiFramework = c.frameworks.some((f) => ["react", "nextjs", "vue", "nuxt", "angular", "svelte", "blazor", "mudblazor", "flutter", "html"].includes(f));
+  const hasUiFramework = c.frameworks.some((f) =>
+    ["react", "nextjs", "vue", "nuxt", "angular", "svelte", "blazor", "mudblazor", "flutter", "html"].includes(f),
+  );
   if (hasUiFramework || c.platforms.some((p) => p === "web" || p.startsWith("mobile") || p === "desktop")) {
     implied.add("frontend-developer");
     implied.add("uiux");
@@ -362,7 +439,9 @@ export function agentTypesForProject(c: ProjectCapabilities): AgentType[] {
 }
 
 /** Legacy single-value fields derived from the capability lists (labels, human readable). */
-export function legacyFieldsFromCapabilities(c: ProjectCapabilities): Pick<Project, "primaryLanguage" | "framework" | "database" | "deploymentTarget"> {
+export function legacyFieldsFromCapabilities(
+  c: ProjectCapabilities,
+): Pick<Project, "primaryLanguage" | "framework" | "database" | "deploymentTarget"> {
   const first = (key: keyof typeof OPTION_INDEX): string | undefined => {
     const v = c[key][0];
     return v ? optionLabel(key, v) : undefined;
@@ -386,7 +465,10 @@ export function isValidRepoFullName(value: string): boolean {
 }
 
 /** Normalize a repository list; guarantees exactly one config (primary) repo when the list is non-empty. */
-export function normalizeRepositories(input: unknown, fallback?: { repo?: string; branch?: string }): ProjectRepositoryLink[] {
+export function normalizeRepositories(
+  input: unknown,
+  fallback?: { repo?: string; branch?: string },
+): ProjectRepositoryLink[] {
   const raw: unknown[] = Array.isArray(input) ? input : [];
   const out: ProjectRepositoryLink[] = [];
   const now = new Date().toISOString();
@@ -395,10 +477,15 @@ export function normalizeRepositories(input: unknown, fallback?: { repo?: string
     if (typeof item === "string") link = { repo: item };
     else if (item && typeof item === "object") link = item as Partial<ProjectRepositoryLink>;
     if (!link?.repo) continue;
-    const repo = String(link.repo).trim().replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "");
+    const repo = String(link.repo)
+      .trim()
+      .replace(/^https?:\/\/github\.com\//i, "")
+      .replace(/\.git$/i, "");
     if (!isValidRepoFullName(repo)) continue;
     if (out.some((r) => r.repo.toLowerCase() === repo.toLowerCase())) continue;
-    const role = (REPOSITORY_ROLE_OPTIONS.some((r) => r.value === link!.role) ? link.role : out.length === 0 ? "primary" : "other") as ProjectRepositoryRole;
+    const role = (
+      REPOSITORY_ROLE_OPTIONS.some((r) => r.value === link!.role) ? link.role : out.length === 0 ? "primary" : "other"
+    ) as ProjectRepositoryRole;
     out.push({
       repo,
       branch: String(link.branch ?? link.defaultBranch ?? fallback?.branch ?? "main").trim() || "main",
@@ -411,7 +498,14 @@ export function normalizeRepositories(input: unknown, fallback?: { repo?: string
     });
   }
   if (out.length === 0 && fallback?.repo && isValidRepoFullName(fallback.repo)) {
-    out.push({ repo: fallback.repo.trim(), branch: fallback.branch || "main", role: "primary", isConfigRepo: true, htmlUrl: `https://github.com/${fallback.repo.trim()}`, addedAt: now });
+    out.push({
+      repo: fallback.repo.trim(),
+      branch: fallback.branch || "main",
+      role: "primary",
+      isConfigRepo: true,
+      htmlUrl: `https://github.com/${fallback.repo.trim()}`,
+      addedAt: now,
+    });
   }
   if (out.length > 0 && !out.some((r) => r.isConfigRepo)) {
     const primary = out.find((r) => r.role === "primary") ?? out[0];

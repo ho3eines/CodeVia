@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { MemoryRecord, IMemoryStore } from "./store.js";
 import type { MemoryEntry, MemoryType } from "../domain/entities.js";
 import { randomUUID } from "node:crypto";

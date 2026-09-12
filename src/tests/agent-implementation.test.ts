@@ -19,19 +19,55 @@ let generate: (req: ChatRequest) => Promise<string> | string;
 let usage = { inputTokens: 10, outputTokens: 10, totalTokens: 20 };
 
 async function realModel(name = "preferred", overrides: Partial<Model> = {}): Promise<Model> {
-  const provider = c.providerRepo.create({ name, type: "openai", authType: "none", apiFormat: "openai", timeoutMs: 1000, maxTokensDefault: 8000, defaultTemperature: 0, rateLimitPerMinute: 100, active: true });
-  const model = c.modelRepo.create({ providerId: provider.id, modelId: name, displayName: name, contextWindow: 128000, inputCostPer1k: 0.1, outputCostPer1k: 0.2, capabilities: { code: true, reasoning: true, structuredOutput: true, tools: false, streaming: false, vision: false }, active: true, priority: 1, fallbackPriority: 1, tags: [], ...overrides });
+  const provider = c.providerRepo.create({
+    name,
+    type: "openai",
+    authType: "none",
+    apiFormat: "openai",
+    timeoutMs: 1000,
+    maxTokensDefault: 8000,
+    defaultTemperature: 0,
+    rateLimitPerMinute: 100,
+    active: true,
+  });
+  const model = c.modelRepo.create({
+    providerId: provider.id,
+    modelId: name,
+    displayName: name,
+    contextWindow: 128000,
+    inputCostPer1k: 0.1,
+    outputCostPer1k: 0.2,
+    capabilities: {
+      code: true,
+      reasoning: true,
+      structuredOutput: true,
+      tools: false,
+      streaming: false,
+      vision: false,
+    },
+    active: true,
+    priority: 1,
+    fallbackPriority: 1,
+    tags: [],
+    ...overrides,
+  });
   const runtime: IModelProvider = {
-    id: provider.id, type: "openai", name,
+    id: provider.id,
+    type: "openai",
+    name,
     chat: async (req): Promise<ChatResponse> => {
       requests.push(req);
       const system = req.messages[0].content;
-      const content = system.includes("business analyst writing") ? "Requirements: implement login using the established API contract; add CI coverage."
-        : system.includes("engineering manager") || system.includes("single-agent implementation") ? JSON.stringify(items)
-        : await generate(req);
+      const content = system.includes("business analyst writing")
+        ? "Requirements: implement login using the established API contract; add CI coverage."
+        : system.includes("engineering manager") || system.includes("single-agent implementation")
+          ? JSON.stringify(items)
+          : await generate(req);
       return { content, finishReason: "stop", usage, costUsd: 0, modelId: req.modelId, providerId: provider.id };
     },
-    health: async () => true, listModels: async () => [], resolveApiKey: () => undefined,
+    health: async () => true,
+    listModels: async () => [],
+    resolveApiKey: () => undefined,
   };
   c.providerRegistry.register(runtime);
   return model;
@@ -39,19 +75,34 @@ async function realModel(name = "preferred", overrides: Partial<Model> = {}): Pr
 
 function code(req: ChatRequest): string {
   const text = req.messages[1].content;
-  if (text.includes("--- START CURRENT FILE ---")) return JSON.stringify({ edits: [{ oldText: "export const answer = 1;", newText: "export const answer = 2;" }] });
+  if (text.includes("--- START CURRENT FILE ---"))
+    return JSON.stringify({ edits: [{ oldText: "export const answer = 1;", newText: "export const answer = 2;" }] });
   const path = text.match(/complete content of "([^"]+)"/)?.[1] ?? "file";
-  return path.includes("Page") ? "export const client = 'LOGIN_API_CONTRACT';\n" : "// LOGIN_API_CONTRACT\nexport const answer = 1;\n";
+  return path.includes("Page")
+    ? "export const client = 'LOGIN_API_CONTRACT';\n"
+    : "// LOGIN_API_CONTRACT\nexport const answer = 1;\n";
 }
 
 beforeEach(async () => {
   fx = freshDb();
   c = new Container();
   await c.ensureSeed();
-  p = await c.agentManager.createProject({ name: "Implementation", description: "A TypeScript application", configRepo: "acme/implementation", capabilities: { languages: ["typescript"], frameworks: ["react"] } });
+  p = await c.agentManager.createProject({
+    name: "Implementation",
+    description: "A TypeScript application",
+    configRepo: "acme/implementation",
+    capabilities: { languages: ["typescript"], frameworks: ["react"] },
+  });
   gh = c.github as MockGitHubService;
   requests = [];
-  items = [{ agentType: "backend-developer", title: "Implement login API", description: "Return the session", files: ["src/server/login.ts"] }];
+  items = [
+    {
+      agentType: "backend-developer",
+      title: "Implement login API",
+      description: "Return the session",
+      files: ["src/server/login.ts"],
+    },
+  ];
   generate = code;
   usage = { inputTokens: 10, outputTokens: 10, totalTokens: 20 };
 });
@@ -62,23 +113,51 @@ afterEach(async () => {
   fx.cleanup();
 });
 
-const task = (autonomous = true) => c.agentManager.createTask({ projectId: p.id, title: "Add login page and API", description: "Implement the session API and its client", agentType: autonomous ? undefined : "backend-developer", input: autonomous ? { executionMode: "autonomous" } : {} });
+const task = (autonomous = true) =>
+  c.agentManager.createTask({
+    projectId: p.id,
+    title: "Add login page and API",
+    description: "Implement the session API and its client",
+    agentType: autonomous ? undefined : "backend-developer",
+    input: autonomous ? { executionMode: "autonomous" } : {},
+  });
 
 describe("grounded implementation pipeline", () => {
   it("honours the agent model, prompt, project prompt, skills, temperature and cost attribution", async () => {
     await realModel("unrelated-first");
     const preferred = await realModel("backend-model", { temperature: 1, omitTemperature: true, maxTokens: 900 });
     const agent = c.agentRepo.byType(p.id, "backend-developer")!;
-    c.agentRepo.upsert({ ...agent, systemPrompt: "AGENT_RULE_KEEP_EXISTING", projectPrompt: "PROJECT_PROMPT_SENTINEL", models: { primary: preferred.id, fallbacks: [], specialized: { coding: preferred.id } } }, { projectId: p.id });
-    c.projectRepo.upsert({ ...p, settings: { ...p.settings, rules: ["PROJECT_RULE_USE_SESSION_SERVICE"] } }, { key: p.slug });
+    c.agentRepo.upsert(
+      {
+        ...agent,
+        systemPrompt: "AGENT_RULE_KEEP_EXISTING",
+        projectPrompt: "PROJECT_PROMPT_SENTINEL",
+        models: { primary: preferred.id, fallbacks: [], specialized: { coding: preferred.id } },
+      },
+      { projectId: p.id },
+    );
+    c.projectRepo.upsert(
+      { ...p, settings: { ...p.settings, rules: ["PROJECT_RULE_USE_SESSION_SERVICE"] } },
+      { key: p.slug },
+    );
     await c.agentManager.syncProjectState(p.id);
     const t = task(false);
     const done = await c.agentManager.runTask(t.id);
     expect(done.status).toBe("succeeded");
     expect(requests).toHaveLength(2); // planning and actual codegen; no discarded extra model call
-    expect(requests.every((r) => r.modelId === "backend-model" && r.temperature === 1 && r.omitTemperature && r.maxTokens === 900)).toBe(true);
+    expect(
+      requests.every(
+        (r) => r.modelId === "backend-model" && r.temperature === 1 && r.omitTemperature && r.maxTokens === 900,
+      ),
+    ).toBe(true);
     const prompt = JSON.stringify(requests[1].messages);
-    for (const marker of ["AGENT_RULE_KEEP_EXISTING", "PROJECT_PROMPT_SENTINEL", "PROJECT_RULE_USE_SESSION_SERVICE", "[Skill:"]) expect(prompt).toContain(marker);
+    for (const marker of [
+      "AGENT_RULE_KEEP_EXISTING",
+      "PROJECT_PROMPT_SENTINEL",
+      "PROJECT_RULE_USE_SESSION_SERVICE",
+      "[Skill:",
+    ])
+      expect(prompt).toContain(marker);
     const runs = c.runRepo.byTask(t.id);
     expect(runs[0].modelId).toBe(preferred.id);
     expect(runs[0].totalTokens).toBe(40);
@@ -90,9 +169,14 @@ describe("grounded implementation pipeline", () => {
   it("falls back through the configured real models instead of a mock response", async () => {
     const primary = await realModel("primary-broken");
     const backup = await realModel("backup-working");
-    c.providerRegistry.get(primary.providerId)!.chat = async () => { throw new Error("primary offline"); };
+    c.providerRegistry.get(primary.providerId)!.chat = async () => {
+      throw new Error("primary offline");
+    };
     const agent = c.agentRepo.byType(p.id, "backend-developer")!;
-    c.agentRepo.upsert({ ...agent, models: { primary: primary.id, fallbacks: [backup.id], specialized: { coding: primary.id } } }, { projectId: p.id });
+    c.agentRepo.upsert(
+      { ...agent, models: { primary: primary.id, fallbacks: [backup.id], specialized: { coding: primary.id } } },
+      { projectId: p.id },
+    );
     const t = task(false);
     expect((await c.agentManager.runTask(t.id)).status).toBe("succeeded");
     expect(requests.every((r) => r.modelId === "backup-working")).toBe(true);
@@ -101,7 +185,13 @@ describe("grounded implementation pipeline", () => {
 
   it("rejects truncated model output before creating any branch or file", async () => {
     const model = await realModel();
-    c.providerRegistry.get(model.providerId)!.chat = async (req) => ({ content: "export const unfinished = ", finishReason: "length", usage, modelId: req.modelId, providerId: model.providerId });
+    c.providerRegistry.get(model.providerId)!.chat = async (req) => ({
+      content: "export const unfinished = ",
+      finishReason: "length",
+      usage,
+      modelId: req.modelId,
+      providerId: model.providerId,
+    });
     const t = task(false);
     await expect(c.agentManager.runTask(t.id)).rejects.toThrow(/truncated/);
     expect((await gh.listBranches(repo)).filter((b) => b.name.startsWith("agent-"))).toHaveLength(0);
@@ -124,13 +214,20 @@ describe("grounded implementation pipeline", () => {
   });
 
   it("orders backend before frontend, shares its actual code, and verifies the integrated branch", async () => {
-    items.unshift({ agentType: "frontend-developer", title: "Implement login page", description: "Consume the login API", files: ["src/ui/LoginPage.tsx"] });
+    items.unshift({
+      agentType: "frontend-developer",
+      title: "Implement login page",
+      description: "Consume the login API",
+      files: ["src/ui/LoginPage.tsx"],
+    });
     await realModel();
     const done = await c.agentManager.runTask(task().id);
     expect(done.status).toBe("succeeded");
     const prs = await gh.listPullRequests(repo);
     expect(prs).toHaveLength(1);
-    const frontendPrompt = requests.find((r) => r.messages[1].content.includes('complete content of "src/ui/LoginPage.tsx"'))!.messages[1].content;
+    const frontendPrompt = requests.find((r) =>
+      r.messages[1].content.includes('complete content of "src/ui/LoginPage.tsx"'),
+    )!.messages[1].content;
     expect(frontendPrompt).toContain("LOGIN_API_CONTRACT");
     expect(await gh.getFile(repo, "src/server/login.ts", prs[0].head)).toBeDefined();
     expect(await gh.getFile(repo, "src/ui/LoginPage.tsx", prs[0].head)).toBeDefined();
@@ -140,8 +237,22 @@ describe("grounded implementation pipeline", () => {
   });
 
   it("uses role-specific linked repositories and hands the backend contract to the frontend", async () => {
-    p = await c.agentManager.createProject({ name: "Multi", description: "TypeScript app", repositories: [{ repo: "acme/config", branch: "main", role: "primary", isConfigRepo: true }, { repo: "acme/api", branch: "develop", role: "backend" }, { repo: "acme/web", branch: "main", role: "frontend" }], capabilities: { platforms: ["web"], languages: ["typescript"] } });
-    items.push({ agentType: "frontend-developer", title: "Implement login page", description: "Use the backend contract", files: ["src/ui/LoginPage.tsx"] });
+    p = await c.agentManager.createProject({
+      name: "Multi",
+      description: "TypeScript app",
+      repositories: [
+        { repo: "acme/config", branch: "main", role: "primary", isConfigRepo: true },
+        { repo: "acme/api", branch: "develop", role: "backend" },
+        { repo: "acme/web", branch: "main", role: "frontend" },
+      ],
+      capabilities: { platforms: ["web"], languages: ["typescript"] },
+    });
+    items.push({
+      agentType: "frontend-developer",
+      title: "Implement login page",
+      description: "Use the backend contract",
+      files: ["src/ui/LoginPage.tsx"],
+    });
     await realModel();
     const done = await c.agentManager.runTask(task().id);
     expect(done.status).toBe("succeeded");
@@ -151,17 +262,26 @@ describe("grounded implementation pipeline", () => {
     expect(await gh.getFile({ owner: "acme", name: "api" }, "src/server/login.ts", apiPr.head)).toBeDefined();
     expect(await gh.getFile({ owner: "acme", name: "web" }, "src/ui/LoginPage.tsx", webPr.head)).toBeDefined();
     expect(await gh.getFile({ owner: "acme", name: "config" }, "src/server/login.ts", "main")).toBeUndefined();
-    const frontend = requests.find((r) => r.messages[1].content.includes('complete content of "src/ui/LoginPage.tsx"'))!.messages[1].content;
+    const frontend = requests.find((r) => r.messages[1].content.includes('complete content of "src/ui/LoginPage.tsx"'))!
+      .messages[1].content;
     expect(frontend).toContain("acme/api@");
     expect(frontend).toContain("LOGIN_API_CONTRACT");
   });
 
   it("applies a real QA failure as a patch on the same branch/PR and keeps frontend work", async () => {
-    items.push({ agentType: "frontend-developer", title: "Implement login page", description: "Use login API", files: ["src/ui/LoginPage.tsx"] });
+    items.push({
+      agentType: "frontend-developer",
+      title: "Implement login page",
+      description: "Use login API",
+      files: ["src/ui/LoginPage.tsx"],
+    });
     await realModel();
     Object.defineProperty(gh, "kind", { value: "real", configurable: true });
-    const checks = vi.fn<() => Promise<GithubCheck[]>>()
-      .mockResolvedValueOnce([{ name: "unit", status: "failure", detail: "src/server/login.ts: expected answer 2, got 1" }])
+    const checks = vi
+      .fn<() => Promise<GithubCheck[]>>()
+      .mockResolvedValueOnce([
+        { name: "unit", status: "failure", detail: "src/server/login.ts: expected answer 2, got 1" },
+      ])
       .mockResolvedValue([{ name: "unit", status: "success" }]);
     Object.assign(gh, { getChecks: checks });
     const done = await c.agentManager.runTask(task().id);
@@ -191,7 +311,10 @@ describe("grounded implementation pipeline", () => {
     await realModel();
     items[0].files = ["src/first.ts", "src/second.ts"];
     let calls = 0;
-    generate = () => { if (++calls === 2) throw new Error("provider offline"); return "export const first = 1;"; };
+    generate = () => {
+      if (++calls === 2) throw new Error("provider offline");
+      return "export const first = 1;";
+    };
     const t = task();
     await expect(c.agentManager.runTask(t.id)).rejects.toThrow(/provider offline/);
     expect(await gh.getFile(repo, "src/first.ts", "main")).toBeUndefined();
@@ -203,15 +326,22 @@ describe("grounded implementation pipeline", () => {
     await realModel();
     let release!: (s: string) => void;
     let started!: () => void;
-    const reached = new Promise<void>((r) => { started = r; });
-    generate = () => { started(); return new Promise<string>((r) => { release = r; }); };
+    const reached = new Promise<void>((r) => {
+      started = r;
+    });
+    generate = () => {
+      started();
+      return new Promise<string>((r) => {
+        release = r;
+      });
+    };
     const t = task();
     const pending = c.agentManager.runTask(t.id);
     await reached;
     c.taskRepo.upsert({ ...c.taskRepo.findById(t.id)!.data, status: "cancelled" }, { projectId: p.id });
     release("export const answer = 1;");
     expect((await pending).status).toBe("cancelled");
-    expect((await gh.listPullRequests(repo))).toHaveLength(0);
+    expect(await gh.listPullRequests(repo)).toHaveLength(0);
     expect(c.taskRepo.findMany({ parentId: t.id }).some((r) => r.data.status === "running")).toBe(false);
   });
 
@@ -225,7 +355,13 @@ describe("grounded implementation pipeline", () => {
     const run = c.runRepo.byTask(t.id)[0];
     expect(run.steps.find((s) => s.tool === "create_branch")?.status).toBe("succeeded");
     expect(run.steps.find((s) => s.tool === "write_file")?.status).toBe("failed");
-    expect(await gh.getFile(repo, "src/routes/login.routes.ts", (await gh.listBranches(repo)).find((b) => b.name.startsWith("agent-"))!.name)).toBeUndefined();
+    expect(
+      await gh.getFile(
+        repo,
+        "src/routes/login.routes.ts",
+        (await gh.listBranches(repo)).find((b) => b.name.startsWith("agent-"))!.name,
+      ),
+    ).toBeUndefined();
   });
 
   it("charges codegen against the task budget and preserves usage on failure", async () => {
@@ -252,7 +388,10 @@ describe("grounded implementation pipeline", () => {
     await realModel("unrelated-model");
     c.modelRepo.upsert({ ...selected, active: false });
     const agent = c.agentRepo.byType(p.id, "backend-developer")!;
-    c.agentRepo.upsert({ ...agent, models: { primary: selected.id, fallbacks: [], specialized: {} } }, { projectId: p.id });
+    c.agentRepo.upsert(
+      { ...agent, models: { primary: selected.id, fallbacks: [], specialized: {} } },
+      { projectId: p.id },
+    );
     await c.agentManager.syncProjectState(p.id);
     await expect(c.agentManager.runTask(task(false).id)).rejects.toThrow(/missing or disabled/);
     expect(requests).toHaveLength(0);
@@ -261,7 +400,11 @@ describe("grounded implementation pipeline", () => {
   it("does not run code fixes for a GitHub CI network failure", async () => {
     await realModel();
     Object.defineProperty(gh, "kind", { value: "real", configurable: true });
-    Object.assign(gh, { getChecks: async () => { throw new Error("CI service unavailable"); } });
+    Object.assign(gh, {
+      getChecks: async () => {
+        throw new Error("CI service unavailable");
+      },
+    });
     const t = task();
     await expect(c.agentManager.runTask(t.id)).rejects.toThrow(/CI service unavailable/);
     expect(c.taskRepo.findMany({ parentId: t.id }).some((r) => r.data.title.startsWith("Fix (attempt"))).toBe(false);
@@ -277,21 +420,40 @@ describe("grounded implementation pipeline", () => {
 
 describe("safe source edits", () => {
   it("preserves the complete tail of files larger than the old 24K limit", () => {
-    const existing = "export const answer = 1;\n" + "// unchanged\n".repeat(4000) + "export const preservedTail = true;\n";
-    const patched = applyFileEdits(existing, JSON.stringify({ edits: [{ oldText: "answer = 1", newText: "answer = 2" }] }));
+    const existing =
+      "export const answer = 1;\n" + "// unchanged\n".repeat(4000) + "export const preservedTail = true;\n";
+    const patched = applyFileEdits(
+      existing,
+      JSON.stringify({ edits: [{ oldText: "answer = 1", newText: "answer = 2" }] }),
+    );
     expect(patched).toBe(existing.replace("answer = 1", "answer = 2"));
-    const simulated = extendContent({ existing, path: "a.ts", agentName: "Backend", agentType: "backend-developer", taskTitle: "Follow-up", subtaskId: "t2", todos: ["Extend behavior"] });
+    const simulated = extendContent({
+      existing,
+      path: "a.ts",
+      agentName: "Backend",
+      agentType: "backend-developer",
+      taskTitle: "Follow-up",
+      subtaskId: "t2",
+      todos: ["Extend behavior"],
+    });
     expect(simulated).toContain(existing);
   });
   it("rejects ambiguous edits and whole-file rewrites", () => {
     expect(() => applyFileEdits("x x", '{"edits":[{"oldText":"x","newText":"y"}]}')).toThrow(/exactly once/);
     expect(() => applyFileEdits("x", "export const changed = 1;")).toThrow(/JSON/);
   });
-  it.each(["../auth.ts", "/src/a.ts", "src/../a.ts", "src\\a.ts", ".git/config", "CodeVia/agents/backend.md"])("rejects unsafe/managed path %s", (path) => {
-    expect(() => cleanRepoPath(path)).toThrow();
-  });
+  it.each(["../auth.ts", "/src/a.ts", "src/../a.ts", "src\\a.ts", ".git/config", "CodeVia/agents/backend.md"])(
+    "rejects unsafe/managed path %s",
+    (path) => {
+      expect(() => cleanRepoPath(path)).toThrow();
+    },
+  );
   it("rejects unsupported owners and never silently drops a sixth file", () => {
-    expect(() => parseBreakdown(JSON.stringify([{ ...items[0], agentType: "security" }]), ["backend-developer"])).toThrow();
-    expect(() => parseBreakdown(JSON.stringify([{ ...items[0], files: ["a", "b", "c", "d", "e", "f"] }]), ["backend-developer"])).toThrow(/1–5/);
+    expect(() =>
+      parseBreakdown(JSON.stringify([{ ...items[0], agentType: "security" }]), ["backend-developer"]),
+    ).toThrow();
+    expect(() =>
+      parseBreakdown(JSON.stringify([{ ...items[0], files: ["a", "b", "c", "d", "e", "f"] }]), ["backend-developer"]),
+    ).toThrow(/1–5/);
   });
 });

@@ -28,7 +28,7 @@
  */
 import { DatabaseSync } from "node:sqlite";
 import { createDecipheriv, createHash } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 
 const DB_PATH = process.env.DATABASE_PATH ?? "./data/codevia.db";
 const AUTH_SECRET = process.env.AUTH_SECRET;
@@ -39,13 +39,20 @@ if (!existsSync(DB_PATH)) {
   process.exit(1);
 }
 
-const keyFor = (context) => createHash("sha256").update(`${AUTH_SECRET ?? ""}:${context}`).digest();
+const keyFor = (context) =>
+  createHash("sha256")
+    .update(`${AUTH_SECRET ?? ""}:${context}`)
+    .digest();
 
 function decrypt(rec, context) {
   if (!rec) return undefined;
   let parsed = rec;
   if (typeof rec === "string") {
-    try { parsed = JSON.parse(rec); } catch { return undefined; }
+    try {
+      parsed = JSON.parse(rec);
+    } catch {
+      return undefined;
+    }
   }
   if (!parsed || parsed.v !== 1 || !AUTH_SECRET) return undefined;
   try {
@@ -65,8 +72,22 @@ const kvRows = db.prepare("SELECT * FROM kv ORDER BY key ASC").all();
 
 const records = recordRows.map((r) => {
   let data;
-  try { data = JSON.parse(r.data); } catch { data = r.data; }
-  if (!data || typeof data !== "object") return { id: r.id, type: r.type, projectId: r.project_id, parentId: r.parent_id, key: r.key, data, createdAt: r.created_at, updatedAt: r.updated_at };
+  try {
+    data = JSON.parse(r.data);
+  } catch {
+    data = r.data;
+  }
+  if (!data || typeof data !== "object")
+    return {
+      id: r.id,
+      type: r.type,
+      projectId: r.project_id,
+      parentId: r.parent_id,
+      key: r.key,
+      data,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
 
   // Decrypt known secret fields per record type
   if (r.type === "provider" && data.secretValueEnc) {
@@ -98,28 +119,57 @@ const records = recordRows.map((r) => {
     }
   }
 
-  return { id: r.id, type: r.type, projectId: r.project_id, parentId: r.parent_id, key: r.key, data, createdAt: r.created_at, updatedAt: r.updated_at };
+  return {
+    id: r.id,
+    type: r.type,
+    projectId: r.project_id,
+    parentId: r.parent_id,
+    key: r.key,
+    data,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 });
 
 const jobs = jobRows.map((j) => {
   let payload;
-  try { payload = JSON.parse(j.payload); } catch { payload = j.payload; }
+  try {
+    payload = JSON.parse(j.payload);
+  } catch {
+    payload = j.payload;
+  }
   return {
-    id: j.id, type: j.type, status: j.status, payload, attempts: Number(j.attempts), maxAttempts: Number(j.max_attempts),
+    id: j.id,
+    type: j.type,
+    status: j.status,
+    payload,
+    attempts: Number(j.attempts),
+    maxAttempts: Number(j.max_attempts),
     correlationId: j.correlation_id ?? undefined,
-    scheduledAt: j.scheduled_at ?? undefined, startedAt: j.started_at ?? undefined, finishedAt: j.finished_at ?? undefined,
-    error: j.error ?? undefined, createdAt: j.created_at, updatedAt: j.updated_at,
+    scheduledAt: j.scheduled_at ?? undefined,
+    startedAt: j.started_at ?? undefined,
+    finishedAt: j.finished_at ?? undefined,
+    error: j.error ?? undefined,
+    createdAt: j.created_at,
+    updatedAt: j.updated_at,
   };
 });
 
 const kv = kvRows.map((k) => {
   let value;
-  try { value = JSON.parse(k.value); } catch { value = k.value; }
+  try {
+    value = JSON.parse(k.value);
+  } catch {
+    value = k.value;
+  }
   // Decrypt any encrypted values in KV (e.g. session tokens)
   if (value && typeof value === "object") {
     for (const f of ["accessTokenEnc", "refreshTokenEnc", "tokenEnc", "secretValueEnc"]) {
       if (value[f]) {
-        const plain = decrypt(value[f], f === "tokenEnc" ? "telegram-token" : f === "secretValueEnc" ? "provider-secret" : "github-token");
+        const plain = decrypt(
+          value[f],
+          f === "tokenEnc" ? "telegram-token" : f === "secretValueEnc" ? "provider-secret" : "github-token",
+        );
         if (plain !== undefined) {
           value[f.replace("Enc", "")] = plain;
         }
@@ -139,7 +189,9 @@ const snapshot = {
     ? "Secrets decrypted with the provided AUTH_SECRET. The original encrypted values are kept as _original*Enc fields for traceability."
     : "AUTH_SECRET not provided — secretValueEnc / tokenEnc / accessTokenEnc left as-is (no plaintext available).",
   summary: { records: records.length, jobs: jobs.length, kv: kv.length, bytes: 0 },
-  records, jobs, kv,
+  records,
+  jobs,
+  kv,
 };
 
 snapshot.summary.bytes = Buffer.byteLength(JSON.stringify(snapshot), "utf8");
@@ -149,5 +201,7 @@ if (OUT_PATH === "-") {
 } else {
   const fs = await import("node:fs");
   fs.writeFileSync(OUT_PATH, JSON.stringify(snapshot, null, 2));
-  console.error(`Wrote ${OUT_PATH} (${snapshot.summary.bytes} bytes; ${records.length} records, ${jobs.length} jobs, ${kv.length} kv)`);
+  console.error(
+    `Wrote ${OUT_PATH} (${snapshot.summary.bytes} bytes; ${records.length} records, ${jobs.length} jobs, ${kv.length} kv)`,
+  );
 }

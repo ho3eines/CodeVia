@@ -51,7 +51,7 @@ describe("entityFor", () => {
 });
 
 describe("scaffoldFor", () => {
-  const brief = "Research brief for \"Add login page and API\"\nRequirements:\n- login";
+  const brief = 'Research brief for "Add login page and API"\nRequirements:\n- login';
   it("writes a valid C# controller for dotnet projects", () => {
     const sc = scaffoldFor({
       agentType: "backend-developer",

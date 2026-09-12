@@ -37,7 +37,9 @@ interface EncryptedRecord {
 }
 
 function keyFor(secret?: string): Buffer {
-  return createHash("sha256").update(`${secret ?? getAuthSecret()}:github-user-token`).digest();
+  return createHash("sha256")
+    .update(`${secret ?? getAuthSecret()}:github-user-token`)
+    .digest();
 }
 
 export function encryptToken(token: string, secret?: string): Pick<EncryptedRecord, "iv" | "tag" | "ct"> {
@@ -93,10 +95,19 @@ export function deleteUserGitHubToken(kv: KvStore, userId: string): void {
 }
 
 /** Non-secret summary for status endpoints (never includes the token). */
-export function describeUserGitHubToken(kv: KvStore, userId: string | undefined): { stored: boolean; scopes: string[]; login?: string; updatedAt?: string; canReadPrivateRepos: boolean } {
+export function describeUserGitHubToken(
+  kv: KvStore,
+  userId: string | undefined,
+): { stored: boolean; scopes: string[]; login?: string; updatedAt?: string; canReadPrivateRepos: boolean } {
   const t = getUserGitHubToken(kv, userId);
   if (!t) return { stored: false, scopes: [], canReadPrivateRepos: false };
-  return { stored: true, scopes: t.scopes, login: t.login, updatedAt: t.updatedAt, canReadPrivateRepos: hasRepoScope(t.scopes) };
+  return {
+    stored: true,
+    scopes: t.scopes,
+    login: t.login,
+    updatedAt: t.updatedAt,
+    canReadPrivateRepos: hasRepoScope(t.scopes),
+  };
 }
 
 /** `repo` grants private-repo access; `public_repo` only public ones. */

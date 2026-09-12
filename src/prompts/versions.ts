@@ -63,19 +63,30 @@ export class PromptVersionRepository extends DocumentRepository<PromptVersion> {
   }
 
   /** Prepare a version without acknowledging a DB write before Git accepts it. */
-  draft(agent: Agent, meta: { source: string; note?: string; derivedFrom?: number }, history = this.forAgent(agent.id)): PromptVersion {
-    if (history.some((v) => v.agentId !== agent.id || v.projectId !== agent.projectId)) throw new Error("Prompt history crosses project/agent boundaries");
+  draft(
+    agent: Agent,
+    meta: { source: string; note?: string; derivedFrom?: number },
+    history = this.forAgent(agent.id),
+  ): PromptVersion {
+    if (history.some((v) => v.agentId !== agent.id || v.projectId !== agent.projectId))
+      throw new Error("Prompt history crosses project/agent boundaries");
     const prev = [...history].sort((a, b) => b.version - a.version)[0];
-    if (prev && prev.systemPrompt === agent.systemPrompt && (prev.projectPrompt ?? "") === (agent.projectPrompt ?? "")) return prev;
+    if (prev && prev.systemPrompt === agent.systemPrompt && (prev.projectPrompt ?? "") === (agent.projectPrompt ?? ""))
+      return prev;
     return {
-      id: randomUUID(), agentId: agent.id, projectId: agent.projectId,
+      id: randomUUID(),
+      agentId: agent.id,
+      projectId: agent.projectId,
       repositoryRevision: prev?.repositoryRevision ?? agent.repositoryRevision,
-      version: (prev?.version ?? 0) + 1, systemPrompt: agent.systemPrompt,
-      projectPrompt: agent.projectPrompt, source: meta.source,
-      note: meta.note, derivedFrom: meta.derivedFrom, createdAt: new Date().toISOString(),
+      version: (prev?.version ?? 0) + 1,
+      systemPrompt: agent.systemPrompt,
+      projectPrompt: agent.projectPrompt,
+      source: meta.source,
+      note: meta.note,
+      derivedFrom: meta.derivedFrom,
+      createdAt: new Date().toISOString(),
     };
   }
-
 }
 
 export function getPromptVersionRepo(): PromptVersionRepository {
@@ -97,7 +108,10 @@ export function diffLines(a: string, b: string): DiffLine[] {
   const m = y.length;
   // Guard pathological sizes: fall back to a whole-replace diff.
   if (n * m > 4_000_000) {
-    return [...x.map((t) => ({ type: "removed" as const, text: t })), ...y.map((t) => ({ type: "added" as const, text: t }))];
+    return [
+      ...x.map((t) => ({ type: "removed" as const, text: t })),
+      ...y.map((t) => ({ type: "added" as const, text: t })),
+    ];
   }
   const dp: Uint32Array[] = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
   for (let i = n - 1; i >= 0; i--) {

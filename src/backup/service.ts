@@ -5,12 +5,7 @@ import { parseRepoFullName } from "../github/types.js";
 import type { NotificationRepository, AuditRepository } from "../observability/repos.js";
 import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { Logger } from "../logger.js";
-import {
-  getEffectiveBackupSettings,
-  getBackupSettings,
-  updateBackupStatus,
-  type BackupSettings,
-} from "./settings.js";
+import { getEffectiveBackupSettings, getBackupSettings, updateBackupStatus, type BackupSettings } from "./settings.js";
 import {
   createSnapshot,
   restoreSnapshot,
@@ -133,9 +128,8 @@ export class BackupService {
     return this.deps.github;
   }
 
-
   /** Create an in-memory snapshot (also used by /admin/backup/export). */
-  async exportSnapshot(settings = getBackupSettings(this.deps.kv)): Promise<BackupSnapshot> {
+  async exportSnapshot(_settings = getBackupSettings(this.deps.kv)): Promise<BackupSnapshot> {
     return createSnapshot(this.deps.db);
   }
 
@@ -160,7 +154,11 @@ export class BackupService {
 
     this.running = true;
     const started = new Date();
-    updateBackupStatus(this.deps.kv, { lastRunStatus: "running", lastRunAt: started.toISOString(), lastRunError: undefined });
+    updateBackupStatus(this.deps.kv, {
+      lastRunStatus: "running",
+      lastRunAt: started.toISOString(),
+      lastRunError: undefined,
+    });
     try {
       const snapshot = await createSnapshot(this.deps.db);
       const dir = safeDirName(started);
@@ -242,14 +240,25 @@ export class BackupService {
         metadata: { repo: settings.repo, branch, error: message },
       });
       this.deps.logger.warn("system backup failed", { error: message, repo: settings.repo });
-      return { ok: false, configured: true, githubKind: github.kind, repo: settings.repo, branch, path: base, error: message };
+      return {
+        ok: false,
+        configured: true,
+        githubKind: github.kind,
+        repo: settings.repo,
+        branch,
+        path: base,
+        error: message,
+      };
     } finally {
       this.running = false;
     }
   }
 
   /** List snapshot directories in the configured backup repository. */
-  async listBackups(input?: Partial<Pick<BackupSettings, "repo" | "branch" | "path">>, limit = 50): Promise<BackupListEntry[]> {
+  async listBackups(
+    input?: Partial<Pick<BackupSettings, "repo" | "branch" | "path">>,
+    limit = 50,
+  ): Promise<BackupListEntry[]> {
     const settings: BackupSettings = mergeSettings(getEffectiveBackupSettings(this.deps.kv), input ?? {});
     const ref = repoRef(settings);
     if (!settings.repo || !ref) return [];
@@ -268,7 +277,10 @@ export class BackupService {
       const f = await github.getFile(ref, manifestPath, branch);
       if (!f) continue;
       try {
-        const manifest = JSON.parse(f.content) as { createdAt?: string; summary?: { records?: number; jobs?: number; kv?: number } };
+        const manifest = JSON.parse(f.content) as {
+          createdAt?: string;
+          summary?: { records?: number; jobs?: number; kv?: number };
+        };
         out.push({
           id,
           path: dir,
@@ -293,7 +305,15 @@ export class BackupService {
     const settings: BackupSettings = mergeSettings(getEffectiveBackupSettings(this.deps.kv), input ?? {});
     const ref = repoRef(settings);
     if (!settings.repo || !ref) {
-      return { ok: false, from: "github", records: 0, jobs: 0, kv: 0, replace: true, error: "Backup repository is not configured." };
+      return {
+        ok: false,
+        from: "github",
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: true,
+        error: "Backup repository is not configured.",
+      };
     }
     const base = normalizeBasePath(settings.path);
     const branch = settings.branch ?? "main";
@@ -306,14 +326,35 @@ export class BackupService {
     const latest = list[0];
     const target = requested && requested !== "latest" ? requested : latest?.id;
     if (!target) {
-      return { ok: false, from: "github", repo: settings.repo, branch, records: 0, jobs: 0, kv: 0, replace: true, error: "No backup found in the configured repository." };
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: true,
+        error: "No backup found in the configured repository.",
+      };
     }
     const dir = `${base}/${target}`;
     const files = [];
     for (const name of ["manifest.json", "records.json", "jobs.json", "kv.json"]) {
       const f = await this.githubFor(settings).getFile(ref, `${dir}/${name}`, branch);
       if (!f) {
-        return { ok: false, from: "github", repo: settings.repo, branch, snapshot: target, records: 0, jobs: 0, kv: 0, replace: true, error: `Backup is incomplete: missing ${name}` };
+        return {
+          ok: false,
+          from: "github",
+          repo: settings.repo,
+          branch,
+          snapshot: target,
+          records: 0,
+          jobs: 0,
+          kv: 0,
+          replace: true,
+          error: `Backup is incomplete: missing ${name}`,
+        };
       }
       files.push({ path: f.path, content: f.content });
     }

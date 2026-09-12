@@ -23,7 +23,9 @@ export class ModelRepository extends DocumentRepository<Model> {
   }
 
   listActive(): Model[] {
-    return this.findMany().filter((r) => r.data.active).map((r) => r.data);
+    return this.findMany()
+      .filter((r) => r.data.active)
+      .map((r) => r.data);
   }
 
   /* ---------------------------------------------------------------- *
@@ -32,7 +34,10 @@ export class ModelRepository extends DocumentRepository<Model> {
 
   /** Every model the account may see — its own plus the shared/platform rows. */
   listForOwner(ownerId?: string | undefined): Model[] {
-    return scopedModels(this.findMany().map((r) => r.data), ownerId);
+    return scopedModels(
+      this.findMany().map((r) => r.data),
+      ownerId,
+    );
   }
 
   /** Active models the account may see. This is what routing must consume. */
@@ -61,7 +66,10 @@ export class ProviderRepository extends DocumentRepository<ModelProvider> {
 
   /** Every provider the account may see — its own plus the shared/platform rows. */
   listForOwner(ownerId?: string | undefined): ModelProvider[] {
-    return scopedProviders(this.findMany().map((r) => r.data), ownerId);
+    return scopedProviders(
+      this.findMany().map((r) => r.data),
+      ownerId,
+    );
   }
 
   /** Read one provider, but only when the account may see it. */

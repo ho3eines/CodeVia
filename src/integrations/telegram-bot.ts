@@ -1,5 +1,11 @@
 import type { ITelegramService, TelegramUpdate } from "./telegram.js";
-import type { ProjectRepository, TaskRepository, WorkflowRepository, ConversationRepository, MemoryRepository } from "../domain/repos.js";
+import type {
+  ProjectRepository,
+  TaskRepository,
+  WorkflowRepository,
+  ConversationRepository,
+  MemoryRepository,
+} from "../domain/repos.js";
 import type { AgentRepository } from "../agents/agent-repo.js";
 import type { RunRepository } from "../observability/repos.js";
 import type { AgentManager } from "../agents/manager.js";
@@ -223,7 +229,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       }
     }
     if (t.callbackData) {
-      return this.resolveCallback(chatId, t.callbackData);
+      return this.resolveCallback(t);
     }
     const raw = t.text?.trim() ?? "";
     if (!raw) return this.menuHome(chatId);
@@ -234,36 +240,53 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     const cmd = head.toLowerCase().replace(/@\w+$/, "");
     const args = rest.join(" ").trim();
 
-    // RESTRICTED MODE (v5+): Telegram is chat + project selection only.
-    // Administrative sections (agents/models/skills/tasks/runs/settings/memory
-    // etc.) are intentionally hidden to keep the bot surface small; use the web
-    // UI for everything else. Only /start, /project, /cancel and natural
-    // language chat are exposed.
-    if (cmd === "/start" || cmd === "/menu" || cmd === "/home" || cmd === "/help") return this.menuHome(chatId);
+    // Command routing. Slash commands map to the same sections the web UI
+    // exposes; `/task`/`/run` create tasks, plain text is a natural-language
+    // request on the active project. Inline buttons (`action:*`, `menu:*`,
+    // `approve:`/`reject:`) are routed in `resolveCallback` below.
+    if (cmd === "/start" || cmd === "/menu" || cmd === "/home") return this.menuHome(chatId);
     if (cmd === "/help" || cmd === "/?" || cmd === "/کمک") return this.helpView();
     if (cmd === "/id" || cmd === "/chatid" || cmd === "/whoami") return this.identityView(t);
     if (cmd === "/ping" || cmd === "/health") return this.pingView();
     if (cmd === "/projects" || cmd === "/project") return this.projectsView();
     if (cmd === "/stop" || cmd === "/cancel") return this.cancelPendingView(chatId);
-    // The following admin commands are disabled on Telegram (web UI only):
-    // /agents /models /skills /tasks /runs /status /tests /memory /review
-    // /dashboard /settings /run /task /approvals /logs
+    if (cmd === "/task") return this.taskCommand(chatId, args);
+    if (cmd === "/run") return this.runCommand(chatId, args);
+    // Global sections mirror the web UI menus (agents, models, skills, tasks,
+    // runs, status, tests, memory, GitHub, approvals, logs, settings…).
+    const SECTIONS: Record<string, string> = {
+      "/agents": "agents",
+      "/models": "models",
+      "/skills": "skills",
+      "/tasks": "tasks",
+      "/runs": "runs",
+      "/status": "status",
+      "/tests": "tests",
+      "/memory": "memory",
+      "/dashboard": "dashboard",
+      "/settings": "settings",
+      "/approvals": "approvals",
+      "/logs": "logs",
+      "/github": "github",
+      "/issues": "issues",
+      "/pr": "prs",
+      "/prs": "prs",
+    };
+    if (SECTIONS[cmd]) return this.globalSection(chatId, SECTIONS[cmd]);
     if (cmd.startsWith("/")) {
-      return this.deps.telegram.sendMessage({
-        chatId,
-        text: "⚠️ Only /start, /project, /cancel and plain chat are available on Telegram. Use the web UI for agents, tasks, runs, settings, etc.",
-      }).then(() => ({
-        text: "",
+      return {
+        text: `🤷 Unknown command \`${cmd}\`. Send /help for the list of available commands.`,
         keyboard: this.homeKeyboard(),
-      }));
+      };
     }
 
     // Anything else — Persian included — is a natural-language request.
     return this.handleNaturalLanguage(chatId, raw);
   }
 
-
-  private async resolveCallback(chatId: string, cb: string): Promise<View> {
+  private async resolveCallback(t: TelegramUpdate): Promise<View> {
+    const chatId = t.chatId!;
+    const cb = t.callbackData ?? "";
     if (cb === "menu:home") {
       this.projectByChat.delete(chatId);
       return this.menuHome(chatId);
@@ -278,19 +301,38 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     switch (action) {
       case "project":
         return this.selectProject(chatId, arg);
-      // RESTRICTED MODE: agents / approvals / action / global menu sections
-      // other than help/ping are hidden. Reject them so callbacks from stale
-      // keyboards don't accidentally touch internal surfaces.
-      case "approve":
-      case "reject":
-      case "menu":
       case "agent":
+        return this.agentView(arg);
+      case "menu": {
+        // `menu:<section>` mirrors the web UI's global sections. Unknown
+        // sections fall back to the home menu rather than touching internals.
+        const known = new Set([
+          "agents",
+          "models",
+          "skills",
+          "tasks",
+          "runs",
+          "status",
+          "tests",
+          "memory",
+          "github",
+          "dashboard",
+          "approvals",
+          "logs",
+          "settings",
+          "issues",
+          "prs",
+        ]);
+        return known.has(arg) ? this.globalSection(chatId, arg) : this.menuHome(chatId);
+      }
       case "action":
+        return this.projectAction(chatId, arg);
+      case "approve":
+        return this.decideApproval(t, "approve", arg);
+      case "reject":
+        return this.decideApproval(t, "reject", arg);
       default:
-        return {
-          text: "⚠️ That feature is not available on Telegram right now. Use the web UI or send a plain message.",
-          keyboard: this.homeKeyboard(),
-        };
+        return this.menuHome(chatId);
     }
   }
 
@@ -314,7 +356,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
             : "📁 No projects yet — create one in the web UI first.",
       "",
       "Pick a section below, or just type a request and I'll run it as a task on your active project.",
-      "Example: *\"بررسی کن چرا Login بعد از آخرین کامیت خراب شده\"*",
+      'Example: *"بررسی کن چرا Login بعد از آخرین کامیت خراب شده"*',
       "",
       "Commands: /projects /agents /models /skills /tasks /runs /status /tests /memory /github /issues /pr /task /run /approvals /logs /settings /ping /help",
     ];
@@ -345,7 +387,9 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       s.webhookInfo?.pendingUpdateCount ? `⏳ Pending at Telegram: ${s.webhookInfo.pendingUpdateCount}` : "",
       s.lastCheckedAt ? `🕒 Last check: ${s.lastCheckedAt}` : "",
       "",
-      s.fixes.length ? "🛠 How to fix:\n" + s.fixes.map((f) => `• ${f}`).join("\n") : "✅ Nothing to fix — send me a message and I'll answer.",
+      s.fixes.length
+        ? "🛠 How to fix:\n" + s.fixes.map((f) => `• ${f}`).join("\n")
+        : "✅ Nothing to fix — send me a message and I'll answer.",
     ]
       .filter(Boolean)
       .join("\n");
@@ -372,12 +416,29 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     return { text, keyboard: this.homeKeyboard() };
   }
 
-
   private homeKeyboard(): InlineKeyboard {
-    // RESTRICTED MODE: only Project list + chat help + ping.
     return [
       [{ text: "📚 Projects", callback_data: "project:list" }],
-      [{ text: "🆘 Help", callback_data: "menu:help" }, { text: "🏓 Self-check", callback_data: "menu:ping" }],
+      [
+        { text: "🤖 Agents", callback_data: "menu:agents" },
+        { text: "🧠 Models", callback_data: "menu:models" },
+      ],
+      [
+        { text: "🛠 Tasks", callback_data: "menu:tasks" },
+        { text: "📼 Runs", callback_data: "menu:runs" },
+      ],
+      [
+        { text: "📊 Status", callback_data: "menu:status" },
+        { text: "🧩 Skills", callback_data: "menu:skills" },
+      ],
+      [
+        { text: "📦 GitHub", callback_data: "menu:github" },
+        { text: "🛑 Approvals", callback_data: "menu:approvals" },
+      ],
+      [
+        { text: "🆘 Help", callback_data: "menu:help" },
+        { text: "🏓 Self-check", callback_data: "menu:ping" },
+      ],
     ];
   }
 
@@ -412,9 +473,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     if (projects.length === 0) {
       return {
         text: "ℹ️ No projects yet.\n\nCreate one from the web UI, or POST /projects with a GitHub repo.",
-        keyboard: this.adHocKeyboard([
-          [{ text: "🏠 Home", callback_data: "menu:home" }],
-        ]),
+        keyboard: this.adHocKeyboard([[{ text: "🏠 Home", callback_data: "menu:home" }]]),
       };
     }
     const rows: InlineKeyboard = projects
@@ -437,7 +496,10 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   }
 
   private repoSummary(p: Project): string {
-    const repos = (p.repositories ?? []).map((r) => r.repo).filter(Boolean).join(", ");
+    const repos = (p.repositories ?? [])
+      .map((r) => r.repo)
+      .filter(Boolean)
+      .join(", ");
     return repos || p.configRepo || "—";
   }
 
@@ -562,9 +624,7 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   private projectsKeyboardOnly(): InlineKeyboard {
     const projects = this.ownedProjects();
     if (projects.length === 0) return [[{ text: "ℹ️ No projects yet", callback_data: "menu:home" }]];
-    return projects
-      .slice(0, 12)
-      .map((p) => [{ text: `📁 ${p.name}`, callback_data: `project:${p.id}` }]);
+    return projects.slice(0, 12).map((p) => [{ text: `📁 ${p.name}`, callback_data: `project:${p.id}` }]);
   }
 
   private modelsView(): View {
@@ -572,7 +632,11 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
     if (models.length === 0) {
       return { text: "ℹ️ No models registered.", keyboard: this.homeKeyboard() };
     }
-    const text = ["🧠 *Models*", "", ...models.map((m) => `• ${m.displayName} (${m.modelId}) — ctx ${m.contextWindow}`)].join("\n");
+    const text = [
+      "🧠 *Models*",
+      "",
+      ...models.map((m) => `• ${m.displayName} (${m.modelId}) — ctx ${m.contextWindow}`),
+    ].join("\n");
     return { text, keyboard: this.homeKeyboard() };
   }
 
@@ -665,7 +729,14 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       .filter((r) => r.agentType === "qa-test")
       .slice(0, 6);
     const text = runs.length
-      ? [`🧪 *Tests — ${p.name}*`, "", ...runs.map((r) => `${r.status === "succeeded" ? "✅" : r.status === "failed" ? "❌" : "⏳"} ${r.status} · ${r.agentType}`)].join("\n")
+      ? [
+          `🧪 *Tests — ${p.name}*`,
+          "",
+          ...runs.map(
+            (r) =>
+              `${r.status === "succeeded" ? "✅" : r.status === "failed" ? "❌" : "⏳"} ${r.status} · ${r.agentType}`,
+          ),
+        ].join("\n")
       : `🧪 *Tests — ${p.name}*\n\nNo test runs yet.`;
     return { text, keyboard: this.projectKeyboard(p) };
   }
@@ -673,7 +744,13 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   private tasksView(p: Project): View {
     const tasks = this.deps.taskRepo.byProject(p.id).slice(0, 8);
     const text = tasks.length
-      ? [`🛠 *Tasks — ${p.name}*`, "", ...tasks.map((t) => `${t.status === "succeeded" ? "✅" : t.status === "failed" ? "❌" : "🔄"} ${t.title.slice(0, 60)}`)].join("\n")
+      ? [
+          `🛠 *Tasks — ${p.name}*`,
+          "",
+          ...tasks.map(
+            (t) => `${t.status === "succeeded" ? "✅" : t.status === "failed" ? "❌" : "🔄"} ${t.title.slice(0, 60)}`,
+          ),
+        ].join("\n")
       : `🛠 *Tasks — ${p.name}*\n\nNo tasks yet.`;
     return { text, keyboard: this.projectKeyboard(p) };
   }
@@ -708,7 +785,10 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
         { text: `❌ ${a.id}`, callback_data: `reject:${a.id}` },
       ]);
     }
-    rows.push([{ text: "🔄 Refresh", callback_data: "menu:approvals" }, { text: "🏠 Home", callback_data: "menu:home" }]);
+    rows.push([
+      { text: "🔄 Refresh", callback_data: "menu:approvals" },
+      { text: "🏠 Home", callback_data: "menu:home" },
+    ]);
     return { text: lines.join("\n"), keyboard: rows };
   }
 
@@ -721,11 +801,19 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       return { text: "🔒 That approval belongs to a project you cannot access.", keyboard: this.homeKeyboard() };
     }
     try {
-      const result = svc.decide(id, decision, { user: t.userId ? `telegram:${t.userId}` : `telegram:${t.chatId}`, source: "telegram" });
+      const result = svc.decide(id, decision, {
+        user: t.userId ? `telegram:${t.userId}` : `telegram:${t.chatId}`,
+        source: "telegram",
+      });
       const ok = result.status === "approved";
       return {
         text: `${ok ? "✅ Approved" : "❌ Rejected"} — *${result.action}*\n\`${result.id}\`${ok ? "\n\nThe agent will continue." : "\n\nThe gated step was skipped."}`,
-        keyboard: this.adHocKeyboard([[{ text: "🛑 Approvals", callback_data: "menu:approvals" }, { text: "🏠 Home", callback_data: "menu:home" }]]),
+        keyboard: this.adHocKeyboard([
+          [
+            { text: "🛑 Approvals", callback_data: "menu:approvals" },
+            { text: "🏠 Home", callback_data: "menu:home" },
+          ],
+        ]),
       };
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -743,23 +831,44 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       .filter((r) => owned.has(r.projectId))
       .slice(0, 10);
     if (runs.length === 0) {
-      return { text: `📜 *Logs*\n\nNo runs recorded${active ? ` for *${active.name}*` : ""} yet.`, keyboard: this.homeKeyboard() };
+      return {
+        text: `📜 *Logs*\n\nNo runs recorded${active ? ` for *${active.name}*` : ""} yet.`,
+        keyboard: this.homeKeyboard(),
+      };
     }
-    const icon = (s: string) => (s === "succeeded" ? "✅" : s === "failed" ? "❌" : s === "waiting_for_approval" ? "🛑" : "⏳");
+    const icon = (s: string) =>
+      s === "succeeded" ? "✅" : s === "failed" ? "❌" : s === "waiting_for_approval" ? "🛑" : "⏳";
     const lines = [`📜 *Logs${active ? ` — ${active.name}` : ""}*`, ""];
     for (const r of runs) {
       const failed = r.steps.find((s) => s.status === "failed");
-      lines.push(`${icon(r.status)} ${r.agentType} · ${r.status} · ${r.durationMs}ms · \`${r.correlationId.slice(0, 12)}\``);
+      lines.push(
+        `${icon(r.status)} ${r.agentType} · ${r.status} · ${r.durationMs}ms · \`${r.correlationId.slice(0, 12)}\``,
+      );
       if (r.error) lines.push(`   ↳ ${r.error.slice(0, 120)}`);
       else if (failed) lines.push(`   ↳ step failed: ${failed.label}`);
     }
-    return { text: lines.join("\n"), keyboard: this.adHocKeyboard([[{ text: "🔄 Refresh", callback_data: "menu:logs" }, { text: "🏠 Home", callback_data: "menu:home" }]]) };
+    return {
+      text: lines.join("\n"),
+      keyboard: this.adHocKeyboard([
+        [
+          { text: "🔄 Refresh", callback_data: "menu:logs" },
+          { text: "🏠 Home", callback_data: "menu:home" },
+        ],
+      ]),
+    };
   }
 
   private runsView(p: Project): View {
     const runs = this.deps.runRepo.byProject(p.id).slice(0, 8);
     const text = runs.length
-      ? [`📼 *Runs — ${p.name}*`, "", ...runs.map((r) => `${r.status === "succeeded" ? "✅" : r.status === "failed" ? "❌" : "⏳"} ${r.status} · ${r.agentType}`)].join("\n")
+      ? [
+          `📼 *Runs — ${p.name}*`,
+          "",
+          ...runs.map(
+            (r) =>
+              `${r.status === "succeeded" ? "✅" : r.status === "failed" ? "❌" : "⏳"} ${r.status} · ${r.agentType}`,
+          ),
+        ].join("\n")
       : `📼 *Runs — ${p.name}*\n\nNo runs yet.`;
     return { text, keyboard: this.projectKeyboard(p) };
   }
@@ -767,7 +876,11 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   private memoryView(p: Project): View {
     const entries = this.deps.memoryRepo?.byProject(p.id) ?? [];
     const text = entries.length
-      ? [`🧠 *Memory — ${p.name}*`, "", ...entries.slice(0, 8).map((m) => `• ${m.type ?? "note"}: ${(m.key ?? m.content ?? "").slice(0, 60)}`)].join("\n")
+      ? [
+          `🧠 *Memory — ${p.name}*`,
+          "",
+          ...entries.slice(0, 8).map((m) => `• ${m.type ?? "note"}: ${(m.key ?? m.content ?? "").slice(0, 60)}`),
+        ].join("\n")
       : `🧠 *Memory — ${p.name}*\n\nNo memory entries yet.`;
     return { text, keyboard: this.projectKeyboard(p) };
   }
@@ -787,20 +900,15 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       };
     }
     const repos = this.repoSummary(p);
-    const text = [
-      `📦 *GitHub — ${p.name}*`,
-      "",
-      `🗃 Repos: ${repos}`,
-      `🌿 Branch: ${p.branch || "main"}`,
-    ].join("\n");
+    const text = [`📦 *GitHub — ${p.name}*`, "", `🗃 Repos: ${repos}`, `🌿 Branch: ${p.branch || "main"}`].join("\n");
     return { text, keyboard: this.projectKeyboard(p) };
   }
 
   private skillsView(p: Project | undefined): View {
-    const skills = (p ? this.deps.skillRepo?.byProject(p.id) : this.deps.skillRepo?.globalCatalog())?.filter((s) => s.enabled) ?? [];
-    const scoped = p && p.settings?.skills?.length
-      ? skills.filter((s) => p.settings?.skills?.includes(s.slug))
-      : skills;
+    const skills =
+      (p ? this.deps.skillRepo?.byProject(p.id) : this.deps.skillRepo?.globalCatalog())?.filter((s) => s.enabled) ?? [];
+    const scoped =
+      p && p.settings?.skills?.length ? skills.filter((s) => p.settings?.skills?.includes(s.slug)) : skills;
     const slice = scoped.slice(0, 10);
     const text = slice.length
       ? [`🧩 *Skills${p ? ` — ${p.name}` : ""}*`, "", ...slice.map((s) => `• ${s.name} (${s.category})`)].join("\n")
@@ -852,20 +960,32 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
         keyboard: this.projectsKeyboardOnly(),
       };
     }
-    // RESTRICTED MODE (v5+): Telegram is chat-only on this build — no task
-    // creation, no autonomous loop, no agents dispatched from Telegram. Users
-    // can chat about the selected project (status, quick Q&A, simple notes);
-    // heavier workflows must be triggered from the web UI.
-    const short = text.length > 120 ? `${text.slice(0, 120)}…` : text;
+    if (!this.deps.queue) {
+      return {
+        text: "⚠️ Background execution is not available in this context.",
+        keyboard: this.projectKeyboard(project),
+      };
+    }
+    // Natural-language requests create a task on the active project and enqueue
+    // it to the background worker (autonomous mode), then report progress as
+    // the run unfolds.
+    const title = text.length > 120 ? `${text.slice(0, 120)}…` : text;
+    const task = this.deps.agentManager.createTask({
+      projectId: project.id,
+      title,
+      description: text,
+      input: { executionMode: "autonomous" },
+    });
+    this.deps.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
     return {
       text: [
-        `💬 پیامت برای پروژه «${project.name}» دریافت شد:`,
+        `✅ *Task created & queued* on ${project.name}`,
         "",
-        short,
+        `\`${title}\``,
         "",
-        "⚠️ در این نسخه بات تلگرام فقط برای انتخاب پروژه و چت ساده فعال است. برای اجرای تسک، اجنت‌ها، تست‌ها و تنظیمات از وب‌اپ استفاده کن.",
+        "I'll report progress as it runs.",
       ].join("\n"),
-      keyboard: this.homeKeyboard(),
+      keyboard: this.projectKeyboard(project),
     };
   }
 
@@ -876,14 +996,22 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
   private projectAgentsView(p: Project): View {
     const agents = this.deps.agentRepo.byProject(p.id);
     const text = agents.length
-      ? [`🤖 *Agents — ${p.name}*`, "", ...agents.slice(0, 18).map((a) => `${a.enabled === false ? "⛔" : "✅"} ${a.name} · ${a.type}`)].join("\n")
+      ? [
+          `🤖 *Agents — ${p.name}*`,
+          "",
+          ...agents.slice(0, 18).map((a) => `${a.enabled === false ? "⛔" : "✅"} ${a.name} · ${a.type}`),
+        ].join("\n")
       : `🤖 *Agents — ${p.name}*\n\nNo agents yet. They are generated when a project is onboarded.`;
     return { text, keyboard: this.projectKeyboard(p) };
   }
 
   private async issuesView(p: Project): Promise<View> {
     const ref = p.repositories?.[0]?.repo ?? p.configRepo;
-    const issues = ref ? await this.safeGithub(() => this.githubFor(p).listIssues({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" })) : undefined;
+    const issues = ref
+      ? await this.safeGithub(() =>
+          this.githubFor(p).listIssues({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" }),
+        )
+      : undefined;
     const open = (issues ?? []).filter((i) => i.state !== "closed").slice(0, 10);
     const text = open.length
       ? [`🐙 *Issues — ${p.name}*`, "", ...open.map((i) => `#${i.number} ${i.title.slice(0, 70)}`)].join("\n")
@@ -893,10 +1021,18 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
 
   private async prsView(p: Project): Promise<View> {
     const ref = p.repositories?.[0]?.repo ?? p.configRepo;
-    const prs = ref ? await this.safeGithub(() => this.githubFor(p).listPullRequests({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" })) : undefined;
+    const prs = ref
+      ? await this.safeGithub(() =>
+          this.githubFor(p).listPullRequests({ owner: ref.split("/")[0] ?? "", name: ref.split("/")[1] ?? "" }),
+        )
+      : undefined;
     const open = (prs ?? []).filter((r) => r.state !== "closed" && r.state !== "merged").slice(0, 10);
     const text = open.length
-      ? [`🔀 *Pull requests — ${p.name}*`, "", ...open.map((r) => `#${r.number} ${r.title.slice(0, 60)} · \`${r.head}\``)].join("\n")
+      ? [
+          `🔀 *Pull requests — ${p.name}*`,
+          "",
+          ...open.map((r) => `#${r.number} ${r.title.slice(0, 60)} · \`${r.head}\``),
+        ].join("\n")
       : `🔀 *Pull requests — ${p.name}*\n\n${ref ? "No open pull requests." : "No repository linked to this project."}`;
     return { text, keyboard: this.projectKeyboard(p) };
   }
@@ -963,10 +1099,17 @@ Open CodeVia → Settings → Telegram, copy the pairing code, and send it here 
       .byProject(p.id)
       .filter((t) => t.status === "created" || t.status === "queued" || t.status === "waiting_for_approval");
     for (const task of pending) {
-      this.deps.taskRepo.upsert({ ...task, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: p.id, parentId: task.parentTaskId });
+      this.deps.taskRepo.upsert(
+        { ...task, status: "cancelled", updatedAt: new Date().toISOString() },
+        { projectId: p.id, parentId: task.parentTaskId },
+      );
     }
     const text = pending.length
-      ? [`🛑 *Cancelled ${pending.length} task(s)* on ${p.name}`, "", ...pending.slice(0, 8).map((t) => `• ${t.title.slice(0, 60)}`)].join("\n")
+      ? [
+          `🛑 *Cancelled ${pending.length} task(s)* on ${p.name}`,
+          "",
+          ...pending.slice(0, 8).map((t) => `• ${t.title.slice(0, 60)}`),
+        ].join("\n")
       : `🛑 *Nothing queued* on ${p.name}.
 
 Running work is reported by /status; cancel mid-run from the web UI.`;

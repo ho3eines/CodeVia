@@ -45,15 +45,21 @@ export class Db {
   }
 
   run(sql: string, params: SqlParams = {}): void {
-    (this.db.prepare(sql) as unknown as { run: (p: Record<string, string | number | null>) => void }).run(sanitize(params));
+    (this.db.prepare(sql) as unknown as { run: (p: Record<string, string | number | null>) => void }).run(
+      sanitize(params),
+    );
   }
 
   get<T = Record<string, unknown>>(sql: string, params: SqlParams = {}): T | undefined {
-    return (this.db.prepare(sql) as unknown as { get: (p: Record<string, string | number | null>) => unknown }).get(sanitize(params)) as T | undefined;
+    return (this.db.prepare(sql) as unknown as { get: (p: Record<string, string | number | null>) => unknown }).get(
+      sanitize(params),
+    ) as T | undefined;
   }
 
   all<T = Record<string, unknown>>(sql: string, params: SqlParams = {}): T[] {
-    return (this.db.prepare(sql) as unknown as { all: (p: Record<string, string | number | null>) => unknown[] }).all(sanitize(params)) as T[];
+    return (this.db.prepare(sql) as unknown as { all: (p: Record<string, string | number | null>) => unknown[] }).all(
+      sanitize(params),
+    ) as T[];
   }
 
   /** Execute a function inside a synchronous transaction. */

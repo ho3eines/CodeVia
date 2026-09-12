@@ -58,8 +58,12 @@ export async function discoverProjectRules(
   if (readme) {
     const content = await read(readme);
     if (content) {
-      const section = extractSection(content, /^#+\s*(contributing|guidelines|conventions|development|coding standards)/im);
-      for (const line of bulletLines(section ?? "").slice(0, 8)) rules.push({ category: "coding", text: line, source: readme });
+      const section = extractSection(
+        content,
+        /^#+\s*(contributing|guidelines|conventions|development|coding standards)/im,
+      );
+      for (const line of bulletLines(section ?? "").slice(0, 8))
+        rules.push({ category: "coding", text: line, source: readme });
     }
   }
 
@@ -68,7 +72,12 @@ export async function discoverProjectRules(
   if (owners) {
     const content = await read(owners);
     const count = (content ?? "").split("\n").filter((l) => l.trim() && !l.trim().startsWith("#")).length;
-    if (count > 0) rules.push({ category: "git", text: `Respect CODEOWNERS: ${count} ownership rule(s) — request review from the listed owners for touched paths.`, source: owners });
+    if (count > 0)
+      rules.push({
+        category: "git",
+        text: `Respect CODEOWNERS: ${count} ownership rule(s) — request review from the listed owners for touched paths.`,
+        source: owners,
+      });
   }
 
   // 4. .editorconfig → naming/coding style.
@@ -78,52 +87,110 @@ export async function discoverProjectRules(
     const indent = /indent_style\s*=\s*(\w+)/i.exec(content)?.[1];
     const size = /indent_size\s*=\s*(\d+)/i.exec(content)?.[1];
     const eol = /end_of_line\s*=\s*(\w+)/i.exec(content)?.[1];
-    const bits = [indent && `${indent} indentation`, size && `size ${size}`, eol && `${eol} line endings`].filter(Boolean);
-    if (bits.length) rules.push({ category: "coding", text: `Follow .editorconfig: ${bits.join(", ")}.`, source: editorconfig });
+    const bits = [indent && `${indent} indentation`, size && `size ${size}`, eol && `${eol} line endings`].filter(
+      Boolean,
+    );
+    if (bits.length)
+      rules.push({ category: "coding", text: `Follow .editorconfig: ${bits.join(", ")}.`, source: editorconfig });
     const naming = content.match(/dotnet_naming_rule\.[^\n]+/g)?.length ?? 0;
-    if (naming > 0) rules.push({ category: "naming", text: `Apply the ${naming} .NET naming rule(s) declared in .editorconfig.`, source: editorconfig });
+    if (naming > 0)
+      rules.push({
+        category: "naming",
+        text: `Apply the ${naming} .NET naming rule(s) declared in .editorconfig.`,
+        source: editorconfig,
+      });
   }
 
   // 5. Directory.Build.props / *.csproj → framework, nullable, warnings-as-errors.
   for (const path of pick(/(^|\/)directory\.build\.props$|\.csproj$/).slice(0, 3)) {
     const content = (await read(path)) ?? "";
     const tf = /<TargetFrameworks?>([^<]+)</i.exec(content)?.[1];
-    if (tf) rules.push({ category: "architecture", text: `Target framework is ${tf}; do not change it without approval.`, source: path });
-    if (/<Nullable>enable</i.test(content)) rules.push({ category: "coding", text: "Nullable reference types are enabled — no new nullable warnings.", source: path });
-    if (/<TreatWarningsAsErrors>true</i.test(content)) rules.push({ category: "coding", text: "Warnings are errors — the build must be warning-free.", source: path });
+    if (tf)
+      rules.push({
+        category: "architecture",
+        text: `Target framework is ${tf}; do not change it without approval.`,
+        source: path,
+      });
+    if (/<Nullable>enable</i.test(content))
+      rules.push({
+        category: "coding",
+        text: "Nullable reference types are enabled — no new nullable warnings.",
+        source: path,
+      });
+    if (/<TreatWarningsAsErrors>true</i.test(content))
+      rules.push({ category: "coding", text: "Warnings are errors — the build must be warning-free.", source: path });
   }
 
   // 6. package.json → scripts (test/lint/build) and engines.
   const pkg = pick(/^package\.json$/)[0];
   if (pkg) {
     try {
-      const json = JSON.parse((await read(pkg)) ?? "{}") as { scripts?: Record<string, string>; engines?: Record<string, string>; type?: string };
+      const json = JSON.parse((await read(pkg)) ?? "{}") as {
+        scripts?: Record<string, string>;
+        engines?: Record<string, string>;
+        type?: string;
+      };
       const scripts = json.scripts ?? {};
-      if (scripts.test) rules.push({ category: "testing", text: `Run \`npm test\` (${scripts.test}) before opening a PR.`, source: pkg });
-      if (scripts.lint) rules.push({ category: "coding", text: `Code must pass \`npm run lint\` (${scripts.lint}).`, source: pkg });
-      if (scripts.build) rules.push({ category: "coding", text: `\`npm run build\` (${scripts.build}) must succeed.`, source: pkg });
-      if (json.engines?.node) rules.push({ category: "architecture", text: `Node.js ${json.engines.node} is required.`, source: pkg });
-      if (json.type === "module") rules.push({ category: "coding", text: "The package is ESM (`type: module`) — use import/export and `.js` specifiers.", source: pkg });
+      if (scripts.test)
+        rules.push({
+          category: "testing",
+          text: `Run \`npm test\` (${scripts.test}) before opening a PR.`,
+          source: pkg,
+        });
+      if (scripts.lint)
+        rules.push({ category: "coding", text: `Code must pass \`npm run lint\` (${scripts.lint}).`, source: pkg });
+      if (scripts.build)
+        rules.push({ category: "coding", text: `\`npm run build\` (${scripts.build}) must succeed.`, source: pkg });
+      if (json.engines?.node)
+        rules.push({ category: "architecture", text: `Node.js ${json.engines.node} is required.`, source: pkg });
+      if (json.type === "module")
+        rules.push({
+          category: "coding",
+          text: "The package is ESM (`type: module`) — use import/export and `.js` specifiers.",
+          source: pkg,
+        });
     } catch {
       /* invalid package.json — ignore */
     }
   }
 
   // 7. Dockerfile / compose → deployment rule.
-  if (pick(/(^|\/)dockerfile$/).length) rules.push({ category: "architecture", text: "The service is containerised — keep the Dockerfile building and avoid host-specific paths.", source: "Dockerfile" });
+  if (pick(/(^|\/)dockerfile$/).length)
+    rules.push({
+      category: "architecture",
+      text: "The service is containerised — keep the Dockerfile building and avoid host-specific paths.",
+      source: "Dockerfile",
+    });
 
   // 8. CI definitions → testing rule.
   const ci = pick(/^\.github\/workflows\/.+\.ya?ml$|^\.gitlab-ci\.ya?ml$|^azure-pipelines\.ya?ml$|^\.circleci\//);
-  if (ci.length) rules.push({ category: "testing", text: `CI is defined in ${ci.slice(0, 3).join(", ")}${ci.length > 3 ? ", …" : ""} — changes must keep CI green.`, source: ci[0]! });
+  if (ci.length)
+    rules.push({
+      category: "testing",
+      text: `CI is defined in ${ci.slice(0, 3).join(", ")}${ci.length > 3 ? ", …" : ""} — changes must keep CI green.`,
+      source: ci[0]!,
+    });
 
   // 9. Security hygiene defaults when secrets scaffolding exists.
-  if (pick(/^\.env\.example$|^\.env\.sample$/).length) rules.push({ category: "security", text: "Configuration comes from environment variables (see .env.example); never commit real secrets.", source: ".env.example" });
+  if (pick(/^\.env\.example$|^\.env\.sample$/).length)
+    rules.push({
+      category: "security",
+      text: "Configuration comes from environment variables (see .env.example); never commit real secrets.",
+      source: ".env.example",
+    });
 
   // 10. Tests folder → testing rule.
-  if (pick(/(^|\/)(tests?|__tests__|spec)\//).length) rules.push({ category: "testing", text: "Add or update tests alongside behaviour changes; existing tests must keep passing.", source: "tests/" });
+  if (pick(/(^|\/)(tests?|__tests__|spec)\//).length)
+    rules.push({
+      category: "testing",
+      text: "Add or update tests alongside behaviour changes; existing tests must keep passing.",
+      source: "tests/",
+    });
 
   const deduped = dedupe(rules);
-  logger.info(`discovered ${deduped.length} rule(s) for ${project.slug}`, { categories: [...new Set(deduped.map((r) => r.category))] });
+  logger.info(`discovered ${deduped.length} rule(s) for ${project.slug}`, {
+    categories: [...new Set(deduped.map((r) => r.category))],
+  });
   return deduped;
 }
 
@@ -131,7 +198,9 @@ export async function discoverProjectRules(
 export function rulesToStrings(rules: DiscoveredRule[]): string[] {
   const byCat = new Map<string, DiscoveredRule[]>();
   for (const r of rules) byCat.set(r.category, [...(byCat.get(r.category) ?? []), r]);
-  return [...byCat.entries()].map(([cat, list]) => `## ${cap(cat)} rules\n${list.map((r) => `- ${r.text}`).join("\n")}`);
+  return [...byCat.entries()].map(
+    ([cat, list]) => `## ${cap(cat)} rules\n${list.map((r) => `- ${r.text}`).join("\n")}`,
+  );
 }
 
 function bulletLines(md: string): string[] {

@@ -4,7 +4,8 @@ export interface WorkflowScope {
   outputs: Record<string, unknown>;
 }
 const forbidden = new Set(["__proto__", "prototype", "constructor"]);
-const lex = /\s*(===|!==|==|!=|>=|<=|&&|\|\||[!><()[\].]|-?\d+(?:\.\d+)?|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_$][\w$]*)/y;
+const lex =
+  /\s*(===|!==|==|!=|>=|<=|&&|\|\||[!><()[\].]|-?\d+(?:\.\d+)?|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_$][\w$]*)/y;
 
 function own(value: unknown, key: string): unknown {
   if (forbidden.has(key)) throw new Error(`Forbidden workflow property: ${key}`);
@@ -28,22 +29,35 @@ export function evaluateExpression(expression: string, scope: WorkflowScope): un
   if (!tokens.length || tokens.length > 512) throw new Error("Invalid workflow expression length");
   let cursor = 0;
   let depth = 0;
-  const take = (token: string): boolean => tokens[cursor] === token ? (++cursor, true) : false;
-  const expect = (token: string): void => { if (!take(token)) throw new Error(`Expected ${token} in workflow expression`); };
-  const string = (token: string): string => token[0] === '"'
-    ? JSON.parse(token) as string
-    : JSON.parse(`"${token.slice(1, -1).replace(/\\'/g, "'").replace(/(?<!\\)"/g, '\\"')}"`) as string;
+  const take = (token: string): boolean => (tokens[cursor] === token ? (++cursor, true) : false);
+  const expect = (token: string): void => {
+    if (!take(token)) throw new Error(`Expected ${token} in workflow expression`);
+  };
+  const string = (token: string): string =>
+    token[0] === '"'
+      ? (JSON.parse(token) as string)
+      : (JSON.parse(
+          `"${token
+            .slice(1, -1)
+            .replace(/\\'/g, "'")
+            .replace(/(?<!\\)"/g, '\\"')}"`,
+        ) as string);
   const primary = (): unknown => {
     if (++depth > 32) throw new Error("Workflow expression is too deeply nested");
     try {
-      if (take("(")) { const result = or(); expect(")"); return result; }
+      if (take("(")) {
+        const result = or();
+        expect(")");
+        return result;
+      }
       const token = tokens[cursor++];
       if (token === "true") return true;
       if (token === "false") return false;
       if (token === "null") return null;
       if (token && /^-?\d/.test(token)) return Number(token);
       if (token?.startsWith('"') || token?.startsWith("'")) return string(token);
-      if (token !== "inputs" && token !== "outputs") throw new Error(`Expected inputs/outputs reference or literal, got ${token ?? "end"}`);
+      if (token !== "inputs" && token !== "outputs")
+        throw new Error(`Expected inputs/outputs reference or literal, got ${token ?? "end"}`);
       let value: unknown = scope[token];
       for (;;) {
         let key: string;
@@ -60,13 +74,15 @@ export function evaluateExpression(expression: string, scope: WorkflowScope): un
         value = own(value, key);
       }
       return value;
-    } finally { depth -= 1; }
+    } finally {
+      depth -= 1;
+    }
   };
   const unary = (): unknown => {
     let count = 0;
     while (take("!")) count += 1;
     const value = primary();
-    return count ? count % 2 ? !value : Boolean(value) : value;
+    return count ? (count % 2 ? !value : Boolean(value)) : value;
   };
   const compare = (): unknown => {
     let value = unary();
@@ -75,7 +91,10 @@ export function evaluateExpression(expression: string, scope: WorkflowScope): un
       const right = unary();
       if (op === "==" || op === "===") value = value === right;
       else if (op === "!=" || op === "!==") value = value !== right;
-      else if ((typeof value === "number" && typeof right === "number") || (typeof value === "string" && typeof right === "string")) {
+      else if (
+        (typeof value === "number" && typeof right === "number") ||
+        (typeof value === "string" && typeof right === "string")
+      ) {
         value = op === ">" ? value > right : op === "<" ? value < right : op === ">=" ? value >= right : value <= right;
       } else value = false;
     }
@@ -83,12 +102,18 @@ export function evaluateExpression(expression: string, scope: WorkflowScope): un
   };
   const and = (): unknown => {
     let value = compare();
-    while (take("&&")) { const right = compare(); value = Boolean(value) && Boolean(right); }
+    while (take("&&")) {
+      const right = compare();
+      value = Boolean(value) && Boolean(right);
+    }
     return value;
   };
   const or = (): unknown => {
     let value = and();
-    while (take("||")) { const right = and(); value = Boolean(value) || Boolean(right); }
+    while (take("||")) {
+      const right = and();
+      value = Boolean(value) || Boolean(right);
+    }
     return value;
   };
   const result = or();
@@ -114,10 +139,12 @@ export function resolveWorkflowInput(value: unknown, scope: WorkflowScope, depth
   }
   if (Array.isArray(value)) return value.map((entry) => resolveWorkflowInput(entry, scope, depth + 1));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
-      if (forbidden.has(key)) throw new Error(`Forbidden workflow input key: ${key}`);
-      return [key, resolveWorkflowInput(entry, scope, depth + 1)];
-    }));
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => {
+        if (forbidden.has(key)) throw new Error(`Forbidden workflow input key: ${key}`);
+        return [key, resolveWorkflowInput(entry, scope, depth + 1)];
+      }),
+    );
   }
   return value;
 }

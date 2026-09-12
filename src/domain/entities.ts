@@ -1,13 +1,4 @@
-import type {
-  CorrelationId,
-  ID,
-  ISODate,
-  JobStatus,
-  Permission,
-  RunStatus,
-  TaskStatus,
-  UserRole,
-} from "../types.js";
+import type { CorrelationId, ID, ISODate, JobStatus, Permission, RunStatus, TaskStatus, UserRole } from "../types.js";
 
 /* ------------------------------------------------------------------ *
  * User
@@ -163,14 +154,7 @@ export interface AssignedSkill {
 
 /** Role a linked repository plays inside a project (multi-repo projects). */
 export type ProjectRepositoryRole =
-  | "primary"
-  | "frontend"
-  | "backend"
-  | "mobile"
-  | "infra"
-  | "docs"
-  | "library"
-  | "other";
+  "primary" | "frontend" | "backend" | "mobile" | "infra" | "docs" | "library" | "other";
 
 /** A GitHub repository linked to a project. Picked from the connected account. */
 export interface ProjectRepositoryLink {
@@ -316,9 +300,7 @@ export interface AgentModelConfig {
    * the conversation assistant").
    */
   allowedModels?: ID[];
-  specialized: Partial<
-    Record<"research" | "coding" | "vision" | "fast" | "final-review" | "reasoning", ID>
-  >;
+  specialized: Partial<Record<"research" | "coding" | "vision" | "fast" | "final-review" | "reasoning", ID>>;
 }
 
 export interface Agent {
@@ -355,14 +337,7 @@ export interface Agent {
  * Workflow
  * ------------------------------------------------------------------ */
 export type WorkflowNodeType =
-  | "agent"
-  | "tool"
-  | "condition"
-  | "approval"
-  | "parallel"
-  | "trigger"
-  | "webhook"
-  | "telegram";
+  "agent" | "tool" | "condition" | "approval" | "parallel" | "trigger" | "webhook" | "telegram";
 
 export interface WorkflowNode {
   id: string;
@@ -517,14 +492,7 @@ export interface Conversation {
  * ------------------------------------------------------------------ */
 export type MemoryScope = "global" | "project" | "agent" | "task" | "conversation";
 export type MemoryType =
-  | "architecture"
-  | "business"
-  | "technical"
-  | "decision"
-  | "bug"
-  | "knowledge"
-  | "lesson"
-  | "conversation";
+  "architecture" | "business" | "technical" | "decision" | "bug" | "knowledge" | "lesson" | "conversation";
 
 export interface MemoryEntry {
   id: ID;

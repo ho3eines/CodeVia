@@ -85,8 +85,12 @@ export const DEFAULT_RULES: AutomationRule[] = [
   {
     event: "github.workflow_completed",
     agentType: "debugging",
-    when: (c) => /fail|cancel|timed_out/i.test(String((c.body.workflow_run as { conclusion?: string } | undefined)?.conclusion ?? "")),
-    title: (c) => `Diagnose failed CI run: ${String((c.body.workflow_run as { name?: string } | undefined)?.name ?? "workflow")}`,
+    when: (c) =>
+      /fail|cancel|timed_out/i.test(
+        String((c.body.workflow_run as { conclusion?: string } | undefined)?.conclusion ?? ""),
+      ),
+    title: (c) =>
+      `Diagnose failed CI run: ${String((c.body.workflow_run as { name?: string } | undefined)?.name ?? "workflow")}`,
   },
 ];
 
@@ -97,8 +101,11 @@ export function isStateOnlyPush(body: Record<string, unknown>): boolean {
   return body.commits.every((value) => {
     const commit = value as Record<string, unknown>;
     if (!commit || !["added", "modified", "removed"].every((k) => Array.isArray(commit[k]))) return false;
-    const paths = [...commit.added as unknown[], ...commit.modified as unknown[], ...commit.removed as unknown[]];
-    return paths.length > 0 && paths.every((path) => typeof path === "string" && path.startsWith("CodeVia/") && !path.split("/").includes(".."));
+    const paths = [...(commit.added as unknown[]), ...(commit.modified as unknown[]), ...(commit.removed as unknown[])];
+    return (
+      paths.length > 0 &&
+      paths.every((path) => typeof path === "string" && path.startsWith("CodeVia/") && !path.split("/").includes(".."))
+    );
   });
 }
 
@@ -111,16 +118,24 @@ let active: GithubAutomation | undefined;
 export class GithubAutomation {
   private readonly unsubscribe: Array<() => void> = [];
 
-  constructor(private readonly deps: GithubAutomationDeps, private readonly rules: AutomationRule[] = DEFAULT_RULES) {}
+  constructor(
+    private readonly deps: GithubAutomationDeps,
+    private readonly rules: AutomationRule[] = DEFAULT_RULES,
+  ) {}
 
   /** Subscribe to the event bus. Idempotent — calling twice is a no-op. */
   start(): void {
     if (this.unsubscribe.length > 0) return;
     if (active && active !== this) active.stop();
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- process-global singleton: only one automation may be live at a time.
     active = this;
     const names = [...new Set(this.rules.map((r) => r.event))];
     for (const name of names) {
-      this.unsubscribe.push(eventBus.on(name, async (e) => { await this.handle(e); }));
+      this.unsubscribe.push(
+        eventBus.on(name, async (e) => {
+          await this.handle(e);
+        }),
+      );
     }
   }
 
@@ -151,7 +166,10 @@ export class GithubAutomation {
       return [];
     }
     const matching = this.rules.filter(
-      (r) => r.event === e.name && (!r.actions || (ctx.action !== undefined && r.actions.includes(ctx.action))) && (!r.when || r.when(ctx)),
+      (r) =>
+        r.event === e.name &&
+        (!r.actions || (ctx.action !== undefined && r.actions.includes(ctx.action))) &&
+        (!r.when || r.when(ctx)),
     );
     if (matching.length === 0) return [];
 
@@ -168,7 +186,14 @@ export class GithubAutomation {
           title: rule.title(ctx),
           description: describe(ctx),
           agentType: rule.agentType,
-          input: { source: "github", event: ctx.event, action: ctx.action, repo: ctx.repo, branch: ctx.branch, deliveryId },
+          input: {
+            source: "github",
+            event: ctx.event,
+            action: ctx.action,
+            repo: ctx.repo,
+            branch: ctx.branch,
+            deliveryId,
+          },
         });
         this.deps.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
         this.deps.taskRepo.upsert(
@@ -182,13 +207,26 @@ export class GithubAutomation {
           result: "success",
           source: "github",
           correlationId: e.correlationId,
-          metadata: { event: ctx.event, action: ctx.action, repo: ctx.repo, taskId: task.id, agentType: rule.agentType, deliveryId },
+          metadata: {
+            event: ctx.event,
+            action: ctx.action,
+            repo: ctx.repo,
+            taskId: task.id,
+            agentType: rule.agentType,
+            deliveryId,
+          },
         });
         created.push({ projectId: project.id, taskId: task.id, agentType: rule.agentType });
       }
     }
     if (deliveryId) this.remember(deliveryId);
-    if (created.length > 0) logger.info("github automation routed event", { event: ctx.event, action: ctx.action, repo: ctx.repo, tasks: created.length });
+    if (created.length > 0)
+      logger.info("github automation routed event", {
+        event: ctx.event,
+        action: ctx.action,
+        repo: ctx.repo,
+        tasks: created.length,
+      });
     return created;
   }
 
@@ -238,7 +276,13 @@ function describe(c: EventContext): string {
   if (c.branch) parts.push(`branch: ${c.branch}`);
   const commits = c.body.commits as Array<{ message?: string; id?: string }> | undefined;
   if (Array.isArray(commits) && commits.length) {
-    parts.push("commits:\n" + commits.slice(0, 10).map((k) => `- ${(k.id ?? "").slice(0, 7)} ${(k.message ?? "").split("\n")[0]}`).join("\n"));
+    parts.push(
+      "commits:\n" +
+        commits
+          .slice(0, 10)
+          .map((k) => `- ${(k.id ?? "").slice(0, 7)} ${(k.message ?? "").split("\n")[0]}`)
+          .join("\n"),
+    );
   }
   const pr = c.body.pull_request as { title?: string; body?: string; html_url?: string } | undefined;
   if (pr) parts.push(`PR: ${pr.title ?? ""}\n${pr.html_url ?? ""}\n${(pr.body ?? "").slice(0, 1000)}`);

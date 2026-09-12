@@ -13,7 +13,12 @@ function mkModel(partial: Partial<Model>): Model {
     inputCostPer1k: partial.inputCostPer1k ?? 0,
     outputCostPer1k: partial.outputCostPer1k ?? 0,
     capabilities: partial.capabilities ?? {
-      vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true,
+      vision: false,
+      tools: true,
+      structuredOutput: false,
+      code: true,
+      reasoning: false,
+      streaming: true,
     },
     active: true,
     priority: partial.priority ?? 100,
@@ -29,9 +34,48 @@ const router = new ModelRouter();
 describe("ModelRouter", () => {
   it("returns an ordered candidate list for a coding task respecting code capability", () => {
     const models: CandidateModel[] = [
-      toCandidate(mkModel({ id: "m-weak", priority: 1, capabilities: { vision: false, tools: true, structuredOutput: false, code: false, reasoning: false, streaming: true } })),
-      toCandidate(mkModel({ id: "m-strong", priority: 2, capabilities: { vision: true, tools: true, structuredOutput: true, code: true, reasoning: true, streaming: true } })),
-      toCandidate(mkModel({ id: "m-fast", priority: 3, capabilities: { vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true } })),
+      toCandidate(
+        mkModel({
+          id: "m-weak",
+          priority: 1,
+          capabilities: {
+            vision: false,
+            tools: true,
+            structuredOutput: false,
+            code: false,
+            reasoning: false,
+            streaming: true,
+          },
+        }),
+      ),
+      toCandidate(
+        mkModel({
+          id: "m-strong",
+          priority: 2,
+          capabilities: {
+            vision: true,
+            tools: true,
+            structuredOutput: true,
+            code: true,
+            reasoning: true,
+            streaming: true,
+          },
+        }),
+      ),
+      toCandidate(
+        mkModel({
+          id: "m-fast",
+          priority: 3,
+          capabilities: {
+            vision: false,
+            tools: true,
+            structuredOutput: false,
+            code: true,
+            reasoning: false,
+            streaming: true,
+          },
+        }),
+      ),
     ];
     const config: AgentModelConfig = { primary: "m-strong", fallbacks: ["m-fast", "m-weak"], specialized: {} };
     const result = router.route(models, config, "coding");
@@ -55,8 +99,34 @@ describe("ModelRouter", () => {
 
   it("moves the user-preferred model to the front", () => {
     const models: CandidateModel[] = [
-      toCandidate(mkModel({ id: "x", priority: 1, capabilities: { vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true } })),
-      toCandidate(mkModel({ id: "y", priority: 2, capabilities: { vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true } })),
+      toCandidate(
+        mkModel({
+          id: "x",
+          priority: 1,
+          capabilities: {
+            vision: false,
+            tools: true,
+            structuredOutput: false,
+            code: true,
+            reasoning: false,
+            streaming: true,
+          },
+        }),
+      ),
+      toCandidate(
+        mkModel({
+          id: "y",
+          priority: 2,
+          capabilities: {
+            vision: false,
+            tools: true,
+            structuredOutput: false,
+            code: true,
+            reasoning: false,
+            streaming: true,
+          },
+        }),
+      ),
     ];
     const config: AgentModelConfig = { primary: "x", fallbacks: [], specialized: {} };
     const result = router.route(models, config, "default", { userPreferredModelId: "y" });
@@ -65,8 +135,36 @@ describe("ModelRouter", () => {
 
   it("filters models whose context window is too small for the budget", () => {
     const models: CandidateModel[] = [
-      toCandidate(mkModel({ id: "small", contextWindow: 2000, priority: 1, capabilities: { vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true } })),
-      toCandidate(mkModel({ id: "big", contextWindow: 100000, priority: 2, capabilities: { vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true } })),
+      toCandidate(
+        mkModel({
+          id: "small",
+          contextWindow: 2000,
+          priority: 1,
+          capabilities: {
+            vision: false,
+            tools: true,
+            structuredOutput: false,
+            code: true,
+            reasoning: false,
+            streaming: true,
+          },
+        }),
+      ),
+      toCandidate(
+        mkModel({
+          id: "big",
+          contextWindow: 100000,
+          priority: 2,
+          capabilities: {
+            vision: false,
+            tools: true,
+            structuredOutput: false,
+            code: true,
+            reasoning: false,
+            streaming: true,
+          },
+        }),
+      ),
     ];
     const config: AgentModelConfig = { primary: "small", fallbacks: ["big"], specialized: {} };
     const result = router.route(models, config, "default", { maxTokens: 10000 });

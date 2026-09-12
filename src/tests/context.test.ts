@@ -1,10 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import type { Project, Task } from "../domain/entities.js";
+import type { Project } from "../domain/entities.js";
 import { Container } from "../app/container.js";
 import { MockGitHubService } from "../github/mock-service.js";
 import {
-  buildContextPack, renderContextMarkdown, parseRegistry, mergeRegistry,
-  renderPromptContext, extendContent, syncProjectContext,
+  buildContextPack,
+  renderContextMarkdown,
+  parseRegistry,
+  mergeRegistry,
+  renderPromptContext,
+  extendContent,
+  syncProjectContext,
 } from "../agents/context.js";
 import { CONTEXT_FILE, RUNTIME_CONTEXT_FILE } from "../github/project-files.js";
 import { freshDb } from "./test-helpers.js";
@@ -22,8 +27,11 @@ function seedCodeRepo(): MockGitHubService {
   const gh = new MockGitHubService({ seedDemoRepos: false });
   gh.seedRepo("acme", "shop", {
     files: [
-      { path: "src/ShopApp.Api/ShopApp.Api.csproj", content: "<Project Sdk=\"Microsoft.NET.Sdk.Web\">\n</Project>\n" },
-      { path: "src/ShopApp.Api/Controllers/LoginController.cs", content: "// login v1\npublic class LoginController {}\n" },
+      { path: "src/ShopApp.Api/ShopApp.Api.csproj", content: '<Project Sdk="Microsoft.NET.Sdk.Web">\n</Project>\n' },
+      {
+        path: "src/ShopApp.Api/Controllers/LoginController.cs",
+        content: "// login v1\npublic class LoginController {}\n",
+      },
       { path: "src/ShopApp.Api/Controllers/UserController.cs", content: "// users\npublic class UserController {}\n" },
       { path: "README.md", content: "# shop\n" },
       { path: "CodeVia/project.md", content: "# manifest\n" },
@@ -70,9 +78,18 @@ describe("buildContextPack", () => {
       const p = await container.agentManager.createProject({ name: "M", description: "d", configRepo: "acme/mem" });
       container.memoryRepo.upsert(
         {
-          id: "mem-1", projectId: p.id, scope: "project", type: "decision", key: "auth.strategy",
-          content: "Use JWT everywhere", tags: [], refs: [], source: "test", version: 1,
-          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          id: "mem-1",
+          projectId: p.id,
+          scope: "project",
+          type: "decision",
+          key: "auth.strategy",
+          content: "Use JWT everywhere",
+          tags: [],
+          refs: [],
+          source: "test",
+          version: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
         },
         { projectId: p.id, key: "auth.strategy" },
       );
@@ -97,17 +114,44 @@ describe("buildContextPack", () => {
     expect(pack.tree).toEqual([]);
     expect(pack.related).toEqual([]);
   });
+
+  it("includes linked implementation repositories in the pack (A16)", async () => {
+    const gh = new MockGitHubService({ seedDemoRepos: false });
+    gh.seedRepo("acme", "config", { files: [{ path: "README.md", content: "# config\n" }] });
+    gh.seedRepo("acme", "backend", {
+      files: [{ path: "src/ExistingAuthEntry.ts", content: "export const existingAuth = true;\n" }],
+    });
+    const pack = await buildContextPack({
+      github: gh,
+      project: project({
+        configRepo: "acme/config",
+        repositories: [
+          { repo: "acme/config", branch: "main", role: "primary", isConfigRepo: true },
+          { repo: "acme/backend", branch: "main", role: "backend" },
+        ],
+      }),
+    });
+    expect(pack.linked).toHaveLength(1);
+    expect(pack.linked![0]).toMatchObject({ repo: "acme/backend", branch: "main" });
+    expect(pack.linked![0].tree).toContain("src/ExistingAuthEntry.ts");
+    expect(renderPromptContext(pack, "(planning)")).toContain("src/ExistingAuthEntry.ts");
+  });
 });
 
 describe("registry round-trip", () => {
   it("renders, parses and merges the entity registry", () => {
     const p = project();
     const md = renderContextMarkdown(p, {
-      tree: ["a.ts"], totalFiles: 1,
+      tree: ["a.ts"],
+      totalFiles: 1,
       stack: { backend: "node-ts", frontend: "react", project: "ShopApp", pkg: "shopapp" },
       stackSummary: "backend node-ts · frontend react · project ShopApp",
-      configs: [], related: [], memory: [],
-      registry: { Login: { entity: "Login", path: "src/login.ts", agentType: "backend-developer", subtaskId: "task-1", at: "t" } },
+      configs: [],
+      related: [],
+      memory: [],
+      registry: {
+        Login: { entity: "Login", path: "src/login.ts", agentType: "backend-developer", subtaskId: "task-1", at: "t" },
+      },
     });
     expect(md).toContain("src/login.ts");
     expect(md).toContain("Stack: backend node-ts");
@@ -128,7 +172,8 @@ describe("renderPromptContext", () => {
   it("tells real AI to extend and never duplicate", () => {
     const out = renderPromptContext(
       {
-        tree: ["src/a.ts"], totalFiles: 1,
+        tree: ["src/a.ts"],
+        totalFiles: 1,
         stack: { backend: "node-ts", frontend: "react", project: "A", pkg: "a" },
         stackSummary: "s",
         configs: [{ path: "package.json", content: "{}" }],
@@ -146,11 +191,18 @@ describe("renderPromptContext", () => {
 
 describe("extendContent", () => {
   const base = {
-    agentName: "Backend Developer", agentType: "backend-developer" as const,
-    taskTitle: "Add login rate limiting", subtaskId: "task-new", todos: ["Throttle attempts per IP"],
+    agentName: "Backend Developer",
+    agentType: "backend-developer" as const,
+    taskTitle: "Add login rate limiting",
+    subtaskId: "task-new",
+    todos: ["Throttle attempts per IP"],
   };
   it("preserves C# code and adds //-comment TODOs", () => {
-    const out = extendContent({ ...base, existing: "public class LoginController {}\n", path: "src/LoginController.cs" });
+    const out = extendContent({
+      ...base,
+      existing: "public class LoginController {}\n",
+      path: "src/LoginController.cs",
+    });
     expect(out).toContain("public class LoginController {}");
     expect(out).toContain("task-new");
     expect(out).toContain("Existing implementation preserved");
@@ -180,7 +232,9 @@ describe("continuity end-to-end (mock AI + mock GitHub)", () => {
 
   it("second task on the same entity extends merged work instead of overwriting", async () => {
     const p = await container.agentManager.createProject({
-      name: "Shop App", description: "d", configRepo: "acme/shop",
+      name: "Shop App",
+      description: "d",
+      configRepo: "acme/shop",
       capabilities: { languages: ["csharp"], frameworks: ["dotnet"] } as Project["capabilities"],
     });
     const gh = container.github as unknown as MockGitHubService;
@@ -188,7 +242,10 @@ describe("continuity end-to-end (mock AI + mock GitHub)", () => {
 
     // Task 1: login API → scaffold on its branch.
     const t1 = container.agentManager.createTask({
-      projectId: p.id, title: "Add login API", description: "Session endpoint", input: { executionMode: "autonomous" },
+      projectId: p.id,
+      title: "Add login API",
+      description: "Session endpoint",
+      input: { executionMode: "autonomous" },
     });
     expect((await container.agentManager.runTask(t1.id)).status).toBe("succeeded");
     const kids1 = container.taskRepo.findMany({ parentId: t1.id }).map((k) => k.data);
@@ -204,7 +261,9 @@ describe("continuity end-to-end (mock AI + mock GitHub)", () => {
     expect((await gh.getFile(ref, target, "main"))?.content).toContain(be1.id);
 
     const t2 = container.agentManager.createTask({
-      projectId: p.id, title: "Add login rate limiting", description: "Throttle login attempts per IP",
+      projectId: p.id,
+      title: "Add login rate limiting",
+      description: "Throttle login attempts per IP",
       input: { executionMode: "autonomous" },
     });
     expect((await container.agentManager.runTask(t2.id)).status).toBe("succeeded");

@@ -127,7 +127,7 @@ export class Worker {
     if (!task || ["succeeded", "failed", "cancelled"].includes(task.status)) return;
     const updated = {
       ...task,
-      status: exhausted ? "failed" as const : "queued" as const,
+      status: exhausted ? ("failed" as const) : ("queued" as const),
       error: exhausted ? job.error : undefined,
       updatedAt: new Date().toISOString(),
     };
@@ -205,7 +205,11 @@ export class Worker {
         await gh.createIssue(repo, String(p.title ?? "Untitled"), String(p.body ?? ""));
         break;
       case "update_pr":
-        await gh.updatePullRequest(repo, Number(p.number), (p.patch as Partial<{ title: string; body: string; state: string }>) ?? {});
+        await gh.updatePullRequest(
+          repo,
+          Number(p.number),
+          (p.patch as Partial<{ title: string; body: string; state: string }>) ?? {},
+        );
         break;
       case "create_branch": {
         const branches = await gh.listBranches(repo);
@@ -222,7 +226,9 @@ export class Worker {
         // project's own GitHub connection, never an unscoped platform default.
         this.requireApprovedMergeApproval(p, project, repo, Number(p.number));
         const ghForMerge = project && this.deps.githubForProject ? this.deps.githubForProject(project) : gh;
-        const res = await ghForMerge.mergePullRequest(repo, Number(p.number), { method: (p.method as "merge" | "squash" | "rebase") ?? "squash" });
+        const res = await ghForMerge.mergePullRequest(repo, Number(p.number), {
+          method: (p.method as "merge" | "squash" | "rebase") ?? "squash",
+        });
         if (!res.merged) throw new Error(`merge_pr #${p.number} failed: ${res.message ?? "unknown"}`);
         break;
       }
@@ -270,23 +276,69 @@ export class Worker {
     const detail = (approval.detail ?? {}) as Record<string, unknown>;
     const nested = (detail.input ?? detail.payload ?? {}) as Record<string, unknown>;
     const recordedNumber =
-      pickPositiveNumber(detail.number) ?? pickPositiveNumber(nested.number) ??
-      pickPositiveNumber(detail.pr) ?? pickPositiveNumber(detail.prNumber) ??
-      pickPositiveNumber(nested.pr) ?? pickPositiveNumber(nested.prNumber);
+      pickPositiveNumber(detail.number) ??
+      pickPositiveNumber(nested.number) ??
+      pickPositiveNumber(detail.pr) ??
+      pickPositiveNumber(detail.prNumber) ??
+      pickPositiveNumber(nested.pr) ??
+      pickPositiveNumber(nested.prNumber);
     if (recordedNumber === undefined || recordedNumber !== number) {
       throw new Error(`github.op merge_pr: approval ${approvalId} does not record pull request #${number}`);
     }
     const recordedRepo =
-      pickRepoString(detail.repo) ?? pickRepoString(nested.repo) ?? pickRepoString(detail.repository) ?? pickRepoString(nested.repository);
+      pickRepoString(detail.repo) ??
+      pickRepoString(nested.repo) ??
+      pickRepoString(detail.repository) ??
+      pickRepoString(nested.repository);
     const fullName = `${repo.owner}/${repo.name}`.toLowerCase();
     if (recordedRepo) {
       if (recordedRepo.toLowerCase() !== fullName) {
-        throw new Error(`github.op merge_pr: approval ${approvalId} records repository ${recordedRepo}, not ${fullName}`);
+        throw new Error(
+          `github.op merge_pr: approval ${approvalId} records repository ${recordedRepo}, not ${fullName}`,
+        );
       }
     } else if (!project || project.repositories.length > 1) {
       throw new Error(
         `github.op merge_pr: approval ${approvalId} must record the repository when the project has multiple repositories`,
       );
+    }
+
+    // (A04) Expiry: an approval whose validity window has passed cannot
+    // authorize a merge. Auto-approve grants carry no `expiresAt` and stay
+    // valid in dev/simulation mode; every human-granted approval does expire.
+    if (approval.expiresAt && new Date(approval.expiresAt).getTime() <= Date.now()) {
+      throw new Error(`github.op merge_pr: approval ${approvalId} has expired (${approval.expiresAt})`);
+    }
+
+    // (A04) Commit SHA binding: when the approval was granted for a specific
+    // head SHA, the merge job must target that exact SHA. A PR that moved on
+    // after the human reviewed it is a different subject and is not authorized.
+    const recordedSha =
+      pickSha(detail.commitSha) ?? pickSha(nested.commitSha) ?? pickSha(detail.headSha) ?? pickSha(nested.headSha);
+    const jobSha = pickSha(payload.commitSha) ?? pickSha(payload.sha);
+    if (recordedSha) {
+      if (!jobSha) {
+        throw new Error(
+          `github.op merge_pr: approval ${approvalId} is bound to commit ${recordedSha}; the merge job must carry the same commitSha`,
+        );
+      }
+      if (jobSha !== recordedSha) {
+        throw new Error(
+          `github.op merge_pr: approval ${approvalId} records commit ${recordedSha}, but the job targets ${jobSha}`,
+        );
+      }
+    }
+
+    // (A04) Actor binding: a job that names an actor must match the actor the
+    // approval was requested for (or, failing that, the actor who decided it).
+    const jobActor = pickId(payload.actorId);
+    if (jobActor) {
+      const recordedActor = pickId(detail.actorId) ?? pickId(nested.actorId) ?? pickId(approval.decidedBy);
+      if (recordedActor && recordedActor !== jobActor) {
+        throw new Error(
+          `github.op merge_pr: approval ${approvalId} was requested/decided by ${recordedActor}, not ${jobActor}`,
+        );
+      }
     }
     return approval;
   }
@@ -295,6 +347,18 @@ export class Worker {
 function pickPositiveNumber(value: unknown): number | undefined {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function pickSha(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  return /^[0-9a-f]{7,64}$/i.test(v) ? v : undefined;
+}
+
+function pickId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  return v ? v : undefined;
 }
 
 function pickRepoString(value: unknown): string | undefined {

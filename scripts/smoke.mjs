@@ -74,7 +74,8 @@ async function startServer() {
       /* not up yet */
     }
     if (Date.now() > deadline) throw new Error("server did not boot in 45s\n" + serverLogs.slice(-2000));
-    if (server.exitCode !== null) throw new Error(`server exited early (code ${server.exitCode})\n` + serverLogs.slice(-2000));
+    if (server.exitCode !== null)
+      throw new Error(`server exited early (code ${server.exitCode})\n` + serverLogs.slice(-2000));
     await sleep(500);
   }
 }
@@ -145,36 +146,63 @@ async function main() {
     check("research unit exists + enabled", research?.enabled === true);
     check(
       "research prompt carries selections",
-      research.systemPrompt.includes("Platforms: web, mobile") && research.systemPrompt.includes("Key features: auth, payments"),
+      research.systemPrompt.includes("Platforms: web, mobile") &&
+        research.systemPrompt.includes("Key features: auth, payments"),
     );
 
     // CodeVia/ folder in git
     const files = ((await api(`/projects/${pid}/files?path=CodeVia`)).json ?? []).map((f) => f.path);
     check("CodeVia/project.md synced", files.includes("CodeVia/project.md"), `${files.length} files`);
     check("CodeVia/agents/research.md synced", files.includes("CodeVia/agents/research.md"));
-    check("CodeVia/skills.md + memory.md synced", files.includes("CodeVia/skills.md") && files.includes("CodeVia/memory.md"));
+    check(
+      "CodeVia/skills.md + memory.md synced",
+      files.includes("CodeVia/skills.md") && files.includes("CodeVia/memory.md"),
+    );
 
     // Autonomous task loop
     const ask = await api(`/projects/${pid}/ask`, {
       method: "POST",
-      body: { title: "Add login page and API", description: "Build the login screen and the session endpoint", executionMode: "autonomous" },
+      body: {
+        title: "Add login page and API",
+        description: "Build the login screen and the session endpoint",
+        executionMode: "autonomous",
+      },
     });
     check("autonomous ask accepted", ask.status === 200 && ask.json.task?.id, `status=${ask.status}`);
     const parent = await waitForTask(pid, ask.json.task.id);
-    check("parent task completes", parent.status === "succeeded", `status=${parent.status} err=${parent.error ?? ""}`.slice(0, 200));
+    check(
+      "parent task completes",
+      parent.status === "succeeded",
+      `status=${parent.status} err=${parent.error ?? ""}`.slice(0, 200),
+    );
 
     const allTasks = (await api(`/projects/${pid}/tasks`)).json ?? [];
     const kids = allTasks.filter((t) => t.parentTaskId === parent.id);
     const types = kids.map((k) => k.agentType);
     const ordered = [...kids].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-    check("research ran first", ordered.length > 0 && ordered[0].agentType === "research", ordered.map((k) => k.agentType).join(","));
-    check("research → backend + frontend → QA", ["research", "backend-developer", "frontend-developer", "qa-test"].every((t) => types.includes(t)), types.join(","));
-    check("every subtask succeeded", kids.every((k) => k.status === "succeeded"), kids.map((k) => `${k.agentType}=${k.status}`).join(","));
+    check(
+      "research ran first",
+      ordered.length > 0 && ordered[0].agentType === "research",
+      ordered.map((k) => k.agentType).join(","),
+    );
+    check(
+      "research → backend + frontend → QA",
+      ["research", "backend-developer", "frontend-developer", "qa-test"].every((t) => types.includes(t)),
+      types.join(","),
+    );
+    check(
+      "every subtask succeeded",
+      kids.every((k) => k.status === "succeeded"),
+      kids.map((k) => `${k.agentType}=${k.status}`).join(","),
+    );
 
     const full = (await api(`/tasks/${parent.id}`)).json;
     const brief = full.input?.researchBrief ?? "";
     check("research brief stored on parent", brief.includes("Research brief for"), `${brief.length} chars`);
-    check("brief embeds definition selections", brief.includes("Platforms: web, mobile") && brief.includes("Key features: auth, payments"));
+    check(
+      "brief embeds definition selections",
+      brief.includes("Platforms: web, mobile") && brief.includes("Key features: auth, payments"),
+    );
     check(
       "every unit has an explicit duty",
       kids.filter((k) => k.agentType !== "research").every((k) => (k.description ?? "").includes("Your duty:")),
@@ -190,11 +218,19 @@ async function main() {
     const taskFiles = ((await api(`/projects/${pid}/files?path=CodeVia/tasks`)).json ?? []).map((f) => f.path);
     check("task files synced to repo", taskFiles.length >= kids.length + 1, `${taskFiles.length} files`);
     const memFile = await api(`/projects/${pid}/file?path=CodeVia/memory.md`);
-    check("CodeVia/memory.md manages memory", memFile.status === 200 && memFile.json.content.includes("### "), `status=${memFile.status}`);
+    check(
+      "CodeVia/memory.md manages memory",
+      memFile.status === 200 && memFile.json.content.includes("### "),
+      `status=${memFile.status}`,
+    );
 
     // Pull / restore
     const pull = await api(`/projects/${pid}/pull`, { method: "POST", body: {} });
-    check("pull restores from git", pull.status === 200 && pull.json.agents > 0 && pull.json.tasks > 0, `status=${pull.status}`);
+    check(
+      "pull restores from git",
+      pull.status === 200 && pull.json.agents > 0 && pull.json.tasks > 0,
+      `status=${pull.status}`,
+    );
 
     // Continuity: merged work is extended, never overwritten
     const prsAll = (await api(`/projects/${pid}/pull-requests`)).json ?? [];
@@ -205,7 +241,11 @@ async function main() {
     check("merge brings code to main", mg.json?.merged === true, JSON.stringify(mg.json).slice(0, 120));
     const ask2 = await api(`/projects/${pid}/ask`, {
       method: "POST",
-      body: { title: "Add login rate limiting", description: "Throttle login attempts per IP", executionMode: "autonomous" },
+      body: {
+        title: "Add login rate limiting",
+        description: "Throttle login attempts per IP",
+        executionMode: "autonomous",
+      },
     });
     check("follow-up ask accepted", ask2.status === 200 && ask2.json.task?.id, `status=${ask2.status}`);
     const parent2 = await waitForTask(pid, ask2.json.task.id);
@@ -215,17 +255,29 @@ async function main() {
       `/projects/${pid}/file?path=${encodeURIComponent("src/SmokeShop.Api/Controllers/LoginController.cs")}&branch=${encodeURIComponent(prsNew[0].head)}`,
     );
     const v2c = v2.json?.content ?? "";
-    check("follow-up extends merged work (no overwrite)", v2c.includes("Existing implementation preserved") && v2c.includes(be1.id), `${v2c.length} chars`);
+    check(
+      "follow-up extends merged work (no overwrite)",
+      v2c.includes("Existing implementation preserved") && v2c.includes(be1.id),
+      `${v2c.length} chars`,
+    );
     check("follow-up adds its own TODOs", v2c.toLowerCase().includes("throttle"), `${v2c.length} chars`);
     const ctxFile = await api(`/projects/${pid}/file?path=${encodeURIComponent("CodeVia/runtime/context.md")}`);
-    check("CodeVia/runtime/context.md tracks the entity", ctxFile.status === 200 && ctxFile.json.content.includes("LoginController.cs"), `status=${ctxFile.status}`);
+    check(
+      "CodeVia/runtime/context.md tracks the entity",
+      ctxFile.status === 200 && ctxFile.json.content.includes("LoginController.cs"),
+      `status=${ctxFile.status}`,
+    );
 
     // Restart persistence: same DB + snapshot, zero re-onboard
     await stopServer();
     serverLogs = "";
     await startServer();
     const filesAfter = (await api(`/projects/${pid}/files?path=CodeVia`)).json ?? [];
-    check("CodeVia/ folder survives restart", filesAfter.length >= files.length, `${filesAfter.length} vs ${files.length}`);
+    check(
+      "CodeVia/ folder survives restart",
+      filesAfter.length >= files.length,
+      `${filesAfter.length} vs ${files.length}`,
+    );
     const branches = await api(`/projects/${pid}/branches`);
     check("git history survives restart", branches.status === 200, `status=${branches.status}`);
 

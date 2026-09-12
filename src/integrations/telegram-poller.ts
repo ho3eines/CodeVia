@@ -142,10 +142,13 @@ export class TelegramPoller {
   }
 
   private maxUpdateId(res: TelegramUpdatesResult): number {
-    return res.updates.reduce<number>((m, u) => {
-      const id = Number((u as { update_id?: number })?.update_id ?? 0);
-      return Number.isFinite(id) && id > m ? id : m;
-    }, this.offset - 1 > 0 ? this.offset - 1 : 0);
+    return res.updates.reduce<number>(
+      (m, u) => {
+        const id = Number((u as { update_id?: number })?.update_id ?? 0);
+        return Number.isFinite(id) && id > m ? id : m;
+      },
+      this.offset - 1 > 0 ? this.offset - 1 : 0,
+    );
   }
 
   private async clearBlockingWebhook(): Promise<void> {
@@ -255,13 +258,15 @@ export class TelegramPoller {
       }
 
       if (res.errorCode === 401 || /unauthorized/i.test(res.error ?? "")) {
-        this.statusInt.note = "Telegram rejected the bot token (401) — re-check TELEGRAM_BOT_TOKEN / reconnect the account.";
+        this.statusInt.note =
+          "Telegram rejected the bot token (401) — re-check TELEGRAM_BOT_TOKEN / reconnect the account.";
         await sleep(Math.min(maxBackoff, 15_000), this.abort?.signal);
         continue;
       }
 
       const retryAfter = res.retryAfterSec != null ? res.retryAfterSec * 1000 : undefined;
-      const backoff = retryAfter ?? Math.min(maxBackoff, minBackoff * 2 ** Math.min(5, this.statusInt.consecutiveErrors));
+      const backoff =
+        retryAfter ?? Math.min(maxBackoff, minBackoff * 2 ** Math.min(5, this.statusInt.consecutiveErrors));
       this.deps.logger.warn("telegram getUpdates failed — backing off", {
         name: this.deps.name,
         error: res.error,

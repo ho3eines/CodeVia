@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { TelegramPoller } from "../integrations/telegram-poller.js";
 import {
   MockTelegramService,
@@ -22,9 +22,19 @@ const NOOP_LOGGER = {
   child: () => NOOP_LOGGER,
 } as unknown as typeof logger;
 
-function fakeStore(): { data: Record<string, unknown>; get<T>(k: string): T | undefined; set(k: string, v: unknown): void } {
+function fakeStore(): {
+  data: Record<string, unknown>;
+  get<T>(k: string): T | undefined;
+  set(k: string, v: unknown): void;
+} {
   const data: Record<string, unknown> = {};
-  return { data, get: <T,>(k: string) => data[k] as T | undefined, set: (k, v) => { data[k] = v; } };
+  return {
+    data,
+    get: <T>(k: string) => data[k] as T | undefined,
+    set: (k, v) => {
+      data[k] = v;
+    },
+  };
 }
 
 /** A minimal polling-capable service driven by scripted getUpdates results. */
@@ -115,7 +125,12 @@ describe("TelegramPoller (long-polling receive path)", () => {
 
   it("clears a blocking webhook when Telegram answers 409 Conflict", async () => {
     const service = fakePollingService([
-      { ok: false, updates: [], errorCode: 409, error: "Conflict: can't use getUpdates method while webhook is active" },
+      {
+        ok: false,
+        updates: [],
+        errorCode: 409,
+        error: "Conflict: can't use getUpdates method while webhook is active",
+      },
       { ok: true, updates: [{ update_id: 3, message: { chat: { id: 1 } } }] },
     ]);
     let handled = 0;
@@ -249,7 +264,9 @@ describe("TelegramBotApiService (Bot API client)", () => {
       return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
     }) as typeof fetch;
     const svc = new TelegramBotApiService("123456:ABC-DEF_token_value");
-    const res = await svc.setWebhook("https://app.example.com/integrations/telegram/webhook", { secretToken: "s3cr3t" });
+    const res = await svc.setWebhook("https://app.example.com/integrations/telegram/webhook", {
+      secretToken: "s3cr3t",
+    });
     expect(res.ok).toBe(true);
     expect(body.secret_token).toBe("s3cr3t");
     expect(body.allowed_updates).toContain("callback_query");
@@ -276,7 +293,12 @@ describe("Telegram update normalization", () => {
   it("reads the chat from a callback_query's message (inline buttons)", () => {
     const t = normalizeTelegramUpdate({
       update_id: 1,
-      callback_query: { id: "cb", data: "menu:home", from: { id: 9 }, message: { chat: { id: 42, type: "private" }, message_id: 5 } },
+      callback_query: {
+        id: "cb",
+        data: "menu:home",
+        from: { id: 9 },
+        message: { chat: { id: 42, type: "private" }, message_id: 5 },
+      },
     });
     expect(t?.chatId).toBe("42");
     expect(t?.messageId).toBe(5);
@@ -285,8 +307,16 @@ describe("Telegram update normalization", () => {
   });
 
   it("handles edited messages and ignores service chatter", () => {
-    expect(normalizeTelegramUpdate({ update_id: 2, edited_message: { chat: { id: 5 }, from: { id: 5 }, text: "/status" } })?.text).toBe("/status");
-    expect(normalizeTelegramUpdate({ update_id: 3, message: { chat: { id: 5 }, from: { id: 5 }, new_chat_member: { id: 7 } } })).toBeUndefined();
+    expect(
+      normalizeTelegramUpdate({ update_id: 2, edited_message: { chat: { id: 5 }, from: { id: 5 }, text: "/status" } })
+        ?.text,
+    ).toBe("/status");
+    expect(
+      normalizeTelegramUpdate({
+        update_id: 3,
+        message: { chat: { id: 5 }, from: { id: 5 }, new_chat_member: { id: 7 } },
+      }),
+    ).toBeUndefined();
   });
 
   it("escapes and converts our markdown-lite to Telegram-safe HTML", () => {

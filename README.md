@@ -1,5 +1,7 @@
 # CodeVia — AI Engineering Agent Platform
 
+[![CI](https://github.com/ho3eines/CodeVia/actions/workflows/ci.yml/badge.svg)](https://github.com/ho3eines/CodeVia/actions/workflows/ci.yml)
+
 A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled** AI engineering platform under active development. CodeVia provides agent definitions and execution paths for research, architecture, backend/frontend development, UI/UX, database, DevOps, QA, security, code review, documentation, debugging, refactoring, performance, and release; not all roles have a complete autonomous implementation.
 
 > **Readiness warning (2026-09-11):** the [historical completeness audit](docs/PIPELINE_AUDIT.md) reproduced 18 targeted gaps before the repository-first work. This update addresses project-state persistence/reuse and **per-account isolation** (GitHub credentials, projects, models and providers — see [docs/MULTI_USER_ISOLATION.md](docs/MULTI_USER_ISOLATION.md)); it is **not** a complete security, QA or queue-recovery remediation. Global admin feeds (notifications, audit log) are still shared, so review the [remaining gaps](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here) before a sensitive multi-user deployment.
@@ -121,8 +123,9 @@ src/
 ├── workers/      # background queue worker
 ├── events/       # event-driven bus + correlation ids
 └── app/          # composition root (dependency injection)
-public/           # SPA (vanilla JS, dark/light, RTL, command palette)
-scripts/          # build helper
+public/           # SPA runtime (vanilla JS, dark/light, RTL, command palette)
+client/app/       # SPA source split into feature modules (assembled into public/app.js)
+scripts/          # build/audit helpers (build-app.mjs assembles the SPA)
 ```
 
 ---
@@ -150,6 +153,8 @@ Features: responsive, dark/light mode, **RTL/Persian-friendly**, command palette
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Implementation roadmap (Phases 1–15) |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues & fixes |
 | [docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md) | Full runtime backup to GitHub, scheduling, restore |
+
+Governance: [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md)
 
 ---
 

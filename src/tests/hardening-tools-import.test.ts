@@ -45,19 +45,28 @@ const ctxFor = (over: Partial<ToolContext>, agentPerms: string[]): ToolContext =
 describe("tool registry — permission matrix, approval gate, timeout", () => {
   beforeEach(async () => {
     await boot();
-    const project = await container.agentManager.createProject({ name: "Tools", description: "x", configRepo: "acme/tools" });
+    const project = await container.agentManager.createProject({
+      name: "Tools",
+      description: "x",
+      configRepo: "acme/tools",
+    });
     expect(project.id).toBeTruthy();
   });
 
   it("denies a tool the agent is not permitted to use", async () => {
-    const res = await container.toolRegistry.execute("write_file", ctxFor({}, ["github.read"]), { path: "x.md", content: "hi" });
+    const res = await container.toolRegistry.execute("write_file", ctxFor({}, ["github.read"]), {
+      path: "x.md",
+      content: "hi",
+    });
     expect(res.ok).toBe(false);
     expect(res.output).toMatch(/Permission denied/);
     expect(res.data?.denied).toBe(true);
   });
 
   it("treats github.write and repository.write as interchangeable", async () => {
-    const res = await container.toolRegistry.execute("create_branch", ctxFor({}, ["repository.write"]), { name: "feat/x" });
+    const res = await container.toolRegistry.execute("create_branch", ctxFor({}, ["repository.write"]), {
+      name: "feat/x",
+    });
     expect(res.ok).toBe(true);
     expect(res.data?.branch).toBe("feat/x");
   });
@@ -89,15 +98,35 @@ describe("tool registry — permission matrix, approval gate, timeout", () => {
   it("search tool reads project memory and repository paths", async () => {
     const project = container.projectRepo.findMany()[0]!.data;
     const memory = container.memoryResolver.resolve({ force: "local", localRoot: `./data/test-memory-${Date.now()}` });
-    await memory.append({ type: "decision", key: "use-postgres", content: "We picked PostgreSQL for the ledger", tags: [], refs: [], scope: "project" });
-    const res = await container.toolRegistry.execute("search", ctxFor({ memory, project, agent: container.agentRepo.byType(project.id, "research")! }, ["memory.read", "github.read"]), { query: "postgres" });
+    await memory.append({
+      type: "decision",
+      key: "use-postgres",
+      content: "We picked PostgreSQL for the ledger",
+      tags: [],
+      refs: [],
+      scope: "project",
+    });
+    const res = await container.toolRegistry.execute(
+      "search",
+      ctxFor({ memory, project, agent: container.agentRepo.byType(project.id, "research")! }, [
+        "memory.read",
+        "github.read",
+      ]),
+      { query: "postgres" },
+    );
     expect(res.ok).toBe(true);
     expect(res.output).toMatch(/\[memory:decision\] use-postgres/);
   });
 
   it("PR body generator produces the required sections", () => {
-    const body = buildPullRequestBody({ agentName: "Backend Developer", taskTitle: "Add login", changes: ["auth.ts"], tests: ["12 passed"] });
-    for (const h of ["## Summary", "## Changes", "## Tests", "## Risks", "## Breaking Changes"]) expect(body).toContain(h);
+    const body = buildPullRequestBody({
+      agentName: "Backend Developer",
+      taskTitle: "Add login",
+      changes: ["auth.ts"],
+      tests: ["12 passed"],
+    });
+    for (const h of ["## Summary", "## Changes", "## Tests", "## Risks", "## Breaking Changes"])
+      expect(body).toContain(h);
     expect(body).toContain("- auth.ts");
   });
 });
@@ -108,7 +137,12 @@ describe("project import — preview, create, merge", () => {
   });
 
   it("dry-run reports the plan without writing, create remaps ids, merge respects conflict policy", async () => {
-    const src = await container.agentManager.createProject({ name: "Source", slug: "source", description: "x", configRepo: "acme/source" });
+    const src = await container.agentManager.createProject({
+      name: "Source",
+      slug: "source",
+      description: "x",
+      configRepo: "acme/source",
+    });
     const wf = container.workflowRepo.create({
       projectId: src.id,
       name: "Ship",
@@ -122,10 +156,14 @@ describe("project import — preview, create, merge", () => {
     await container.agentManager.syncProjectState(src.id);
     const exported = (await app!.inject({ method: "GET", url: `/projects/${src.id}/export` })).json();
     expect(exported.agents.length).toBeGreaterThan(0);
-    expect(exported.workflows.map((w: { slug: string }) => w.slug)).toEqual(expect.arrayContaining(["autonomous-development-loop", "bug-diagnosis-loop", "ship"]));
+    expect(exported.workflows.map((w: { slug: string }) => w.slug)).toEqual(
+      expect.arrayContaining(["autonomous-development-loop", "bug-diagnosis-loop", "ship"]),
+    );
 
     const before = container.projectRepo.findMany().length;
-    const preview = (await app!.inject({ method: "POST", url: "/settings/import", payload: { ...exported, dryRun: true } })).json();
+    const preview = (
+      await app!.inject({ method: "POST", url: "/settings/import", payload: { ...exported, dryRun: true } })
+    ).json();
     expect(preview.dryRun).toBe(true);
     expect(preview.plan.workflows.create).toBe(exported.workflows.length);
     expect(preview.conflicts.some((c: { kind: string }) => c.kind === "project")).toBe(true); // slug taken → rename
@@ -133,20 +171,36 @@ describe("project import — preview, create, merge", () => {
 
     const clone = structuredClone(exported);
     clone.project.configRepo = "acme/imported-source";
-    clone.project.repositories = [{ repo: "acme/imported-source", branch: "main", role: "primary", isConfigRepo: true }];
+    clone.project.repositories = [
+      { repo: "acme/imported-source", branch: "main", role: "primary", isConfigRepo: true },
+    ];
     const created = (await app!.inject({ method: "POST", url: "/settings/import", payload: clone })).json();
     expect(created.ok, JSON.stringify(created)).toBe(true);
     expect(created.projectId).not.toBe(src.id);
     const newWfs = container.workflowRepo.byProject(created.projectId);
-    expect(newWfs.map((w) => w.slug)).toEqual(expect.arrayContaining(["autonomous-development-loop", "bug-diagnosis-loop", "ship"]));
+    expect(newWfs.map((w) => w.slug)).toEqual(
+      expect.arrayContaining(["autonomous-development-loop", "bug-diagnosis-loop", "ship"]),
+    );
     expect(newWfs.find((w) => w.slug === "ship")?.id).not.toBe(wf.id);
     expect(container.agentRepo.byProject(created.projectId).length).toBeGreaterThan(0);
 
     // Merge back into the source project: everything conflicts → skipped by default.
-    const merged = (await app!.inject({ method: "POST", url: "/settings/import", payload: { ...exported, mode: "merge", targetProjectId: src.id } })).json();
+    const merged = (
+      await app!.inject({
+        method: "POST",
+        url: "/settings/import",
+        payload: { ...exported, mode: "merge", targetProjectId: src.id },
+      })
+    ).json();
     expect(merged.imported.workflows).toBe(0);
     expect(merged.imported.skipped).toBeGreaterThan(0);
-    const over = (await app!.inject({ method: "POST", url: "/settings/import", payload: { ...exported, mode: "merge", targetProjectId: src.id, conflict: "overwrite" } })).json();
+    const over = (
+      await app!.inject({
+        method: "POST",
+        url: "/settings/import",
+        payload: { ...exported, mode: "merge", targetProjectId: src.id, conflict: "overwrite" },
+      })
+    ).json();
     expect(over.imported.workflows).toBe(exported.workflows.length);
     expect(container.workflowRepo.byProject(src.id).length).toBe(exported.workflows.length);
     expect(container.workflowRepo.byProject(src.id).find((x) => x.slug === "ship")?.version).toBe(2);
@@ -159,7 +213,11 @@ describe("task cancellation + hardening", () => {
   });
 
   it("cancelled queued task is skipped by the worker and final tasks are not re-cancelled", async () => {
-    const project = await container.agentManager.createProject({ name: "Cancel", description: "x", configRepo: "acme/cancel" });
+    const project = await container.agentManager.createProject({
+      name: "Cancel",
+      description: "x",
+      configRepo: "acme/cancel",
+    });
     const task = container.agentManager.createTask({ projectId: project.id, title: "Long job", description: "" });
     const job = container.queue.enqueue("agent.run", { taskId: task.id });
     const res = (await app!.inject({ method: "POST", url: `/tasks/${task.id}/cancel` })).json();
@@ -182,8 +240,16 @@ describe("task cancellation + hardening", () => {
   });
 
   it("worker github.op executes real GitHub operations", async () => {
-    const project = await container.agentManager.createProject({ name: "Ops", description: "x", configRepo: "acme/ops" });
-    const job = container.queue.enqueue("github.op", { op: "create_branch", projectId: project.id, name: "agent/ops-1" });
+    const project = await container.agentManager.createProject({
+      name: "Ops",
+      description: "x",
+      configRepo: "acme/ops",
+    });
+    const job = container.queue.enqueue("github.op", {
+      op: "create_branch",
+      projectId: project.id,
+      name: "agent/ops-1",
+    });
     await container.worker.process(job.id);
     const branches = await container.github.listBranches({ owner: "acme", name: "ops" });
     expect(branches.some((b) => b.name === "agent/ops-1")).toBe(true);

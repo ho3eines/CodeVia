@@ -55,7 +55,7 @@ export function createLogger(bindings: Record<string, unknown> = {}): Logger {
       : `${COLORS[level] ?? ""}[${ts}] ${level.toUpperCase().padEnd(5)}${RESET} ${msg} ${
           Object.keys(all).length ? JSON.stringify(all) : ""
         }`;
-    // eslint-disable-next-line no-console
+
     (level === "error" || level === "fatal" ? console.error : console.log)(line);
   }
 

@@ -34,7 +34,10 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
     const q = req.query as { projectId?: string; agentId?: string };
     // Spend is per-account: only costs of projects this account may access.
     const owned = accessibleProjectIds(req, container);
-    let costs = container.costRepo.findMany().map((r) => r.data).filter((c) => !c.projectId || owned.has(c.projectId));
+    let costs = container.costRepo
+      .findMany()
+      .map((r) => r.data)
+      .filter((c) => !c.projectId || owned.has(c.projectId));
     if (q.projectId) costs = costs.filter((c) => c.projectId === q.projectId);
     if (q.agentId) costs = costs.filter((c) => c.agentId === q.agentId);
     return costs;
@@ -43,7 +46,10 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
   app.get("/costs/summary", { schema: { tags: ["observability"] } }, async (req) => {
     const q = req.query as { projectId?: string };
     const owned = accessibleProjectIds(req, container);
-    const all = container.costRepo.findMany().map((r) => r.data).filter((c) => !c.projectId || owned.has(c.projectId));
+    const all = container.costRepo
+      .findMany()
+      .map((r) => r.data)
+      .filter((c) => !c.projectId || owned.has(c.projectId));
     const filtered = q.projectId ? all.filter((c) => c.projectId === q.projectId) : all;
     return {
       calls: filtered.length,
@@ -68,14 +74,17 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
     return container.auditRepo
       .findMany()
       .map((r) => r.data)
-      .filter((e) => e.projectId ? owned.has(e.projectId) : isAdmin || e.userId === user.id);
+      .filter((e) => (e.projectId ? owned.has(e.projectId) : isAdmin || e.userId === user.id));
   });
 
   // Agent observability dashboard
   app.get("/observability/agents", { schema: { tags: ["observability"] } }, async (req) => {
     const q = req.query as { agentId?: string; projectId?: string };
     const owned = accessibleProjectIds(req, container);
-    let runs = container.runRepo.findMany().map((r) => r.data).filter((r) => owned.has(r.projectId));
+    let runs = container.runRepo
+      .findMany()
+      .map((r) => r.data)
+      .filter((r) => owned.has(r.projectId));
     if (q.agentId) runs = runs.filter((r) => r.agentId === q.agentId);
     if (q.projectId) runs = runs.filter((r) => r.projectId === q.projectId);
     const byAgent = new Map<string, typeof runs>();
@@ -98,11 +107,16 @@ export function registerObservabilityRoutes(app: FastifyInstance, container: Con
   });
 
   app.get("/logs", { schema: { tags: ["observability"] } }, async () => {
-    return container.runRepo.findMany().map((r) => ({ runId: r.data.id, status: r.data.status, error: r.data.error, createdAt: r.data.createdAt }));
+    return container.runRepo
+      .findMany()
+      .map((r) => ({ runId: r.data.id, status: r.data.status, error: r.data.error, createdAt: r.data.createdAt }));
   });
 }
 
-function aggregate(records: Array<{ totalTokens: number; estimatedCostUsd: number }>, keyFn: (r: any) => string): Array<{ key: string; calls: number; tokens: number; costUsd: number }> {
+function aggregate(
+  records: Array<{ totalTokens: number; estimatedCostUsd: number }>,
+  keyFn: (r: any) => string,
+): Array<{ key: string; calls: number; tokens: number; costUsd: number }> {
   const map = new Map<string, { calls: number; tokens: number; costUsd: number }>();
   for (const r of records) {
     const key = keyFn(r);

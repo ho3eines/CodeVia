@@ -52,7 +52,9 @@ describe("per-user Telegram bot accounts", () => {
       const url = String(input);
       calls.push(url);
       if (url.includes("/getMe")) {
-        return Promise.resolve(new Response(JSON.stringify({ ok: true, result: { id: 999, username: "my_custom_bot" } }), { status: 200 }));
+        return Promise.resolve(
+          new Response(JSON.stringify({ ok: true, result: { id: 999, username: "my_custom_bot" } }), { status: 200 }),
+        );
       }
       if (url.includes("/setWebhook")) {
         return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
@@ -61,7 +63,11 @@ describe("per-user Telegram bot accounts", () => {
     }) as typeof fetch;
 
     try {
-      const created = await srv.inject({ method: "POST", url: "/integrations/telegram/accounts", payload: { token: "12345:ABC_SECRET", accountId: "777777", name: "My bot" } });
+      const created = await srv.inject({
+        method: "POST",
+        url: "/integrations/telegram/accounts",
+        payload: { token: "12345:ABC_SECRET", accountId: "777777", name: "My bot" },
+      });
       expect(created.statusCode).toBe(201);
       const body = created.json();
       expect(body.account.connected).toBe(true);
@@ -72,12 +78,18 @@ describe("per-user Telegram bot accounts", () => {
       expect(calls.some((u) => u.includes("/getMe"))).toBe(true);
       expect(calls.some((u) => u.includes("/setWebhook"))).toBe(true);
 
-      const list = (await srv.inject({ method: "GET", url: "/integrations/telegram/accounts" })).json() as Array<{ accountId: string; connected: boolean }>;
+      const list = (await srv.inject({ method: "GET", url: "/integrations/telegram/accounts" })).json() as Array<{
+        accountId: string;
+        connected: boolean;
+      }>;
       expect(list).toHaveLength(1);
       expect(list[0].accountId).toBe("777777");
       expect(list[0].connected).toBe(true);
 
-      const reconnect = await srv.inject({ method: "POST", url: `/integrations/telegram/accounts/${body.account.id}/connect` });
+      const reconnect = await srv.inject({
+        method: "POST",
+        url: `/integrations/telegram/accounts/${body.account.id}/connect`,
+      });
       expect(reconnect.statusCode).toBe(200);
       expect(reconnect.json().connected).toBe(true);
 

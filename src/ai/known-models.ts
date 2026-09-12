@@ -66,17 +66,7 @@ export const KNOWN_MODELS_BY_TYPE: Partial<Record<ModelProvider["type"], string[
     "mistralai/mixtral-8x7b-instruct",
     "qwen/qwen2.5-72b-instruct",
   ],
-  ollama: [
-    "llama3.2",
-    "llama3.1",
-    "llama3",
-    "mistral",
-    "qwen2.5",
-    "phi3",
-    "gemma2",
-    "deepseek-r1",
-    "codellama",
-  ],
+  ollama: ["llama3.2", "llama3.1", "llama3", "mistral", "qwen2.5", "phi3", "gemma2", "deepseek-r1", "codellama"],
 };
 
 /** Well-known model ids for a provider type, with auto-detected metadata. */

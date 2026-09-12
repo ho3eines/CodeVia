@@ -72,12 +72,14 @@ export class ExecutionBudget {
 export function runBudget(project: Project, agent: Agent): ExecutionBudget {
   return new ExecutionBudget({
     ...project.settings.budget,
-    maxTokensPerRun: agent.tokenBudget > 0
-      ? Math.min(project.settings.budget.maxTokensPerRun || Infinity, agent.tokenBudget)
-      : project.settings.budget.maxTokensPerRun,
-    maxDurationMs: agent.timeoutMs > 0
-      ? Math.min(project.settings.budget.maxDurationMs || Infinity, agent.timeoutMs)
-      : project.settings.budget.maxDurationMs,
+    maxTokensPerRun:
+      agent.tokenBudget > 0
+        ? Math.min(project.settings.budget.maxTokensPerRun || Infinity, agent.tokenBudget)
+        : project.settings.budget.maxTokensPerRun,
+    maxDurationMs:
+      agent.timeoutMs > 0
+        ? Math.min(project.settings.budget.maxDurationMs || Infinity, agent.timeoutMs)
+        : project.settings.budget.maxDurationMs,
   });
 }
 
