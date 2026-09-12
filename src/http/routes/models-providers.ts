@@ -11,6 +11,9 @@ import {
   type ModelTuning,
 } from "../../ai/provider-test.js";
 import { detectModelCapabilities, detectModelInfo } from "../../ai/provider-urls.js";
+import { candidatesFor } from "../../ai/model-router.js";
+import { ROUTING_POLICIES, type RoutingConfig } from "../../ai/load-balancer.js";
+import { ROLE_PERMISSIONS } from "../auth.js";
 import { streamModelChat } from "../../ai/model-stream.js";
 import type { ChatMessage } from "../../ai/types.js";
 import { knownModelInfos } from "../../ai/known-models.js";
@@ -110,6 +113,20 @@ function optionalNumber(v: unknown): number | undefined | null {
   if (v === undefined) return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Load-distribution fields accepted on create: relative share and per-model
+ * concurrency ceiling. Invalid or missing values simply stay unset, so the
+ * router uses the platform default (equal share, no ceiling).
+ */
+function loadBalanceFields(b: Record<string, unknown>): Pick<Model, "loadWeight" | "maxConcurrency"> {
+  const out: Pick<Model, "loadWeight" | "maxConcurrency"> = {};
+  const weight = optionalNumber(b.loadWeight);
+  if (typeof weight === "number" && weight >= 0 && weight <= 10) out.loadWeight = weight;
+  const concurrency = optionalNumber(b.maxConcurrency);
+  if (typeof concurrency === "number" && concurrency >= 0) out.maxConcurrency = Math.floor(concurrency);
+  return out;
 }
 
 function numberOr(v: unknown, fallback: number): number {
@@ -268,6 +285,89 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     return container.modelRepo.listForOwner(actor(req));
   });
 
+  /* ------------------------------------------------------------------ *
+   * Load distribution (which model takes THIS request)
+   *
+   * The router decides which model is *best*; this decides which model should
+   * answer now so no single provider key carries every chat, agent step and
+   * background summary while the rest of the registry idles. The live counters
+   * are in-memory on purpose (they describe the current moment), the policy is
+   * persisted so a deploy keeps the operator's choice.
+   * ------------------------------------------------------------------ */
+
+  /** Routing config + per-model live load, for the Models page and the API. */
+  const routingView = (req: FastifyRequest) => {
+    const models = container.modelRepo.listForOwner(actor(req)).filter((m) => m.active);
+    const candidates = candidatesFor(models, (id) => container.providerRepo.findById(id)?.data);
+    const snapshot = container.loadBalancer.snapshot(candidates);
+    const byId = new Map(models.map((m) => [m.id, m]));
+    const cfg = container.loadBalancer.config();
+    return {
+      policy: cfg.policy,
+      policies: ROUTING_POLICIES,
+      config: cfg,
+      modelCount: models.length,
+      activeCalls: snapshot.reduce((n, r) => n + r.inflight, 0),
+      totalRouted: snapshot.reduce((n, r) => n + r.picks, 0),
+      models: snapshot.map((row) => {
+        const m = byId.get(row.modelId);
+        const provider = m ? container.providerRepo.findById(m.providerId)?.data : undefined;
+        return {
+          ...row,
+          known: !!m,
+          displayName: m?.displayName ?? row.modelId,
+          modelId: m?.modelId ?? row.modelId,
+          providerId: m?.providerId,
+          providerName: provider?.name,
+          providerRateLimitPerMinute: provider?.rateLimitPerMinute,
+          configuredWeight: m?.loadWeight ?? 1,
+          configuredMaxConcurrency: m?.maxConcurrency,
+          perfScore: m ? (container.benchRepo.computeStats().find((x) => x.modelId === m.id)?.score ?? null) : null,
+        };
+      }),
+    };
+  };
+
+  app.get("/models/routing", { schema: { tags: ["models"] } }, async (req) => routingView(req));
+
+  app.patch("/models/routing", { schema: { tags: ["models"] } }, async (req, reply) => {
+    // A platform-wide setting: changing who gets the traffic needs model write rights.
+    const user = resolveRequestUser(req, container).user;
+    if (!(ROLE_PERMISSIONS[user.role] ?? []).includes("model.write")) {
+      return fail(reply, 403, "changing the routing policy requires the model.write permission");
+    }
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const before = container.loadBalancer.config();
+    const cfg = container.loadBalancer.configure({
+      ...(typeof b.policy === "string" ? { policy: b.policy as RoutingConfig["policy"] } : {}),
+      ...(b.maxConcurrencyPerModel !== undefined ? { maxConcurrencyPerModel: Number(b.maxConcurrencyPerModel) } : {}),
+      ...(b.failureThreshold !== undefined ? { failureThreshold: Number(b.failureThreshold) } : {}),
+      ...(b.cooldownMs !== undefined ? { cooldownMs: Number(b.cooldownMs) } : {}),
+      ...(b.sessionStickyMs !== undefined ? { sessionStickyMs: Number(b.sessionStickyMs) } : {}),
+    });
+    const invalid = typeof b.policy === "string" && !ROUTING_POLICIES.includes(b.policy as (typeof ROUTING_POLICIES)[number]);
+    if (invalid) return fail(reply, 400, `policy must be one of: ${ROUTING_POLICIES.join(", ")}`);
+    try {
+      container.auditRepo.record({
+        userId: user.id,
+        action: "models.routing.update",
+        result: "success",
+        source: "web",
+        correlationId: `routing-${Date.now()}`,
+        metadata: { before, after: cfg },
+      });
+    } catch {
+      /* auditing must never block a routing change */
+    }
+    return { policy: cfg.policy, config: cfg, previous: before, models: routingView(req).models };
+  });
+
+  /** Forget live counters (rotation position, error streaks, cooldowns). */
+  app.post("/models/routing/reset", { schema: { tags: ["models"] } }, async (req) => {
+    container.loadBalancer.reset();
+    return { ok: true, config: container.loadBalancer.config() };
+  });
+
   app.post("/models", { schema: { tags: ["models"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const providerId = String(b.providerId ?? "").trim();
@@ -314,6 +414,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       ...(typeof optionalNumber(b.maxTokens) === "number" ? { maxTokens: optionalNumber(b.maxTokens) as number } : {}),
       ...(b.omitTemperature === true ? { omitTemperature: true } : {}),
       ...(typeof b.notes === "string" && b.notes.trim() ? { notes: b.notes.trim() } : {}),
+      ...loadBalanceFields(b),
     });
     reply.code(201);
     return { ...model, detectedCapabilities };
@@ -381,11 +482,35 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
         patch.maxTokens = Math.floor(mt);
       }
     }
+    // Load distribution: relative share (0 = fallback only) and an optional
+    // per-model concurrency ceiling. null/"" clears the override.
+    if (b.loadWeight !== undefined) {
+      const w = optionalNumber(b.loadWeight);
+      if (w === null) patch.loadWeight = undefined;
+      else if (typeof w === "number") {
+        if (w < 0 || w > 10) return fail(reply, 400, "loadWeight must be between 0 and 10 (0 = fallback only, 1 = equal share)");
+        patch.loadWeight = w;
+      } else {
+        return fail(reply, 400, "loadWeight must be a number between 0 and 10");
+      }
+    }
+    if (b.maxConcurrency !== undefined) {
+      const mc = optionalNumber(b.maxConcurrency);
+      if (mc === null) patch.maxConcurrency = undefined;
+      else if (typeof mc === "number") {
+        if (mc < 0) return fail(reply, 400, "maxConcurrency must be 0 (unlimited) or more");
+        patch.maxConcurrency = Math.floor(mc);
+      } else {
+        return fail(reply, 400, "maxConcurrency must be a number");
+      }
+    }
 
     const m: Model = { ...r.data, ...patch, id, createdAt: r.data.createdAt, updatedAt: new Date().toISOString() };
     // `undefined` in a patch means "clear it", so drop the keys explicitly.
     if (b.temperature !== undefined && patch.temperature === undefined) delete m.temperature;
     if (b.maxTokens !== undefined && patch.maxTokens === undefined) delete m.maxTokens;
+    if (b.loadWeight !== undefined && patch.loadWeight === undefined) delete m.loadWeight;
+    if (b.maxConcurrency !== undefined && patch.maxConcurrency === undefined) delete m.maxConcurrency;
     if (typeof b.notes === "string" && !patch.notes) delete m.notes;
     container.modelRepo.upsert(m);
     return m;

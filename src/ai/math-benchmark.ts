@@ -80,7 +80,7 @@ export class MathBenchmarkService {
   private resolveTargets(modelIds?: string[], ownerId?: string): BenchmarkTarget[] {
     // Per-account: only the requesting account's models (+ shared rows) are
     // benchmarked — never another account's paid provider.
-    const active = this.deps.modelRepo.listActiveForOwner(ownerId).map(toCandidate);
+    const active = this.deps.modelRepo.listActiveForOwner(ownerId).map((m) => toCandidate(m));
     const picked = modelIds?.length ? active.filter((c) => modelIds!.includes(c.id)) : active;
     const out = [];
     for (const candidate of picked) {

@@ -13,7 +13,8 @@ import { MathBenchmarkService } from "../ai/math-benchmark.js";
 import { getSkillRepo, SkillRegistry } from "../skills/registry.js";
 import { getModelRepo, getProviderRepo } from "../ai/model-repo.js";
 import { providerRegistry, ProviderRegistry } from "../ai/provider-registry.js";
-import { modelRouter, ModelRouter } from "../ai/model-router.js";
+import { ModelRouter } from "../ai/model-router.js";
+import { ModelLoadBalancer, routingConfigFromEnv } from "../ai/load-balancer.js";
 import { contextEngine, ContextEngine } from "../ai/context-engine.js";
 import { toolRegistry, ToolRegistry } from "../tools/registry.js";
 import { resolveGitHubService, resolveGitHubForProject } from "../github/registry.js";
@@ -70,7 +71,16 @@ export class Container {
 
   readonly skillsRegistry = new SkillRegistry(this.skillRepo);
   readonly providerRegistry: ProviderRegistry = providerRegistry;
-  readonly modelRouter: ModelRouter = modelRouter;
+  /**
+   * Live load distributor for model routing. One instance for the whole
+   * process: it owns the in-flight counters, the fair-share cursors and the
+   * short-lived "this conversation/run is already using model X" affinities, so
+   * chat, Telegram, agent runs and background summaries all draw from the same
+   * view of who is busy. Configuration is persisted to the KV store (only the
+   * policy survives a restart — the counters deliberately do not).
+   */
+  readonly loadBalancer = new ModelLoadBalancer(routingConfigFromEnv());
+  readonly modelRouter: ModelRouter = new ModelRouter(this.loadBalancer);
   /** Math-benchmark service: quizzes all active models with random arithmetic
    *  to gather real accuracy/latency/error-rate telemetry for the smart router. */
   /** Routed model calls outside agent runs (summaries, PR text, chat). */
@@ -81,6 +91,7 @@ export class Container {
     modelRouter: this.modelRouter,
     costRepo: this.costRepo,
     benchRepo: this.benchRepo,
+    loadBalancer: this.loadBalancer,
   });
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
@@ -137,6 +148,7 @@ export class Container {
       providerRepo: this.providerRepo,
       providerRegistry: this.providerRegistry,
       modelRouter: this.modelRouter,
+      loadBalancer: this.loadBalancer,
       contextEngine: this.contextEngine,
       github: this.github,
       githubForProject: this.githubForProject,
@@ -282,7 +294,11 @@ export class Container {
     }
     // Load the mock provider + default models into the registry for routing.
     this.seedDefaultModels();
-    logger.info("container seeded");
+    // Operator's saved routing policy (Models page / PATCH /models/routing) wins
+    // over the environment default; live counters always start empty.
+    this.loadBalancer.attachKv(this.kv);
+    this.loadBalancer.restore();
+    logger.info("container seeded", { routingPolicy: this.loadBalancer.config().policy });
   }
 
   /* ------------------------------------------------------------------ *

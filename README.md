@@ -13,7 +13,7 @@ A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled
 - 🔀 **Multi-project organization** — project-scoped agents, model assignments, skills, memory, prompts, workflows and Telegram chats. Projects, models and providers are isolated per account (a signed-in account sees only its own); see [docs/MULTI_USER_ISOLATION.md](docs/MULTI_USER_ISOLATION.md).
 - 🤖 **18 built-in agent types** generated automatically from your project description (**AI Agent Generator**).
 - 🧠 **Provider-agnostic model system** — OpenAI, Anthropic, Gemini, Azure OpenAI, OpenRouter, Ollama, custom OpenAI-compatible + a built-in **Mock AI provider** so the whole platform runs offline. Providers and models belong to the account that created them; routing never spends another account's key.
-- 🎯 **Intelligent Model Router** — picks a model per task by capability, budget, cost, latency, context size; auto-falls back A → B → C on failure.
+- 🎯 **Intelligent Model Router + load distribution** — picks a model per task by capability, budget, cost, latency and context size, then decides *which of those eligible models should answer now*: adaptive / round-robin / weighted / least-loaded, with a concurrency ceiling, a circuit breaker for models that keep failing and automatic fallback A → B → C. No single provider key carries the whole installation while the rest of the registry idles (a model the user explicitly picked is still pinned). See [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md).
 - 🗂️ **GitHub-backed Memory** — architecture, decisions, bugs, knowledge, lessons and conversation summaries versioned via commits.
 - 🔀 **Workflow Engine** — visual DAG of agent / tool / condition / approval / parallel / trigger nodes.
 - 🏃 **Background Worker + Queue** — agent executions never block the UI/API thread; retries, exponential backoff, dead-letter, idempotency.
@@ -146,6 +146,7 @@ Features: responsive, dark/light mode, **RTL/Persian-friendly**, command palette
 | [docs/GITHUB_SETUP.md](docs/GITHUB_SETUP.md) | GitHub App + OAuth + webhook setup |
 | [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) | Telegram bot setup & commands |
 | [docs/PROVIDER_SETUP.md](docs/PROVIDER_SETUP.md) | Configure AI providers (OpenAI, Anthropic, Gemini, Ollama…) |
+| [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md) | Model selection, load balancing policies, pins, circuit breaker, live distribution |
 | [docs/API.md](docs/API.md) | REST API reference (OpenAPI at `/docs`) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Implementation roadmap (Phases 1–15) |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues & fixes |

@@ -1,4 +1,8 @@
 # Provider Setup Guide
+> **Several providers/models configured?** Routing spreads the traffic across every model that fits the
+> task (adaptive / round-robin / weighted / least-loaded) so one key does not carry every chat and agent
+> run. Policies, pins, the concurrency ceiling and the failure cooldown: [MODEL_ROUTING.md](MODEL_ROUTING.md).
+
 
 The platform is **provider-agnostic**. Agents depend on the `IModelProvider` interface; vendors are adapters. This means adding a provider does not require touching agent logic.
 

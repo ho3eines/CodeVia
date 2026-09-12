@@ -1,5 +1,5 @@
 # CodeVia Project Handoff
-> آخرین بروزرسانی: 2026-09-09 (۱۴۰۸/۰۶/۱۹ — نسخه ۵)
+> آخرین بروزرسانی: 2026-09-12 — توزیع بار بین مدل‌ها (Load distribution) در مسیریابی
 > این فایل برای جلوگیری از خواندن کل کد در هر جلسه است. همیشه قبل از شروع کار این فایل را بخوانید.
 
 ## معماری کلی پروژه
@@ -526,3 +526,23 @@ All checks now pass:
 - **رفعِ باگ جانبی:** `getModelBenchmarkRepo()` ریپازیتوری را روی اولین دیتابیسِ فعال کش می‌کرد؛ بعد از هر تعویضِ DB «database is not open» می‌آمد و **هر** فراخوانی مدل شکست می‌خورد. با re-bind خودکار، تعداد تست‌های شکست‌خورده از **۴۲ به ۵** رسید (۵ موردِ باقی‌مانده — ۴ تست منو/انتخاب خودکارِ بات تلگرام و ۱ تست تأیید تلگرام — روی درخت تمیز هم می‌شکنند و ربطی به این کار ندارند).
 - **اعلان‌ها و گزارش حسابرسی:** `/notifications` به پروژه‌های همان حساب محدود شد (موارد سراسریِ بدون پروژه برای همه می‌مانند)؛ خواندنِ اعلانِ دیگران ۴۰۴ است؛ `/audit` فقط رخدادهای پروژه‌های خودِ حساب، رخدادهای خودِ کاربر، و رخدادهای سراسری برای نقش‌های دارای `admin.read` را نشان می‌دهد.
 - **Tests:** `src/tests/multi-user-ownership.test.ts` (۱۰ تست جدید: پنهان‌بودن پرووایدر/مدلِ دیگران، عملیات گروهی، انتقالِ ردیف مشترک، محافظت از Mock توکار، نمایش همه‌چیز به کاربر دمو، و **عدمِ مسیریابی به پرووایدرِ حساب دیگر** با registry ساختگی). `security-regressions` (A02/A03) با قانون جدید به‌روزرسانی شد.
+
+
+## 2026-09-12 — Load distribution: chat no longer pins all traffic to one model
+- **User ask (Persian):** «همیشه با یک مدل چت میکنه؛ فشار روی یک مدل نباشه، round-robin یا یک الگوریتم بین همه تقسیم بشه.»
+- **ریشهٔ مشکل:** روتر فقط به سؤال «کدام مدل بهترین است؟» جواب می‌داد و آن جواب *پایدار* است (مرتب‌سازی بر اساس بنچمارک + priority) → هر پیام چت، هر گام ایجنت و هر خلاصه‌سازی روی همان یک مدل می‌افتاد؛ بقیهٔ رجیستری بیکار و آن کلید درگیر rate limit.
+- **ماژول جدید `src/ai/load-balancer.ts`:** سؤال دوم — «این درخواست را کدام مدل جواب بدهد؟».
+  - سیاست‌ها: `adaptive` (پیش‌فرض: `0.30·perf + 0.16·routerOrder − 0.50·fairShareDeficit − 1.00·saturation − 0.50·errors`)، `round-robin`، `weighted-round-robin`، `least-loaded`، `sticky` (همان رفتار قدیمی، به‌عنوان درِ فرار).
+  - هستهٔ همه = **fair-share deficit** (`picks / weight`) به‌جای cursor یا تصادف: قطع‌ی و تکرارپذیر، با مدل‌های افزوده/خارج‌شده سازگار، و سهم‌ها به نسبت وزن همگرا می‌شوند.
+  - `order()` خالص است (هیچ شمارنده‌ای را تغییر نمی‌دهد)؛ شمارنده‌ها فقط در `begin()` (commit) جلو می‌روند و `lease.finish(ok)` آزاد می‌شوند → دو بار روتینگ در یک ریکوئست، یک جواب.
+  - circuit breaker: بعد از N خطای پشت‌سرهم، مدل به **انتهای** صف می‌رود (حذف نمی‌شود) با cooldown دو‌برابرشونده تا ۸×؛ یک موفقیت streak را پاک می‌کند.
+  - saturation = حداکثرِ `inflight/cap` و `rpm / provider.rateLimitPerMinute` → سقف هم‌زمانی و سقف نرخ هر دقیقه.
+- **ModelRouter:** `new ModelRouter(loadBalancer)`؛ مرحلهٔ ۵ داخل `route()` فراخوانی `order()` است (نه حذف هیچ مدلی). `RoutingPreference.balance = { scope, pin, affinityKey, affinityTtlMs, disable }`. روترِ بدون بالانسر (تست‌های واحد، `ProjectStateGenerator`) دقیقاً مثل قبل کار می‌کند.
+- **پین‌ها:** `pin:"forced"` = انتخاب صریح کاربر در چت (قفل می‌ماند)؛ `pin:"preferred"` = `project.defaultModelId` / primary ایجنت (تا وقتی سالم و بیکار است جلو می‌آید، وقتی سیر شد استخر تحویل می‌گیرد). انتخاب `Auto` در UI حالا قفل ذخیره‌شدهٔ مکالمه را **پاک** می‌کند (`updateModel(id, "")`).
+- **Affinity (صدای ثابت):** `MODEL_ROUTING_SESSION_STICKY_MS=0` پیش‌فرض یعنی هر پیام می‌چرخد؛ `MODEL_ROUTING_RUN_STICKY_MS=900000` یعنی یک run ایجنت در همهٔ گام‌هایش یک مدل دارد ولی runهای مختلف مدل‌های مختلف می‌گیرند.
+- **Entity/Model:** `Model.loadWeight` (0 = فقط fallback) و `Model.maxConcurrency`؛ از `POST/PATCH /models/:id` قابل تنظیم، روی کارت مدل با بج `⚙` نمایش داده می‌شود. `toCandidate(m, hints)` و کمکی جدید `candidatesFor(models, providerOf)` تا rate limit پرووایدر به کاندید برسد.
+- **Env:** `MODEL_ROUTING_POLICY`، `MODEL_ROUTING_MAX_CONCURRENCY_PER_MODEL`، `MODEL_ROUTING_FAILURE_THRESHOLD`، `MODEL_ROUTING_COOLDOWN_MS`، `MODEL_ROUTING_SESSION_STICKY_MS`، `MODEL_ROUTING_RUN_STICKY_MS`.
+- **API:** `GET/PATCH /models/routing` (سیاست + شمارنده‌های زنده؛ سیاست در KV ذخیره می‌شود، شمارنده‌ها عمداً نه) و `POST /models/routing/reset`. تغییر سیاست به `model.write` نیاز دارد و در audit لاگ می‌نشیند.
+- **UI:** کارت «⚖️ Load distribution» در `Models → Benchmark` (سهم ترافیک، live calls، calls/min، saturation، خطاها، cooldown + انتخاب سیاست + Reset counters، با polling فقط وقتی درخواستی در جریان است). فیلدهای `Load share` و `Max concurrent calls` در Edit Model. لیبل سلکتور چت: «Auto — spread across N model(s)».
+- **Tests:** `src/tests/model-load-balancer.test.ts` (۲۲ تست: چرخش، وزن ۲:۱، کم‌بارترین، پین‌ها، affinity، breaker + ریکاوری با fake timer، purity، `loadWeight:0`)، `src/tests/chat-load-balancing.test.ts` (۷ تست HTTP: چرخش در JSON و SSE، پاک‌شدن قفل با Auto، تک‌مدلی، `model-lb-*` CRUD، دو run = دو مدل و گام‌های یک run = یک مدل)، `src/tests/models-routing-ui.test.ts` (۲ تست jsdom). `npx tsc` صفر خطا؛ شکست‌های از قبل موجود: ۵ تست تلگرام/تأیید (روی درخت تمیز هم می‌شکنند).
+- **مستند:** [`docs/MODEL_ROUTING.md`](docs/MODEL_ROUTING.md) + جدول env در `docs/ENVIRONMENT.md` + مسیرهای جدید در `docs/API.md` + سناریوی دستی «۵-الف» در `TESTING.md` + اشاره در `README.md` و `docs/PROVIDER_SETUP.md`.

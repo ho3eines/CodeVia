@@ -73,6 +73,21 @@ Without a token, a **MockTelegramService** is used (messages are recorded/logged
 
 ---
 
+## Model routing / load distribution
+
+Which model answers *now* — see [MODEL_ROUTING.md](MODEL_ROUTING.md) for the algorithms. The policy can also be changed at runtime in **Models → Benchmark → Load distribution** (persisted, and it wins over these defaults after the first change).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL_ROUTING_POLICY` | `adaptive` | `adaptive` \| `round-robin` \| `weighted-round-robin` \| `least-loaded` \| `sticky`. Everything except `sticky` spreads the traffic over every eligible model instead of hammering the best-scored one |
+| `MODEL_ROUTING_MAX_CONCURRENCY_PER_MODEL` | `0` (unlimited) | Live calls one model may carry before the router prefers a peer. A per-model `maxConcurrency` overrides it |
+| `MODEL_ROUTING_FAILURE_THRESHOLD` | `3` | Consecutive failures that demote a model to the back of the queue. `0` disables the circuit breaker |
+| `MODEL_ROUTING_COOLDOWN_MS` | `60000` | How long a demoted model stays last (doubles per trip, capped at 8×); it is never removed from the pool |
+| `MODEL_ROUTING_SESSION_STICKY_MS` | `0` | How long one conversation keeps its model. `0` = rotate every message (best spread); raise it for one-voice-per-thread |
+| `MODEL_ROUTING_RUN_STICKY_MS` | `900000` | How long one agent run keeps its model, so a run never changes style mid-task while different runs still spread |
+
+---
+
 ## Platform behavior
 
 | Variable | Default | Description |

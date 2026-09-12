@@ -1575,7 +1575,7 @@
       const sel = $("#p-chat-model");
       if (sel && !sel.dataset.touched) {
         const prev = sel.value;
-        sel.innerHTML = `<option value="">Auto (best per benchmark)</option>` + active.map((m) => {
+        sel.innerHTML = `<option value="">Auto — spread across ${active.length} model(s) (round-robin / least-loaded)</option>` + active.map((m) => {
           const s = stats.get(m.id);
           const score = s && typeof s.score === "number" ? s.score.toFixed(2) : "—";
           const tag = s ? `score ${score} · ${s.p95LatencyMs||s.avgLatencyMs||"?"}ms` : "no data";
@@ -1698,7 +1698,8 @@
       const attachments = pending.slice(); pending = []; renderChatAttachments();
       const body = {
         role: "user", content: content || "(attachment)",
-        modelId: $("#p-chat-model")?.value || undefined,
+        // "" is meaningful: it means "no pin, let the balancer rotate".
+        modelId: $("#p-chat-model")?.value ?? undefined,
         executionMode: $("#p-chat-mode")?.value || "chat",
         agentType: $("#p-chat-agent")?.value || undefined,
         temperature: Number($("#p-chat-temp")?.value) || 0.3,
@@ -3068,9 +3069,141 @@
   function renderBenchmarkTab() {
     const body = $("#models-tab-body");
     if (!body) return;
-    body.innerHTML = `<div id="model-bench-card"><div class="card card-body"><div class="repo-empty">Loading benchmark…</div></div></div>`;
+    body.innerHTML = `<div id="model-routing-card"><div class="card card-body"><div class="repo-empty">Loading load distribution…</div></div></div><div id="model-bench-card"><div class="card card-body"><div class="repo-empty">Loading benchmark…</div></div></div>`;
+    renderRoutingCard();
     renderBenchmarkCard();
   }
+
+  /* ---------- Load distribution — who answers THIS request ---------- */
+  // The benchmark decides which model is *best*; that answer is stable, so with
+  // several registered models every chat message, agent step and summary used to
+  // land on the same one — one provider key took all the traffic (and its rate
+  // limit) while the others idled. This card shows and tunes how the platform
+  // spreads that traffic, with live counters.
+  let routingCache = null;
+  let routingPollTimer = null;
+
+  const ROUTING_POLICY_LABELS = {
+    "adaptive": "Adaptive (recommended)",
+    "round-robin": "Round-robin (strict rotation)",
+    "weighted-round-robin": "Weighted round-robin",
+    "least-loaded": "Least-loaded (fewest live calls)",
+    "sticky": "Sticky (always the best model)",
+  };
+
+  function routingPolicyOptions(policies, current) {
+    return (policies || Object.keys(ROUTING_POLICY_LABELS)).map((p) =>
+      `<option value="${esc(p)}" ${p === current ? "selected" : ""}>${esc(ROUTING_POLICY_LABELS[p] || p)}</option>`).join("");
+  }
+
+  function routingShareBar(share) {
+    const pct = Math.round((Number(share) || 0) * 100);
+    return `<div class="meter-row" style="align-items:center;gap:6px"><div class="bar" style="width:90px;display:inline-block"><span style="width:${pct}%"></span></div><span class="val mono">${pct}%</span></div>`;
+  }
+
+  function routingStateBadge(row) {
+    if (row.cooldownUntil && row.cooldownUntil > Date.now()) {
+      const left = Math.ceil((row.cooldownUntil - Date.now()) / 1000);
+      return `<span class="badge badge-err" title="Too many consecutive failures — cooled down, still usable as a last resort">cooling ${left}s</span>`;
+    }
+    if (row.configuredWeight === 0) return `<span class="badge badge-muted">fallback only</span>`;
+    if (row.saturation >= 1) return `<span class="badge badge-warn">at capacity</span>`;
+    if (row.consecutiveErrors > 0) return `<span class="badge badge-warn">${row.consecutiveErrors} recent error(s)</span>`;
+    return `<span class="badge badge-ok">available</span>`;
+  }
+
+  function routingCardHtml() {
+    const r = routingCache;
+    if (!r) return `<div class="card card-body"><div class="repo-empty">Load distribution is unavailable.</div></div>`;
+    const cfg = r.config || {};
+    const rows = (r.models || []).filter((m) => m.known);
+    const busy = rows.filter((m) => m.inflight > 0).length;
+    const unanswered = rows.filter((m) => m.picks === 0).length;
+    return `<div class="card card-body">
+      <div class="card-title">⚖️ Load distribution <span class="sub">${esc(ROUTING_POLICY_LABELS[cfg.policy] || cfg.policy)} · ${r.modelCount || 0} active model(s) · ${r.activeCalls || 0} live call(s) on ${busy} model(s)</span></div>
+      <p style="color:var(--text-muted);font-size:12px">Every model that fits the task takes a turn, so no single provider key carries the whole installation. A model you pick in the chat dropdown still pins the answer; a project default gets roughly twice the share instead of everything. A model that keeps failing is moved to the back of the queue for a while — never removed.</p>
+      <div class="unresp-controls" style="flex-wrap:wrap;gap:10px;align-items:flex-end">
+        <label class="unresp-field"><span>Policy</span>
+          <select class="select" onchange="routingPolicySet(this.value)">${routingPolicyOptions(r.policies, cfg.policy)}</select>
+        </label>
+        <label class="unresp-field"><span>Max live calls per model</span>
+          <input class="input" style="width:90px" type="number" min="0" step="1" value="${Number(cfg.maxConcurrencyPerModel) || 0}" onchange="routingFieldSet('maxConcurrencyPerModel', this.value)" title="0 = unlimited"/>
+        </label>
+        <label class="unresp-field"><span>Errors before cooldown</span>
+          <input class="input" style="width:70px" type="number" min="0" step="1" value="${Number(cfg.failureThreshold) || 0}" onchange="routingFieldSet('failureThreshold', this.value)" title="0 = never cool down"/>
+        </label>
+        <label class="unresp-field"><span>Cooldown (seconds)</span>
+          <input class="input" style="width:80px" type="number" min="1" step="1" value="${Math.round((Number(cfg.cooldownMs) || 60000) / 1000)}" onchange="routingFieldSet('cooldownMs', Number(this.value) * 1000)"/>
+        </label>
+        <label class="unresp-field"><span>Keep a thread on its model</span>
+          <select class="select" onchange="routingFieldSet('sessionStickyMs', this.value)">
+            ${[[0, "Never (rotate each request)"], [60000, "1 minute"], [300000, "5 minutes"], [1800000, "30 minutes"]].map(([v, l]) => `<option value="${v}" ${Number(cfg.sessionStickyMs) === v ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+        </label>
+        <span class="spacer"></span>
+        <button class="btn" onclick="renderRoutingCard()">↻ Refresh</button>
+        <button class="btn" onclick="routingCountersReset()" title="Forget rotation position, error streaks and cooldowns">Reset counters</button>
+      </div>
+      ${rows.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Model</th><th>Traffic share</th><th>Calls routed</th><th>Live</th><th>Calls/min</th><th>Saturation</th><th>Last used</th><th>State</th></tr></thead>
+        <tbody>${rows.map((m) => `<tr>
+          <td><strong>${esc(m.displayName || m.modelId)}</strong><div class="mono sub">${esc(m.modelId)} · ${esc(m.providerName || "")}</div>${typeof m.configuredWeight === "number" && m.configuredWeight !== 1 ? `<div class="sub">weight ×${m.configuredWeight}</div>` : ""}</td>
+          <td>${routingShareBar(m.share)}</td>
+          <td class="mono">${m.picks}</td>
+          <td class="mono">${m.inflight}</td>
+          <td class="mono">${m.requestsLastMinute}${m.providerRateLimitPerMinute ? ` <span class="sub">/ ${m.providerRateLimitPerMinute}</span>` : ""}</td>
+          <td class="mono">${Math.round((m.saturation || 0) * 100)}%</td>
+          <td class="sub">${m.lastUsedAt ? timeAgo(new Date(m.lastUsedAt).toISOString()) : "—"}</td>
+          <td>${routingStateBadge(m)}${m.perfScore ? ` <span class="sub mono" title="benchmark score">${Number(m.perfScore).toFixed(2)}</span>` : ""}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+      <div class="field-hint mt">${unanswered === 0 ? "✓ Every active model is receiving traffic." : `⚠ ${unanswered} model(s) have received nothing yet — they join the rotation as requests come in (or are excluded by capability/budget).`}</div>`
+      : emptyState("⚖️", "No routed calls yet", "Send a chat message or run an agent — this table fills in live.")}
+    </div>`;
+  }
+
+  async function renderRoutingCard() {
+    const el = $("#model-routing-card");
+    if (!el) return;
+    try {
+      routingCache = await api("/models/routing");
+    } catch (e) {
+      el.innerHTML = `<div class="card card-body"><div class="error-state"><h4>Could not load routing state</h4><pre>${esc(e.message)}</pre></div></div>`;
+      return;
+    }
+    if (!$("#model-routing-card")) return;   // user switched tabs mid-fetch
+    $("#model-routing-card").innerHTML = routingCardHtml();
+    // Keep the live counters honest only while something is actually in flight.
+    if (routingPollTimer) { clearTimeout(routingPollTimer); routingPollTimer = null; }
+    if ((routingCache.activeCalls || 0) > 0 && $("#model-routing-card")) {
+      routingPollTimer = setTimeout(() => { routingPollTimer = null; renderRoutingCard(); }, 4000);
+    }
+  }
+  window.renderRoutingCard = renderRoutingCard;
+
+  window.routingPolicySet = async (policy) => {
+    try {
+      await api("/models/routing", { method: "PATCH", body: { policy } });
+      toast("Routing policy updated", ROUTING_POLICY_LABELS[policy] || policy, "ok");
+      await renderRoutingCard();
+    } catch (e) { toast("Error", e.message, "err"); await renderRoutingCard(); }
+  };
+
+  window.routingFieldSet = async (field, value) => {
+    try {
+      await api("/models/routing", { method: "PATCH", body: { [field]: Number(value) } });
+      await renderRoutingCard();
+      toast("Routing updated", `${field} = ${value}`, "ok");
+    } catch (e) { toast("Error", e.message, "err"); await renderRoutingCard(); }
+  };
+
+  window.routingCountersReset = async () => {
+    try {
+      await api("/models/routing/reset", { method: "POST", body: {} });
+      toast("Counters reset", "Rotation, error streaks and cooldowns cleared", "ok");
+      await renderRoutingCard();
+    } catch (e) { toast("Error", e.message, "err"); }
+  };
 
   /* ---------- Smart model routing — benchmark panel ---------- */
   // Benchmark runs execute in the background and are *paced* (one provider call
@@ -3498,6 +3631,8 @@
     if (m.omitTemperature) bits.push("no temp");
     else if (typeof m.temperature === "number") bits.push("creativity " + m.temperature);
     if (typeof m.maxTokens === "number") bits.push("max " + m.maxTokens);
+    if (typeof m.loadWeight === "number") bits.push(m.loadWeight <= 0 ? "fallback only" : "share ×" + m.loadWeight);
+    if (typeof m.maxConcurrency === "number") bits.push("≤" + m.maxConcurrency + " live");
     return bits.length ? ` <span class="badge badge-info" title="Per-model overrides">⚙ ${esc(bits.join(" · "))}</span>` : "";
   }
 
@@ -3547,6 +3682,16 @@
       <div class="grid-2">
         <div class="field"><label>Tags <span class="select-count">comma separated</span></label><input class="input" id="e-tags" value="${esc((m.tags || []).join(", "))}"/></div>
         <div class="field"><label>Status</label><select class="select" id="e-active"><option value="true" ${m.active ? "selected" : ""}>active</option><option value="false" ${m.active ? "" : "selected"}>inactive</option></select></div>
+      </div>
+      <div class="grid-2">
+        <div class="field"><label>Load share <span class="select-count">relative traffic weight</span></label>
+          <input class="input" id="e-weight" placeholder="1 (equal)" value="${typeof m.loadWeight === "number" ? m.loadWeight : ""}"/>
+          <div class="field-hint">0 = only used as a fallback · 1 = equal share · 2 = about twice as many requests. Leave empty for the automatic share (benchmark-score weighted).</div>
+        </div>
+        <div class="field"><label>Max concurrent calls <span class="select-count">load ceiling</span></label>
+          <input class="input" id="e-maxconc" placeholder="no limit" value="${typeof m.maxConcurrency === "number" ? m.maxConcurrency : ""}"/>
+          <div class="field-hint">While this many calls are in flight, the router gives new requests to other models first.</div>
+        </div>
       </div>
       <div class="field"><label>Notes</label><textarea class="textarea" id="e-notes" rows="2" placeholder="e.g. this route only accepts temperature 1.0">${esc(m.notes || "")}</textarea></div>
       <div class="flex"><button class="btn" id="e-test">Test with these settings</button><button class="btn btn-primary" id="e-save">Save changes</button><button class="btn" onclick="closeModal()">Cancel</button></div>
@@ -3601,8 +3746,17 @@
         showTestVerdict({ ok: false, message: e.message, hint: e.body?.hint, status: e.status }, { modelId: id, title: "✗ Model test failed" });
       }
     };
+    /** Empty box = clear the override; a number = set it. */
+    const numOrEmpty = (sel) => {
+      const raw = $(sel).value.trim();
+      return raw === "" ? null : Number(raw);
+    };
     $("#e-save").onclick = async () => {
       const tune = formTuning();
+      const weight = numOrEmpty("#e-weight");
+      if (weight !== null && (Number.isNaN(weight) || weight < 0 || weight > 10)) {
+        toast("Invalid load share", "Use a number between 0 and 10, or leave it empty.", "err"); return;
+      }
       if (tune.temperature !== null && (Number.isNaN(tune.temperature) || tune.temperature < 0 || tune.temperature > 1)) {
         toast("Invalid creativity", "Temperature must be between 0.0 and 1.0, or leave it empty.", "err"); return;
       }
@@ -3627,6 +3781,8 @@
           temperature: tune.temperature,
           maxTokens: tune.maxTokens,
           omitTemperature: tune.omitTemperature,
+          loadWeight: numOrEmpty("#e-weight"),
+          maxConcurrency: numOrEmpty("#e-maxconc"),
         }});
         closeModal(); toast("Model updated", $("#e-mid").value.trim(), "ok"); refreshModelsData();
       } catch (e) { toast("Error", e.message, "err"); }

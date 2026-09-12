@@ -1,6 +1,7 @@
 import type { Model } from "../domain/entities.js";
 import type { AgentModelConfig } from "../domain/entities.js";
 import type { ModelPerformanceStats } from "../domain/entities.js";
+import type { ModelLoadBalancer } from "./load-balancer.js";
 
 export type TaskCategory =
   | "research"
@@ -21,6 +22,22 @@ export interface RoutingPreference {
   requireStructuredOutput?: boolean;
   requireReasoning?: boolean;
   userPreferredModelId?: string;
+  /**
+   * Load distribution controls (ignored when the router was built without a
+   * load balancer, e.g. in unit tests or one-shot generators).
+   */
+  balance?: {
+    /** Rotation pool identity — normally `owner:<id>` or `project:<id>:<category>`. */
+    scope?: string;
+    /** `"forced"` = the user picked this model now; `"boost"` = a configured default. */
+    pin?: "forced" | "boost";
+    /** Conversation / task id for short-lived stickiness. */
+    affinityKey?: string;
+    /** Overrides the configured stickiness window for this decision. */
+    affinityTtlMs?: number;
+    /** Opt out completely (benchmarks, single-model bootstrap). */
+    disable?: boolean;
+  };
 }
 
 export interface CandidateModel {
@@ -45,6 +62,12 @@ export interface CandidateModel {
    *  the math-benchmark telemetry. Defaults to 0.5 (neutral) when no benchmark
    *  data exists. */
   perfScore?: number;
+  /** Relative share for load distribution (1 = equal, 0 = never volunteer). */
+  loadWeight?: number;
+  /** Per-model concurrency ceiling; `maxConcurrencyPerModel` applies when unset. */
+  maxConcurrency?: number;
+  /** Provider rate limit (calls/minute) — saturation signal for load balancing. */
+  rateLimitPerMinute?: number;
 }
 
 const CATEGORY_CAPABILITY: Record<TaskCategory, keyof Model["capabilities"]> = {
@@ -69,12 +92,23 @@ const CATEGORY_CAPABILITY: Record<TaskCategory, keyof Model["capabilities"]> = {
  *      move to the front. Models with repeated recent errors are demoted.
  *   5. Static `priority` / `fallbackPriority` — tiebreaker when no telemetry
  *      exists (fresh install).
- *   6. User-preferred model (explicit `preferredModelId`) is moved to front.
+ *   6. **Load distribution** (`ModelLoadBalancer`) — spreads consecutive requests
+ *      over every eligible model (round-robin / weighted / least-loaded /
+ *      adaptive) so one provider key does not carry the entire traffic while the
+ *      rest of the registry idles. A model the user explicitly picked stays
+ *      pinned; a configured default is given a larger share of the rotation
+ *      instead of all of it.
+ *   7. User-preferred model (explicit `preferredModelId`) is moved to front —
+ *      the legacy behaviour, kept for routers built without a balancer.
  *
  * Returns an ordered list of candidate model ids so callers can implement
- * automatic fallback (A -> B -> C) on failure/rate-limit/timeout.
+ * automatic fallback (A -> B -> C) on failure/rate-limit/timeout. The fallback
+ * order is the load-balanced order, so a saturated or failing model hands over
+ * to the one that is next in line rather than to a fixed second choice.
  */
 export class ModelRouter {
+  constructor(private readonly balancer?: ModelLoadBalancer) {}
+
   /** Order candidate models for a given task category and preference. */
   route(
     available: CandidateModel[],
@@ -160,8 +194,20 @@ export class ModelRouter {
     });
     candidates = [...candidates, ...remaining];
 
-    // 5) User preference overrides ordering (moves selected model to front).
-    if (preference.userPreferredModelId) {
+    // 5) Load distribution across every eligible model — or, for a router built
+    // without a balancer, the plain user-preference pin (step 6 below).
+    const balance = preference.balance;
+    if (this.balancer && !balance?.disable) {
+      candidates = this.balancer.order({
+        candidates,
+        scope: balance?.scope,
+        pinnedId: preference.userPreferredModelId,
+        // An explicit UI choice pins; a configured default only biases the mix.
+        pin: balance?.pin ?? "boost",
+        affinityKey: balance?.affinityKey,
+        affinityTtlMs: balance?.affinityTtlMs,
+      });
+    } else if (preference.userPreferredModelId) {
       const preferred = candidates.find((m) => m.id === preference.userPreferredModelId);
       if (preferred) {
         candidates = [preferred, ...candidates.filter((m) => m.id !== preferred.id)];
@@ -211,8 +257,28 @@ const NO_CAPABILITIES: CandidateModel["capabilities"] = {
   streaming: false,
 };
 
+/** Provider-side hints a candidate needs for load distribution. */
+export interface CandidateHints {
+  /** ModelProvider.rateLimitPerMinute — used as a saturation signal. */
+  rateLimitPerMinute?: number;
+  /** ModelProvider.maxConcurrencyPerModel override, when the operator set one. */
+  maxConcurrency?: number;
+}
+
+/**
+ * Build routing candidates for a set of models, attaching the provider-side
+ * capacity hints the load balancer needs (rate limits live on the provider, not
+ * on the model row).
+ */
+export function candidatesFor(
+  models: Model[],
+  providerOf: (providerId: string) => { rateLimitPerMinute?: number } | undefined,
+): CandidateModel[] {
+  return models.map((m) => toCandidate(m, { rateLimitPerMinute: providerOf(m.providerId)?.rateLimitPerMinute }));
+}
+
 /** Adapt a stored Model to a CandidateModel for routing. */
-export function toCandidate(m: Model): CandidateModel {
+export function toCandidate(m: Model, hints: CandidateHints = {}): CandidateModel {
   return {
     id: m.id,
     modelId: m.modelId,
@@ -225,5 +291,10 @@ export function toCandidate(m: Model): CandidateModel {
     priority: m.priority,
     fallbackPriority: m.fallbackPriority,
     perfScore: 0.5,
+    // Load-distribution inputs: the operator's relative share for this model,
+    // an optional per-model concurrency ceiling and the provider's rate limit.
+    loadWeight: m.loadWeight,
+    maxConcurrency: m.maxConcurrency ?? hints.maxConcurrency,
+    rateLimitPerMinute: hints.rateLimitPerMinute,
   };
 }

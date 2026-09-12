@@ -113,6 +113,19 @@ export interface Model {
   omitTemperature?: boolean;
   /** Notes shown on the Models page (why this model is tuned this way). */
   notes?: string;
+  /**
+   * Relative share for load distribution (1 = equal with its peers, 2 = takes
+   * roughly twice as many requests, 0 = only ever used as a fallback). The
+   * benchmark score is folded in automatically, so leaving this unset means
+   * "spread evenly, better models slightly ahead".
+   */
+  loadWeight?: number;
+  /**
+   * Per-model concurrency ceiling for load balancing: once this many calls are
+   * in flight the router sends new traffic to other models first. Unset = the
+   * platform-wide `MODEL_ROUTING_MAX_CONCURRENCY_PER_MODEL` (0 = unlimited).
+   */
+  maxConcurrency?: number;
   createdAt: ISODate;
   updatedAt: ISODate;
   /**

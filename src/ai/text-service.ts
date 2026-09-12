@@ -1,6 +1,7 @@
 import type { ModelRepository, ProviderRepository } from "./model-repo.js";
 import type { ProviderRegistry } from "./provider-registry.js";
-import { toCandidate, type ModelRouter, type TaskCategory } from "./model-router.js";
+import { candidatesFor, type ModelRouter, type TaskCategory } from "./model-router.js";
+import type { ModelLoadBalancer } from "./load-balancer.js";
 import type { CostRepository } from "../observability/repos.js";
 import { ModelBenchmarkRepository } from "../observability/model-bench-repo.js";
 import type { ChatMessage } from "./types.js";
@@ -13,6 +14,22 @@ export interface AiTextRequest {
   category?: TaskCategory;
   /** Optional preferred model id (e.g. conversation.modelId). */
   preferredModelId?: string;
+  /**
+   * True when the caller *chose* `preferredModelId` (a model picked in the chat
+   * UI): routing pins it. False/absent means "a configured default", which is
+   * only a bias — it gets roughly double the traffic share of its peers instead
+   * of every request. That is what keeps one model from carrying every chat in
+   * an installation with several models.
+   */
+  preferredModelPinned?: boolean;
+  /**
+   * Affinity for load distribution: requests sharing a key (one conversation,
+   * one task) reuse one model for a short window while different keys rotate
+   * across the registry. Omitted = rotate on every call.
+   */
+  balanceAffinityKey?: string;
+  /** Opt out of load distribution (single-shot or pinned calls, e.g. a test). */
+  disableLoadBalancing?: boolean;
   /** Optional agent model config to honour primary/fallback ordering. */
   agentModels?: AgentModelConfig;
   temperature?: number;
@@ -66,13 +83,15 @@ export class AiTextService {
       modelRouter: ModelRouter;
       costRepo: CostRepository;
       benchRepo: ModelBenchmarkRepository;
+      /** Live load counters — in-flight, fair-share cursor, circuit breaker. */
+      loadBalancer?: ModelLoadBalancer;
     },
   ) {}
 
   async complete(req: AiTextRequest): Promise<AiTextResult | null> {
     // Per-account pool: this account's models + the shared platform rows.
     const pool = this.deps.modelRepo.listActiveForOwner(req.ownerId);
-    const available = pool.map(toCandidate);
+    const available = candidatesFor(pool, (providerId) => this.deps.providerRepo.findById(providerId)?.data);
     const perfStats = this.deps.benchRepo.computeStats();
     // Ignore telemetry for models that no longer exist (deleted/deactivated), so
     // a stale model can never skew the speed normalisation or be routed to.
@@ -85,6 +104,13 @@ export class AiTextService {
       {
         userPreferredModelId: req.preferredModelId,
         maxLatencyMs: req.maxLatencyMs,
+        balance: {
+          // One rotation per account: two users' pools never advance each other.
+          scope: `owner:${req.ownerId ?? "platform"}`,
+          pin: req.preferredModelPinned ? "forced" : "boost",
+          affinityKey: req.balanceAffinityKey,
+          disable: req.disableLoadBalancing,
+        },
       },
       perfStats,
     );
@@ -95,6 +121,12 @@ export class AiTextService {
       const providerConfig = this.deps.providerRepo.findById(model.providerId)?.data;
       if (!providerConfig || !providerConfig.active) continue;
       const startedAt = Date.now();
+      // Commit the pick: this model is now in flight and its fair-share
+      // advances, so the next request goes to a peer instead of hammering it.
+      const lease = this.deps.loadBalancer?.begin(candidate.id, {
+        scope: `owner:${req.ownerId ?? "platform"}`,
+        affinityKey: req.balanceAffinityKey,
+      });
       try {
         const provider = this.deps.providerRegistry.resolve(providerConfig);
         const response = await provider.chat({
@@ -117,6 +149,7 @@ export class AiTextService {
           estimatedCostUsd: response.costUsd ?? 0,
           durationMs: latency,
         });
+        lease?.finish(true);
         return {
           content: response.content,
           modelId: model.id,
@@ -126,6 +159,7 @@ export class AiTextService {
           latencyMs: latency,
         };
       } catch (err) {
+        lease?.finish(false);
         lastError = err;
         logger.warn(`text-service: model ${candidate.id} failed, trying next`, { err: String(err), correlationId: req.correlationId });
       }

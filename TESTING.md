@@ -80,6 +80,41 @@ npm run dev
 | فقط بک‌اند | Add session expiry to the auth API | فقط بک‌اند + QA |
 | دیتابیس | Add user sessions table migration | بک‌اند + دیتابیس + QA |
 | فارسی | راست‌چین کردن صفحه ورود | بک‌اند + فرانت‌اند + QA |
+| توزیع بار | چند پیام پشت‌سرهم در Chat (با مدل روی Auto) | هر پیام به یک مدل دیگر می‌رود؛ هیچ مدلی بیکار نمی‌ماند |
+
+## ۵-الف) توزیع بار بین مدل‌ها (Load distribution)
+
+هدف: فشار روی یک مدل نباشد. جزئیات الگوریتم‌ها در [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md).
+
+1. **پول:** `Models → Benchmark → ⚖️ Load distribution` — سیاست فعلی، سهم ترافیک هر مدل،
+   تعداد درخواست در حال اجرا، فراخوانی/دقیقه و وضعیت (available / at capacity / cooling) را نشان می‌دهد.
+2. **چرخش در چت:** در یک گفتگو ۳ تا ۶ پیام پشت‌سرهم بفرست (منوی مدل روی `Auto`). زیر هر پاسخ،
+   بجِ شناسهٔ مدل پاسخ‌دِهننده دیده می‌شود و باید بین مدل‌های فعال بچرخد، نه اینکه ثابت بماند.
+   API:
+   ```bash
+   curl -s -X POST localhost:8080/conversations -H 'content-type: application/json' -d '{"title":"lb"}'
+   curl -s -X POST localhost:8080/conversations/<id>/messages -H 'content-type: application/json' \
+     -d '{"content":"سلام","role":"user"}' | python3 -c 'import sys,json; print(json.load(sys.stdin)["messages"][-1]["metadata"])'
+   ```
+3. **پین دستی:** اگر از منوی مدل یک مدل مشخص را انتخاب کنی، همان مدل قفل می‌شود
+   (انتخاب صریح کاربر محترم شمرده می‌شود). با انتخاب دوبارهٔ `Auto` قفل پاک می‌شود
+   و توزیع ادامه می‌یابد: `GET /conversations/<id>` باید `modelId` تهی/خالی بدهد.
+4. **سیاست‌ها:** از همان کارت، سیاست را روی `round-robin` بگذار → چرخش دقیق؛
+   `least-loaded` → مدلی که درخواست هم‌زمان کمتری دارد؛ `sticky` → رفتار قدیمی (همیشه بهترین مدل).
+   تغییر سیاست persist می‌شود و پس از ری‌استارت باقی می‌ماند:
+   ```bash
+   curl -s localhost:8080/models/routing | python3 -m json.tool
+   curl -s -X PATCH localhost:8080/models/routing -H 'content-type: application/json' -d '{"policy":"round-robin"}'
+   ```
+5. **وزن و سقف هر مدل:** در Edit Model دو فیلد جدید: `Load share` (۰ = فقط به‌عنوان fallback،
+   ۱ = سهم برابر، ۲ ≈ دو برابر ترافیک) و `Max concurrent calls`. مقدار ست‌شده روی کارت مدل
+   با بج `⚙ share ×2 · ≤3 live` دیده می‌شود.
+6. **مدل خراب:** یک مدل را با کلید باطل فعال کن و چند پیام بفرست؛ پس از
+   `MODEL_ROUTING_FAILURE_THRESHOLD` خطای پشت‌سرهم، آن مدل به انتهای صف می‌رود (بج `cooling`)
+   اما حذف نمی‌شود — بقیهٔ مدل‌ها ادامه می‌دهند و ترافیک بینشان تقسیم می‌ماند.
+   شمارنده‌ها را می‌توان با دکمهٔ `Reset counters` (یا `POST /models/routing/reset`) صفر کرد.
+
+تست خودکار: `npx vitest run src/tests/model-load-balancer.test.ts src/tests/chat-load-balancing.test.ts src/tests/models-routing-ui.test.ts`
 
 ## عیب‌یابی
 

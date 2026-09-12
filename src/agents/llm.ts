@@ -1,6 +1,7 @@
 import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
-import { ModelRouter, toCandidate, type TaskCategory } from "../ai/model-router.js";
+import { candidatesFor, ModelRouter, type TaskCategory } from "../ai/model-router.js";
+import { routingRunStickyMs, type ModelLoadBalancer } from "../ai/load-balancer.js";
 import type { Agent, Project, Task } from "../domain/entities.js";
 import type { CostRepository } from "../observability/repos.js";
 import { getModelBenchmarkRepo, ModelBenchmarkRepository } from "../observability/model-bench-repo.js";
@@ -22,6 +23,13 @@ export interface ChatDeps {
   providerRegistry: ProviderRegistry;
   modelRouter: ModelRouter;
   costRepo: CostRepository;
+  /**
+   * Live load counters of the whole platform. When present, consecutive agent
+   * steps and consecutive runs share the registry instead of hammering the one
+   * best-scored model; a run keeps its chosen model (see
+   * `MODEL_ROUTING_RUN_STICKY_MS`) so its answers stay stylistically consistent.
+   */
+  loadBalancer?: ModelLoadBalancer;
   project: Project;
   agent: Agent;
   task: Task;
@@ -56,6 +64,12 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
     const p = deps.providerRepo.findById(m.providerId)?.data;
     return p?.active && (deps.allowMock || p.type !== "mock");
   });
+  // Rotation identity for this run: the owner's pool for the task category, plus
+  // a per-run affinity key so every step of ONE run stays on the same model
+  // while different runs land on different models.
+  const balanceScope = `owner:${deps.ownerId ?? "platform"}:${deps.category}`;
+  const balanceAffinity = `run:${deps.task.id}:${deps.agent.id}:${deps.category}`;
+  const balanceTtl = routingRunStickyMs();
 
   const hasReal = models.some((m) => deps.providerRepo.findById(m.providerId)?.data.type !== "mock");
   // An explicit mock-only installation remains offline. With real models
@@ -82,7 +96,13 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
   const benchRepo: ModelBenchmarkRepository = getModelBenchmarkRepo();
   const perfStats = benchRepo.computeStats();
   ModelBenchmarkRepository.addSpeedNormalisation(perfStats);
-  const initial = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category, {}, perfStats);
+  const initial = deps.modelRouter.route(
+    candidatesFor(available, (id) => deps.providerRepo.findById(id)?.data),
+    deps.agent.models,
+    deps.category,
+    { balance: { scope: balanceScope, affinityKey: balanceAffinity, affinityTtlMs: balanceTtl } },
+    perfStats,
+  );
   if (!initial.length) throw new Error(`No active ${deps.category} model is available for ${deps.agent.name}`);
   const session: RealChat = {
     setContext: (context) => { deps.context = context; },
@@ -101,7 +121,16 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
         { role: "user" as const, content: `${deps.context}\n\n--- Current operation ---\n${user}` },
       ];
       const inputEstimate = Math.ceil(messages.reduce((n, m) => n + m.content.length, 0) / 4);
-      const candidates = deps.modelRouter.route(available.map(toCandidate), deps.agent.models, deps.category, { maxTokens: inputEstimate + 1 }, perfStats);
+      const candidates = deps.modelRouter.route(
+        candidatesFor(available, (id) => deps.providerRepo.findById(id)?.data),
+        deps.agent.models,
+        deps.category,
+        {
+          maxTokens: inputEstimate + 1,
+          balance: { scope: balanceScope, affinityKey: balanceAffinity, affinityTtlMs: balanceTtl },
+        },
+        perfStats,
+      );
       let lastError: unknown;
       for (const candidate of candidates) {
         deps.checkActive();
@@ -117,6 +146,11 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
         deps.taskBudget?.beginCall();
         deps.budget.beginCall();
         const started = Date.now();
+        const lease = deps.loadBalancer?.begin(model.id, {
+          scope: balanceScope,
+          affinityKey: balanceAffinity,
+          stickyMs: balanceTtl,
+        });
         try {
           const response = await deps.providerRegistry.resolve(config).chat({
             modelId: model.modelId,
@@ -146,8 +180,12 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
           if (!response.content?.trim()) throw new Error(`Model ${model.displayName} returned no content`);
           session.providerName = config.name;
           session.modelLabel = model.modelId;
+          lease?.finish(true);
           return response.content;
         } catch (err) {
+          // Report the failure even when the budget/abort path rethrows, so a
+          // model that is down stops being volunteered for the next step.
+          lease?.finish(false);
           deps.signal?.throwIfAborted();
           if (err instanceof BudgetExceededError || err instanceof TaskCancelledError) throw err;
           lastError = err;

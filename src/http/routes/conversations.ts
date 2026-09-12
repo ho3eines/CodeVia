@@ -9,7 +9,7 @@ import { hydrateProject } from "../../domain/project-options.js";
 import { buildRepoBrief } from "../../agents/context.js";
 import { logger } from "../../logger.js";
 import { streamModelChat } from "../../ai/model-stream.js";
-import { toCandidate } from "../../ai/model-router.js";
+import { candidatesFor } from "../../ai/model-router.js";
 import { ModelBenchmarkRepository } from "../../observability/model-bench-repo.js";
 import type { ChatMessage } from "../../ai/types.js";
 
@@ -175,12 +175,16 @@ Be helpful, concise, and accurate. Answer questions directly; if a question need
  */
 function resolveOrderedModels(
   container: Container,
-  preferredModelId?: string,
-  ownerId?: string,
+  preferredModelId: string | undefined,
+  ownerId: string | undefined,
+  opts: { pinned?: boolean; affinityKey?: string } = {},
 ): Array<{ model: Model; provider: ModelProvider }> {
   try {
     // Per-account pool: this account's models + the shared platform rows.
-    const available = container.modelRepo.listActiveForOwner(ownerId).map(toCandidate);
+    const available = candidatesFor(
+      container.modelRepo.listActiveForOwner(ownerId),
+      (providerId) => container.providerRepo.findById(providerId)?.data,
+    );
     if (!available.length) return [];
     const perfStats = container.benchRepo.computeStats();
     const liveIds = new Set(available.map((m) => m.id));
@@ -189,7 +193,16 @@ function resolveOrderedModels(
       available,
       { primary: "", fallbacks: [], specialized: {} },
       "fast",
-      { userPreferredModelId: preferredModelId },
+      {
+        userPreferredModelId: preferredModelId,
+        balance: {
+          scope: `owner:${ownerId ?? "platform"}`,
+          // A model the user picked in the dropdown pins the answer; a project
+          // default only earns a bigger share of the rotation.
+          pin: opts.pinned ? "forced" : "boost",
+          affinityKey: opts.affinityKey,
+        },
+      },
       perfStats,
     );
     const out: Array<{ model: Model; provider: ModelProvider }> = [];
@@ -205,6 +218,26 @@ function resolveOrderedModels(
     logger.warn("conversation streaming model resolution failed", { err: String(err) });
     return [];
   }
+}
+
+/**
+ * Which model should answer this message, and how hard to pin it.
+ *
+ * `pinned` = the user (or an earlier message in this conversation) explicitly
+ * chose a model — honour it exactly. Otherwise the project default, when set,
+ * is only a *bias*: it takes roughly twice the share of an equal peer while the
+ * rest of the registry still gets traffic. That is the whole point of the
+ * "Auto" option: no single model carries every chat.
+ */
+function resolveModelSelection(
+  requested: string | undefined,
+  conversationModelId: string | undefined,
+  projectDefaultModelId: string | undefined,
+): { preferredModelId: string | undefined; pinned: boolean } {
+  const explicit = (requested || "").trim() || (conversationModelId || "").trim();
+  if (explicit) return { preferredModelId: explicit, pinned: true };
+  const soft = (projectDefaultModelId || "").trim();
+  return { preferredModelId: soft || undefined, pinned: false };
 }
 
 export function registerConversationRoutes(app: FastifyInstance, container: Container): void {
@@ -332,8 +365,10 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       createdAt: new Date().toISOString(),
       metadata: attachments.length ? { attachments } : undefined,
     };
-    // Persist the user-chosen model for the rest of the conversation.
-    if (b.modelId) container.conversationRepo.updateModel?.(id, b.modelId);
+    // Persist the user-chosen model for the rest of the conversation. An empty
+    // string means "Auto" was selected: drop the stored pin so the balancer
+    // rotates again instead of staying on one model forever.
+    if (typeof b.modelId === "string") container.conversationRepo.updateModel?.(id, b.modelId.trim());
     let updated = container.conversationRepo.addMessage(id, msg);
     if (!updated) {
       reply.code(404);
@@ -427,9 +462,15 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       const messages = buildChatMessages({ safeProject, updated, content, attachments, repoBrief });
 
       try {
+        const selection = resolveModelSelection(b.modelId, updated.modelId, safeProject?.defaultModelId);
         const res = await container.aiText.complete({
           category: "fast",
-          preferredModelId: b.modelId ?? updated.modelId ?? safeProject?.defaultModelId,
+          preferredModelId: selection.preferredModelId,
+          preferredModelPinned: selection.pinned,
+          // Same conversation id for the whole thread: with stickiness enabled
+          // the thread keeps one voice while different threads land on
+          // different models; by default (0ms) every message rotates.
+          balanceAffinityKey: `conv:${id}`,
           projectId: updated.projectId,
           ownerId: safeProject?.ownerId ?? resolveRequestUser(req, container).user.id,
           correlationId: `conv-chat-${id}-${Date.now()}`,
@@ -501,7 +542,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       return { error: "project not found" };
     }
     const attachments = parseAttachments(b.attachments);
-    if (b.modelId) container.conversationRepo.updateModel?.(id, b.modelId);
+    if (typeof b.modelId === "string") container.conversationRepo.updateModel?.(id, b.modelId.trim());
     const msg: ConversationMessage = {
       id: randomUUID(),
       role,
@@ -637,7 +678,12 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       const messages = buildChatMessages({ safeProject, updated: current, content, attachments, repoBrief });
       // The project owner's models serve project chats; a standalone chat
       // uses the signed-in user's own models.
-      const ordered = resolveOrderedModels(container, b.modelId ?? current.modelId ?? safeProject?.defaultModelId, safeProject?.ownerId ?? resolveRequestUser(req, container).user.id);
+      const selection = resolveModelSelection(b.modelId, current.modelId, safeProject?.defaultModelId);
+      const ownerId = safeProject?.ownerId ?? resolveRequestUser(req, container).user.id;
+      const ordered = resolveOrderedModels(container, selection.preferredModelId, ownerId, {
+        pinned: selection.pinned,
+        affinityKey: `conv:${id}`,
+      });
       if (!ordered.length) {
         const errMsg: ConversationMessage = {
           id: randomUUID(),
@@ -668,6 +714,14 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           send({ type: "meta", modelId: model.id, providerId: provider.id, displayName: model.displayName });
         }
         let attemptError = "";
+        // Commit the pick in the load balancer (in-flight + fair-share cursor),
+        // and report the outcome so a model that keeps failing is rotated away
+        // for a while instead of staying first in every list.
+        const lease = container.loadBalancer.begin(model.id, {
+          scope: `owner:${ownerId ?? "platform"}`,
+          affinityKey: `conv:${id}`,
+        });
+        let answered = false;
         try {
           for await (const ev of streamModelChat(provider, model.modelId, {
             messages,
@@ -678,6 +732,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           })) {
             if (ev.type === "delta" && ev.text) {
               full += ev.text;
+              answered = true;
               usedModel = model;
               usedProvider = provider;
               send({ type: "delta", text: ev.text });
@@ -685,6 +740,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
               // Providers that ignore `stream: true` answer in one `done`.
               if (ev.text && !full) {
                 full = ev.text;
+                answered = true;
                 usedModel = model;
                 usedProvider = provider;
                 send({ type: "delta", text: ev.text });
@@ -696,6 +752,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         } catch (err) {
           attemptError = err instanceof Error ? err.message : String(err);
         }
+        lease.finish(answered && !attemptError);
         if (!full.trim() && attemptError) lastError = attemptError;
       }
 

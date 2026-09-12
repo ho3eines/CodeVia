@@ -137,6 +137,29 @@ const EnvSchema = z.object({
   ENABLE_SIMULATION_MODE: envBoolean(true),
   MOCK_AI_DEFAULT: envBoolean(true),
 
+  // Model routing — how requests are spread over the registered models.
+  //   adaptive            (default) benchmark quality + fair share, discounted
+  //                                 by live load and models that keep failing
+  //   round-robin                     strict rotation: one request per model
+  //   weighted-round-robin            rotation weighted by loadWeight × score
+  //   least-loaded                    fewest in-flight / lowest rate usage first
+  //   sticky                          always the single best model (legacy)
+  MODEL_ROUTING_POLICY: envEnum(["adaptive", "round-robin", "weighted-round-robin", "least-loaded", "sticky"] as const, "adaptive"),
+  // In-flight calls one model may carry before the router prefers its peers
+  // (0 = unlimited; a per-model value on the Model overrides this one).
+  MODEL_ROUTING_MAX_CONCURRENCY_PER_MODEL: envNumber(0, 0),
+  // Consecutive failures that cool a model down for a while. 0 disables the
+  // circuit breaker (a failing model then keeps getting traffic every round).
+  MODEL_ROUTING_FAILURE_THRESHOLD: envNumber(3, 0),
+  // Base cooldown for a cooled-down model; doubles per trip up to 8×.
+  MODEL_ROUTING_COOLDOWN_MS: envNumber(60000, 1000),
+  // How long one conversation keeps the model it was first given
+  // (0 = rotate on every message, which is what spreads chat load best).
+  MODEL_ROUTING_SESSION_STICKY_MS: envNumber(0, 0),
+  // How long one agent run keeps its model, so a run does not switch voice
+  // between steps while different runs still spread across the registry.
+  MODEL_ROUTING_RUN_STICKY_MS: envNumber(900000, 0),
+
   // Web UI
   WEB_BASE_URL: z.string().default("http://localhost:8080"),
   PUBLIC_WEB_BASE_URL: z.string().optional(),

@@ -7,6 +7,7 @@ import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
 import type { ContextEngine } from "../ai/context-engine.js";
 import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { ModelRouter, TaskCategory } from "../ai/model-router.js";
+import type { ModelLoadBalancer } from "../ai/load-balancer.js";
 import type { IGitHubService } from "../github/types.js";
 import { eventBus, generateCorrelationId } from "../events/bus.js";
 import { live } from "../realtime/live.js";
@@ -34,6 +35,7 @@ export interface AgentRunnerDeps {
   providerRepo: ProviderRepository;
   providerRegistry: ProviderRegistry;
   modelRouter: ModelRouter;
+  loadBalancer?: ModelLoadBalancer;
   contextEngine: ContextEngine;
   github: IGitHubService;
   githubForProject?: (project: Project, requestUserId?: string) => IGitHubService;
@@ -134,6 +136,7 @@ export class AgentRunner {
         modelRepo: this.deps.modelRepo, providerRepo: this.deps.providerRepo,
         providerRegistry: req.providerRegistry ?? this.deps.providerRegistry,
         modelRouter: this.deps.modelRouter, costRepo: this.deps.costRepo,
+        loadBalancer: this.deps.loadBalancer,
         project, agent, task, context: built.context,
         category: req.category ?? (isWriter(agent.type) ? "coding" : agent.type === "research" ? "research" : "reasoning"),
         budget, taskBudget: req.taskBudget, checkActive,
