@@ -31,7 +31,12 @@ export class CostRepository extends DocumentRepository<CostRecord> {
     this.upsert(rec, { projectId: rec.projectId, parentId: rec.agentId });
     return rec;
   }
-  totals(filter: { projectId?: string; agentId?: string } = {}): { tokens: number; costUsd: number; runs: number; calls: number } {
+  totals(filter: { projectId?: string; agentId?: string } = {}): {
+    tokens: number;
+    costUsd: number;
+    runs: number;
+    calls: number;
+  } {
     const records = this.findMany({
       projectId: filter.projectId,
       parentId: filter.agentId,

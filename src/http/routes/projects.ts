@@ -14,15 +14,22 @@ import { parseRepoFullName } from "../../github/types.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken, getUserGitHubToken } from "../../auth/github-tokens.js";
-import { adoptProjectConnection as bindProjectConnection, adoptStrandedProject } from "../../auth/project-connection.js";
+import {
+  adoptProjectConnection as bindProjectConnection,
+  adoptStrandedProject,
+} from "../../auth/project-connection.js";
 import { logger } from "../../logger.js";
 import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
 import { isAgentType } from "../../agents/generator.js";
-import { IMPLEMENTERS } from "../../agents/implementation.js";
 import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
 
-function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
+function fail(
+  reply: FastifyReply,
+  status: number,
+  message: string,
+  extra: Record<string, unknown> = {},
+): { error: string } {
   reply.code(status);
   return { error: message, ...extra };
 }
@@ -104,7 +111,12 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     }
     const { user, authenticated } = resolveRequestUser(req, container);
     const ownerId = user.id;
-    const resolved = resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github });
+    const resolved = resolveGitHubForUser({
+      kv: container.kv,
+      userId: user.id,
+      authenticated,
+      fallback: container.github,
+    });
     const tokenInfo = resolved.source === "user-oauth" ? describeUserGitHubToken(container.kv, user.id) : undefined;
     const githubConnection: ProjectGithubConnection = {
       kind: resolved.source,
@@ -112,7 +124,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       login: tokenInfo?.login,
     };
     try {
-      let project = await container.agentManager.createProject({
+      const project = await container.agentManager.createProject({
         ownerId,
         name,
         slug: typeof body.slug === "string" && body.slug.trim() ? body.slug.trim() : undefined,
@@ -178,17 +190,27 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     }
     if (typeof body.memoryRepo === "string") {
       const mem = body.memoryRepo.trim();
-      if (mem && !isValidRepoFullName(mem)) return fail(reply, 400, `Invalid memory repository "${mem}" — expected owner/name`);
+      if (mem && !isValidRepoFullName(mem))
+        return fail(reply, 400, `Invalid memory repository "${mem}" — expected owner/name`);
       patch.memoryRepo = mem || undefined;
     }
     if (typeof body.telegramChatId === "string") patch.telegramChatId = body.telegramChatId || undefined;
     if (typeof body.active === "boolean") patch.active = body.active;
     if (body.settings && typeof body.settings === "object") {
       const settings = body.settings as Partial<Project["settings"]>;
-      patch.settings = { ...p.settings, ...settings, budget: { ...p.settings.budget, ...settings.budget }, permissions: { ...p.settings.permissions, ...settings.permissions }, metadata: { ...p.settings.metadata, ...settings.metadata } };
+      patch.settings = {
+        ...p.settings,
+        ...settings,
+        budget: { ...p.settings.budget, ...settings.budget },
+        permissions: { ...p.settings.permissions, ...settings.permissions },
+        metadata: { ...p.settings.metadata, ...settings.metadata },
+      };
     }
     if (body.capabilities && typeof body.capabilities === "object") {
-      patch.capabilities = normalizeCapabilities({ ...p.capabilities, ...(body.capabilities as Record<string, unknown>) });
+      patch.capabilities = normalizeCapabilities({
+        ...p.capabilities,
+        ...(body.capabilities as Record<string, unknown>),
+      });
       Object.assign(patch, legacyFieldsFromCapabilities(patch.capabilities));
     }
     if (Array.isArray(body.repositories)) {
@@ -255,7 +277,11 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     try {
       const gh = githubForProject(req, p);
-      const entries = await gh.listFiles({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.branch || p.branch, q.path || "CodeVia");
+      const entries = await gh.listFiles(
+        { owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") },
+        q.branch || p.branch,
+        q.path || "CodeVia",
+      );
       return entries;
     } catch (err) {
       return fail(reply, 502, `GitHub unreachable: ${String(err).slice(0, 200)}`);
@@ -270,7 +296,11 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (!q.path) return fail(reply, 400, "path query is required");
     try {
       const gh = githubForProject(req, p);
-      const file = await gh.getFile({ owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") }, q.path, q.branch || p.branch);
+      const file = await gh.getFile(
+        { owner: p.configRepo.split("/")[0], name: p.configRepo.split("/").slice(1).join("/") },
+        q.path,
+        q.branch || p.branch,
+      );
       if (!file) return fail(reply, 404, `file not found: ${q.path}`);
       return { path: q.path, content: file.content.slice(0, 60000), sha: file.sha };
     } catch (err) {
@@ -299,9 +329,17 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     // Cascade-delete every project-scoped record so a deleted project leaves no
     // orphans behind (agents, tasks, runs, memory, workflows, …).
     for (const repo of [
-      container.agentRepo, container.taskRepo, container.runRepo, container.memoryRepo,
-      container.workflowRepo, container.conversationRepo, container.promptVersionRepo,
-      container.skillRepo, container.costRepo, container.approvalRepo, container.notificationRepo,
+      container.agentRepo,
+      container.taskRepo,
+      container.runRepo,
+      container.memoryRepo,
+      container.workflowRepo,
+      container.conversationRepo,
+      container.promptVersionRepo,
+      container.skillRepo,
+      container.costRepo,
+      container.approvalRepo,
+      container.notificationRepo,
     ]) {
       repo.deleteByProject(id);
     }
@@ -376,11 +414,17 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (requestUserId && getUserGitHubToken(container.kv, requestUserId)) {
       // Bind this project to the account using it so later writes (including
       // background work with no request user) use that owner's own credential.
-      bindProjectConnection({ kv: container.kv, projectRepo: container.projectRepo, project: p, userId: requestUserId });
+      bindProjectConnection({
+        kv: container.kv,
+        projectRepo: container.projectRepo,
+        project: p,
+        userId: requestUserId,
+      });
       return container.githubForProject(p, requestUserId);
     }
     if (p.githubConnection) return container.githubForProject(p);
-    return resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github }).service;
+    return resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github })
+      .service;
   };
 
   /**
@@ -397,7 +441,6 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
    * so a project stays with its owner while that owner remains connected.
    */
   app.get("/projects/:id/issues", { schema: { tags: ["projects"] } }, async (req, reply) => {
-
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
@@ -460,13 +503,19 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       if (!ref) continue;
       try {
         for (const i of await gh.listIssues(ref)) issues.push({ repo: link.repo, ...i });
-      } catch { /* per-repo failures must not hide the others */ }
+      } catch {
+        /* per-repo failures must not hide the others */
+      }
       try {
         for (const pr of await gh.listPullRequests(ref)) prs.push({ repo: link.repo, ...pr });
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       try {
         for (const c of await gh.listCommits(ref, link.branch)) commits.push({ repo: link.repo, ...c });
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
     commits.sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
 
@@ -482,7 +531,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       }));
     const decisions = memory.filter((m) => m.type === "decision").slice(0, 5);
     const activity = [
-      ...runs.slice(0, 20).map((r) => ({ kind: "run", id: r.id, title: `${r.agentType} run`, status: r.status, at: r.createdAt })),
+      ...runs
+        .slice(0, 20)
+        .map((r) => ({ kind: "run", id: r.id, title: `${r.agentType} run`, status: r.status, at: r.createdAt })),
       ...tasks.slice(0, 20).map((t) => ({ kind: "task", id: t.id, title: t.title, status: t.status, at: t.updatedAt })),
     ]
       .sort((a, b) => String(b.at).localeCompare(String(a.at)))
@@ -521,8 +572,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       recentErrors: errors,
       recentDecisions: decisions,
       recentRuns: runs.slice(0, 8).map((r) => ({
-        id: r.id, agentType: r.agentType, status: r.status,
-        totalTokens: r.totalTokens, costUsd: r.costUsd, durationMs: r.durationMs, createdAt: r.createdAt,
+        id: r.id,
+        agentType: r.agentType,
+        status: r.status,
+        totalTokens: r.totalTokens,
+        costUsd: r.costUsd,
+        durationMs: r.durationMs,
+        createdAt: r.createdAt,
       })),
       activity,
       cost,
@@ -543,8 +599,11 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       const ref = parseRepoFullName(link.repo);
       if (!ref) continue;
       try {
-        for (const c of await gh.listCommits(ref, link.branch)) out.push({ repo: link.repo, branch: link.branch, ...c });
-      } catch { /* ignore per-repo failures */ }
+        for (const c of await gh.listCommits(ref, link.branch))
+          out.push({ repo: link.repo, branch: link.branch, ...c });
+      } catch {
+        /* ignore per-repo failures */
+      }
     }
     out.sort((a, b) => String(b.date ?? "").localeCompare(String(a.date ?? "")));
     const limit = Math.min(Math.max(Number(q.limit) || 30, 1), 100);
@@ -579,9 +638,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const title = String(body.title ?? "").trim();
     if (!title) return fail(reply, 400, "Issue title is required");
-    const target = typeof body.repo === "string" && body.repo
-      ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
-      : configRepoOf(p.repositories);
+    const target =
+      typeof body.repo === "string" && body.repo
+        ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
+        : configRepoOf(p.repositories);
     if (!target) return fail(reply, 404, "repository is not linked to this project");
     const ref = parseRepoFullName(target.repo);
     if (!ref) return fail(reply, 400, `Invalid repository "${target.repo}"`);
@@ -589,8 +649,12 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       const gh = githubForProject(req, p);
       const issue = await gh.createIssue(ref, title, String(body.body ?? ""));
       container.auditRepo.record({
-        action: "github.issue.created", projectId: id, result: "success", source: "web",
-        correlationId: `issue-${id}-${Date.now()}`, metadata: { repo: target.repo, number: issue.number, title },
+        action: "github.issue.created",
+        projectId: id,
+        result: "success",
+        source: "web",
+        correlationId: `issue-${id}-${Date.now()}`,
+        metadata: { repo: target.repo, number: issue.number, title },
       });
       reply.code(201);
       return { repo: target.repo, ...issue };
@@ -610,9 +674,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const base = String(body.base ?? "").trim();
     if (!title) return fail(reply, 400, "Pull request title is required");
     if (!head || !base) return fail(reply, 400, "Both head and base branches are required");
-    const target = typeof body.repo === "string" && body.repo
-      ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
-      : configRepoOf(p.repositories);
+    const target =
+      typeof body.repo === "string" && body.repo
+        ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
+        : configRepoOf(p.repositories);
     if (!target) return fail(reply, 404, "repository is not linked to this project");
     const ref = parseRepoFullName(target.repo);
     if (!ref) return fail(reply, 400, `Invalid repository "${target.repo}"`);
@@ -620,8 +685,12 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       const gh = githubForProject(req, p);
       const pr = await gh.createPullRequest(ref, title, String(body.body ?? ""), head, base);
       container.auditRepo.record({
-        action: "github.pr.created", projectId: id, result: "success", source: "web",
-        correlationId: `pr-${id}-${Date.now()}`, metadata: { repo: target.repo, number: pr.number, title, head, base },
+        action: "github.pr.created",
+        projectId: id,
+        result: "success",
+        source: "web",
+        correlationId: `pr-${id}-${Date.now()}`,
+        metadata: { repo: target.repo, number: pr.number, title, head, base },
       });
       reply.code(201);
       return { repo: target.repo, ...pr };
@@ -635,9 +704,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
-    const target = typeof body.repo === "string" && body.repo
-      ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
-      : configRepoOf(p.repositories);
+    const target =
+      typeof body.repo === "string" && body.repo
+        ? p.repositories.find((r) => r.repo.toLowerCase() === String(body.repo).toLowerCase())
+        : configRepoOf(p.repositories);
     if (!target) return fail(reply, 404, "repository is not linked to this project");
     const ref = parseRepoFullName(target.repo);
     if (!ref) return fail(reply, 400, `Invalid repository "${target.repo}"`);
@@ -646,8 +716,12 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       const gh = githubForProject(req, p);
       const res = await gh.mergePullRequest(ref, Number(number), { method });
       container.auditRepo.record({
-        action: "github.pr.merged", projectId: id, result: res.merged ? "success" : "failure", source: "web",
-        correlationId: `merge-${id}-${number}-${Date.now()}`, metadata: { repo: target.repo, number: Number(number), method, ...res },
+        action: "github.pr.merged",
+        projectId: id,
+        result: res.merged ? "success" : "failure",
+        source: "web",
+        correlationId: `merge-${id}-${number}-${Date.now()}`,
+        metadata: { repo: target.repo, number: Number(number), method, ...res },
       });
       if (!res.merged) return fail(reply, 422, res.message ?? `PR #${number} could not be merged`);
       return { repo: target.repo, number: Number(number), ...res };
@@ -666,10 +740,22 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       .map((s) => String(s).trim())
       .filter(Boolean);
     if (!slugs.length) return fail(reply, 400, "Skill slug is required");
-    if (slugs.some((slug) => container.projectFiles.isTombstoned(p, `CodeVia/skills/${slug}.md`))) return fail(reply, 409, "This skill was intentionally removed. Create its definition explicitly before attaching it again.");
+    if (slugs.some((slug) => container.projectFiles.isTombstoned(p, `CodeVia/skills/${slug}.md`)))
+      return fail(
+        reply,
+        409,
+        "This skill was intentionally removed. Create its definition explicitly before attaching it again.",
+      );
     const unknown = slugs.filter((s) => !container.skillRepo.findBySlug(s, id) && !container.skillRepo.findBySlug(s));
     if (unknown.length) return fail(reply, 404, `Unknown skill(s): ${unknown.join(", ")}`);
-    const next = await save({ ...p, settings: { ...p.settings, skills: [...new Set([...p.settings.skills, ...slugs])], generatedSkills: p.settings.generatedSkills?.filter((slug) => !slugs.includes(slug)) } });
+    const next = await save({
+      ...p,
+      settings: {
+        ...p.settings,
+        skills: [...new Set([...p.settings.skills, ...slugs])],
+        generatedSkills: p.settings.generatedSkills?.filter((slug) => !slugs.includes(slug)),
+      },
+    });
     return next.settings.skills;
   });
 
@@ -680,14 +766,6 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const next = await save({ ...p, settings: { ...p.settings, skills: p.settings.skills.filter((s) => s !== slug) } });
     return next.settings.skills;
   });
-
-  const workflowForIntent = (projectId: string, text: string): string | undefined => {
-    const workflows = container.workflowRepo.byProject(projectId).filter((w) => w.enabled);
-    const lower = text.toLowerCase();
-    const bugLike = /bug|fix|error|failing|test|login|debug|خطا|ارور|باگ|خراب|رفع|دیباگ|تست|لاگین|ورود/.test(lower);
-    const wanted = bugLike ? "bug-diagnosis-loop" : "autonomous-development-loop";
-    return workflows.find((w) => w.slug === wanted)?.id ?? workflows[0]?.id;
-  };
 
   // Natural-language AI action on a project (routed through Agent Manager)
   app.post("/projects/:id/ask", { schema: { tags: ["projects"] } }, async (req, reply) => {
@@ -705,7 +783,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       agentType: body.agentType as string | undefined,
       workflowId: typeof body.workflowId === "string" ? body.workflowId : undefined,
       correlationId: `project-ask-${id}-${Date.now()}`,
-      requestUserId: resolveRequestUser(req, container).authenticated ? resolveRequestUser(req, container).user.id : undefined,
+      requestUserId: resolveRequestUser(req, container).authenticated
+        ? resolveRequestUser(req, container).user.id
+        : undefined,
     });
     if (isAskError(result)) return fail(reply, result.status, result.error);
     return result;
@@ -739,9 +819,17 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     const body = (req.body ?? {}) as { rules?: string[]; keepDiscovered?: boolean };
     const manual = Array.isArray(body.rules) ? body.rules.map((r) => String(r).trim()).filter(Boolean) : [];
-    const discovered = body.keepDiscovered === false ? [] : p.settings.rules.filter((r) => r.startsWith(DISCOVERED_RULE_TAG));
+    const discovered =
+      body.keepDiscovered === false ? [] : p.settings.rules.filter((r) => r.startsWith(DISCOVERED_RULE_TAG));
     const next = await save({ ...p, settings: { ...p.settings, rules: [...manual, ...discovered] } });
-    container.auditRepo.record({ action: "project.rules.updated", projectId: id, result: "success", source: "web", correlationId: `rules-${id}-${Date.now()}`, metadata: { manual: manual.length, discovered: discovered.length } });
+    container.auditRepo.record({
+      action: "project.rules.updated",
+      projectId: id,
+      result: "success",
+      source: "web",
+      correlationId: `rules-${id}-${Date.now()}`,
+      metadata: { manual: manual.length, discovered: discovered.length },
+    });
     return { rules: next.settings.rules.length, manual: manual.length, discovered: discovered.length };
   });
 
@@ -769,15 +857,30 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       updatedAt: now,
     };
     const plan = defaultPlanFor(agent, task);
-    const context = await container.contextEngine.build({ project: p, agent, task, skills: container.skillsRegistry, github: githubForProject(req, p) }).catch(() => undefined);
-    const tools = plan.filter((s) => s.tool).map((s) => container.toolRegistry.get(s.tool!)).filter(Boolean);
+    const context = await container.contextEngine
+      .build({ project: p, agent, task, skills: container.skillsRegistry, github: githubForProject(req, p) })
+      .catch(() => undefined);
+    const tools = plan
+      .filter((s) => s.tool)
+      .map((s) => container.toolRegistry.get(s.tool!))
+      .filter(Boolean);
     return {
       simulation: true,
       agent: { id: agent.id, name: agent.name, type: agent.type },
       model: { primary: agent.models.primary || null, fallbacks: agent.models.fallbacks },
-      plan: plan.map((s, i) => ({ index: i, label: s.label, tool: s.tool ?? null, requiresApproval: Boolean(s.requiresApproval) || Boolean(s.tool && container.toolRegistry.get(s.tool)?.dangerous) })),
-      writes: plan.filter((s) => s.tool && container.toolRegistry.get(s.tool)?.dangerous).map((s) => ({ step: s.label, tool: s.tool })),
-      approvalsNeeded: plan.filter((s) => s.requiresApproval || (s.tool && container.toolRegistry.get(s.tool)?.dangerous)).length,
+      plan: plan.map((s, i) => ({
+        index: i,
+        label: s.label,
+        tool: s.tool ?? null,
+        requiresApproval:
+          Boolean(s.requiresApproval) || Boolean(s.tool && container.toolRegistry.get(s.tool)?.dangerous),
+      })),
+      writes: plan
+        .filter((s) => s.tool && container.toolRegistry.get(s.tool)?.dangerous)
+        .map((s) => ({ step: s.label, tool: s.tool })),
+      approvalsNeeded: plan.filter(
+        (s) => s.requiresApproval || (s.tool && container.toolRegistry.get(s.tool)?.dangerous),
+      ).length,
       context: context ? { tokens: context.tokens, sources: context.sources.map((c) => c.label) } : null,
       tools: tools.map((t) => ({ name: t!.name, dangerous: t!.dangerous, permissions: t!.permissions })),
       budget: p.settings.budget,
@@ -803,16 +906,23 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const existing = p.repositories.find((r) => r.repo.toLowerCase() === repo.toLowerCase());
     const link: Partial<ProjectRepositoryLink> = {
       repo,
-      branch: typeof body.branch === "string" && body.branch.trim() ? body.branch.trim() : (existing?.branch ?? (typeof body.defaultBranch === "string" ? body.defaultBranch : "main")),
-      role: (body.role as ProjectRepositoryLink["role"]) ?? existing?.role ?? (p.repositories.length ? "other" : "primary"),
-      isConfigRepo: body.isConfigRepo === true || (p.repositories.length === 0),
+      branch:
+        typeof body.branch === "string" && body.branch.trim()
+          ? body.branch.trim()
+          : (existing?.branch ?? (typeof body.defaultBranch === "string" ? body.defaultBranch : "main")),
+      role:
+        (body.role as ProjectRepositoryLink["role"]) ?? existing?.role ?? (p.repositories.length ? "other" : "primary"),
+      isConfigRepo: body.isConfigRepo === true || p.repositories.length === 0,
       private: typeof body.private === "boolean" ? body.private : existing?.private,
       defaultBranch: typeof body.defaultBranch === "string" ? body.defaultBranch : existing?.defaultBranch,
       htmlUrl: typeof body.htmlUrl === "string" ? body.htmlUrl : existing?.htmlUrl,
       addedAt: existing?.addedAt,
     };
-    let repos = existing ? p.repositories.map((r) => (r === existing ? { ...r, ...link } : r)) : [...p.repositories, link as ProjectRepositoryLink];
-    if (link.isConfigRepo) repos = repos.map((r) => ({ ...r, isConfigRepo: r.repo.toLowerCase() === repo.toLowerCase() }));
+    let repos = existing
+      ? p.repositories.map((r) => (r === existing ? { ...r, ...link } : r))
+      : [...p.repositories, link as ProjectRepositoryLink];
+    if (link.isConfigRepo)
+      repos = repos.map((r) => ({ ...r, isConfigRepo: r.repo.toLowerCase() === repo.toLowerCase() }));
     const updated = await save({ ...p, repositories: normalizeRepositories(repos) });
     // Seed the demo structure only when this project really has no real
     // connection — not merely because the platform-wide service is the mock.
@@ -833,7 +943,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
         ? {
             ...r,
             branch: typeof body.branch === "string" && body.branch.trim() ? body.branch.trim() : r.branch,
-            role: (typeof body.role === "string" ? (body.role as ProjectRepositoryLink["role"]) : r.role),
+            role: typeof body.role === "string" ? (body.role as ProjectRepositoryLink["role"]) : r.role,
             isConfigRepo: body.isConfigRepo === true ? true : r.isConfigRepo,
           }
         : r,

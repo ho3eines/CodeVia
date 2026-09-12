@@ -10,15 +10,24 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:server": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
+    "build": "npm run build:app && tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
+    "build:app": "node scripts/build-app.mjs",
+    "check:app": "node scripts/build-app.mjs --check",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "coverage:check": "node scripts/check-coverage.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "lint": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src scripts",
+    "lint:fix": "eslint src scripts --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run typecheck && npm run lint && npm run check:app",
     "seed": "tsx src/db/seed.ts",
-    "mock:telegram": "node scripts/mock-telegram-api.mjs"
+    "mock:telegram": "node scripts/mock-telegram-api.mjs",
+    "prepare": "husky"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",
@@ -30,13 +39,29 @@
     "yaml": "^2.7.0",
     "zod": "^3.24.1"
   },
+  "lint-staged": {
+    "*.{ts,mjs}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,css,html}": [
+      "prettier --write"
+    ]
+  },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^22.10.5",
+    "@vitest/coverage-v8": "^2.1.9",
+    "eslint": "^10.10.0",
+    "husky": "^9.1.7",
     "jsdom": "^25.0.1",
+    "lint-staged": "^17.5.1",
+    "prettier": "^3.9.6",
     "socket.io-client": "^4.8.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
+    "typescript-eslint": "^8.70.0",
     "vitest": "^2.1.8"
   }
 }

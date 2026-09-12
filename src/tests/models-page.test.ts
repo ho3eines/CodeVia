@@ -44,8 +44,7 @@ afterEach(async () => {
   cleanup = undefined;
 });
 
-const mockProviderId = (): string =>
-  container.providerRepo.findMany().find((p) => p.data.type === "mock")!.data.id;
+const mockProviderId = (): string => container.providerRepo.findMany().find((p) => p.data.type === "mock")!.data.id;
 
 describe("models: manual model ids", () => {
   it("accepts a model id typed by hand that is not in any catalog", async () => {
@@ -64,9 +63,17 @@ describe("models: manual model ids", () => {
     stubEmptyCatalog();
     const srv = await boot();
     const providerId = mockProviderId();
-    const first = await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "models/gemini-2.0-flash-exp" } });
+    const first = await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId, modelId: "models/gemini-2.0-flash-exp" },
+    });
     expect(first.json().modelId).toBe("gemini-2.0-flash-exp");
-    const dup = await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "gemini-2.0-flash-exp" } });
+    const dup = await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId, modelId: "gemini-2.0-flash-exp" },
+    });
     expect(dup.json()).toMatchObject({ id: first.json().id, duplicate: true });
     expect(container.modelRepo.findMany().filter((m) => m.data.modelId === "gemini-2.0-flash-exp")).toHaveLength(1);
   });
@@ -86,7 +93,11 @@ describe("models: bulk multi-select actions", () => {
     expect(off.json()).toMatchObject({ ok: true, affected: 3 });
     expect(ids.every((id) => container.modelRepo.findById(id)!.data.active === false)).toBe(true);
 
-    const del = await srv.inject({ method: "POST", url: "/models/bulk", payload: { action: "delete", ids: [...ids, "ghost"] } });
+    const del = await srv.inject({
+      method: "POST",
+      url: "/models/bulk",
+      payload: { action: "delete", ids: [...ids, "ghost"] },
+    });
     expect(del.json()).toMatchObject({ affected: 3, missing: ["ghost"] });
     expect(ids.every((id) => container.modelRepo.findById(id) === undefined)).toBe(true);
   });
@@ -94,8 +105,12 @@ describe("models: bulk multi-select actions", () => {
   it("rejects unknown actions and empty selections", async () => {
     stubEmptyCatalog();
     const srv = await boot();
-    expect((await srv.inject({ method: "POST", url: "/models/bulk", payload: { action: "nuke", ids: ["x"] } })).statusCode).toBe(400);
-    expect((await srv.inject({ method: "POST", url: "/models/bulk", payload: { action: "delete", ids: [] } })).statusCode).toBe(400);
+    expect(
+      (await srv.inject({ method: "POST", url: "/models/bulk", payload: { action: "nuke", ids: ["x"] } })).statusCode,
+    ).toBe(400);
+    expect(
+      (await srv.inject({ method: "POST", url: "/models/bulk", payload: { action: "delete", ids: [] } })).statusCode,
+    ).toBe(400);
   });
 });
 
@@ -127,7 +142,9 @@ describe("models: streaming chat", () => {
     const srv = await boot();
     const model = container.modelRepo.findMany().find((m) => m.data.modelId === "mock-fast")!.data;
     expect((await srv.inject({ method: "POST", url: `/models/${model.id}/stream`, payload: {} })).statusCode).toBe(400);
-    expect((await srv.inject({ method: "POST", url: "/models/nope/stream", payload: { message: "hi" } })).statusCode).toBe(404);
+    expect(
+      (await srv.inject({ method: "POST", url: "/models/nope/stream", payload: { message: "hi" } })).statusCode,
+    ).toBe(404);
   });
 });
 
@@ -154,7 +171,11 @@ describe("model-stream helpers", () => {
     expect(buildStreamRequest(base, "gpt-4o", { messages: msgs }).body.stream).toBe(true);
     const anthropic = buildStreamRequest({ ...base, apiFormat: "anthropic" }, "claude", { messages: msgs });
     expect(anthropic.body.stream).toBe(true);
-    const gemini = buildStreamRequest({ ...base, apiFormat: "gemini", baseUrl: "https://g.example/v1beta" }, "gemini-pro", { messages: msgs });
+    const gemini = buildStreamRequest(
+      { ...base, apiFormat: "gemini", baseUrl: "https://g.example/v1beta" },
+      "gemini-pro",
+      { messages: msgs },
+    );
     expect(gemini.url).toContain(":streamGenerateContent?alt=sse");
   });
 
@@ -182,7 +203,10 @@ describe("model-stream helpers", () => {
     process.env.TEST_KEY = "k-123";
     const out: string[] = [];
     let final = "";
-    for await (const ev of streamModelChat(base, "gpt-4o", { messages: [{ role: "user", content: "hi" }], fetchImpl })) {
+    for await (const ev of streamModelChat(base, "gpt-4o", {
+      messages: [{ role: "user", content: "hi" }],
+      fetchImpl,
+    })) {
       if (ev.type === "delta") out.push(ev.text);
       if (ev.type === "done") final = ev.text;
     }
@@ -196,7 +220,10 @@ describe("model-stream helpers", () => {
       new Response(JSON.stringify({ error: { message: "bad key" } }), { status: 401 })) as unknown as typeof fetch;
     process.env.TEST_KEY = "k-123";
     const events = [];
-    for await (const ev of streamModelChat(base, "gpt-4o", { messages: [{ role: "user", content: "hi" }], fetchImpl })) {
+    for await (const ev of streamModelChat(base, "gpt-4o", {
+      messages: [{ role: "user", content: "hi" }],
+      fetchImpl,
+    })) {
       events.push(ev);
     }
     delete process.env.TEST_KEY;
@@ -210,7 +237,9 @@ describe("models: editing and per-model tuning", () => {
     stubEmptyCatalog();
     const srv = await boot();
     const providerId = mockProviderId();
-    const created = (await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "edit-me" } })).json();
+    const created = (
+      await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "edit-me" } })
+    ).json();
     const res = await srv.inject({
       method: "PATCH",
       url: `/models/${created.id}`,
@@ -245,18 +274,36 @@ describe("models: editing and per-model tuning", () => {
     const providerId = mockProviderId();
     const m = (await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "tuned" } })).json();
 
-    const set = await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 0.7, maxTokens: 2048 } });
+    const set = await srv.inject({
+      method: "PATCH",
+      url: `/models/${m.id}`,
+      payload: { temperature: 0.7, maxTokens: 2048 },
+    });
     expect(set.json()).toMatchObject({ temperature: 0.7, maxTokens: 2048 });
 
     // Temperature is the creativity dial and only spans 0.0 … 1.0.
-    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 1.5 } })).statusCode).toBe(400);
-    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: -0.1 } })).statusCode).toBe(400);
+    expect(
+      (await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 1.5 } })).statusCode,
+    ).toBe(400);
+    expect(
+      (await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: -0.1 } })).statusCode,
+    ).toBe(400);
     // Both ends of the range are valid.
-    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 0 } })).json().temperature).toBe(0);
-    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 1 } })).json().temperature).toBe(1);
-    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { maxTokens: 0 } })).statusCode).toBe(400);
+    expect(
+      (await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 0 } })).json().temperature,
+    ).toBe(0);
+    expect(
+      (await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: 1 } })).json().temperature,
+    ).toBe(1);
+    expect((await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { maxTokens: 0 } })).statusCode).toBe(
+      400,
+    );
 
-    const cleared = await srv.inject({ method: "PATCH", url: `/models/${m.id}`, payload: { temperature: null, maxTokens: null } });
+    const cleared = await srv.inject({
+      method: "PATCH",
+      url: `/models/${m.id}`,
+      payload: { temperature: null, maxTokens: null },
+    });
     expect(cleared.json().temperature).toBeUndefined();
     expect(cleared.json().maxTokens).toBeUndefined();
   });
@@ -267,7 +314,9 @@ describe("models: editing and per-model tuning", () => {
     const providerId = mockProviderId();
     const a = (await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "aaa" } })).json();
     await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "bbb" } });
-    expect((await srv.inject({ method: "PATCH", url: `/models/${a.id}`, payload: { modelId: "bbb" } })).statusCode).toBe(409);
+    expect(
+      (await srv.inject({ method: "PATCH", url: `/models/${a.id}`, payload: { modelId: "bbb" } })).statusCode,
+    ).toBe(409);
   });
 
   it("sends the model's saved temperature to the provider instead of a hardcoded 0", async () => {
@@ -278,7 +327,13 @@ describe("models: editing and per-model tuning", () => {
     }) as unknown as typeof fetch);
     process.env.OPENAI_API_KEY = "sk-test-123";
     const srv = await boot();
-    const m = (await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "tuned-route", temperature: 1 } })).json();
+    const m = (
+      await srv.inject({
+        method: "POST",
+        url: "/models",
+        payload: { providerId: "provider-openai", modelId: "tuned-route", temperature: 1 },
+      })
+    ).json();
     expect(m.temperature).toBe(1);
     await srv.inject({ method: "POST", url: `/models/${m.id}/test`, payload: { message: "hi" } });
     const chatBody = seen.find((b) => b.model === "tuned-route")!;
@@ -294,14 +349,28 @@ describe("models: editing and per-model tuning", () => {
   });
 
   it("hints at the Edit form when a route rejects the temperature parameter", async () => {
-    vi.stubGlobal("fetch", (async () =>
-      new Response(
-        JSON.stringify({ error: { message: "The value 0.0 for 'temperature' is not supported by this model route. Supported values are between 1.0 and 1.0." } }),
-        { status: 400 },
-      )) as unknown as typeof fetch);
+    vi.stubGlobal(
+      "fetch",
+      (async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "The value 0.0 for 'temperature' is not supported by this model route. Supported values are between 1.0 and 1.0.",
+            },
+          }),
+          { status: 400 },
+        )) as unknown as typeof fetch,
+    );
     process.env.OPENAI_API_KEY = "sk-test-123";
     const srv = await boot();
-    const m = (await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "picky-route" } })).json();
+    const m = (
+      await srv.inject({
+        method: "POST",
+        url: "/models",
+        payload: { providerId: "provider-openai", modelId: "picky-route" },
+      })
+    ).json();
     const r = (await srv.inject({ method: "POST", url: `/models/${m.id}/test`, payload: { message: "hi" } })).json();
     expect(r.ok).toBe(false);
     expect(r.hint).toMatch(/Edit/);

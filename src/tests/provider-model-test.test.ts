@@ -83,21 +83,50 @@ function stubNoNetwork(): CapturedRequest[] {
 }
 
 const openAiChatReply = (text: string) =>
-  new Response(JSON.stringify({ choices: [{ message: { content: text }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 3 } }), { status: 200 });
+  new Response(
+    JSON.stringify({
+      choices: [{ message: { content: text }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3 },
+    }),
+    { status: 200 },
+  );
 const anthropicChatReply = (text: string) =>
-  new Response(JSON.stringify({ content: [{ type: "text", text }], stop_reason: "end_turn", usage: { input_tokens: 4, output_tokens: 2 } }), { status: 200 });
+  new Response(
+    JSON.stringify({
+      content: [{ type: "text", text }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 4, output_tokens: 2 },
+    }),
+    { status: 200 },
+  );
 const geminiChatReply = (text: string) =>
-  new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 } }), { status: 200 });
+  new Response(
+    JSON.stringify({
+      candidates: [{ content: { parts: [{ text }] } }],
+      usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 },
+    }),
+    { status: 200 },
+  );
 const ollamaChatReply = (text: string) =>
   new Response(JSON.stringify({ message: { role: "assistant", content: text }, done: true }), { status: 200 });
 
 describe("provider URL construction (no /v1 on Claude, /v1 on OpenAI)", () => {
   it("builds the OpenAI model catalog under /v1", () => {
     const p: ModelProvider = {
-      id: "p", name: "OpenAI", type: "openai", baseUrl: "https://api.openai.com/v1",
-      secretRef: "OPENAI_API_KEY", authType: "bearer", apiFormat: "openai",
-      timeoutMs: 5000, maxTokensDefault: 1024, defaultTemperature: 0.2, rateLimitPerMinute: 60,
-      active: true, createdAt: "", updatedAt: "",
+      id: "p",
+      name: "OpenAI",
+      type: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      secretRef: "OPENAI_API_KEY",
+      authType: "bearer",
+      apiFormat: "openai",
+      timeoutMs: 5000,
+      maxTokensDefault: 1024,
+      defaultTemperature: 0.2,
+      rateLimitPerMinute: 60,
+      active: true,
+      createdAt: "",
+      updatedAt: "",
     };
     expect(buildModelsEndpoint(p).url).toBe("https://api.openai.com/v1/models");
     expect(buildChatEndpoint(p)).toBe("https://api.openai.com/v1/chat/completions");
@@ -105,10 +134,20 @@ describe("provider URL construction (no /v1 on Claude, /v1 on OpenAI)", () => {
 
   it("builds the Anthropic model catalog under /v1 even when the base URL omits /v1", () => {
     const p: ModelProvider = {
-      id: "p", name: "Anthropic", type: "anthropic", baseUrl: "https://api.anthropic.com",
-      secretRef: "ANTHROPIC_API_KEY", authType: "api-key", apiFormat: "anthropic",
-      timeoutMs: 5000, maxTokensDefault: 1024, defaultTemperature: 0.2, rateLimitPerMinute: 60,
-      active: true, createdAt: "", updatedAt: "",
+      id: "p",
+      name: "Anthropic",
+      type: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      secretRef: "ANTHROPIC_API_KEY",
+      authType: "api-key",
+      apiFormat: "anthropic",
+      timeoutMs: 5000,
+      maxTokensDefault: 1024,
+      defaultTemperature: 0.2,
+      rateLimitPerMinute: 60,
+      active: true,
+      createdAt: "",
+      updatedAt: "",
     };
     expect(buildModelsEndpoint(p).url).toBe("https://api.anthropic.com/v1/models?limit=50");
     expect(buildAnthropicChatEndpoint(p)).toBe("https://api.anthropic.com/v1/messages");
@@ -116,26 +155,50 @@ describe("provider URL construction (no /v1 on Claude, /v1 on OpenAI)", () => {
 
   it("keeps Gemini under /v1beta and Ollama under /api/tags", () => {
     const gem: ModelProvider = {
-      id: "g", name: "Gemini", type: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      secretRef: "GEMINI_API_KEY", authType: "api-key", apiFormat: "gemini",
-      timeoutMs: 5000, maxTokensDefault: 1024, defaultTemperature: 0.2, rateLimitPerMinute: 60,
-      active: true, createdAt: "", updatedAt: "",
+      id: "g",
+      name: "Gemini",
+      type: "gemini",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      secretRef: "GEMINI_API_KEY",
+      authType: "api-key",
+      apiFormat: "gemini",
+      timeoutMs: 5000,
+      maxTokensDefault: 1024,
+      defaultTemperature: 0.2,
+      rateLimitPerMinute: 60,
+      active: true,
+      createdAt: "",
+      updatedAt: "",
     };
     expect(buildModelsEndpoint(gem).url).toBe("https://generativelanguage.googleapis.com/v1beta/models");
-    expect(buildGeminiChatEndpoint(gem, "gemini-2.5-pro", "k")).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=k");
+    expect(buildGeminiChatEndpoint(gem, "gemini-2.5-pro", "k")).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=k",
+    );
 
     const oll: ModelProvider = {
-      id: "o", name: "Ollama", type: "ollama", baseUrl: "http://localhost:11434/v1",
-      secretRef: undefined, authType: "none", apiFormat: "ollama",
-      timeoutMs: 5000, maxTokensDefault: 1024, defaultTemperature: 0.2, rateLimitPerMinute: 60,
-      active: true, createdAt: "", updatedAt: "",
+      id: "o",
+      name: "Ollama",
+      type: "ollama",
+      baseUrl: "http://localhost:11434/v1",
+      secretRef: undefined,
+      authType: "none",
+      apiFormat: "ollama",
+      timeoutMs: 5000,
+      maxTokensDefault: 1024,
+      defaultTemperature: 0.2,
+      rateLimitPerMinute: 60,
+      active: true,
+      createdAt: "",
+      updatedAt: "",
     };
     expect(buildModelsEndpoint(oll).url).toBe("http://localhost:11434/api/tags");
     expect(buildOllamaChatEndpoint(oll)).toBe("http://localhost:11434/api/chat");
   });
 
   it("masks secrets embedded in URLs", () => {
-    expect(maskUrlSecrets("https://x/models/g:generateContent?key=SECRET123")).toBe("https://x/models/g:generateContent?key=***");
+    expect(maskUrlSecrets("https://x/models/g:generateContent?key=SECRET123")).toBe(
+      "https://x/models/g:generateContent?key=***",
+    );
     expect(maskUrlSecrets("https://x/chat?api_key=abc&x=1")).toBe("https://x/chat?api_key=***&x=1");
     expect(maskUrlSecrets("https://x/chat?x=1")).toBe("https://x/chat?x=1");
   });
@@ -193,7 +256,12 @@ describe("pre-registration provider test (never saves, always shows the destinat
     const r = await srv.inject({
       method: "POST",
       url: "/providers/test",
-      payload: { type: "openai", baseUrl: "https://api.openai.com/v1", secretRef: "NONEXISTENT_KEY", authType: "bearer" },
+      payload: {
+        type: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        secretRef: "NONEXISTENT_KEY",
+        authType: "bearer",
+      },
     });
     expect(r.statusCode).toBe(200);
     const body = r.json();
@@ -210,7 +278,12 @@ describe("pre-registration provider test (never saves, always shows the destinat
     const r = await srv.inject({
       method: "POST",
       url: "/providers/test",
-      payload: { type: "openai", baseUrl: "https://api.openai.com/v1", secretValue: "sk-test-123456", authType: "bearer" },
+      payload: {
+        type: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        secretValue: "sk-test-123456",
+        authType: "bearer",
+      },
     });
     const body = r.json();
     expect(body.ok).toBe(true);
@@ -242,9 +315,17 @@ describe("model chat test — send a message, see the reply", () => {
     process.env.OPENAI_API_KEY = "sk-test-123456";
     const srv = await boot();
     const captured = stubFetch(() => openAiChatReply("OK"));
-    const m = await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "gpt-4o-mini" } });
+    const m = await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId: "provider-openai", modelId: "gpt-4o-mini" },
+    });
     const model = m.json();
-    const r = await srv.inject({ method: "POST", url: `/models/${model.id}/test`, payload: { message: "سلام! این یک تست است" } });
+    const r = await srv.inject({
+      method: "POST",
+      url: `/models/${model.id}/test`,
+      payload: { message: "سلام! این یک تست است" },
+    });
     expect(r.statusCode).toBe(200);
     const body = r.json();
     expect(body.ok).toBe(true);
@@ -271,7 +352,11 @@ describe("model chat test — send a message, see the reply", () => {
     process.env.OPENAI_API_KEY = "sk-test-123456";
     const srv = await boot();
     const captured = stubFetch(() => openAiChatReply("OK"));
-    const m = await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "gpt-4o" } });
+    const m = await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId: "provider-openai", modelId: "gpt-4o" },
+    });
     const r = await srv.inject({ method: "POST", url: `/models/${m.json().id}/test` });
     expect(r.json().ok).toBe(true);
     const sent = String((captured[0].body?.messages as Array<Record<string, unknown>>)[0].content);
@@ -313,7 +398,9 @@ describe("model chat test — send a message, see the reply", () => {
     });
     const body = r.json();
     expect(body.ok).toBe(true);
-    expect(body.url).toContain("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent");
+    expect(body.url).toContain(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+    );
     expect(body.url).toContain("key=***");
     expect(body.responseText).toBe("hello from gemini");
     // The real request did carry the key — but the response never leaks it.
@@ -324,18 +411,29 @@ describe("model chat test — send a message, see the reply", () => {
   it("uses the Ollama native /api/chat endpoint (no /v1, no key)", async () => {
     const srv = await boot();
     const captured = stubFetch((url) => {
-      if (url.includes("/api/tags")) return new Response(JSON.stringify({ models: [{ name: "llama3.2" }] }), { status: 200 });
+      if (url.includes("/api/tags"))
+        return new Response(JSON.stringify({ models: [{ name: "llama3.2" }] }), { status: 200 });
       return ollamaChatReply("hello from llama");
     });
     const created = await srv.inject({
       method: "POST",
       url: "/providers",
-      payload: { name: "Local Ollama", type: "ollama", baseUrl: "http://localhost:11434", authType: "none", apiFormat: "ollama" },
+      payload: {
+        name: "Local Ollama",
+        type: "ollama",
+        baseUrl: "http://localhost:11434",
+        authType: "none",
+        apiFormat: "ollama",
+      },
     });
     expect(created.statusCode).toBe(201);
     const providerId = created.json().id;
     const m = await srv.inject({ method: "POST", url: "/models", payload: { providerId, modelId: "llama3.2" } });
-    const r = await srv.inject({ method: "POST", url: `/models/${m.json().id}/test`, payload: { message: "hi llama" } });
+    const r = await srv.inject({
+      method: "POST",
+      url: `/models/${m.json().id}/test`,
+      payload: { message: "hi llama" },
+    });
     const body = r.json();
     expect(body.ok).toBe(true);
     expect(body.url).toBe("http://localhost:11434/api/chat");
@@ -349,7 +447,11 @@ describe("model chat test — send a message, see the reply", () => {
   it("sends nothing when the key is missing — but shows the chat URL it would use", async () => {
     const srv = await boot();
     const captured = stubNoNetwork();
-    const m = await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "gpt-4o" } });
+    const m = await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId: "provider-openai", modelId: "gpt-4o" },
+    });
     const r = await srv.inject({ method: "POST", url: `/models/${m.json().id}/test` });
     const body = r.json();
     expect(body.ok).toBe(false);
@@ -365,8 +467,16 @@ describe("model chat test — send a message, see the reply", () => {
   it("answers locally for the mock provider without touching the network", async () => {
     const srv = await boot();
     const captured = stubNoNetwork();
-    const m = await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-mock", modelId: "mock-fast" } });
-    const r = await srv.inject({ method: "POST", url: `/models/${m.json().id}/test`, payload: { message: "hello mock" } });
+    const m = await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId: "provider-mock", modelId: "mock-fast" },
+    });
+    const r = await srv.inject({
+      method: "POST",
+      url: `/models/${m.json().id}/test`,
+      payload: { message: "hello mock" },
+    });
     const body = r.json();
     expect(body.ok).toBe(true);
     expect(body.transport).toBe("mock");
@@ -379,8 +489,14 @@ describe("model chat test — send a message, see the reply", () => {
   it("reports provider HTTP errors with the status and the URL", async () => {
     process.env.OPENAI_API_KEY = "sk-invalid-123";
     const srv = await boot();
-    stubFetch(() => new Response(JSON.stringify({ error: { message: "Incorrect API key provided" } }), { status: 401 }));
-    const m = await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "gpt-4o" } });
+    stubFetch(
+      () => new Response(JSON.stringify({ error: { message: "Incorrect API key provided" } }), { status: 401 }),
+    );
+    const m = await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId: "provider-openai", modelId: "gpt-4o" },
+    });
     const r = await srv.inject({ method: "POST", url: `/models/${m.json().id}/test` });
     const body = r.json();
     expect(body.ok).toBe(false);
@@ -421,7 +537,13 @@ describe("provider create + saved-provider tests", () => {
     const r = await srv.inject({
       method: "POST",
       url: "/providers",
-      payload: { name: "Local LLM", type: "openai-compatible", baseUrl: "http://localhost:9999/v1", authType: "none", apiFormat: "openai" },
+      payload: {
+        name: "Local LLM",
+        type: "openai-compatible",
+        baseUrl: "http://localhost:9999/v1",
+        authType: "none",
+        apiFormat: "openai",
+      },
     });
     expect(r.statusCode).toBe(201);
     const body = r.json();
@@ -445,7 +567,13 @@ describe("provider create + saved-provider tests", () => {
     const created = await srv.inject({
       method: "POST",
       url: "/providers",
-      payload: { name: "Local LLM", type: "openai-compatible", baseUrl: "http://localhost:9999/v1", authType: "bearer", secretValue: "sk-bad-123456" },
+      payload: {
+        name: "Local LLM",
+        type: "openai-compatible",
+        baseUrl: "http://localhost:9999/v1",
+        authType: "bearer",
+        secretValue: "sk-bad-123456",
+      },
     });
     expect(created.statusCode).toBe(201);
     const pid = created.json().id;
@@ -458,7 +586,11 @@ describe("provider create + saved-provider tests", () => {
         ? new Response(JSON.stringify({ data: [{ id: "lm-1" }, { id: "lm-2" }] }), { status: 200 })
         : new Response("{}", { status: 404 }),
     );
-    const edited = await srv.inject({ method: "PATCH", url: `/providers/${pid}`, payload: { secretValue: "sk-good-123456" } });
+    const edited = await srv.inject({
+      method: "PATCH",
+      url: `/providers/${pid}`,
+      payload: { secretValue: "sk-good-123456" },
+    });
     expect(edited.statusCode).toBe(200);
     const body = edited.json();
     expect(body.discoveredModels).toBe(2);
@@ -483,7 +615,13 @@ describe("provider create + saved-provider tests", () => {
     const created = await srv.inject({
       method: "POST",
       url: "/providers",
-      payload: { name: "Idem", type: "openai-compatible", baseUrl: "http://localhost:9998/v1", authType: "none", apiFormat: "openai" },
+      payload: {
+        name: "Idem",
+        type: "openai-compatible",
+        baseUrl: "http://localhost:9998/v1",
+        authType: "none",
+        apiFormat: "openai",
+      },
     });
     const pid = created.json().id;
     expect(created.statusCode).toBe(201);
@@ -503,7 +641,13 @@ describe("provider create + saved-provider tests", () => {
     const created = await srv.inject({
       method: "POST",
       url: "/providers",
-      payload: { name: "Flaky", type: "openai-compatible", baseUrl: "http://localhost:9997/v1", authType: "bearer", secretValue: "sk-x-123456" },
+      payload: {
+        name: "Flaky",
+        type: "openai-compatible",
+        baseUrl: "http://localhost:9997/v1",
+        authType: "bearer",
+        secretValue: "sk-x-123456",
+      },
     });
     const pid = created.json().id;
     // Edit while the catalog is still failing: 200, zero models, reason surfaced.
@@ -535,7 +679,13 @@ describe("provider create + saved-provider tests", () => {
     const created = await srv.inject({
       method: "POST",
       url: "/providers",
-      payload: { name: "Keyed", type: "openai-compatible", baseUrl: "https://llm.example/v1", authType: "bearer", secretValue: "sk-stored-123456" },
+      payload: {
+        name: "Keyed",
+        type: "openai-compatible",
+        baseUrl: "https://llm.example/v1",
+        authType: "bearer",
+        secretValue: "sk-stored-123456",
+      },
     });
     expect(created.statusCode).toBe(201);
     const pid = created.json().id;
@@ -554,7 +704,12 @@ describe("provider create + saved-provider tests", () => {
     const r2 = await srv.inject({
       method: "POST",
       url: "/providers/test",
-      payload: { providerId: "missing-id", type: "openai-compatible", baseUrl: "https://llm.example/v1", authType: "bearer" },
+      payload: {
+        providerId: "missing-id",
+        type: "openai-compatible",
+        baseUrl: "https://llm.example/v1",
+        authType: "bearer",
+      },
     });
     expect(r2.json().ok).toBe(false);
     expect(r2.json().keyPresent).toBe(false);
@@ -617,7 +772,11 @@ describe("provider create + saved-provider tests", () => {
     expect(mine.map((m: { modelId: string }) => m.modelId)).toEqual(expect.arrayContaining(["gpt-4o", "gpt-4o-mini"]));
 
     // Re-saving the provider must NOT duplicate the known models.
-    const reSaved = await srv.inject({ method: "PATCH", url: `/providers/${body.id}`, payload: { name: "Offline OpenAI" } });
+    const reSaved = await srv.inject({
+      method: "PATCH",
+      url: `/providers/${body.id}`,
+      payload: { name: "Offline OpenAI" },
+    });
     expect(reSaved.json().discoveredModels).toBe(0);
     const after = (await srv.inject({ method: "GET", url: "/models" })).json();
     expect(after.filter((m: { providerId: string }) => m.providerId === body.id)).toHaveLength(mine.length);
@@ -630,7 +789,13 @@ describe("provider create + saved-provider tests", () => {
     const created = await srv.inject({
       method: "POST",
       url: "/providers",
-      payload: { name: "Mixed OpenAI", type: "openai", baseUrl: "https://api.openai.com/v1", authType: "none", secretValue: "sk-123456" },
+      payload: {
+        name: "Mixed OpenAI",
+        type: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        authType: "none",
+        secretValue: "sk-123456",
+      },
     });
     const pid = created.json().id;
     const knownCount = created.json().discoveredModels;
@@ -654,7 +819,13 @@ describe("provider create + saved-provider tests", () => {
     const r = await srv.inject({
       method: "POST",
       url: "/providers/test",
-      payload: { type: "anthropic", baseUrl: "https://api.anthropic.com", secretRef: "ANTHROPIC_API_KEY", authType: "api-key", apiFormat: "anthropic" },
+      payload: {
+        type: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        secretRef: "ANTHROPIC_API_KEY",
+        authType: "api-key",
+        apiFormat: "anthropic",
+      },
     });
     expect(r.statusCode).toBe(200);
     const body = r.json();
@@ -669,7 +840,13 @@ describe("provider create + saved-provider tests", () => {
     const r = await srv.inject({
       method: "POST",
       url: "/providers/test",
-      payload: { type: "gemini", baseUrl: "https://generativelanguage.googleapis.com", secretRef: "GEMINI_API_KEY", authType: "api-key", apiFormat: "gemini" },
+      payload: {
+        type: "gemini",
+        baseUrl: "https://generativelanguage.googleapis.com",
+        secretRef: "GEMINI_API_KEY",
+        authType: "api-key",
+        apiFormat: "gemini",
+      },
     });
     expect(r.statusCode).toBe(200);
     const body = r.json();

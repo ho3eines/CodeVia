@@ -25,7 +25,14 @@ import { freshDb } from "./test-helpers.js";
  *   - GitHub failures came back as 200 `{error}` bodies.
  * ------------------------------------------------------------------ */
 
-const ENV_KEYS = ["REQUIRE_AUTH", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "AUTH_SECRET", "GITHUB_TOKEN", "GITHUB_ENABLED"] as const;
+const ENV_KEYS = [
+  "REQUIRE_AUTH",
+  "GITHUB_CLIENT_ID",
+  "GITHUB_CLIENT_SECRET",
+  "AUTH_SECRET",
+  "GITHUB_TOKEN",
+  "GITHUB_ENABLED",
+] as const;
 let savedEnv: Record<string, string | undefined>;
 let cleanup: (() => void) | undefined;
 let app: FastifyInstance | undefined;
@@ -45,7 +52,8 @@ function fakeGitHub(opts: { token: string; scopes?: string; failWith?: number })
     const url = String(input);
     const auth = new Headers(init?.headers).get("authorization");
     if (opts.failWith) return new Response(JSON.stringify({ message: "Bad credentials" }), { status: opts.failWith });
-    if (auth !== `Bearer ${opts.token}`) return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+    if (auth !== `Bearer ${opts.token}`)
+      return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
     if (url.includes("/user/repos")) {
       const page = new URL(url).searchParams.get("page") ?? "1";
       const mk = (i: number, priv: boolean) => ({
@@ -110,8 +118,16 @@ describe("encrypted per-user GitHub token store", () => {
     storeUserGitHubToken(kv, "user-1", "gho_secret_token_value", { scopes: "repo, read:user", login: "octo" });
     const raw = kv.get<Record<string, unknown>>(GITHUB_TOKEN_KV_PREFIX + "user-1");
     expect(JSON.stringify(raw)).not.toContain("gho_secret_token_value");
-    expect(getUserGitHubToken(kv, "user-1")).toMatchObject({ token: "gho_secret_token_value", scopes: ["repo", "read:user"], login: "octo" });
-    expect(describeUserGitHubToken(kv, "user-1")).toMatchObject({ stored: true, canReadPrivateRepos: true, login: "octo" });
+    expect(getUserGitHubToken(kv, "user-1")).toMatchObject({
+      token: "gho_secret_token_value",
+      scopes: ["repo", "read:user"],
+      login: "octo",
+    });
+    expect(describeUserGitHubToken(kv, "user-1")).toMatchObject({
+      stored: true,
+      canReadPrivateRepos: true,
+      login: "octo",
+    });
     expect(JSON.stringify(describeUserGitHubToken(kv, "user-1"))).not.toContain("gho_");
     expect(getUserGitHubToken(kv, "nobody")).toBeUndefined();
   });
@@ -134,7 +150,13 @@ describe("RealGitHubService.listRepositories", () => {
     const svc = new RealGitHubService({ token: "tok", fetchImpl: fakeGitHub({ token: "tok" }) });
     const all = await svc.listRepositories();
     expect(all.map((r) => r.fullName)).toEqual(["octo/repo-1", "octo/repo-2", "octo/repo-3"]);
-    expect(all[1]).toMatchObject({ owner: "octo", name: "repo-2", private: true, defaultBranch: "main", language: "TypeScript" });
+    expect(all[1]).toMatchObject({
+      owner: "octo",
+      name: "repo-2",
+      private: true,
+      defaultBranch: "main",
+      language: "TypeScript",
+    });
     expect((await svc.listRepositories({ query: "repo-3" })).map((r) => r.fullName)).toEqual(["octo/repo-3"]);
     expect(await svc.listRepositories({ limit: 1 })).toHaveLength(1);
     const viewer = await svc.getViewer();
@@ -149,9 +171,11 @@ describe("RealGitHubService.listRepositories", () => {
   });
 
   it("parses the Link header", () => {
-    expect(parseNextLink('<https://api.github.com/user/repos?page=2>; rel="next", <https://api.github.com/user/repos?page=5>; rel="last"')).toBe(
-      "https://api.github.com/user/repos?page=2",
-    );
+    expect(
+      parseNextLink(
+        '<https://api.github.com/user/repos?page=2>; rel="next", <https://api.github.com/user/repos?page=5>; rel="last"',
+      ),
+    ).toBe("https://api.github.com/user/repos?page=2");
     expect(parseNextLink('<https://api.github.com/user/repos?page=1>; rel="prev"')).toBeUndefined();
     expect(parseNextLink(null)).toBeUndefined();
   });
@@ -176,7 +200,12 @@ describe("GET /github/repositories", () => {
     process.env.GITHUB_CLIENT_SECRET = "test-client-secret";
     getEnvFresh();
     const srv = await boot();
-    const { user } = container.userRepo.upsertGitHubUser({ id: 42, login: "octo", name: "Octo Cat", email: "octo@example.com" });
+    const { user } = container.userRepo.upsertGitHubUser({
+      id: 42,
+      login: "octo",
+      name: "Octo Cat",
+      email: "octo@example.com",
+    });
     storeUserGitHubToken(container.kv, user.id, "tok", { scopes: "repo,read:user,user:email", login: "octo" });
     setUserGitHubFetchForTest(fakeGitHub({ token: "tok" }));
     const cookie = `cv_session=${signSession(user.id)}`;
@@ -184,9 +213,15 @@ describe("GET /github/repositories", () => {
     const res = await srv.inject({ method: "GET", url: "/github/repositories", headers: { cookie } });
     expect(res.statusCode).toBe(200);
     expect(res.json().source).toBe("user-oauth");
-    expect(res.json().repositories.map((r: { fullName: string }) => r.fullName)).toEqual(["octo/repo-1", "octo/repo-2", "octo/repo-3"]);
+    expect(res.json().repositories.map((r: { fullName: string }) => r.fullName)).toEqual([
+      "octo/repo-1",
+      "octo/repo-2",
+      "octo/repo-3",
+    ]);
 
-    const status = (await srv.inject({ method: "GET", url: "/integrations/github/status", headers: { cookie } })).json();
+    const status = (
+      await srv.inject({ method: "GET", url: "/integrations/github/status", headers: { cookie } })
+    ).json();
     expect(status.source).toBe("user-oauth");
     expect(status.repoCount).toBe(3);
     expect(status.viewer.login).toBe("octo");
@@ -194,7 +229,7 @@ describe("GET /github/repositories", () => {
 
     const me = (await srv.inject({ method: "GET", url: "/auth/me", headers: { cookie } })).json();
     expect(me.githubToken).toMatchObject({ stored: true, canReadPrivateRepos: true, login: "octo" });
-    expect(JSON.stringify(me)).not.toContain("tok\"");
+    expect(JSON.stringify(me)).not.toContain('tok"');
 
     // logout drops the stored token
     await srv.inject({ method: "POST", url: "/auth/logout", headers: { cookie } });
@@ -207,10 +242,19 @@ describe("GET /github/repositories", () => {
     process.env.GITHUB_CLIENT_SECRET = "test-client-secret";
     getEnvFresh();
     const srv = await boot();
-    const { user } = container.userRepo.upsertGitHubUser({ id: 43, login: "revoked", name: "R", email: "r@example.com" });
+    const { user } = container.userRepo.upsertGitHubUser({
+      id: 43,
+      login: "revoked",
+      name: "R",
+      email: "r@example.com",
+    });
     storeUserGitHubToken(container.kv, user.id, "old", { scopes: "repo" });
     setUserGitHubFetchForTest(fakeGitHub({ token: "new", failWith: 401 }));
-    const res = await srv.inject({ method: "GET", url: "/github/repositories", headers: { cookie: `cv_session=${signSession(user.id)}` } });
+    const res = await srv.inject({
+      method: "GET",
+      url: "/github/repositories",
+      headers: { cookie: `cv_session=${signSession(user.id)}` },
+    });
     expect(res.statusCode).toBe(401);
     expect(res.json().hint).toMatch(/log in with GitHub again/i);
   });
@@ -226,7 +270,11 @@ describe("GET /github/repositories", () => {
 
   it("creates a repository and lists branches/files for the new repo", async () => {
     const srv = await boot();
-    const created = await srv.inject({ method: "POST", url: "/github/repositories", payload: { name: "brand-new", description: "New project", private: true } });
+    const created = await srv.inject({
+      method: "POST",
+      url: "/github/repositories",
+      payload: { name: "brand-new", description: "New project", private: true },
+    });
     expect(created.statusCode).toBe(201);
     const body = created.json();
     expect(body.repository.fullName).toBe("mock-user/brand-new");
@@ -236,7 +284,9 @@ describe("GET /github/repositories", () => {
     const list = (await srv.inject({ method: "GET", url: "/github/repositories?q=brand-new" })).json();
     expect(list.repositories.map((r: { fullName: string }) => r.fullName)).toContain("mock-user/brand-new");
 
-    const branches = (await srv.inject({ method: "GET", url: "/github/repositories/mock-user/brand-new/branches" })).json();
+    const branches = (
+      await srv.inject({ method: "GET", url: "/github/repositories/mock-user/brand-new/branches" })
+    ).json();
     expect(branches.map((b: { name: string }) => b.name)).toContain("main");
 
     const files = (await srv.inject({ method: "GET", url: "/github/repositories/mock-user/brand-new/files" })).json();

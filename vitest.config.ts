@@ -17,6 +17,21 @@ export default defineConfig({
         external: ["node:sqlite", "node:test", "node:assert"],
       },
     },
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.ts"],
+      exclude: ["src/**/*.test.ts", "src/tests/**", "src/**/__tests__/**", "src/db/seed.ts", "src/index.ts"],
+      reporter: ["text", "text-summary", "json-summary", "html"],
+      // Global coverage floor. `npm run test:coverage` fails when these are
+      // missed. Per-directory floors for the sensitive surface are enforced by
+      // `npm run coverage:check` (scripts/check-coverage.mjs).
+      thresholds: {
+        lines: 75,
+        functions: 75,
+        statements: 75,
+        branches: 70,
+      },
+    },
   },
   ssr: {
     external: ["node:sqlite"],

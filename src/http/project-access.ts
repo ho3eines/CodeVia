@@ -22,7 +22,11 @@ import { canAccessProject, resolveRequestUser } from "./auth.js";
  */
 
 /** Resolve the project a request targets, but only if the caller may access it. */
-export function resolveProjectForRequest(req: FastifyRequest, c: Container, projectId: string | undefined): Project | undefined {
+export function resolveProjectForRequest(
+  req: FastifyRequest,
+  c: Container,
+  projectId: string | undefined,
+): Project | undefined {
   if (!projectId) return undefined;
   const p = c.projectRepo.findById(projectId)?.data;
   if (!p) return undefined;

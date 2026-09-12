@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Container } from "../app/container.js";
 import { TelegramBot } from "../integrations/telegram-bot.js";
-import { MockTelegramService, validateTelegramWebhookUrl, setTelegramWebhook, getPublicBaseUrl, getTelegramWebhookUrl } from "../integrations/telegram.js";
+import {
+  MockTelegramService,
+  validateTelegramWebhookUrl,
+  setTelegramWebhook,
+  getPublicBaseUrl,
+  getTelegramWebhookUrl,
+} from "../integrations/telegram.js";
 import { logger } from "../logger.js";
 import { freshDb } from "./test-helpers.js";
 
@@ -41,8 +47,16 @@ afterEach(() => {
   cleanup?.();
 });
 
-function lastSent(): { chatId: string; text: string; inlineKeyboard?: Array<Array<{ text: string; callback_data?: string }>> } {
-  return telegram.sent[telegram.sent.length - 1] as unknown as { chatId: string; text: string; inlineKeyboard?: Array<Array<{ text: string; callback_data?: string }>> };
+function lastSent(): {
+  chatId: string;
+  text: string;
+  inlineKeyboard?: Array<Array<{ text: string; callback_data?: string }>>;
+} {
+  return telegram.sent[telegram.sent.length - 1] as unknown as {
+    chatId: string;
+    text: string;
+    inlineKeyboard?: Array<Array<{ text: string; callback_data?: string }>>;
+  };
 }
 
 describe("Telegram bot (project-aware, keyboard-driven)", () => {
@@ -71,8 +85,14 @@ describe("Telegram bot (project-aware, keyboard-driven)", () => {
       configRepo: "acme/legacy-tg",
       branch: "main",
       capabilities: {
-        platforms: [], languages: [], frameworks: [], databases: [],
-        deploymentTargets: [], features: [], integrations: [], agentTypes: [],
+        platforms: [],
+        languages: [],
+        frameworks: [],
+        databases: [],
+        deploymentTargets: [],
+        features: [],
+        integrations: [],
+        agentTypes: [],
       },
       settings: {
         environment: "development",
@@ -150,7 +170,10 @@ describe("Telegram bot (project-aware, keyboard-driven)", () => {
     });
     const before = container.taskRepo.byProject(project.id).length;
 
-    await bot.handle({ update_id: 4, message: { chat: { id: 777 }, from: { id: 123 }, text: "Add pagination to the API" } });
+    await bot.handle({
+      update_id: 4,
+      message: { chat: { id: 777 }, from: { id: 123 }, text: "Add pagination to the API" },
+    });
 
     const tasks = container.taskRepo.byProject(project.id);
     expect(tasks.length).toBe(before + 1);
@@ -158,7 +181,9 @@ describe("Telegram bot (project-aware, keyboard-driven)", () => {
     expect(tasks[0].input.executionMode).toBe("autonomous");
     expect(tasks[0].workflowId).toBeUndefined();
     // A job must have been enqueued so the worker actually runs the task.
-    const jobs = container.db.all<{ id: string; type: string; status: string }>("SELECT id, type, status FROM jobs WHERE type = 'agent.run'");
+    const jobs = container.db.all<{ id: string; type: string; status: string }>(
+      "SELECT id, type, status FROM jobs WHERE type = 'agent.run'",
+    );
     expect(jobs.length).toBeGreaterThanOrEqual(1);
     expect(jobs.some((j) => j.status === "pending")).toBe(true);
     const sent = lastSent();
@@ -203,7 +228,9 @@ describe("Telegram bot (project-aware, keyboard-driven)", () => {
     // Behind a proxy / the Arena preview host, the request carries the public
     // host + proto — we must use it instead of the http://localhost default.
     expect(getPublicBaseUrl("8080-codevia.e2b.app", "https")).toBe("https://8080-codevia.e2b.app");
-    expect(getTelegramWebhookUrl("8080-codevia.e2b.app", "https")).toBe("https://8080-codevia.e2b.app/integrations/telegram/webhook");
+    expect(getTelegramWebhookUrl("8080-codevia.e2b.app", "https")).toBe(
+      "https://8080-codevia.e2b.app/integrations/telegram/webhook",
+    );
     // A real deployment with PUBLIC_WEB_BASE_URL set wins over the request host.
     expect(validateTelegramWebhookUrl(getTelegramWebhookUrl("8080-codevia.e2b.app", "https")).ok).toBe(true);
   });
@@ -213,7 +240,11 @@ describe("Telegram bot — real-world command handling", () => {
   it("answers /start@BotName in groups (Telegram appends the bot username)", async () => {
     await bot.handle({
       update_id: 20,
-      message: { chat: { id: -100, type: "supergroup" }, from: { id: 123, username: "dev" }, text: "/start@CodeViaBot" },
+      message: {
+        chat: { id: -100, type: "supergroup" },
+        from: { id: 123, username: "dev" },
+        text: "/start@CodeViaBot",
+      },
     });
     const sent = lastSent();
     expect(sent.chatId).toBe("-100");
@@ -221,7 +252,11 @@ describe("Telegram bot — real-world command handling", () => {
   });
 
   it("auto-selects the only project, so a plain message runs without menu taps", async () => {
-    await container.agentManager.createProject({ name: "Storefront", configRepo: "acme/storefront", description: "Demo storefront" });
+    await container.agentManager.createProject({
+      name: "Storefront",
+      configRepo: "acme/storefront",
+      description: "Demo storefront",
+    });
     const before = container.taskRepo.findMany().length;
     await bot.handle({
       update_id: 21,
@@ -247,7 +282,13 @@ describe("Telegram bot — real-world command handling", () => {
     const withStatus = new TelegramBot({
       ...botDeps(),
       runtimeStatus: () =>
-        ({ transport: "polling", mode: "auto", enabled: true, fixes: [], webhookUrl: "https://x/integrations/telegram/webhook" }) as never,
+        ({
+          transport: "polling",
+          mode: "auto",
+          enabled: true,
+          fixes: [],
+          webhookUrl: "https://x/integrations/telegram/webhook",
+        }) as never,
     });
     await withStatus.handle({ update_id: 23, message: { chat: { id: 777 }, from: { id: 1 }, text: "/ping" } });
     const sent = lastSent();
@@ -256,7 +297,17 @@ describe("Telegram bot — real-world command handling", () => {
   });
 
   it("answers with the error instead of going silent when a handler throws", async () => {
-    const broken = new TelegramBot({ ...botDeps(), projectRepo: { findMany() { throw new Error("db is locked"); }, findById() { throw new Error("db is locked"); } } as never });
+    const broken = new TelegramBot({
+      ...botDeps(),
+      projectRepo: {
+        findMany() {
+          throw new Error("db is locked");
+        },
+        findById() {
+          throw new Error("db is locked");
+        },
+      } as never,
+    });
     await broken.handle({ update_id: 24, message: { chat: { id: 777 }, from: { id: 1 }, text: "/projects" } });
     const sent = lastSent();
     expect(sent.text).toContain("db is locked");
@@ -264,7 +315,11 @@ describe("Telegram bot — real-world command handling", () => {
   });
 
   it("cancels queued tasks on /stop", async () => {
-    const project = await container.agentManager.createProject({ name: "Storefront", configRepo: "acme/storefront", description: "Demo storefront" });
+    const project = await container.agentManager.createProject({
+      name: "Storefront",
+      configRepo: "acme/storefront",
+      description: "Demo storefront",
+    });
     const task = container.agentManager.createTask({ projectId: project.id, title: "queued thing" });
     container.taskRepo.upsert({ ...task, status: "queued" }, { projectId: project.id });
     await bot.handle({ update_id: 25, message: { chat: { id: 777 }, from: { id: 1 }, text: "/stop" } });

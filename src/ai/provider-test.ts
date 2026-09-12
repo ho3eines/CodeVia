@@ -140,7 +140,9 @@ export function providerReadiness(config: ModelProvider): { ready: boolean; reas
     if (!resolveProviderKey(config)) {
       return {
         ready: false,
-        reason: config.secretRef ? `Environment variable ${config.secretRef} is not set on the server` : "Stored API key can no longer be decrypted",
+        reason: config.secretRef
+          ? `Environment variable ${config.secretRef} is not set on the server`
+          : "Stored API key can no longer be decrypted",
         hint: config.secretRef
           ? `Add ${config.secretRef}=<your key> to the server environment (.env / docker-compose) and restart, or paste the key directly in the provider form.`
           : "AUTH_SECRET may have changed — re-enter the API key in the provider form.",
@@ -148,7 +150,11 @@ export function providerReadiness(config: ModelProvider): { ready: boolean; reas
     }
   }
   if (!config.baseUrl) {
-    return { ready: false, reason: "Base URL is required", hint: "Enter the provider's API base URL (e.g. https://api.openai.com/v1)." };
+    return {
+      ready: false,
+      reason: "Base URL is required",
+      hint: "Enter the provider's API base URL (e.g. https://api.openai.com/v1).",
+    };
   }
   return { ready: true };
 }
@@ -165,18 +171,23 @@ function extractModelIds(payload: unknown): string[] {
 }
 
 /** Build a best-effort `ProviderTestResult` for a request that could not be attempted. */
-export function providerTestNotReady(
-  config: ModelProvider,
-  url: string | undefined,
-): ProviderTestResult {
+export function providerTestNotReady(config: ModelProvider, url: string | undefined): ProviderTestResult {
   const keyPresent = !!resolveProviderKey(config);
   const readiness = providerReadiness(config);
   const eps = maskEndpoints(buildAllEndpoints(config, keyPresent ? resolveProviderKey(config) : undefined));
   if (config.apiFormat === "custom") {
-    return { ok: false, keyPresent, checked: false, method: "POST", url: eps.chatUrl,
-      urls: eps.urls, chatUrl: eps.chatUrl, apiFormat: config.apiFormat,
+    return {
+      ok: false,
+      keyPresent,
+      checked: false,
+      method: "POST",
+      url: eps.chatUrl,
+      urls: eps.urls,
+      chatUrl: eps.chatUrl,
+      apiFormat: config.apiFormat,
       message: `${readiness.reason ?? "Provider not ready"}. No request was sent — chat endpoint: ${eps.chatUrl}`,
-      hint: readiness.hint };
+      hint: readiness.hint,
+    };
   }
   return {
     ok: false,
@@ -228,10 +239,17 @@ export async function testProviderConnection(
     return providerTestNotReady(config, raw.catalogUrl);
   }
   if (config.apiFormat === "custom") {
-    return { ok: false, keyPresent, checked: false, chatChecked: false, apiFormat: config.apiFormat,
-      chatUrl: eps.chatUrl, urls: eps.urls,
+    return {
+      ok: false,
+      keyPresent,
+      checked: false,
+      chatChecked: false,
+      apiFormat: config.apiFormat,
+      chatUrl: eps.chatUrl,
+      urls: eps.urls,
       message: "Custom chat has no model catalog configured. Connection has not been tested.",
-      hint: "Add a model ID manually, then use its chat test. Base URL must be the exact chat endpoint." };
+      hint: "Add a model ID manually, then use its chat test. Base URL must be the exact chat endpoint.",
+    };
   }
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = Math.min(opts.timeoutMs ?? 10_000, config.timeoutMs || 10_000);
@@ -269,7 +287,10 @@ export async function testProviderConnection(
       };
     }
     const apiMessage =
-      (body && typeof body === "object" && ((body as { error?: { message?: string } }).error?.message ?? (body as { message?: string }).message)) || res.statusText;
+      (body &&
+        typeof body === "object" &&
+        ((body as { error?: { message?: string } }).error?.message ?? (body as { message?: string }).message)) ||
+      res.statusText;
     const hint =
       res.status === 401 || res.status === 403
         ? `The key in ${config.secretRef} was rejected by the provider — check that it is valid and has API access.`
@@ -337,7 +358,8 @@ function buildChatRequest(
   apiKey?: string,
   tuning: ModelTuning = {},
 ): { url: string; headers: Record<string, string>; body: Record<string, unknown> } {
-  if (config.apiFormat === "custom") return buildDirectChatRequest(config, modelId, [{ role: "user", content: message }], apiKey);
+  if (config.apiFormat === "custom")
+    return buildDirectChatRequest(config, modelId, [{ role: "user", content: message }], apiKey);
   // A model route may mandate a specific temperature (or reject the field
   // outright), so both the value and its presence are configurable per model.
   const temperature = tuning.temperature ?? 0;
@@ -532,7 +554,9 @@ export async function testModelChat(
       };
     }
     const apiMessage =
-      (payload && typeof payload === "object" && (((payload as { error?: { message?: string } }).error?.message) ?? (payload as { message?: string }).message)) ||
+      (payload &&
+        typeof payload === "object" &&
+        ((payload as { error?: { message?: string } }).error?.message ?? (payload as { message?: string }).message)) ||
       res.statusText;
     const hint =
       res.status === 401 || res.status === 403

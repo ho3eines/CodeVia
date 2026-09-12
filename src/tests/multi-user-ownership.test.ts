@@ -105,7 +105,9 @@ describe("providers are per-account", () => {
     expect(provider.ownerId).toBe(alice.id);
 
     // Bob's list contains the shared platform rows but never Alice's provider.
-    const bobList = (await srv.inject({ method: "GET", url: "/providers", headers: bob.bearer })).json() as Array<{ id: string }>;
+    const bobList = (await srv.inject({ method: "GET", url: "/providers", headers: bob.bearer })).json() as Array<{
+      id: string;
+    }>;
     expect(bobList.some((p) => p.id === provider.id)).toBe(false);
     expect(bobList.some((p) => p.id === "provider-mock")).toBe(true);
 
@@ -121,17 +123,31 @@ describe("providers are per-account", () => {
       { method: "POST", url: `/providers/${provider.id}/duplicate`, payload: {} },
       { method: "GET", url: `/providers/${provider.id}/models` },
     ] as const) {
-      const res = await srv.inject({ ...attempt, url: attempt.url, headers: bob.bearer, payload: "payload" in attempt ? attempt.payload : undefined });
+      const res = await srv.inject({
+        ...attempt,
+        url: attempt.url,
+        headers: bob.bearer,
+        payload: "payload" in attempt ? attempt.payload : undefined,
+      });
       expect(res.statusCode, `${attempt.method} ${attempt.url}`).toBe(404);
     }
 
     // Bulk actions skip it instead of acting on someone else's row.
-    const bulk = (await srv.inject({ method: "POST", url: "/providers/bulk", headers: bob.bearer, payload: { action: "delete", ids: [provider.id], cascade: true } })).json() as { affected: string[]; missing: string[] };
+    const bulk = (
+      await srv.inject({
+        method: "POST",
+        url: "/providers/bulk",
+        headers: bob.bearer,
+        payload: { action: "delete", ids: [provider.id], cascade: true },
+      })
+    ).json() as { affected: string[]; missing: string[] };
     expect(bulk.affected).toBe(0);
     expect(bulk.missing).toContain(provider.id);
 
     // Untouched for its owner.
-    const own = (await srv.inject({ method: "GET", url: `/providers/${provider.id}`, headers: alice.bearer })).json() as ModelProvider;
+    const own = (
+      await srv.inject({ method: "GET", url: `/providers/${provider.id}`, headers: alice.bearer })
+    ).json() as ModelProvider;
     expect(own.name).toBe("Alice Private");
   });
 
@@ -157,9 +173,14 @@ describe("providers are per-account", () => {
     expect(patched.statusCode).toBe(200);
     expect(container.providerRepo.findById("provider-openai")?.data.ownerId).toBe(alice.id);
 
-    const bobList = (await srv.inject({ method: "GET", url: "/providers", headers: bob.bearer })).json() as Array<{ id: string }>;
+    const bobList = (await srv.inject({ method: "GET", url: "/providers", headers: bob.bearer })).json() as Array<{
+      id: string;
+    }>;
     expect(bobList.some((p) => p.id === "provider-openai")).toBe(false);
-    const aliceList = (await srv.inject({ method: "GET", url: "/providers", headers: alice.bearer })).json() as Array<{ id: string; secretValuePresent: boolean }>;
+    const aliceList = (await srv.inject({ method: "GET", url: "/providers", headers: alice.bearer })).json() as Array<{
+      id: string;
+      secretValuePresent: boolean;
+    }>;
     expect(aliceList.find((p) => p.id === "provider-openai")?.secretValuePresent).toBe(true);
   });
 
@@ -170,20 +191,43 @@ describe("providers are per-account", () => {
     const bob = makeUser(16, "mock-bob");
 
     // Editing the offline fallback must not hand it to one account.
-    const patched = await srv.inject({ method: "PATCH", url: "/providers/provider-mock", headers: alice.bearer, payload: { timeoutMs: 12345 } });
+    const patched = await srv.inject({
+      method: "PATCH",
+      url: "/providers/provider-mock",
+      headers: alice.bearer,
+      payload: { timeoutMs: 12345 },
+    });
     expect(patched.statusCode).toBe(200);
     expect(container.providerRepo.findById("provider-mock")?.data.ownerId).toBeUndefined();
 
     // …and it stays available to every account.
-    const bobList = (await srv.inject({ method: "GET", url: "/providers", headers: bob.bearer })).json() as Array<{ id: string }>;
+    const bobList = (await srv.inject({ method: "GET", url: "/providers", headers: bob.bearer })).json() as Array<{
+      id: string;
+    }>;
     expect(bobList.some((p) => p.id === "provider-mock")).toBe(true);
 
     // Deleting it (or its models) is refused: that would take the offline path
     // away from everyone else.
-    expect((await srv.inject({ method: "DELETE", url: "/providers/provider-mock", headers: alice.bearer, query: { cascade: "true" } })).statusCode).toBe(400);
+    expect(
+      (
+        await srv.inject({
+          method: "DELETE",
+          url: "/providers/provider-mock",
+          headers: alice.bearer,
+          query: { cascade: "true" },
+        })
+      ).statusCode,
+    ).toBe(400);
     const delModel = await srv.inject({ method: "DELETE", url: "/models/model-mock-fast", headers: alice.bearer });
     expect(delModel.statusCode).toBe(409);
-    const bulk = (await srv.inject({ method: "POST", url: "/models/bulk", headers: alice.bearer, payload: { action: "delete", ids: ["model-mock-fast", "model-mock-strong"] } })).json() as { affected: string[]; skipped: Array<{ id: string }> };
+    const bulk = (
+      await srv.inject({
+        method: "POST",
+        url: "/models/bulk",
+        headers: alice.bearer,
+        payload: { action: "delete", ids: ["model-mock-fast", "model-mock-strong"] },
+      })
+    ).json() as { affected: string[]; skipped: Array<{ id: string }> };
     expect(bulk.affected).toBe(0);
     expect(bulk.skipped.map((s) => s.id)).toEqual(["model-mock-fast", "model-mock-strong"]);
     expect(container.modelRepo.findById("model-mock-fast")).toBeDefined();
@@ -208,8 +252,22 @@ describe("providers are per-account", () => {
  * ------------------------------------------------------------------ */
 describe("models are per-account", () => {
   async function aliceModel(srv: FastifyInstance, alice: TestUser): Promise<{ provider: ModelProvider; model: Model }> {
-    const provider = (await srv.inject({ method: "POST", url: "/providers", headers: alice.bearer, payload: { type: "mock", name: "Alice Models" } })).json() as ModelProvider;
-    const model = (await srv.inject({ method: "POST", url: "/models", headers: alice.bearer, payload: { providerId: provider.id, modelId: "alice-private-model" } })).json() as Model;
+    const provider = (
+      await srv.inject({
+        method: "POST",
+        url: "/providers",
+        headers: alice.bearer,
+        payload: { type: "mock", name: "Alice Models" },
+      })
+    ).json() as ModelProvider;
+    const model = (
+      await srv.inject({
+        method: "POST",
+        url: "/models",
+        headers: alice.bearer,
+        payload: { providerId: provider.id, modelId: "alice-private-model" },
+      })
+    ).json() as Model;
     return { provider, model };
   }
 
@@ -221,7 +279,9 @@ describe("models are per-account", () => {
     const { provider, model } = await aliceModel(srv, alice);
     expect(model.ownerId).toBe(alice.id);
 
-    const bobModels = (await srv.inject({ method: "GET", url: "/models", headers: bob.bearer })).json() as Array<{ id: string }>;
+    const bobModels = (await srv.inject({ method: "GET", url: "/models", headers: bob.bearer })).json() as Array<{
+      id: string;
+    }>;
     expect(bobModels.some((m) => m.id === model.id)).toBe(false);
 
     for (const attempt of [
@@ -237,19 +297,31 @@ describe("models are per-account", () => {
     }
 
     // Bulk actions skip foreign rows.
-    const bulk = (await srv.inject({ method: "POST", url: "/models/bulk", headers: bob.bearer, payload: { action: "delete", ids: [model.id] } })).json() as { affected: string[]; missing: string[] };
+    const bulk = (
+      await srv.inject({
+        method: "POST",
+        url: "/models/bulk",
+        headers: bob.bearer,
+        payload: { action: "delete", ids: [model.id] },
+      })
+    ).json() as { affected: string[]; missing: string[] };
     expect(bulk.affected).toBe(0);
     expect(bulk.missing).toContain(model.id);
 
     // The owner keeps full control, and the provider's model count is scoped.
-    expect((await srv.inject({ method: "GET", url: `/models/${model.id}`, headers: alice.bearer })).statusCode).toBe(200);
-    const counts = (await srv.inject({ method: "GET", url: "/providers", headers: alice.bearer })).json() as Array<{ id: string; modelCount: number }>;
+    expect((await srv.inject({ method: "GET", url: `/models/${model.id}`, headers: alice.bearer })).statusCode).toBe(
+      200,
+    );
+    const counts = (await srv.inject({ method: "GET", url: "/providers", headers: alice.bearer })).json() as Array<{
+      id: string;
+      modelCount: number;
+    }>;
     expect(counts.find((p) => p.id === provider.id)?.modelCount).toBe(1);
   });
 
   it("never routes a call through another account's provider", async () => {
     stubEmptyCatalog();
-    const srv = await boot();
+    await boot();
     const alice = makeUser(23, "route-alice");
     const bob = makeUser(24, "route-bob");
 
@@ -277,7 +349,14 @@ describe("models are per-account", () => {
         contextWindow: 128000,
         inputCostPer1k: 0,
         outputCostPer1k: 0,
-        capabilities: { vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true },
+        capabilities: {
+          vision: false,
+          tools: true,
+          structuredOutput: false,
+          code: true,
+          reasoning: false,
+          streaming: true,
+        },
         active: true,
         priority: 1,
         fallbackPriority: 1,
@@ -298,7 +377,13 @@ describe("models are per-account", () => {
         name: config.name,
         chat: async (req: ChatRequest): Promise<ChatResponse> => {
           called.push(config.id);
-          return { content: "ok", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, modelId: req.modelId, providerId: config.id };
+          return {
+            content: "ok",
+            finishReason: "stop",
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            modelId: req.modelId,
+            providerId: config.id,
+          };
         },
         listModels: async () => [],
         resolveApiKey: () => "sk-test",
@@ -350,16 +435,24 @@ describe("projects, dashboard and search are per-account", () => {
     const aliceProject = await createProject(srv, alice, "DashboardAlice");
     await createProject(srv, bob, "DashboardBob");
 
-    const aliceDash = (await srv.inject({ method: "GET", url: "/dashboard", headers: alice.bearer })).json() as { totalProjects: number };
-    const bobDash = (await srv.inject({ method: "GET", url: "/dashboard", headers: bob.bearer })).json() as { totalProjects: number };
+    const aliceDash = (await srv.inject({ method: "GET", url: "/dashboard", headers: alice.bearer })).json() as {
+      totalProjects: number;
+    };
+    const bobDash = (await srv.inject({ method: "GET", url: "/dashboard", headers: bob.bearer })).json() as {
+      totalProjects: number;
+    };
     expect(aliceDash.totalProjects).toBe(1);
     expect(bobDash.totalProjects).toBe(1);
 
-    const aliceSearch = (await srv.inject({ method: "GET", url: "/search?q=dashboard", headers: alice.bearer })).json() as { results: Array<{ id: string }> };
+    const aliceSearch = (
+      await srv.inject({ method: "GET", url: "/search?q=dashboard", headers: alice.bearer })
+    ).json() as { results: Array<{ id: string }> };
     expect(aliceSearch.results.some((r) => r.id === aliceProject)).toBe(true);
     expect(aliceSearch.results.length).toBe(1);
 
-    const bobSearch = (await srv.inject({ method: "GET", url: "/search?q=dashboard", headers: bob.bearer })).json() as { results: Array<{ id: string }> };
+    const bobSearch = (await srv.inject({ method: "GET", url: "/search?q=dashboard", headers: bob.bearer })).json() as {
+      results: Array<{ id: string }>;
+    };
     expect(bobSearch.results.some((r) => r.id === aliceProject)).toBe(false);
   });
 
@@ -369,18 +462,26 @@ describe("projects, dashboard and search are per-account", () => {
     const alice = makeUser(33, "task-alice");
     const bob = makeUser(34, "task-bob");
     const aliceProject = await createProject(srv, alice, "TasksAlice");
-    const task = (await srv.inject({
-      method: "POST",
-      url: "/tasks",
-      headers: alice.bearer,
-      payload: { projectId: aliceProject, title: "Alice task", description: "private" },
-    })).json() as { id: string };
+    const task = (
+      await srv.inject({
+        method: "POST",
+        url: "/tasks",
+        headers: alice.bearer,
+        payload: { projectId: aliceProject, title: "Alice task", description: "private" },
+      })
+    ).json() as { id: string };
 
-    const bobTasks = (await srv.inject({ method: "GET", url: "/tasks", headers: bob.bearer })).json() as Array<{ id: string }>;
+    const bobTasks = (await srv.inject({ method: "GET", url: "/tasks", headers: bob.bearer })).json() as Array<{
+      id: string;
+    }>;
     expect(bobTasks.some((t) => t.id === task.id)).toBe(false);
-    const bobRuns = (await srv.inject({ method: "GET", url: "/runs", headers: bob.bearer })).json() as Array<{ projectId: string }>;
+    const bobRuns = (await srv.inject({ method: "GET", url: "/runs", headers: bob.bearer })).json() as Array<{
+      projectId: string;
+    }>;
     expect(bobRuns.some((r) => r.projectId === aliceProject)).toBe(false);
-    const bobCosts = (await srv.inject({ method: "GET", url: "/costs", headers: bob.bearer })).json() as Array<{ projectId?: string }>;
+    const bobCosts = (await srv.inject({ method: "GET", url: "/costs", headers: bob.bearer })).json() as Array<{
+      projectId?: string;
+    }>;
     expect(bobCosts.some((c) => c.projectId === aliceProject)).toBe(false);
   });
 });
@@ -408,21 +509,36 @@ describe("notifications and the audit trail are per-account", () => {
     const aliceProject = await createProject(srv, alice, "NotesAlice");
     const bobProject = await createProject(srv, bob, "NotesBob");
 
-    container.notificationRepo.create({ severity: "error", title: "Alice failed", message: "private", projectId: aliceProject });
+    container.notificationRepo.create({
+      severity: "error",
+      title: "Alice failed",
+      message: "private",
+      projectId: aliceProject,
+    });
     container.notificationRepo.create({ severity: "info", title: "Platform", message: "backup done" });
 
-    const bobNotes = (await srv.inject({ method: "GET", url: "/notifications", headers: bob.bearer })).json() as Array<{ title: string; projectId?: string }>;
+    const bobNotes = (await srv.inject({ method: "GET", url: "/notifications", headers: bob.bearer })).json() as Array<{
+      title: string;
+      projectId?: string;
+    }>;
     expect(bobNotes.some((n) => n.title === "Alice failed")).toBe(false);
     expect(bobNotes.some((n) => n.title === "Platform")).toBe(true);
 
     // Marking a foreign notification read must not confirm it exists.
     const aliceNote = container.notificationRepo.findMany().find((n) => n.data.projectId === aliceProject)!;
-    const read = await srv.inject({ method: "POST", url: `/notifications/${aliceNote.data.id}/read`, headers: bob.bearer });
+    const read = await srv.inject({
+      method: "POST",
+      url: `/notifications/${aliceNote.data.id}/read`,
+      headers: bob.bearer,
+    });
     expect(read.statusCode).toBe(404);
     expect(container.notificationRepo.findById(aliceNote.data.id)?.data.read).toBe(false);
 
     // Its owner can.
-    expect((await srv.inject({ method: "POST", url: `/notifications/${aliceNote.data.id}/read`, headers: alice.bearer })).statusCode).toBe(200);
+    expect(
+      (await srv.inject({ method: "POST", url: `/notifications/${aliceNote.data.id}/read`, headers: alice.bearer }))
+        .statusCode,
+    ).toBe(200);
     expect(container.notificationRepo.findById(aliceNote.data.id)?.data.read).toBe(true);
     expect(bobProject).toBeTruthy();
   });
@@ -435,12 +551,41 @@ describe("notifications and the audit trail are per-account", () => {
     const aliceProject = await createProject(srv, alice, "AuditAlice");
     const bobProject = await createProject(srv, bob, "AuditBob");
 
-    container.auditRepo.record({ action: "alice.project", result: "success", source: "web", correlationId: "c1", metadata: {}, projectId: aliceProject });
-    container.auditRepo.record({ action: "bob.project", result: "success", source: "web", correlationId: "c2", metadata: {}, projectId: bobProject });
-    container.auditRepo.record({ action: "auth.github.login", result: "success", source: "web", correlationId: "c3", metadata: {}, userId: alice.id });
-    container.auditRepo.record({ action: "system.backup", result: "success", source: "system", correlationId: "c4", metadata: {} });
+    container.auditRepo.record({
+      action: "alice.project",
+      result: "success",
+      source: "web",
+      correlationId: "c1",
+      metadata: {},
+      projectId: aliceProject,
+    });
+    container.auditRepo.record({
+      action: "bob.project",
+      result: "success",
+      source: "web",
+      correlationId: "c2",
+      metadata: {},
+      projectId: bobProject,
+    });
+    container.auditRepo.record({
+      action: "auth.github.login",
+      result: "success",
+      source: "web",
+      correlationId: "c3",
+      metadata: {},
+      userId: alice.id,
+    });
+    container.auditRepo.record({
+      action: "system.backup",
+      result: "success",
+      source: "system",
+      correlationId: "c4",
+      metadata: {},
+    });
 
-    const bobAudit = (await srv.inject({ method: "GET", url: "/audit", headers: bob.bearer })).json() as Array<{ action: string }>;
+    const bobAudit = (await srv.inject({ method: "GET", url: "/audit", headers: bob.bearer })).json() as Array<{
+      action: string;
+    }>;
     expect(bobAudit.map((e) => e.action)).toContain("bob.project");
     // Another account's project events, its logins and platform events are not
     // Bob's business.
@@ -449,8 +594,12 @@ describe("notifications and the audit trail are per-account", () => {
     expect(bobAudit.map((e) => e.action)).not.toContain("system.backup");
 
     // An admin-role account sees its own projects plus the platform trail.
-    const aliceAudit = (await srv.inject({ method: "GET", url: "/audit", headers: alice.bearer })).json() as Array<{ action: string }>;
-    expect(aliceAudit.map((e) => e.action)).toEqual(expect.arrayContaining(["alice.project", "auth.github.login", "system.backup"]));
+    const aliceAudit = (await srv.inject({ method: "GET", url: "/audit", headers: alice.bearer })).json() as Array<{
+      action: string;
+    }>;
+    expect(aliceAudit.map((e) => e.action)).toEqual(
+      expect.arrayContaining(["alice.project", "auth.github.login", "system.backup"]),
+    );
     // …but not another account's project, even as admin (projects stay private).
     expect(aliceAudit.map((e) => e.action)).not.toContain("bob.project");
   });

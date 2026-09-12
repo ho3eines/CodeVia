@@ -40,18 +40,40 @@ function agent(type: Agent["type"]): Agent {
   // plans are permission-aware: read-only agents must not get write steps.
   const scaffold = scaffoldFor(type);
   return {
-    id: "a1", projectId: "p1", type, name: "Agent", slug: type, role: "", description: "",
-    systemPrompt: "", skills: [...scaffold.skills], tools: [...scaffold.tools], permissions: [...scaffold.permissions],
+    id: "a1",
+    projectId: "p1",
+    type,
+    name: "Agent",
+    slug: type,
+    role: "",
+    description: "",
+    systemPrompt: "",
+    skills: [...scaffold.skills],
+    tools: [...scaffold.tools],
+    permissions: [...scaffold.permissions],
     models: { primary: "m", fallbacks: [], specialized: {} },
-    maxIterations: 5, timeoutMs: 1000, tokenBudget: 100, memorySources: [],
-    enabled: true, version: 1, createdAt: now, updatedAt: now,
+    maxIterations: 5,
+    timeoutMs: 1000,
+    tokenBudget: 100,
+    memorySources: [],
+    enabled: true,
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
   };
 }
 function task(): Task {
   const now = new Date().toISOString();
   return {
-    id: "t1", projectId: "p1", title: "Fix login", description: "login broken", status: "created",
-    correlationId: "c", input: {}, createdAt: now, updatedAt: now,
+    id: "t1",
+    projectId: "p1",
+    title: "Fix login",
+    description: "login broken",
+    status: "created",
+    correlationId: "c",
+    input: {},
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
@@ -100,16 +122,38 @@ describe("ContextEngine project request contract", () => {
       configRepo: "acme/accounting",
       branch: "main",
       repositories: [{ repo: "acme/accounting", branch: "main", role: "primary", isConfigRepo: true }],
-      capabilities: { platforms: ["web"], languages: ["csharp"], frameworks: ["dotnet"], databases: ["sqlserver"], deploymentTargets: [], features: [], integrations: [], agentTypes: [] },
+      capabilities: {
+        platforms: ["web"],
+        languages: ["csharp"],
+        frameworks: ["dotnet"],
+        databases: ["sqlserver"],
+        deploymentTargets: [],
+        features: [],
+        integrations: [],
+        agentTypes: [],
+      },
       primaryLanguage: "csharp",
       framework: "dotnet",
       database: "sqlserver",
-      settings: { environment: "development", notifications: [], rules: [], skills: [], workflows: [], budget: { maxTokensPerRun: 1000, maxCallsPerRun: 5, maxCostUsdPerRun: 1, maxDurationMs: 10000 }, permissions: {} as never, metadata: {} },
+      settings: {
+        environment: "development",
+        notifications: [],
+        rules: [],
+        skills: [],
+        workflows: [],
+        budget: { maxTokensPerRun: 1000, maxCallsPerRun: 5, maxCostUsdPerRun: 1, maxDurationMs: 10000 },
+        permissions: {} as never,
+        metadata: {},
+      },
       active: true,
       createdAt: now,
       updatedAt: now,
     };
-    const req = { ...task(), title: "بررسی بک‌اند لاگین", description: "طبق پرامپ پروژه اول ریپو را بررسی کن، تست بگیر و اگر لازم بود PR بساز." };
+    const req = {
+      ...task(),
+      title: "بررسی بک‌اند لاگین",
+      description: "طبق پرامپ پروژه اول ریپو را بررسی کن، تست بگیر و اگر لازم بود PR بساز.",
+    };
     const engine = new ContextEngine();
     const built = await engine.build({
       project,

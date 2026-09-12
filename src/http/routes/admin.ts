@@ -74,6 +74,14 @@ export function registerAdminRoutes(app: FastifyInstance, container: Container):
     return container.providerRegistry.all().map((p) => ({ id: p.id, type: p.type }));
   });
 
+  // Queue operational metrics: backlog, retry and dead-letter counts, and the
+  // age of the oldest waiting job (queue lag) — the signals behind the task
+  // success / latency SLOs in docs/SLO.md.
+  app.get("/admin/queue", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    if (!requireAdmin(req, reply)) return { error: "Forbidden" };
+    return container.queue.metrics();
+  });
+
   // ---- Admin → GitHub Login settings (non-secret values; secrets stay env-only) ----
   app.get("/admin/settings", { schema: { tags: ["admin"] } }, async (req, reply) => {
     if (!requireAdmin(req, reply)) return { error: "Forbidden" };
@@ -157,7 +165,10 @@ export function registerAdminRoutes(app: FastifyInstance, container: Container):
       return { error: "User not found" };
     }
     if (rec.data.role === "owner" && role !== "owner") {
-      const owners = container.userRepo.findMany().map((r) => r.data).filter((u) => u.role === "owner");
+      const owners = container.userRepo
+        .findMany()
+        .map((r) => r.data)
+        .filter((u) => u.role === "owner");
       if (owners.length <= 1) {
         reply.code(400);
         return { error: "Cannot demote the last owner" };

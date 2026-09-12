@@ -15,7 +15,9 @@ export function freshDb(): { db: Db; path: string; cleanup: () => void } {
     cleanup: () => {
       try {
         db.close();
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       rmSync(dir, { recursive: true, force: true });
     },
   };

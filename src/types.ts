@@ -10,23 +10,10 @@ export type ISODate = string;
 export type CorrelationId = string;
 
 export type JobStatus =
-  | "pending"
-  | "running"
-  | "waiting_for_approval"
-  | "succeeded"
-  | "failed"
-  | "cancelled"
-  | "retrying"
-  | "dead";
+  "pending" | "running" | "waiting_for_approval" | "succeeded" | "failed" | "cancelled" | "retrying" | "dead";
 
 export type TaskStatus =
-  | "created"
-  | "queued"
-  | "running"
-  | "waiting_for_approval"
-  | "succeeded"
-  | "failed"
-  | "cancelled";
+  "created" | "queued" | "running" | "waiting_for_approval" | "succeeded" | "failed" | "cancelled";
 
 export type RunStatus = TaskStatus;
 

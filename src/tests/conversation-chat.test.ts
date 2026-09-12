@@ -37,7 +37,11 @@ beforeAll(async () => {
   // Present as a *real* GitHub connection (kind !== "mock") backed by the
   // in-memory service, so the mock-only code paths stay out of the way.
   const gh = container.github as unknown as IGitHubService & {
-    seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string }): unknown;
+    seedRepo(
+      owner: string,
+      name: string,
+      opts?: { files?: Array<{ path: string; content: string }>; branch?: string },
+    ): unknown;
   };
   Object.defineProperty(gh, "kind", { value: "real", configurable: true });
   gh.seedRepo("acme", "legacy", { files: [{ path: "README.md", content: "# legacy\n" }], branch: "main" });
@@ -62,8 +66,14 @@ function legacyProject(id: string, slug: string, configRepo: string): Project {
     configRepo,
     branch: "main",
     capabilities: {
-      platforms: [], languages: [], frameworks: [], databases: [],
-      deploymentTargets: [], features: [], integrations: [], agentTypes: [],
+      platforms: [],
+      languages: [],
+      frameworks: [],
+      databases: [],
+      deploymentTargets: [],
+      features: [],
+      integrations: [],
+      agentTypes: [],
     },
     githubConnection: { kind: "server-token" },
     settings: {
@@ -87,7 +97,19 @@ function legacyProject(id: string, slug: string, configRepo: string): Project {
 /** The same project as the current version stores it: with `repositories`. */
 function modernProject(id: string, slug: string, configRepo: string): Project {
   const legacy = legacyProject(id, slug, configRepo) as unknown as Record<string, unknown>;
-  return { ...legacy, repositories: [{ repo: configRepo, branch: "main", role: "primary", isConfigRepo: true, htmlUrl: `https://github.com/${configRepo}`, addedAt: new Date().toISOString() }] } as unknown as Project;
+  return {
+    ...legacy,
+    repositories: [
+      {
+        repo: configRepo,
+        branch: "main",
+        role: "primary",
+        isConfigRepo: true,
+        htmlUrl: `https://github.com/${configRepo}`,
+        addedAt: new Date().toISOString(),
+      },
+    ],
+  } as unknown as Project;
 }
 
 describe("project chat send", () => {
@@ -95,12 +117,16 @@ describe("project chat send", () => {
     const name = `blazor-${randomUUID().slice(0, 8)}`;
     const repo = `acme/${name}`;
     const gh = container.github as unknown as {
-      seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string }): unknown;
+      seedRepo(
+        owner: string,
+        name: string,
+        opts?: { files?: Array<{ path: string; content: string }>; branch?: string },
+      ): unknown;
     };
     gh.seedRepo("acme", name, {
       files: [
         { path: "README.md", content: "# Pdd.ir — Blazor shop\nThis is a Blazor WebAssembly project." },
-        { path: "Pdd.ir.csproj", content: "<Project Sdk=\"Microsoft.NET.Sdk.BlazorWebAssembly\">" },
+        { path: "Pdd.ir.csproj", content: '<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">' },
         { path: "Program.cs", content: "var builder = WebAssemblyHostBuilder.CreateDefault(args);" },
       ],
       branch: "main",
@@ -109,13 +135,21 @@ describe("project chat send", () => {
     const project = modernProject(`proj-${name}`, name, repo);
     container.projectRepo.upsert(project, { key: project.slug });
 
-    const created = await app.inject({ method: "POST", url: "/conversations", payload: { projectId: project.id, title: "Project Chat", userId: "local-user" } });
+    const created = await app.inject({
+      method: "POST",
+      url: "/conversations",
+      payload: { projectId: project.id, title: "Project Chat", userId: "local-user" },
+    });
     expect(created.statusCode, created.body).toBe(200);
     const conv = created.json();
 
     const spy = vi.spyOn(container.aiText, "complete");
     try {
-      const res = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "پروژه رو بررسی کن" } });
+      const res = await app.inject({
+        method: "POST",
+        url: `/conversations/${conv.id}/messages`,
+        payload: { role: "user", content: "پروژه رو بررسی کن" },
+      });
       expect(res.statusCode, res.body).toBe(200);
       expect(res.json().messages.at(-1).role).toBe("assistant");
       expect(spy).toHaveBeenCalled();
@@ -133,11 +167,19 @@ describe("project chat send", () => {
     const project = legacyProject("proj-legacy1", "legacy1", "acme/legacy");
     container.projectRepo.upsert(project, { key: project.slug });
 
-    const created = await app.inject({ method: "POST", url: "/conversations", payload: { projectId: project.id, title: "Project Chat", userId: "local-user" } });
+    const created = await app.inject({
+      method: "POST",
+      url: "/conversations",
+      payload: { projectId: project.id, title: "Project Chat", userId: "local-user" },
+    });
     expect(created.statusCode, created.body).toBe(200);
     const conv = created.json();
 
-    const res = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "سلام" } });
+    const res = await app.inject({
+      method: "POST",
+      url: `/conversations/${conv.id}/messages`,
+      payload: { role: "user", content: "سلام" },
+    });
     expect(res.statusCode, res.body).toBe(200);
     const body = res.json();
     expect(body.messages.length).toBeGreaterThanOrEqual(2);
@@ -148,20 +190,44 @@ describe("project chat send", () => {
   it("does not 500 when attachments arrive as a non-array", async () => {
     const project = legacyProject("proj-legacy2", "legacy2", "acme/legacy2");
     container.projectRepo.upsert(project, { key: project.slug });
-    const conv = (await app.inject({ method: "POST", url: "/conversations", payload: { projectId: project.id, title: "Project Chat", userId: "local-user" } })).json();
-    const res = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "سلام", attachments: { name: "x" } } });
+    const conv = (
+      await app.inject({
+        method: "POST",
+        url: "/conversations",
+        payload: { projectId: project.id, title: "Project Chat", userId: "local-user" },
+      })
+    ).json();
+    const res = await app.inject({
+      method: "POST",
+      url: `/conversations/${conv.id}/messages`,
+      payload: { role: "user", content: "سلام", attachments: { name: "x" } },
+    });
     expect(res.statusCode, res.body).toBe(200);
   }, 30000);
 
   it("still sends for a normal project and dispatches non-chat modes", async () => {
     const p = modernProject("proj-modern1", "modern1", "acme/modern");
     container.projectRepo.upsert(p, { key: p.slug });
-    const conv = (await app.inject({ method: "POST", url: "/conversations", payload: { projectId: p!.id, title: "Project Chat", userId: "local-user" } })).json();
-    const chat = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "سلام" } });
+    const conv = (
+      await app.inject({
+        method: "POST",
+        url: "/conversations",
+        payload: { projectId: p!.id, title: "Project Chat", userId: "local-user" },
+      })
+    ).json();
+    const chat = await app.inject({
+      method: "POST",
+      url: `/conversations/${conv.id}/messages`,
+      payload: { role: "user", content: "سلام" },
+    });
     expect(chat.statusCode, chat.body).toBe(200);
     expect(chat.json().messages.at(-1).role).toBe("assistant");
 
-    const dispatched = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "یک کار انجام بده", executionMode: "agent" } });
+    const dispatched = await app.inject({
+      method: "POST",
+      url: `/conversations/${conv.id}/messages`,
+      payload: { role: "user", content: "یک کار انجام بده", executionMode: "agent" },
+    });
     expect(dispatched.statusCode, dispatched.body).toBe(200);
     expect(dispatched.json().messages.at(-1).metadata?.dispatchedTaskId).toBeTruthy();
   }, 30000);
@@ -169,12 +235,22 @@ describe("project chat send", () => {
   it("still returns the assistant reply when GitHub conversation sync fails", async () => {
     const project = legacyProject("proj-legacy-persist", "legacy-persist", "acme/legacy");
     container.projectRepo.upsert(project, { key: project.slug });
-    const created = await app.inject({ method: "POST", url: "/conversations", payload: { projectId: project.id, title: "Project Chat", userId: "local-user" } });
+    const created = await app.inject({
+      method: "POST",
+      url: "/conversations",
+      payload: { projectId: project.id, title: "Project Chat", userId: "local-user" },
+    });
     expect(created.statusCode, created.body).toBe(200);
     const conv = created.json();
-    const spy = vi.spyOn(container.projectFiles, "syncConversation").mockRejectedValue(Object.assign(new Error("GitHub 404"), { status: 404 }));
+    const spy = vi
+      .spyOn(container.projectFiles, "syncConversation")
+      .mockRejectedValue(Object.assign(new Error("GitHub 404"), { status: 404 }));
     try {
-      const res = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "سلام" } });
+      const res = await app.inject({
+        method: "POST",
+        url: `/conversations/${conv.id}/messages`,
+        payload: { role: "user", content: "سلام" },
+      });
       expect(res.statusCode, res.body).toBe(200);
       const body = res.json();
       expect(body.messages.at(-1).role).toBe("assistant");
@@ -193,16 +269,20 @@ describe("project chat send", () => {
     const name = `empty-wipe-${randomUUID().slice(0, 8)}`;
     const repo = `acme/${name}`;
     const gh = container.github as unknown as {
-      seedRepo(owner: string, name: string, opts?: { files?: Array<{ path: string; content: string }>; branch?: string }): unknown;
+      seedRepo(
+        owner: string,
+        name: string,
+        opts?: { files?: Array<{ path: string; content: string }>; branch?: string },
+      ): unknown;
     };
     gh.seedRepo("acme", name, { files: [{ path: "README.md", content: `# ${name}\n` }], branch: "main" });
 
     const project = legacyProject(`proj-${name}`, name, repo);
     container.projectRepo.upsert(project, { key: project.slug });
 
-    const spy = vi.spyOn(container.projectFiles, "syncConversation").mockRejectedValue(
-      Object.assign(new Error("GitHub 404"), { status: 404 }),
-    );
+    const spy = vi
+      .spyOn(container.projectFiles, "syncConversation")
+      .mockRejectedValue(Object.assign(new Error("GitHub 404"), { status: 404 }));
     try {
       const created = await app.inject({
         method: "POST",
@@ -247,7 +327,14 @@ describe("project chat send", () => {
  * (`ghs_server` is login-only and 404s on the owner's private repos).
  */
 describe("project chat send uses the owner's OAuth token, not GITHUB_TOKEN", () => {
-  const ENV_KEYS = ["REQUIRE_AUTH", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "AUTH_SECRET", "GITHUB_TOKEN", "GITHUB_ENABLED"] as const;
+  const ENV_KEYS = [
+    "REQUIRE_AUTH",
+    "GITHUB_CLIENT_ID",
+    "GITHUB_CLIENT_SECRET",
+    "AUTH_SECRET",
+    "GITHUB_TOKEN",
+    "GITHUB_ENABLED",
+  ] as const;
   let savedEnv: Record<string, string | undefined>;
   let cleanupOwner: (() => void) | undefined;
   let ownerApp: FastifyInstance | undefined;
@@ -297,7 +384,9 @@ describe("project chat send uses the owner's OAuth token, not GITHUB_TOKEN", () 
         return json({ sha: head, tree: { sha: `tree-${head}` } });
       }
       if (url.includes("/git/trees") && method === "POST") {
-        const body = JSON.parse(String(init?.body ?? "{}")) as { tree?: Array<{ path?: string; content?: string; sha?: string | null }> };
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          tree?: Array<{ path?: string; content?: string; sha?: string | null }>;
+        };
         for (const entry of body.tree ?? []) {
           if (!entry.path) continue;
           if (entry.sha === null) files.delete(entry.path);
@@ -362,7 +451,12 @@ describe("project chat send uses the owner's OAuth token, not GITHUB_TOKEN", () 
     ownerApp = (await buildServer(ownerContainer)).app;
     await ownerApp.ready();
 
-    const alice = ownerContainer.userRepo.upsertGitHubUser({ id: 1, login: "alice", name: "Alice", email: "a@example.com" }).user;
+    const alice = ownerContainer.userRepo.upsertGitHubUser({
+      id: 1,
+      login: "alice",
+      name: "Alice",
+      email: "a@example.com",
+    }).user;
     storeUserGitHubToken(ownerContainer.kv, alice.id, "tok-alice", { scopes: "repo", login: "alice" });
     const cookie = `cv_session=${signSession(alice.id)}`;
 
@@ -417,7 +511,11 @@ describe("project chat send uses the owner's OAuth token, not GITHUB_TOKEN", () 
  * ------------------------------------------------------------------ */
 describe("standalone chat (no project)", () => {
   it("creates a conversation without projectId", async () => {
-    const created = await app.inject({ method: "POST", url: "/conversations", payload: { title: "Hello", userId: "local-user" } });
+    const created = await app.inject({
+      method: "POST",
+      url: "/conversations",
+      payload: { title: "Hello", userId: "local-user" },
+    });
     expect(created.statusCode, created.body).toBe(200);
     const conv = created.json();
     expect(conv.id).toBeTruthy();
@@ -425,16 +523,28 @@ describe("standalone chat (no project)", () => {
   }, 30000);
 
   it("still 404s when given a bogus projectId", async () => {
-    const created = await app.inject({ method: "POST", url: "/conversations", payload: { projectId: "proj-nope", title: "x" } });
+    const created = await app.inject({
+      method: "POST",
+      url: "/conversations",
+      payload: { projectId: "proj-nope", title: "x" },
+    });
     expect(created.statusCode).toBe(404);
   }, 30000);
 
   it("answers with a generic prompt and no repository context", async () => {
-    const created = await app.inject({ method: "POST", url: "/conversations", payload: { title: "General Q", userId: "local-user" } });
+    const created = await app.inject({
+      method: "POST",
+      url: "/conversations",
+      payload: { title: "General Q", userId: "local-user" },
+    });
     const conv = created.json();
     const spy = vi.spyOn(container.aiText, "complete");
     try {
-      const res = await app.inject({ method: "POST", url: `/conversations/${conv.id}/messages`, payload: { role: "user", content: "What is 2+2?" } });
+      const res = await app.inject({
+        method: "POST",
+        url: `/conversations/${conv.id}/messages`,
+        payload: { role: "user", content: "What is 2+2?" },
+      });
       expect(res.statusCode, res.body).toBe(200);
       const body = res.json();
       expect(body.messages.length).toBeGreaterThanOrEqual(2);
@@ -450,7 +560,11 @@ describe("standalone chat (no project)", () => {
   }, 30000);
 
   it("guides task execution modes to the project chat instead of dispatching", async () => {
-    const created = await app.inject({ method: "POST", url: "/conversations", payload: { title: "Tasks?", userId: "local-user" } });
+    const created = await app.inject({
+      method: "POST",
+      url: "/conversations",
+      payload: { title: "Tasks?", userId: "local-user" },
+    });
     const conv = created.json();
     const tasksBefore = container.taskRepo.findMany().length;
     const res = await app.inject({

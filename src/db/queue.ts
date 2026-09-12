@@ -3,6 +3,7 @@ import type { Db } from "./client.js";
 import { randomUUID } from "node:crypto";
 import type { JobStatus } from "../types.js";
 import type { Job } from "../domain/entities.js";
+import { correlationId, currentCorrelationId } from "../correlation.js";
 
 export type JobType = "agent.run" | "telegram.send" | "webhook" | "github.op" | "notify" | "workflow.run";
 
@@ -29,7 +30,7 @@ export class JobQueue {
         type,
         payload: JSON.stringify(payload),
         max_attempts: opts.maxAttempts ?? 3,
-        correlation_id: opts.correlationId ?? null,
+        correlation_id: opts.correlationId ?? currentCorrelationId() ?? correlationId(),
         scheduled_at: opts.scheduledAt ?? null,
         created_at: nowIso(),
         updated_at: nowIso(),
@@ -55,13 +56,24 @@ export class JobQueue {
    * Deliberately limited to agent/workflow execution: blindly replaying an
    * interrupted GitHub mutation or notification could duplicate an external
    * side effect whose acknowledgement was lost during shutdown.
+   *
+   * When `olderThanMs` is given, only rows whose claim is older than that lease
+   * are recovered (used by `claim()` so a job being actively processed by a
+   * live worker is never stolen, while a job abandoned by a dead one is).
    */
-  recoverInterruptedExecutions(): { retrying: Job[]; dead: Job[] } {
+  recoverInterruptedExecutions(olderThanMs?: number): { retrying: Job[]; dead: Job[] } {
     return this.db.tx(() => {
+      const cutoff = olderThanMs ? new Date(Date.now() - olderThanMs).toISOString() : undefined;
       const rows = this.db.all(
-        `SELECT * FROM jobs
-         WHERE status = 'running' AND type IN ('agent.run', 'workflow.run')
-         ORDER BY created_at ASC`,
+        cutoff
+          ? `SELECT * FROM jobs
+             WHERE status = 'running' AND type IN ('agent.run', 'workflow.run')
+               AND (started_at IS NOT NULL AND started_at < :cutoff)
+             ORDER BY created_at ASC`
+          : `SELECT * FROM jobs
+             WHERE status = 'running' AND type IN ('agent.run', 'workflow.run')
+             ORDER BY created_at ASC`,
+        cutoff ? { cutoff } : {},
       ) as Record<string, unknown>[];
       const retrying: Job[] = [];
       const dead: Job[] = [];
@@ -93,9 +105,16 @@ export class JobQueue {
     });
   }
 
+  /** A running execution job whose claim is this old has no live owner. */
+  static readonly LEASE_TTL_MS = 10 * 60 * 1000;
+
   /** Claim a batch of pending jobs (oldest first by created_at). */
   claim(limit = 5): Job[] {
     if (!Number.isFinite(limit) || limit <= 0) return [];
+    // A worker/queue recreated after a crash must be able to reclaim execution
+    // jobs a dead owner left in `running` (A12): recover expired leases first,
+    // then claim normally. Age-gated so an in-flight job is never stolen.
+    this.recoverInterruptedExecutions(JobQueue.LEASE_TTL_MS);
     const now = nowIso();
     // One UPDATE…RETURNING statement owns the claim. A SELECT followed by an
     // UPDATE can return another worker's already-running row after losing the race.
@@ -115,17 +134,26 @@ export class JobQueue {
 
   /** A cancelled execution may still be unwinding; do not overwrite its cancellation by retrying early. */
   hasRunningTask(taskId: string): boolean {
-    return !!this.db.get(`SELECT id FROM jobs WHERE status = 'running' AND type IN ('agent.run', 'workflow.run') AND json_extract(payload, '$.taskId') = :taskId LIMIT 1`, { taskId });
+    const cutoff = new Date(Date.now() - JobQueue.LEASE_TTL_MS).toISOString();
+    return !!this.db.get(
+      `SELECT id FROM jobs WHERE status = 'running' AND type IN ('agent.run', 'workflow.run') AND json_extract(payload, '$.taskId') = :taskId AND (started_at IS NULL OR started_at >= :cutoff) LIMIT 1`,
+      { taskId, cutoff },
+    );
   }
 
   /**
    * True when a worker job for this task is actually live (enqueued and not yet
    * claimed, or being processed). Jobs that finished — including dead-lettered
-   * ones (`status = 'dead'`) — do NOT count, so a task stranded as non-terminal
-   * by a job that died can be re-run instead of being reported "in flight".
+   * ones (`status = 'dead'`) and `running` rows whose lease has expired — do
+   * NOT count, so a task stranded as non-terminal by a job that died can be
+   * re-run instead of being reported "in flight".
    */
   hasLiveJob(taskId: string): boolean {
-    return !!this.db.get(`SELECT id FROM jobs WHERE status IN ('pending', 'running') AND type IN ('agent.run', 'workflow.run') AND json_extract(payload, '$.taskId') = :taskId LIMIT 1`, { taskId });
+    const cutoff = new Date(Date.now() - JobQueue.LEASE_TTL_MS).toISOString();
+    return !!this.db.get(
+      `SELECT id FROM jobs WHERE status IN ('pending', 'running') AND type IN ('agent.run', 'workflow.run') AND json_extract(payload, '$.taskId') = :taskId AND (status = 'pending' OR started_at IS NULL OR started_at >= :cutoff) LIMIT 1`,
+      { taskId, cutoff },
+    );
   }
 
   update(id: string, patch: Partial<Pick<Job, "status" | "attempts" | "error" | "finishedAt">>): Job | undefined {
@@ -156,10 +184,10 @@ export class JobQueue {
   /** Idempotent enqueue: if a job with the same correlation id + type exists, return it. */
   enqueueIdempotent(type: JobType, payload: Record<string, unknown>, opts: EnqueueOptions = {}): Job {
     if (opts.correlationId) {
-      const existing = this.db.get(
-        `SELECT * FROM jobs WHERE correlation_id = :correlation_id AND type = :type`,
-        { correlation_id: opts.correlationId, type },
-      ) as Record<string, unknown> | undefined;
+      const existing = this.db.get(`SELECT * FROM jobs WHERE correlation_id = :correlation_id AND type = :type`, {
+        correlation_id: opts.correlationId,
+        type,
+      }) as Record<string, unknown> | undefined;
       if (existing) return this.mapJob(existing);
     }
     return this.enqueue(type, payload, opts);
@@ -173,6 +201,48 @@ export class JobQueue {
     const out: Record<string, number> = {};
     for (const r of rows) out[r.status] = Number(r.n);
     return out;
+  }
+
+  /**
+   * Operational metrics for the queue: backlog size, retry and dead-letter
+   * counts, and the age of the oldest waiting/retrying job (queue lag). Used by
+   * the SLO instrumentation and `/admin/queue`.
+   */
+  metrics(): {
+    total: number;
+    byStatus: Partial<Record<JobStatus, number>>;
+    pending: number;
+    retrying: number;
+    deadLetter: number;
+    oldestPendingAgeMs: number | null;
+    oldestRetryingAgeMs: number | null;
+  } {
+    const rows = this.db.all(`SELECT status, COUNT(*) as n FROM jobs GROUP BY status`) as {
+      status: string;
+      n: number;
+    }[];
+    const byStatus: Partial<Record<JobStatus, number>> = {};
+    let total = 0;
+    for (const r of rows) {
+      const n = Number(r.n);
+      byStatus[r.status as JobStatus] = n;
+      total += n;
+    }
+    const ageOf = (status: JobStatus): number | null => {
+      const row = this.db.get(`SELECT created_at FROM jobs WHERE status = :status ORDER BY created_at ASC LIMIT 1`, {
+        status,
+      }) as { created_at: string } | undefined;
+      return row ? Math.max(0, Date.now() - new Date(row.created_at).getTime()) : null;
+    };
+    return {
+      total,
+      byStatus,
+      pending: byStatus.pending ?? 0,
+      retrying: byStatus.retrying ?? 0,
+      deadLetter: byStatus.dead ?? 0,
+      oldestPendingAgeMs: ageOf("pending"),
+      oldestRetryingAgeMs: ageOf("retrying"),
+    };
   }
 
   private mapJob(row: Record<string, unknown>): Job {

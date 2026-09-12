@@ -93,7 +93,10 @@ const server = createServer(async (req, res) => {
 
   switch (method) {
     case "getMe":
-      return send(res, 200, { ok: true, result: { id: 42, is_bot: true, username: "codevia_mock_bot", first_name: "CodeVia (mock)" } });
+      return send(res, 200, {
+        ok: true,
+        result: { id: 42, is_bot: true, username: "codevia_mock_bot", first_name: "CodeVia (mock)" },
+      });
     case "getUpdates": {
       const timeoutSec = Number(body.timeout ?? 0);
       const offset = Number(body.offset ?? 0);
@@ -113,7 +116,14 @@ const server = createServer(async (req, res) => {
       webhook = null;
       return send(res, 200, { ok: true, result: true });
     case "getWebhookInfo":
-      return send(res, 200, { ok: true, result: { url: webhook?.url ?? "", pending_update_count: queue.length, ...(webhook ? { last_error_message: "" } : {}) } });
+      return send(res, 200, {
+        ok: true,
+        result: {
+          url: webhook?.url ?? "",
+          pending_update_count: queue.length,
+          ...(webhook ? { last_error_message: "" } : {}),
+        },
+      });
     case "sendMessage":
     case "editMessageText":
     case "sendDocument":

@@ -19,7 +19,7 @@ import { toolRegistry, ToolRegistry } from "../tools/registry.js";
 import { resolveGitHubService, resolveGitHubForProject } from "../github/registry.js";
 import { resolveTelegramService } from "../integrations/telegram.js";
 import { TelegramBot } from "../integrations/telegram-bot.js";
-import { TelegramRuntime, type TelegramMode, type TelegramRuntimeStatus } from "../integrations/telegram-runtime.js";
+import { TelegramRuntime, type TelegramRuntimeStatus } from "../integrations/telegram-runtime.js";
 import { getEnv } from "../config/env.js";
 import { memoryResolver, MemoryResolver } from "../memory/index.js";
 import { AgentRouter } from "../agents/router.js";
@@ -85,9 +85,25 @@ export class Container {
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
   readonly github: IGitHubService = resolveGitHubService();
-  readonly githubForProject = (project: Project, requestUserId?: string): IGitHubService => resolveGitHubForProject({ project, kv: this.kv, fallback: this.github, requestUserId });
+  readonly githubForProject = (project: Project, requestUserId?: string): IGitHubService =>
+    resolveGitHubForProject({ project, kv: this.kv, fallback: this.github, requestUserId });
   /** Project folder (CodeVia/*) sync between the database and the project repo. Shares the platform github instance. */
-  readonly projectFiles: ProjectFilesService = new ProjectFilesService({ github: this.github, githubForProject: this.githubForProject, repositories: { projectRepo: this.projectRepo, agentRepo: this.agentRepo, taskRepo: this.taskRepo, memoryRepo: this.memoryRepo, skillRepo: this.skillRepo, workflowRepo: this.workflowRepo, runRepo: this.runRepo, conversationRepo: this.conversationRepo, promptVersionRepo: this.promptVersionRepo }, transaction: (fn) => this.db.tx(fn) });
+  readonly projectFiles: ProjectFilesService = new ProjectFilesService({
+    github: this.github,
+    githubForProject: this.githubForProject,
+    repositories: {
+      projectRepo: this.projectRepo,
+      agentRepo: this.agentRepo,
+      taskRepo: this.taskRepo,
+      memoryRepo: this.memoryRepo,
+      skillRepo: this.skillRepo,
+      workflowRepo: this.workflowRepo,
+      runRepo: this.runRepo,
+      conversationRepo: this.conversationRepo,
+      promptVersionRepo: this.promptVersionRepo,
+    },
+    transaction: (fn) => this.db.tx(fn),
+  });
   readonly telegram = resolveTelegramService();
   readonly memoryResolver: MemoryResolver = memoryResolver;
   readonly agentRouter = new AgentRouter();
@@ -143,7 +159,10 @@ export class Container {
       requestApproval: (a, d) => this.approvalChannel(a, d),
       memoryRepo: this.memoryRepo,
       projectFiles: this.projectFiles,
-      refresh: async (id) => ({ project: await this.agentManager.refreshProject(id), agents: this.agentRepo.byProject(id) }),
+      refresh: async (id) => ({
+        project: await this.agentManager.refreshProject(id),
+        agents: this.agentRepo.byProject(id),
+      }),
       checkActive: (task) => assertTaskActive(this.taskRepo, task),
     });
     this.workflowEngine = new WorkflowEngine({
@@ -152,6 +171,7 @@ export class Container {
       toolRegistry: this.toolRegistry,
       github: this.github,
       githubForProject: this.githubForProject,
+      telegram: this.telegram,
       requestApproval: (a, d) => this.approvalChannel(a, d),
       checkActive: (task) => assertTaskActive(this.taskRepo, task),
     });
@@ -244,7 +264,10 @@ export class Container {
         { text: "❌ Reject", callback_data: `reject:${req.id}` },
       ],
     ];
-    const targets: Array<{ chatId: string; send: (msg: { chatId: string; text: string; inlineKeyboard: typeof inlineKeyboard }) => Promise<boolean> }> = [];
+    const targets: Array<{
+      chatId: string;
+      send: (msg: { chatId: string; text: string; inlineKeyboard: typeof inlineKeyboard }) => Promise<boolean>;
+    }> = [];
     if (project?.telegramChatId) {
       targets.push({ chatId: project.telegramChatId, send: (m) => this.telegram.sendButtons(m) });
     }
@@ -397,8 +420,17 @@ export class Container {
   async setupTelegramWebhook(baseOverride?: string): Promise<{ ok: boolean; url?: string; error?: string }> {
     const status = await this.telegramRuntime.start(baseOverride);
     if (status.transport === "webhook") return { ok: true, url: status.webhookUrl };
-    if (status.transport === "polling") return { ok: false, url: status.webhookUrl, error: `webhook unavailable (${status.webhookError ?? "no public HTTPS URL"}); long polling is active instead` };
-    return { ok: false, url: status.webhookUrl, error: status.webhookError ?? status.note ?? "Telegram is not receiving updates" };
+    if (status.transport === "polling")
+      return {
+        ok: false,
+        url: status.webhookUrl,
+        error: `webhook unavailable (${status.webhookError ?? "no public HTTPS URL"}); long polling is active instead`,
+      };
+    return {
+      ok: false,
+      url: status.webhookUrl,
+      error: status.webhookError ?? status.note ?? "Telegram is not receiving updates",
+    };
   }
 
   /**
@@ -420,10 +452,69 @@ export class Container {
     if (this.providerRepo.count() > 0) return;
     const now = new Date().toISOString();
     const defaults: ModelProvider[] = [
-      { id: "provider-openai", name: "OpenAI", type: "openai", baseUrl: "https://api.openai.com/v1", secretRef: "OPENAI_API_KEY", authType: "bearer", apiFormat: "openai", timeoutMs: 60000, maxTokensDefault: 4096, defaultTemperature: 0.3, rateLimitPerMinute: 200, active: !!process.env.OPENAI_API_KEY, createdAt: now, updatedAt: now },
-      { id: "provider-anthropic", name: "Anthropic", type: "anthropic", baseUrl: "https://api.anthropic.com", secretRef: "ANTHROPIC_API_KEY", authType: "api-key", apiFormat: "anthropic", timeoutMs: 60000, maxTokensDefault: 4096, defaultTemperature: 0.3, rateLimitPerMinute: 200, active: !!process.env.ANTHROPIC_API_KEY, createdAt: now, updatedAt: now },
-      { id: "provider-gemini", name: "Google Gemini", type: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", secretRef: "GEMINI_API_KEY", authType: "api-key", apiFormat: "gemini", timeoutMs: 60000, maxTokensDefault: 4096, defaultTemperature: 0.3, rateLimitPerMinute: 200, active: !!process.env.GEMINI_API_KEY, createdAt: now, updatedAt: now },
-      { id: "provider-mock", name: "Mock AI", type: "mock", secretRef: undefined, authType: "none", apiFormat: "custom", timeoutMs: 60000, maxTokensDefault: 4096, defaultTemperature: 0.3, rateLimitPerMinute: 1000, active: true, createdAt: now, updatedAt: now },
+      {
+        id: "provider-openai",
+        name: "OpenAI",
+        type: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        secretRef: "OPENAI_API_KEY",
+        authType: "bearer",
+        apiFormat: "openai",
+        timeoutMs: 60000,
+        maxTokensDefault: 4096,
+        defaultTemperature: 0.3,
+        rateLimitPerMinute: 200,
+        active: !!process.env.OPENAI_API_KEY,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "provider-anthropic",
+        name: "Anthropic",
+        type: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        secretRef: "ANTHROPIC_API_KEY",
+        authType: "api-key",
+        apiFormat: "anthropic",
+        timeoutMs: 60000,
+        maxTokensDefault: 4096,
+        defaultTemperature: 0.3,
+        rateLimitPerMinute: 200,
+        active: !!process.env.ANTHROPIC_API_KEY,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "provider-gemini",
+        name: "Google Gemini",
+        type: "gemini",
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        secretRef: "GEMINI_API_KEY",
+        authType: "api-key",
+        apiFormat: "gemini",
+        timeoutMs: 60000,
+        maxTokensDefault: 4096,
+        defaultTemperature: 0.3,
+        rateLimitPerMinute: 200,
+        active: !!process.env.GEMINI_API_KEY,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "provider-mock",
+        name: "Mock AI",
+        type: "mock",
+        secretRef: undefined,
+        authType: "none",
+        apiFormat: "custom",
+        timeoutMs: 60000,
+        maxTokensDefault: 4096,
+        defaultTemperature: 0.3,
+        rateLimitPerMinute: 1000,
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      },
     ];
     for (const p of defaults) this.providerRepo.upsert(p);
   }
@@ -433,9 +524,30 @@ export class Container {
     if (existing > 0) return;
     const now = new Date().toISOString();
     const defaults = [
-      { modelId: "mock-fast", displayName: "Mock Fast", providerId: "provider-mock", priority: 1, fallbackPriority: 10, caps: { vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true } },
-      { modelId: "mock-strong", displayName: "Mock Strong", providerId: "provider-mock", priority: 2, fallbackPriority: 5, caps: { vision: true, tools: true, structuredOutput: true, code: true, reasoning: true, streaming: true } },
-      { modelId: "mock-reasoning", displayName: "Mock Reasoning", providerId: "provider-mock", priority: 3, fallbackPriority: 1, caps: { vision: false, tools: true, structuredOutput: true, code: true, reasoning: true, streaming: true } },
+      {
+        modelId: "mock-fast",
+        displayName: "Mock Fast",
+        providerId: "provider-mock",
+        priority: 1,
+        fallbackPriority: 10,
+        caps: { vision: false, tools: true, structuredOutput: false, code: true, reasoning: false, streaming: true },
+      },
+      {
+        modelId: "mock-strong",
+        displayName: "Mock Strong",
+        providerId: "provider-mock",
+        priority: 2,
+        fallbackPriority: 5,
+        caps: { vision: true, tools: true, structuredOutput: true, code: true, reasoning: true, streaming: true },
+      },
+      {
+        modelId: "mock-reasoning",
+        displayName: "Mock Reasoning",
+        providerId: "provider-mock",
+        priority: 3,
+        fallbackPriority: 1,
+        caps: { vision: false, tools: true, structuredOutput: true, code: true, reasoning: true, streaming: true },
+      },
     ];
     for (const d of defaults) {
       this.modelRepo.upsert({

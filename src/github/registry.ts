@@ -23,7 +23,8 @@ export interface GithubConnection {
 export function isServerGitHubEnabled(): boolean {
   const env = getEnv();
   const token = process.env.GITHUB_TOKEN;
-  const enabled = env.NODE_ENV === "production" || env.GITHUB_ENABLED === "true" || process.env.GITHUB_ENABLED === "true";
+  const enabled =
+    env.NODE_ENV === "production" || env.GITHUB_ENABLED === "true" || process.env.GITHUB_ENABLED === "true";
   return !!token && enabled;
 }
 
@@ -85,7 +86,11 @@ export function resolveGitHubForUser(opts: {
   if (opts.authenticated && opts.userId) {
     const stored = getUserGitHubToken(opts.kv, opts.userId);
     if (stored) {
-      const service = new RealGitHubService({ token: stored.token, label: "user GitHub session", fetchImpl: userGitHubFetch });
+      const service = new RealGitHubService({
+        token: stored.token,
+        label: "user GitHub session",
+        fetchImpl: userGitHubFetch,
+      });
       const hint = hasRepoScope(stored.scopes)
         ? undefined
         : "Your GitHub login only granted public access (scope 'public_repo'/none). Private repositories are hidden — an admin can set the OAuth scope to 'repo read:user user:email' and you can log in again to see them.";
@@ -126,7 +131,11 @@ export type { IGitHubService, GithubRepoRef } from "./types.js";
  * the sole stored user token for backwards compatibility.
  * Returns the userId when a decryptable token exists, otherwise undefined.
  */
-export function resolveProjectUserIdWithGitHubToken(kv: KvStore, project: import("../domain/entities.js").Project, allowSoleUser = true): string | undefined {
+export function resolveProjectUserIdWithGitHubToken(
+  kv: KvStore,
+  project: import("../domain/entities.js").Project,
+  allowSoleUser = true,
+): string | undefined {
   const explicit = project.githubConnection?.userId || project.ownerId;
   if (explicit) return getUserGitHubToken(kv, explicit) ? explicit : undefined;
   if (!allowSoleUser) return undefined;
@@ -167,7 +176,11 @@ export function resolveGitHubForProject(opts: {
   const requestUserId = opts.requestUserId ?? githubRequestActorId();
   if (requestUserId && getUserGitHubToken(opts.kv, requestUserId)) {
     const userId = requestUserId;
-    return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
+    return new RealGitHubService({
+      token: () => getUserGitHubToken(opts.kv, userId)?.token,
+      label: "GitHub OAuth connection",
+      fetchImpl: userGitHubFetch,
+    });
   }
   const connection = opts.project.githubConnection;
   if (!connection) return opts.fallback; // legacy installations
@@ -176,7 +189,11 @@ export function resolveGitHubForProject(opts: {
     if (!userId) {
       throw new Error(`GitHub connection for project ${opts.project.name} needs to be reconnected by its owner`);
     }
-    return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
+    return new RealGitHubService({
+      token: () => getUserGitHubToken(opts.kv, userId)?.token,
+      label: "GitHub OAuth connection",
+      fetchImpl: userGitHubFetch,
+    });
   }
   if (connection.kind === "server-token") {
     // GITHUB_TOKEN / OAuth-app credentials are for login, not repository
@@ -185,11 +202,17 @@ export function resolveGitHubForProject(opts: {
     // user repos the PAT cannot see.
     const ownerUserId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
     if (ownerUserId) {
-      return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, ownerUserId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
+      return new RealGitHubService({
+        token: () => getUserGitHubToken(opts.kv, ownerUserId)?.token,
+        label: "GitHub OAuth connection",
+        fetchImpl: userGitHubFetch,
+      });
     }
     if (opts.fallback.kind === "real") return opts.fallback;
     if (isServerGitHubEnabled()) return new RealGitHubService();
-    throw new Error(`Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`);
+    throw new Error(
+      `Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`,
+    );
   }
   // `mock` was persisted while the platform ran in demo/simulation mode. Use the
   // real OAuth user token obtained from GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET
@@ -201,16 +224,25 @@ export function resolveGitHubForProject(opts: {
   if (connection.kind === "mock") {
     const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project);
     if (userId) {
-      return new RealGitHubService({ token: () => getUserGitHubToken(opts.kv, userId)?.token, label: "GitHub OAuth connection", fetchImpl: userGitHubFetch });
+      return new RealGitHubService({
+        token: () => getUserGitHubToken(opts.kv, userId)?.token,
+        label: "GitHub OAuth connection",
+        fetchImpl: userGitHubFetch,
+      });
     }
     const identity = opts.project.githubConnection?.userId || opts.project.ownerId;
     if (identity !== DEMO_USER_ID && getEffectiveOAuthConfig(opts.kv)) {
-      throw new Error(`GitHub OAuth is configured, but no user token is stored for project ${opts.project.name}. Log in with GitHub once; then project actions use your repository access without GITHUB_TOKEN.`);
+      throw new Error(
+        `GitHub OAuth is configured, but no user token is stored for project ${opts.project.name}. Log in with GitHub once; then project actions use your repository access without GITHUB_TOKEN.`,
+      );
     }
     if (opts.fallback.kind === "mock") return opts.fallback;
   }
   let mock = projectMocks.get(opts.fallback);
-  if (!mock) { mock = new MockGitHubService(); projectMocks.set(opts.fallback, mock); }
+  if (!mock) {
+    mock = new MockGitHubService();
+    projectMocks.set(opts.fallback, mock);
+  }
   return mock;
 }
 const projectMocks = new WeakMap<IGitHubService, MockGitHubService>();
@@ -278,6 +310,7 @@ export function adoptStrandedProjects(opts: {
       logger.warn(`could not adopt project ${project.id}: ${String(err).slice(0, 200)}`);
     }
   }
-  if (adopted.length) logger.info(`adopted ${adopted.length} stranded GitHub project(s) onto ${opts.login ?? opts.userId}`);
+  if (adopted.length)
+    logger.info(`adopted ${adopted.length} stranded GitHub project(s) onto ${opts.login ?? opts.userId}`);
   return adopted;
 }

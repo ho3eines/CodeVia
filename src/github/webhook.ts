@@ -6,11 +6,7 @@ import { getEnv } from "../config/env.js";
  * The signing secret comes from the environment (GITHUB_WEBHOOK_SECRET) and is
  * never stored in the repository.
  */
-export function verifyGithubSignature(
-  secret: string,
-  signatureHeader: string | undefined,
-  rawBody: string,
-): boolean {
+export function verifyGithubSignature(secret: string, signatureHeader: string | undefined, rawBody: string): boolean {
   if (!secret) return false;
   if (!signatureHeader) return false;
   const match = /^sha256=(.+)$/.exec(signatureHeader);

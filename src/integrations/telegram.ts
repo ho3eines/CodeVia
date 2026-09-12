@@ -83,7 +83,14 @@ export interface TelegramConnection {
   readonly configured: boolean;
   /** Why the token cannot be used (missing / malformed), if it cannot. */
   readonly tokenProblem?: string;
-  getMe(signal?: AbortSignal): Promise<TelegramApiResult<{ id?: number; username?: string; can_read_all_group_messages?: boolean; supports_inline_queries?: boolean }>>;
+  getMe(signal?: AbortSignal): Promise<
+    TelegramApiResult<{
+      id?: number;
+      username?: string;
+      can_read_all_group_messages?: boolean;
+      supports_inline_queries?: boolean;
+    }>
+  >;
   getWebhookInfo(signal?: AbortSignal): Promise<TelegramWebhookInfo>;
   setWebhook(url: string, opts?: { secretToken?: string; maxConnections?: number }): Promise<TelegramApiResult>;
   deleteWebhook(dropPending?: boolean): Promise<TelegramApiResult>;
@@ -198,7 +205,7 @@ export class TelegramBotApiService implements ITelegramService, TelegramConnecti
     const maxRetries = opts.retries ?? 1;
     let attempt = 0;
     // 429 responses carry `retry_after`; everything else is a single attempt.
-    // eslint-disable-next-line no-constant-condition
+
     while (true) {
       attempt += 1;
       try {
@@ -211,7 +218,13 @@ export class TelegramBotApiService implements ITelegramService, TelegramConnecti
           signal: opts.signal,
         });
         const json = (await res.json().catch(() => undefined)) as
-          | { ok: boolean; result?: T; description?: string; error_code?: number; parameters?: { retry_after?: number } }
+          | {
+              ok: boolean;
+              result?: T;
+              description?: string;
+              error_code?: number;
+              parameters?: { retry_after?: number };
+            }
           | undefined;
         if (json?.ok) {
           this.lastOkAt = new Date().toISOString();
@@ -330,7 +343,10 @@ export class TelegramBotApiService implements ITelegramService, TelegramConnecti
     };
   }
 
-  async setWebhook(url: string, opts: { secretToken?: string; maxConnections?: number } = {}): Promise<TelegramApiResult> {
+  async setWebhook(
+    url: string,
+    opts: { secretToken?: string; maxConnections?: number } = {},
+  ): Promise<TelegramApiResult> {
     const valid = validateTelegramWebhookUrl(url);
     if (!valid.ok) return { ok: false, error: valid.error };
     return this.call("setWebhook", {
@@ -347,12 +363,16 @@ export class TelegramBotApiService implements ITelegramService, TelegramConnecti
   }
 
   async getUpdates(params: TelegramUpdatesParams = {}): Promise<TelegramUpdatesResult> {
-    const res = await this.call<unknown[]>("getUpdates", {
-      offset: params.offset,
-      timeout: Math.max(0, Math.min(60, params.timeoutSec ?? getEnv().TELEGRAM_POLL_TIMEOUT ?? 25)),
-      limit: params.limit ?? 100,
-      allowed_updates: params.allowedUpdates ?? [...TELEGRAM_ALLOWED_UPDATES],
-    }, { signal: params.signal, retries: 0 });
+    const res = await this.call<unknown[]>(
+      "getUpdates",
+      {
+        offset: params.offset,
+        timeout: Math.max(0, Math.min(60, params.timeoutSec ?? getEnv().TELEGRAM_POLL_TIMEOUT ?? 25)),
+        limit: params.limit ?? 100,
+        allowed_updates: params.allowedUpdates ?? [...TELEGRAM_ALLOWED_UPDATES],
+      },
+      { signal: params.signal, retries: 0 },
+    );
     return { ...res, updates: Array.isArray(res.result) ? res.result : [] };
   }
 
@@ -481,7 +501,9 @@ export class MockTelegramService implements ITelegramService {
 export function isTelegramConnection(svc: ITelegramService | undefined): svc is ITelegramService & TelegramConnection {
   if (!svc) return false;
   const c = svc as unknown as Partial<TelegramConnection>;
-  return typeof c.getUpdates === "function" && typeof c.getWebhookInfo === "function" && typeof c.setWebhook === "function";
+  return (
+    typeof c.getUpdates === "function" && typeof c.getWebhookInfo === "function" && typeof c.setWebhook === "function"
+  );
 }
 
 export function resolveTelegramService(): ITelegramService {
@@ -531,7 +553,9 @@ export function resetLearnedPublicBaseUrl(): void {
 /** Hosts Telegram can never reach. */
 export function isLocalHost(host: string): boolean {
   const h = host.toLowerCase();
-  return h === "localhost" || h.startsWith("localhost:") || h === "127.0.0.1" || h.startsWith("127.") || h.endsWith(".local");
+  return (
+    h === "localhost" || h.startsWith("localhost:") || h === "127.0.0.1" || h.startsWith("127.") || h.endsWith(".local")
+  );
 }
 
 /**
@@ -573,7 +597,7 @@ function forceHttpsForPublicHosts(): boolean {
 function upgradeInsecurePublicBase(base: string | undefined): string {
   if (!base || !forceHttpsForPublicHosts()) return base ?? "";
   if (!/^http:\/\//i.test(base)) return base;
-  let host = "";
+  let host: string;
   try {
     host = new URL(base).hostname;
   } catch {
@@ -639,7 +663,10 @@ export function validateTelegramWebhookUrl(url: string): { ok: boolean; error?: 
     const host = new URL(url).hostname;
     const loopback = host === "localhost" || host === "127.0.0.1" || host.startsWith("127.") || host.endsWith(".local");
     if (loopback && !allowLoopbackWebhook()) {
-      return { ok: false, error: `webhook URL "${url}" points at localhost, which Telegram cannot reach. Use a public HTTPS URL — or set TELEGRAM_WEBHOOK_ALLOW_LOOPBACK=true for local/tunnel testing.` };
+      return {
+        ok: false,
+        error: `webhook URL "${url}" points at localhost, which Telegram cannot reach. Use a public HTTPS URL — or set TELEGRAM_WEBHOOK_ALLOW_LOOPBACK=true for local/tunnel testing.`,
+      };
     }
   } catch {
     return { ok: false, error: `invalid webhook URL "${url}"` };
@@ -703,10 +730,16 @@ export async function testTelegramToken(token: string): Promise<TelegramGetMe> {
 }
 
 /** Register the platform webhook for a user bot (real connection). */
-export async function setTelegramWebhook(token: string, url: string, secretToken?: string): Promise<{ ok: boolean; error?: string }> {
+export async function setTelegramWebhook(
+  token: string,
+  url: string,
+  secretToken?: string,
+): Promise<{ ok: boolean; error?: string }> {
   const valid = validateTelegramWebhookUrl(url);
   if (!valid.ok) return { ok: false, error: valid.error };
-  const res = await new TelegramBotApiService(token).setWebhook(url, { secretToken: secretToken ?? getEnv().TELEGRAM_WEBHOOK_SECRET });
+  const res = await new TelegramBotApiService(token).setWebhook(url, {
+    secretToken: secretToken ?? getEnv().TELEGRAM_WEBHOOK_SECRET,
+  });
   return res.ok ? { ok: true } : { ok: false, error: res.error || "setWebhook failed" };
 }
 
@@ -738,7 +771,9 @@ export function verifyTelegramWebhookSecret(headerValue: string | undefined, exp
  */
 export function isTelegramUnreachable(error: string | undefined): boolean {
   if (!error) return false;
-  return /ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|SSL_ERROR|socket hang up|fetch failed|network error|could not connect/i.test(error);
+  return /ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|SSL_ERROR|socket hang up|fetch failed|network error|could not connect/i.test(
+    error,
+  );
 }
 
 /** Actionable guidance for the most common "bot is silent" causes. */
@@ -761,14 +796,18 @@ export function telegramWebhookFixHints(
   if (localError) {
     hints.push(`Nothing was sent to Telegram: ${localError}`);
     if ((info?.pendingUpdateCount ?? 0) > 0) {
-      hints.push(`${info?.pendingUpdateCount} update(s) are queued at Telegram meanwhile — they arrive as soon as a receive path is registered.`);
+      hints.push(
+        `${info?.pendingUpdateCount} update(s) are queued at Telegram meanwhile — they arrive as soon as a receive path is registered.`,
+      );
     }
     return hints;
   }
   // A failed *query* is not "no webhook" — say which one it is, or people debug
   // a registration that was never the problem.
   if (isTelegramUnreachable(err)) {
-    hints.push(`Cannot query Telegram (${err}) — this host has no outbound HTTPS to api.telegram.org. Fix egress first; webhook and polling both need it.`);
+    hints.push(
+      `Cannot query Telegram (${err}) — this host has no outbound HTTPS to api.telegram.org. Fix egress first; webhook and polling both need it.`,
+    );
     return hints;
   }
   // We registered a webhook successfully a moment ago but Telegram's own view is
@@ -776,15 +815,29 @@ export function telegramWebhookFixHints(
   // not echo it), not a missing registration — do not tell people to flip to
   // polling when their push delivery is actually fine.
   const lag = Boolean(registeredByUs) && info?.empty === true && !err;
-  if (lag) hints.push(`Telegram has not reported the webhook yet (${info?.url || "no url"}) — this usually clears within a few seconds. Re-run the connection test before changing anything.`);
-  else if (info?.empty === true && mode !== "polling") hints.push("No webhook is registered and polling is off — the bot cannot receive messages. Set TELEGRAM_MODE=polling.");
-  if (/HTTPS URL must be provided/i.test(err)) hints.push("Telegram rejected the webhook URL: it must be public HTTPS. Set PUBLIC_WEB_BASE_URL or TELEGRAM_WEBHOOK_URL.");
+  if (lag)
+    hints.push(
+      `Telegram has not reported the webhook yet (${info?.url || "no url"}) — this usually clears within a few seconds. Re-run the connection test before changing anything.`,
+    );
+  else if (info?.empty === true && mode !== "polling")
+    hints.push(
+      "No webhook is registered and polling is off — the bot cannot receive messages. Set TELEGRAM_MODE=polling.",
+    );
+  if (/HTTPS URL must be provided/i.test(err))
+    hints.push(
+      "Telegram rejected the webhook URL: it must be public HTTPS. Set PUBLIC_WEB_BASE_URL or TELEGRAM_WEBHOOK_URL.",
+    );
   if (/connection refused|timed out|not enough|bad webhook/i.test(err)) {
-    hints.push(`Telegram cannot reach ${info?.url ?? "the webhook URL"} (${err}). Make sure the app is publicly reachable, then press "Reconnect".`);
+    hints.push(
+      `Telegram cannot reach ${info?.url ?? "the webhook URL"} (${err}). Make sure the app is publicly reachable, then press "Reconnect".`,
+    );
   }
-  if (mode === "webhook" && !info?.url && !lag) hints.push('TELEGRAM_MODE=webhook but no webhook is set — run "Refresh webhook" or switch to TELEGRAM_MODE=auto.');
+  if (mode === "webhook" && !info?.url && !lag)
+    hints.push('TELEGRAM_MODE=webhook but no webhook is set — run "Refresh webhook" or switch to TELEGRAM_MODE=auto.');
   if ((info?.pendingUpdateCount ?? 0) > 0) {
-    hints.push(`${info?.pendingUpdateCount} update(s) queued at Telegram but not delivered — the webhook endpoint is failing or unreachable.`);
+    hints.push(
+      `${info?.pendingUpdateCount} update(s) queued at Telegram but not delivered — the webhook endpoint is failing or unreachable.`,
+    );
   }
   return hints;
 }

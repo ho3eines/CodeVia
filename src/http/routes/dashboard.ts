@@ -18,7 +18,6 @@ export function registerDashboardRoutes(app: FastifyInstance, container: Contain
     const costs = container.costRepo.findMany().filter((r) => !r.data.projectId || owned.has(r.data.projectId));
     const queueStats = container.queue.stats();
 
-    const runningRuns = runs.filter((r) => r.data.status === "running");
     const pendingApprovals = container.approvals.list({ status: "pending" });
 
     return {
@@ -34,16 +33,14 @@ export function registerDashboardRoutes(app: FastifyInstance, container: Contain
         tokens: costs.reduce((s, c) => s + c.data.totalTokens, 0),
         costUsd: round2(costs.reduce((s, c) => s + c.data.estimatedCostUsd, 0)),
       },
-      recentActivity: runs
-        .slice(0, 10)
-        .map((r) => ({
-          runId: r.data.id,
-          agentType: r.data.agentType,
-          status: r.data.status,
-          projectId: r.data.projectId,
-          durationMs: r.data.durationMs,
-          createdAt: r.data.createdAt,
-        })),
+      recentActivity: runs.slice(0, 10).map((r) => ({
+        runId: r.data.id,
+        agentType: r.data.agentType,
+        status: r.data.status,
+        projectId: r.data.projectId,
+        durationMs: r.data.durationMs,
+        createdAt: r.data.createdAt,
+      })),
     };
   });
 
@@ -67,10 +64,17 @@ export function registerDashboardRoutes(app: FastifyInstance, container: Contain
       runCount: runs.length,
       cost: costs,
       memoryCount: memory.length,
-      recentRuns: runs
-        .slice(0, 8)
-        .map((r) => ({ runId: r.id, agentType: r.agentType, status: r.status, durationMs: r.durationMs, createdAt: r.createdAt })),
-      recentErrors: runs.filter((r) => r.status === "failed" || !!(r.error)).slice(0, 5).map((r) => ({ runId: r.id, error: r.error })),
+      recentRuns: runs.slice(0, 8).map((r) => ({
+        runId: r.id,
+        agentType: r.agentType,
+        status: r.status,
+        durationMs: r.durationMs,
+        createdAt: r.createdAt,
+      })),
+      recentErrors: runs
+        .filter((r) => r.status === "failed" || !!r.error)
+        .slice(0, 5)
+        .map((r) => ({ runId: r.id, error: r.error })),
     };
   });
 }

@@ -75,7 +75,21 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     container.approvals.cancelForTask(id);
     const task = container.taskRepo.findById(id)!.data;
     const p = container.projectRepo.findById(task.projectId)?.data;
-    if (p) await container.projectFiles.writeFiles(p, [{ path: container.projectFiles.pathFor(p, "task", id), content: matter({ schemaVersion: 2, deleted: true }, "Task intentionally removed. Do not restore or enqueue it.") }], "[CodeVia] remove task", false);
+    if (p)
+      await container.projectFiles.writeFiles(
+        p,
+        [
+          {
+            path: container.projectFiles.pathFor(p, "task", id),
+            content: matter(
+              { schemaVersion: 2, deleted: true },
+              "Task intentionally removed. Do not restore or enqueue it.",
+            ),
+          },
+        ],
+        "[CodeVia] remove task",
+        false,
+      );
     container.taskRepo.deleteById(id);
     return { ok: true };
   });
@@ -84,23 +98,42 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     const { id } = req.params as { id: string };
     if (!container.taskRepo.findById(id)) return reply.code(404).send({ error: "task not found" });
     let task;
-    try { task = executionTask(container.taskRepo, id); } catch (err) { return reply.code(409).send({ error: String(err) }); }
+    try {
+      task = executionTask(container.taskRepo, id);
+    } catch (err) {
+      return reply.code(409).send({ error: String(err) });
+    }
     // A "running" task is genuinely executing (or was interrupted mid-run) and
     // must not be double-started. "waiting_for_approval" is held for a human.
     // Anything else — including a task stranded as "queued" by a dead-lettered
     // job or a hard-killed worker — has no live work behind it and can be
     // re-run instead of being permanently stuck at a false "already in flight".
-    const active = container.agentManager.isTaskRunning(task.id) || container.queue.hasLiveJob(task.id) || task.status === "running";
+    const active =
+      container.agentManager.isTaskRunning(task.id) || container.queue.hasLiveJob(task.id) || task.status === "running";
     if (active) return reply.code(409).send({ error: "Owning task is already in flight", taskId: task.id });
     if (task.status === "waiting_for_approval") {
-      return reply.code(409).send({ error: "Task is waiting for approval; approve, reject, or cancel it before running again", taskId: task.id });
+      return reply.code(409).send({
+        error: "Task is waiting for approval; approve, reject, or cancel it before running again",
+        taskId: task.id,
+      });
     }
     // Store the signed-in user's id so the worker can use their GitHub OAuth
     // token when resolving the project's GitHub connection (GITHUB_TOKEN is
     // login-only and cannot write to the user's repositories).
     const { user: reqUser, authenticated: reqAuth } = resolveRequestUser(req, container);
-    const inputWithUser = reqAuth ? { ...(task.input as Record<string, unknown> | undefined ?? {}), requestUserId: reqUser.id } : task.input;
-    container.taskRepo.upsert({ ...task, status: "queued", error: undefined, input: inputWithUser as typeof task.input, updatedAt: new Date().toISOString() }, { projectId: task.projectId, parentId: task.parentTaskId });
+    const inputWithUser = reqAuth
+      ? { ...((task.input as Record<string, unknown> | undefined) ?? {}), requestUserId: reqUser.id }
+      : task.input;
+    container.taskRepo.upsert(
+      {
+        ...task,
+        status: "queued",
+        error: undefined,
+        input: inputWithUser as typeof task.input,
+        updatedAt: new Date().toISOString(),
+      },
+      { projectId: task.projectId, parentId: task.parentTaskId },
+    );
     const p = container.projectRepo.findById(task.projectId)?.data;
     if (p) await container.projectFiles.syncTask(p, container.taskRepo.findById(task.id)!.data);
     const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
@@ -130,9 +163,18 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
   });
 
   app.get("/runs", { schema: { tags: ["runs"] } }, async (req) => {
-    const q = req.query as { projectId?: string; status?: string; agentId?: string; agentType?: string; taskId?: string };
+    const q = req.query as {
+      projectId?: string;
+      status?: string;
+      agentId?: string;
+      agentType?: string;
+      taskId?: string;
+    };
     const owned = accessibleProjectIds(req, container);
-    let runs = container.runRepo.findMany().map((r) => r.data).filter((r) => owned.has(r.projectId));
+    let runs = container.runRepo
+      .findMany()
+      .map((r) => r.data)
+      .filter((r) => owned.has(r.projectId));
     if (q.projectId) runs = runs.filter((r) => r.projectId === q.projectId);
     if (q.status) runs = runs.filter((r) => r.status === q.status);
     if (q.agentId) runs = runs.filter((r) => r.agentId === q.agentId);

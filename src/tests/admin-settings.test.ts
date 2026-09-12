@@ -56,12 +56,16 @@ function kv(): KvStore {
 describe("admin GitHub settings storage", () => {
   it("starts empty and saves valid values", () => {
     expect(getGitHubAdminSettings(kv())).toEqual({});
-    const s = saveGitHubAdminSettings(kv(), {
-      clientId: "Ov23.test123",
-      callbackUrl: "https://app.example.com/auth/github/callback",
-      scope: "read:user",
-      requireAuth: true,
-    }, "user-1");
+    const s = saveGitHubAdminSettings(
+      kv(),
+      {
+        clientId: "Ov23.test123",
+        callbackUrl: "https://app.example.com/auth/github/callback",
+        scope: "read:user",
+        requireAuth: true,
+      },
+      "user-1",
+    );
     expect(s.clientId).toBe("Ov23.test123");
     expect(s.updatedBy).toBe("user-1");
     expect(getGitHubAdminSettings(kv()).requireAuth).toBe(true);

@@ -18,10 +18,7 @@ import { freshDb } from "./test-helpers.js";
  * auto-discovery stays fast + deterministic (no real network in these tests).
  */
 function stubEmptyCatalog(): void {
-  vi.stubGlobal(
-    "fetch",
-    (async () => new Response(JSON.stringify({ data: [] }), { status: 200 })) as typeof fetch,
-  );
+  vi.stubGlobal("fetch", (async () => new Response(JSON.stringify({ data: [] }), { status: 200 })) as typeof fetch);
 }
 
 let cleanup: (() => void) | undefined;
@@ -100,15 +97,26 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     expect(p.configRepo).toBe("acme/storefront");
     expect(p.branch).toBe("main");
     expect(p.repositories).toHaveLength(2);
-    expect(p.repositories[1]).toMatchObject({ repo: "acme/mobile-app", branch: "develop", role: "mobile", isConfigRepo: false });
+    expect(p.repositories[1]).toMatchObject({
+      repo: "acme/mobile-app",
+      branch: "develop",
+      role: "mobile",
+      isConfigRepo: false,
+    });
     expect(p.capabilities.databases).toEqual(["postgresql", "redis"]);
     expect(p.capabilities.platforms).toEqual(["web", "mobile-ios"]);
     expect(p.framework).toBe("Next.js");
     expect(p.database).toBe("PostgreSQL");
     expect(p.githubConnection.kind).toBe("mock");
 
-    const agents = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{ type: string; enabled: boolean }>;
-    const enabled = agents.filter((a) => a.enabled).map((a) => a.type).sort();
+    const agents = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{
+      type: string;
+      enabled: boolean;
+    }>;
+    const enabled = agents
+      .filter((a) => a.enabled)
+      .map((a) => a.type)
+      .sort();
     expect(enabled).toContain("backend-developer");
     expect(enabled).toContain("frontend-developer");
     expect(enabled).toContain("orchestrator");
@@ -121,9 +129,25 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     expect(got.capabilities.frameworks).toContain("react");
 
     // repositories sub-resource: link, re-point config, unlink
-    const linked = (await srv.inject({ method: "POST", url: `/projects/${p.id}/repositories`, payload: { repo: "acme/accounting", role: "library" } })).json();
-    expect(linked.repositories.map((r: { repo: string }) => r.repo)).toEqual(["acme/storefront", "acme/mobile-app", "acme/accounting"]);
-    const moved = (await srv.inject({ method: "PATCH", url: `/projects/${p.id}/repositories/acme/accounting`, payload: { isConfigRepo: true, branch: "release" } })).json();
+    const linked = (
+      await srv.inject({
+        method: "POST",
+        url: `/projects/${p.id}/repositories`,
+        payload: { repo: "acme/accounting", role: "library" },
+      })
+    ).json();
+    expect(linked.repositories.map((r: { repo: string }) => r.repo)).toEqual([
+      "acme/storefront",
+      "acme/mobile-app",
+      "acme/accounting",
+    ]);
+    const moved = (
+      await srv.inject({
+        method: "PATCH",
+        url: `/projects/${p.id}/repositories/acme/accounting`,
+        payload: { isConfigRepo: true, branch: "release" },
+      })
+    ).json();
     expect(moved.configRepo, JSON.stringify(moved)).toBe("acme/accounting");
     expect(moved.branch).toBe("release");
     expect(moved.repositories.filter((r: { isConfigRepo: boolean }) => r.isConfigRepo)).toHaveLength(1);
@@ -136,14 +160,28 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
 
   it("preserves existing agents and their enablement when project capabilities change", async () => {
     const srv = await boot();
-    const p = (await srv.inject({ method: "POST", url: "/projects", payload: { name: "Roster", configRepo: "acme/roster" } })).json();
-    const before = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{ enabled: boolean }>;
+    const p = (
+      await srv.inject({ method: "POST", url: "/projects", payload: { name: "Roster", configRepo: "acme/roster" } })
+    ).json();
+    const before = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{
+      enabled: boolean;
+    }>;
     expect(before.filter((a) => a.enabled)).toHaveLength(18); // nothing selected → all agents
-    const patched = await srv.inject({ method: "PATCH", url: `/projects/${p.id}`, payload: { capabilities: { agentTypes: ["devops"] } } });
+    const patched = await srv.inject({
+      method: "PATCH",
+      url: `/projects/${p.id}`,
+      payload: { capabilities: { agentTypes: ["devops"] } },
+    });
     expect(patched.statusCode).toBe(200);
-    const after = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{ type: string; enabled: boolean }>;
+    const after = (await srv.inject({ method: "GET", url: `/projects/${p.id}/agents` })).json() as Array<{
+      type: string;
+      enabled: boolean;
+    }>;
     expect(after).toHaveLength(18); // never deleted
-    const enabled = after.filter((a) => a.enabled).map((a) => a.type).sort();
+    const enabled = after
+      .filter((a) => a.enabled)
+      .map((a) => a.type)
+      .sort();
     expect(enabled).toHaveLength(18);
     const current = (await srv.inject({ method: "GET", url: `/projects/${p.id}` })).json();
     expect(current.capabilities.agentTypes).toEqual(["devops"]);
@@ -153,20 +191,34 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     const srv = await boot();
     expect((await srv.inject({ method: "POST", url: "/projects", payload: { name: "" } })).statusCode).toBe(400);
     expect((await srv.inject({ method: "POST", url: "/projects", payload: { name: "X" } })).statusCode).toBe(400);
-    const badRepo = await srv.inject({ method: "POST", url: "/projects", payload: { name: "X", configRepo: "not a repo" } });
+    const badRepo = await srv.inject({
+      method: "POST",
+      url: "/projects",
+      payload: { name: "X", configRepo: "not a repo" },
+    });
     expect(badRepo.statusCode).toBe(400);
     expect(badRepo.json().error).toMatch(/owner\/name/);
-    expect((await srv.inject({ method: "POST", url: "/projects", payload: { name: "Dup", configRepo: "a/b" } })).statusCode).toBe(201);
-    expect((await srv.inject({ method: "POST", url: "/projects", payload: { name: "Dup", configRepo: "a/c" } })).statusCode).toBe(409);
+    expect(
+      (await srv.inject({ method: "POST", url: "/projects", payload: { name: "Dup", configRepo: "a/b" } })).statusCode,
+    ).toBe(201);
+    expect(
+      (await srv.inject({ method: "POST", url: "/projects", payload: { name: "Dup", configRepo: "a/c" } })).statusCode,
+    ).toBe(409);
     expect((await srv.inject({ method: "GET", url: "/projects/does-not-exist" })).statusCode).toBe(404);
   });
 
   it("still accepts the legacy single-value payload (framework/database strings)", async () => {
     const srv = await boot();
-    const res = await srv.inject({ method: "POST", url: "/projects", payload: { name: "Legacy", configRepo: "acme/legacy", framework: ".NET", database: "SQL Server", branch: "dev" } });
+    const res = await srv.inject({
+      method: "POST",
+      url: "/projects",
+      payload: { name: "Legacy", configRepo: "acme/legacy", framework: ".NET", database: "SQL Server", branch: "dev" },
+    });
     expect(res.statusCode).toBe(201);
     const p = res.json();
-    expect(p.repositories).toEqual([expect.objectContaining({ repo: "acme/legacy", branch: "dev", isConfigRepo: true })]);
+    expect(p.repositories).toEqual([
+      expect.objectContaining({ repo: "acme/legacy", branch: "dev", isConfigRepo: true }),
+    ]);
     expect(p.capabilities.frameworks).toEqual(["dotnet"]);
     expect(p.capabilities.databases).toEqual(["sqlserver"]);
   });
@@ -196,7 +248,9 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
     expect(p.settings.skills).toContain("html");
     expect(p.settings.skills).toContain("css");
 
-    const mgr = container.agentManager as unknown as { inspectRepository: (project: Record<string, unknown>) => Promise<{ files: string[] }> };
+    const mgr = container.agentManager as unknown as {
+      inspectRepository: (project: Record<string, unknown>) => Promise<{ files: string[] }>;
+    };
     const inspect = await mgr.inspectRepository(p);
     expect(inspect.files).toContain("Agent.md");
     // The mock GitHub repo receives Agent.md during onboarding.
@@ -209,7 +263,9 @@ describe("projects API — multi-repo + multi-select capabilities", () => {
 describe("providers API — approval flow", () => {
   it("lists providers with readiness and refuses to activate one without its key", async () => {
     const srv = await boot();
-    const list = (await srv.inject({ method: "GET", url: "/providers" })).json() as Array<ModelProvider & { readiness: { ready: boolean }; keyPresent: boolean }>;
+    const list = (await srv.inject({ method: "GET", url: "/providers" })).json() as Array<
+      ModelProvider & { readiness: { ready: boolean }; keyPresent: boolean }
+    >;
     const openai = list.find((p) => p.id === "provider-openai")!;
     expect(openai.active).toBe(false);
     expect(openai.readiness.ready).toBe(false);
@@ -237,22 +293,47 @@ describe("providers API — approval flow", () => {
     stubEmptyCatalog();
     const presets = (await srv.inject({ method: "GET", url: "/providers/presets" })).json();
     expect(presets.types).toContain("ollama");
-    const created = await srv.inject({ method: "POST", url: "/providers", payload: { name: "Local Ollama", type: "ollama" } });
+    const created = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Local Ollama", type: "ollama" },
+    });
     expect(created.statusCode).toBe(201);
     expect(created.json()).toMatchObject({ baseUrl: "http://localhost:11434/v1", authType: "none", active: true });
-    expect((await srv.inject({ method: "POST", url: "/providers", payload: { name: "Local Ollama", type: "ollama" } })).statusCode).toBe(409);
-    const literal = await srv.inject({ method: "POST", url: "/providers", payload: { name: "Leak", type: "openai", secretRef: "sk-live-abcdef" } });
+    expect(
+      (await srv.inject({ method: "POST", url: "/providers", payload: { name: "Local Ollama", type: "ollama" } }))
+        .statusCode,
+    ).toBe(409);
+    const literal = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: { name: "Leak", type: "openai", secretRef: "sk-live-abcdef" },
+    });
     expect(literal.statusCode).toBe(400);
     expect(literal.json().error).toMatch(/environment variable NAME/);
-    expect((await srv.inject({ method: "POST", url: "/providers", payload: { name: "Bad", type: "nope" } })).statusCode).toBe(400);
+    expect(
+      (await srv.inject({ method: "POST", url: "/providers", payload: { name: "Bad", type: "nope" } })).statusCode,
+    ).toBe(400);
     // new provider without key is saved inactive, never "confirmed" silently
-    const noKey = (await srv.inject({ method: "POST", url: "/providers", payload: { name: "OpenRouter", type: "openrouter" } })).json();
+    const noKey = (
+      await srv.inject({ method: "POST", url: "/providers", payload: { name: "OpenRouter", type: "openrouter" } })
+    ).json();
     expect(noKey.active).toBe(false);
     expect(noKey.readiness.ready).toBe(false);
 
     // A provider can also store a literal API key (encrypted at rest) so it
     // works without a deploy-time env var — the key is never echoed back.
-    const stored = await srv.inject({ method: "POST", url: "/providers", payload: { name: "Stored Key", type: "openai-compatible", baseUrl: "https://llm.example/v1", secretValue: "sk-1234567890abcdef", authType: "bearer" } });
+    const stored = await srv.inject({
+      method: "POST",
+      url: "/providers",
+      payload: {
+        name: "Stored Key",
+        type: "openai-compatible",
+        baseUrl: "https://llm.example/v1",
+        secretValue: "sk-1234567890abcdef",
+        authType: "bearer",
+      },
+    });
     expect(stored.statusCode).toBe(201);
     const storedBody = stored.json();
     expect(storedBody.secretValuePresent).toBe(true);
@@ -263,7 +344,11 @@ describe("providers API — approval flow", () => {
     expect(masked).toContain("•");
 
     // Editing a provider without retyping the key must keep the stored secret.
-    const kept = await srv.inject({ method: "PATCH", url: `/providers/${storedBody.id}`, payload: { name: "Stored Key", baseUrl: "https://llm.example/v2", secretValue: "" } });
+    const kept = await srv.inject({
+      method: "PATCH",
+      url: `/providers/${storedBody.id}`,
+      payload: { name: "Stored Key", baseUrl: "https://llm.example/v2", secretValue: "" },
+    });
     expect(kept.statusCode).toBe(200);
     const keptBody = kept.json();
     expect(keptBody.baseUrl).toBe("https://llm.example/v2");
@@ -272,7 +357,11 @@ describe("providers API — approval flow", () => {
     expect(JSON.stringify(keptBody)).not.toContain("sk-1234567890abcdef");
 
     // A new literal key replaces the old one (and is still never echoed).
-    const replaced = await srv.inject({ method: "PATCH", url: `/providers/${storedBody.id}`, payload: { secretValue: "sk-abcdef9876543210" } });
+    const replaced = await srv.inject({
+      method: "PATCH",
+      url: `/providers/${storedBody.id}`,
+      payload: { secretValue: "sk-abcdef9876543210" },
+    });
     expect(replaced.statusCode).toBe(200);
     const replacedBody = replaced.json();
     expect(replacedBody.secretValuePresent).toBe(true);
@@ -291,12 +380,25 @@ describe("providers API — approval flow", () => {
     // PATCH refreshes the cached adapter so the new config is used
     container.providerRegistry.resolve(container.providerRepo.findById("provider-openai")!.data);
     expect(container.providerRegistry.get("provider-openai")).toBeDefined();
-    await srv.inject({ method: "PATCH", url: "/providers/provider-openai", payload: { baseUrl: "https://proxy.example/v1" } });
+    await srv.inject({
+      method: "PATCH",
+      url: "/providers/provider-openai",
+      payload: { baseUrl: "https://proxy.example/v1" },
+    });
     expect(container.providerRegistry.get("provider-openai")).toBeUndefined();
 
-    const model = (await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "gpt-test" } })).json();
+    const model = (
+      await srv.inject({
+        method: "POST",
+        url: "/models",
+        payload: { providerId: "provider-openai", modelId: "gpt-test" },
+      })
+    ).json();
     expect(model.id).toBeDefined();
-    expect((await srv.inject({ method: "POST", url: "/models", payload: { providerId: "missing", modelId: "x" } })).statusCode).toBe(400);
+    expect(
+      (await srv.inject({ method: "POST", url: "/models", payload: { providerId: "missing", modelId: "x" } }))
+        .statusCode,
+    ).toBe(400);
     const blocked = await srv.inject({ method: "DELETE", url: "/providers/provider-openai" });
     expect(blocked.statusCode).toBe(409);
     const deleted = await srv.inject({ method: "DELETE", url: "/providers/provider-openai?cascade=true" });
@@ -329,7 +431,11 @@ describe("testProviderConnection", () => {
 
   it("short-circuits without a key and reports readiness", async () => {
     expect(providerReadiness(base).ready).toBe(false);
-    const r = await testProviderConnection(base, { fetchImpl: (() => { throw new Error("must not be called"); }) as unknown as typeof fetch });
+    const r = await testProviderConnection(base, {
+      fetchImpl: (() => {
+        throw new Error("must not be called");
+      }) as unknown as typeof fetch,
+    });
     expect(r).toMatchObject({ ok: false, checked: false, keyPresent: false });
   });
 
@@ -347,7 +453,10 @@ describe("testProviderConnection", () => {
 
   it("explains 401s from the provider", async () => {
     process.env.TEST_PROVIDER_KEY = "bad";
-    const fetchImpl = (async () => new Response(JSON.stringify({ error: { message: "Incorrect API key" } }), { status: 401 })) as unknown as typeof fetch;
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ error: { message: "Incorrect API key" } }), {
+        status: 401,
+      })) as unknown as typeof fetch;
     const r = await testProviderConnection(base, { fetchImpl });
     expect(r.ok).toBe(false);
     expect(r.status).toBe(401);

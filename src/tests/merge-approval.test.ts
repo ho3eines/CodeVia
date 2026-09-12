@@ -45,14 +45,18 @@ function buildWorker(opts: { withProjectConnection?: boolean } = {}): Worker {
     taskRepo: container.taskRepo,
     approvalRepo: container.approvalRepo,
     github: fakeGithub(merges, false),
-    githubForProject: opts.withProjectConnection === false ? undefined : (project) => fakeGithub(merges, true),
+    githubForProject: opts.withProjectConnection === false ? undefined : (_project) => fakeGithub(merges, true),
     telegram: container.telegram,
     notificationRepo: container.notificationRepo,
     logger,
   });
 }
 
-function makeApproval(projectId: string, detail: Record<string, unknown>, overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
+function makeApproval(
+  projectId: string,
+  detail: Record<string, unknown>,
+  overrides: Partial<ApprovalRequest> = {},
+): ApprovalRequest {
   const request: ApprovalRequest = {
     id: `apr-${Math.random().toString(36).slice(2, 10)}`,
     action: "Merge pull request",
@@ -90,15 +94,29 @@ afterEach(() => {
 describe("worker merge_pr — approval-backed merges only (A04)", () => {
   it("rejects a merge job whose approvalId does not exist", async () => {
     const worker = buildWorker();
-    const project = await container.agentManager.createProject({ name: "Ops", description: "x", configRepo: "acme/ops" });
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/ops", number: 7, approvalId: "apr-does-not-exist" });
+    const project = await container.agentManager.createProject({
+      name: "Ops",
+      description: "x",
+      configRepo: "acme/ops",
+    });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/ops",
+      number: 7,
+      approvalId: "apr-does-not-exist",
+    });
     expect(merges).toHaveLength(0);
     expect(status).not.toBe("succeeded");
   });
 
   it("rejects a merge job with no approvalId at all", async () => {
     const worker = buildWorker();
-    const project = await container.agentManager.createProject({ name: "Ops2", description: "x", configRepo: "acme/ops2" });
+    const project = await container.agentManager.createProject({
+      name: "Ops2",
+      description: "x",
+      configRepo: "acme/ops2",
+    });
     const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/ops2", number: 7 });
     expect(merges).toHaveLength(0);
     expect(status).not.toBe("succeeded");
@@ -106,37 +124,85 @@ describe("worker merge_pr — approval-backed merges only (A04)", () => {
 
   it("rejects an approval that is only pending", async () => {
     const worker = buildWorker();
-    const project = await container.agentManager.createProject({ name: "Gate", description: "x", configRepo: "acme/gate" });
-    const approval = makeApproval(project.id, { tool: "merge_pull_request", number: 7, repo: "acme/gate" }, { status: "pending" });
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/gate", number: 7, approvalId: approval.id });
+    const project = await container.agentManager.createProject({
+      name: "Gate",
+      description: "x",
+      configRepo: "acme/gate",
+    });
+    const approval = makeApproval(
+      project.id,
+      { tool: "merge_pull_request", number: 7, repo: "acme/gate" },
+      { status: "pending" },
+    );
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/gate",
+      number: 7,
+      approvalId: approval.id,
+    });
     expect(merges).toHaveLength(0);
     expect(status).not.toBe("succeeded");
   });
 
   it("rejects an approval belonging to another project", async () => {
     const worker = buildWorker();
-    const here = await container.agentManager.createProject({ name: "Here", description: "x", configRepo: "acme/here" });
-    const there = await container.agentManager.createProject({ name: "There", description: "x", configRepo: "acme/there" });
+    const here = await container.agentManager.createProject({
+      name: "Here",
+      description: "x",
+      configRepo: "acme/here",
+    });
+    const there = await container.agentManager.createProject({
+      name: "There",
+      description: "x",
+      configRepo: "acme/there",
+    });
     const approval = makeApproval(there.id, { tool: "merge_pull_request", number: 7, repo: "acme/there" });
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: here.id, repo: "acme/here", number: 7, approvalId: approval.id });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: here.id,
+      repo: "acme/here",
+      number: 7,
+      approvalId: approval.id,
+    });
     expect(merges).toHaveLength(0);
     expect(status).not.toBe("succeeded");
   });
 
   it("rejects an approval that does not record the pull request number", async () => {
     const worker = buildWorker();
-    const project = await container.agentManager.createProject({ name: "Vague", description: "x", configRepo: "acme/vague" });
+    const project = await container.agentManager.createProject({
+      name: "Vague",
+      description: "x",
+      configRepo: "acme/vague",
+    });
     const approval = makeApproval(project.id, { tool: "merge_pull_request", repo: "acme/vague" });
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/vague", number: 7, approvalId: approval.id });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/vague",
+      number: 7,
+      approvalId: approval.id,
+    });
     expect(merges).toHaveLength(0);
     expect(status).not.toBe("succeeded");
   });
 
   it("rejects when the recorded pull request number differs", async () => {
     const worker = buildWorker();
-    const project = await container.agentManager.createProject({ name: "Wrong", description: "x", configRepo: "acme/wrong" });
+    const project = await container.agentManager.createProject({
+      name: "Wrong",
+      description: "x",
+      configRepo: "acme/wrong",
+    });
     const approval = makeApproval(project.id, { tool: "merge_pull_request", number: 12, repo: "acme/wrong" });
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/wrong", number: 13, approvalId: approval.id });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/wrong",
+      number: 13,
+      approvalId: approval.id,
+    });
     expect(merges).toHaveLength(0);
     expect(status).not.toBe("succeeded");
   });
@@ -154,7 +220,13 @@ describe("worker merge_pr — approval-backed merges only (A04)", () => {
     });
     const approval = makeApproval(project.id, { tool: "merge_pull_request", number: 7, repo: "acme/one" });
     // Approved for acme/one — must not authorize merging into acme/two.
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/two", number: 7, approvalId: approval.id });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/two",
+      number: 7,
+      approvalId: approval.id,
+    });
     expect(merges).toHaveLength(0);
     expect(status).not.toBe("succeeded");
   });
@@ -171,16 +243,33 @@ describe("worker merge_pr — approval-backed merges only (A04)", () => {
       ],
     });
     const approval = makeApproval(project.id, { tool: "merge_pull_request", number: 7 }); // no repo recorded
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/two", number: 7, approvalId: approval.id });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/two",
+      number: 7,
+      approvalId: approval.id,
+    });
     expect(merges).toHaveLength(0);
     expect(status).not.toBe("succeeded");
   });
 
   it("merges with a genuine approved approval for the same project and PR, via the project connection", async () => {
     const worker = buildWorker();
-    const project = await container.agentManager.createProject({ name: "Legit", description: "x", configRepo: "acme/legit" });
+    const project = await container.agentManager.createProject({
+      name: "Legit",
+      description: "x",
+      configRepo: "acme/legit",
+    });
     const approval = makeApproval(project.id, { tool: "merge_pull_request", number: 12, repo: "acme/legit" });
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/legit", number: 12, approvalId: approval.id, method: "squash" });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/legit",
+      number: 12,
+      approvalId: approval.id,
+      method: "squash",
+    });
     expect(status).toBe("succeeded");
     expect(merges).toHaveLength(1);
     expect(merges[0]).toMatchObject({ repo: "acme/legit", number: 12, viaProjectConnection: true });
@@ -188,9 +277,19 @@ describe("worker merge_pr — approval-backed merges only (A04)", () => {
 
   it("accepts a repo-less approval on a single-repo project (project + PR already unambiguous)", async () => {
     const worker = buildWorker();
-    const project = await container.agentManager.createProject({ name: "Solo", description: "x", configRepo: "acme/solo" });
+    const project = await container.agentManager.createProject({
+      name: "Solo",
+      description: "x",
+      configRepo: "acme/solo",
+    });
     const approval = makeApproval(project.id, { tool: "merge_pull_request", number: 3 });
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/solo", number: 3, approvalId: approval.id });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/solo",
+      number: 3,
+      approvalId: approval.id,
+    });
     expect(status).toBe("succeeded");
     expect(merges).toHaveLength(1);
     expect(merges[0]).toMatchObject({ repo: "acme/solo", number: 3 });
@@ -198,11 +297,144 @@ describe("worker merge_pr — approval-backed merges only (A04)", () => {
 
   it("falls back to the platform GitHub connection when no project resolver is configured", async () => {
     const worker = buildWorker({ withProjectConnection: false });
-    const project = await container.agentManager.createProject({ name: "Plain", description: "x", configRepo: "acme/plain" });
+    const project = await container.agentManager.createProject({
+      name: "Plain",
+      description: "x",
+      configRepo: "acme/plain",
+    });
     const approval = makeApproval(project.id, { tool: "merge_pull_request", number: 5, repo: "acme/plain" });
-    const status = await runMergeJob(worker, { op: "merge_pr", projectId: project.id, repo: "acme/plain", number: 5, approvalId: approval.id });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/plain",
+      number: 5,
+      approvalId: approval.id,
+    });
     expect(status).toBe("succeeded");
     expect(merges).toHaveLength(1);
     expect(merges[0].viaProjectConnection).toBe(false);
+  });
+
+  it("rejects an expired approval even when it was approved", async () => {
+    const worker = buildWorker();
+    const project = await container.agentManager.createProject({
+      name: "Stale",
+      description: "x",
+      configRepo: "acme/stale",
+    });
+    const approval = makeApproval(
+      project.id,
+      { tool: "merge_pull_request", number: 7, repo: "acme/stale" },
+      { expiresAt: new Date(Date.now() - 60_000).toISOString() },
+    );
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/stale",
+      number: 7,
+      approvalId: approval.id,
+    });
+    expect(merges).toHaveLength(0);
+    expect(status).not.toBe("succeeded");
+  });
+
+  it("rejects a merge targeting a commit that differs from the approved head SHA", async () => {
+    const worker = buildWorker();
+    const project = await container.agentManager.createProject({
+      name: "Drift",
+      description: "x",
+      configRepo: "acme/drift",
+    });
+    const approval = makeApproval(project.id, {
+      tool: "merge_pull_request",
+      number: 7,
+      repo: "acme/drift",
+      commitSha: "deadbee",
+    });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/drift",
+      number: 7,
+      approvalId: approval.id,
+      commitSha: "cafebabe",
+    });
+    expect(merges).toHaveLength(0);
+    expect(status).not.toBe("succeeded");
+  });
+
+  it("rejects a merge job that omits the commitSha a SHA-bound approval requires", async () => {
+    const worker = buildWorker();
+    const project = await container.agentManager.createProject({
+      name: "Bound",
+      description: "x",
+      configRepo: "acme/bound",
+    });
+    const approval = makeApproval(project.id, {
+      tool: "merge_pull_request",
+      number: 7,
+      repo: "acme/bound",
+      commitSha: "deadbee",
+    });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/bound",
+      number: 7,
+      approvalId: approval.id,
+    });
+    expect(merges).toHaveLength(0);
+    expect(status).not.toBe("succeeded");
+  });
+
+  it("rejects a merge job attributed to a different actor than the approval", async () => {
+    const worker = buildWorker();
+    const project = await container.agentManager.createProject({
+      name: "Imperson",
+      description: "x",
+      configRepo: "acme/imperson",
+    });
+    const approval = makeApproval(project.id, {
+      tool: "merge_pull_request",
+      number: 7,
+      repo: "acme/imperson",
+      actorId: "agent-research",
+    });
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/imperson",
+      number: 7,
+      approvalId: approval.id,
+      actorId: "agent-other",
+    });
+    expect(merges).toHaveLength(0);
+    expect(status).not.toBe("succeeded");
+  });
+
+  it("merges when commitSha, actorId and expiry all match the approval binding", async () => {
+    const worker = buildWorker();
+    const project = await container.agentManager.createProject({
+      name: "BoundOk",
+      description: "x",
+      configRepo: "acme/boundok",
+    });
+    const approval = makeApproval(
+      project.id,
+      { tool: "merge_pull_request", number: 9, repo: "acme/boundok", commitSha: "deadbee", actorId: "agent-research" },
+      { expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    );
+    const status = await runMergeJob(worker, {
+      op: "merge_pr",
+      projectId: project.id,
+      repo: "acme/boundok",
+      number: 9,
+      approvalId: approval.id,
+      commitSha: "deadbee",
+      actorId: "agent-research",
+    });
+    expect(status).toBe("succeeded");
+    expect(merges).toHaveLength(1);
+    expect(merges[0]).toMatchObject({ repo: "acme/boundok", number: 9 });
   });
 });

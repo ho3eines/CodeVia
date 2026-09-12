@@ -56,8 +56,24 @@ function mockTelegramApi(routes: Record<string, Reply> = {}, opts: { networkDown
     }
     fetchCalls.push(method);
     fetchBodies.push(init?.body && typeof init.body === "string" ? JSON.parse(init.body) : {});
-    const reply = routes[method] ?? { status: 200, body: { ok: true, result: method === "getMe" ? { id: 42, username: "codevia_test_bot" } : method === "getUpdates" ? [] : method === "getWebhookInfo" ? { url: "" } : true } };
-    return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { "Content-Type": "application/json" } });
+    const reply = routes[method] ?? {
+      status: 200,
+      body: {
+        ok: true,
+        result:
+          method === "getMe"
+            ? { id: 42, username: "codevia_test_bot" }
+            : method === "getUpdates"
+              ? []
+              : method === "getWebhookInfo"
+                ? { url: "" }
+                : true,
+      },
+    };
+    return new Response(JSON.stringify(reply.body), {
+      status: reply.status,
+      headers: { "Content-Type": "application/json" },
+    });
   }) as typeof fetch;
 }
 
@@ -135,7 +151,10 @@ describe("Telegram receive path (webhook vs long polling)", () => {
     process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
     getEnvFresh();
     mockTelegramApi({
-      getWebhookInfo: { status: 200, body: { ok: true, result: { url: "https://somewhere-else.example.com/hook", pending_update_count: 0 } } },
+      getWebhookInfo: {
+        status: 200,
+        body: { ok: true, result: { url: "https://somewhere-else.example.com/hook", pending_update_count: 0 } },
+      },
     });
     const c = newContainer();
     await c.ensureSeed();
@@ -166,7 +185,16 @@ describe("Telegram receive path (webhook vs long polling)", () => {
     process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
     process.env.PUBLIC_WEB_BASE_URL = "https://codevia.up.railway.app";
     getEnvFresh();
-    mockTelegramApi({ setWebhook: { status: 400, body: { ok: false, error_code: 400, description: "Bad Request: bad webhook: an HTTPS URL must be provided for webhook" } } });
+    mockTelegramApi({
+      setWebhook: {
+        status: 400,
+        body: {
+          ok: false,
+          error_code: 400,
+          description: "Bad Request: bad webhook: an HTTPS URL must be provided for webhook",
+        },
+      },
+    });
     const c = newContainer();
     await c.ensureSeed();
     const status = await c.startTelegram();
@@ -257,7 +285,10 @@ describe("Telegram webhook transport (end-to-end through the route)", () => {
       const inbound = await srv.inject({
         method: "POST",
         url: "/integrations/telegram/webhook",
-        payload: { update_id: 1, message: { chat: { id: 555010, type: "private" }, from: { id: 555010 }, text: "/start" } },
+        payload: {
+          update_id: 1,
+          message: { chat: { id: 555010, type: "private" }, from: { id: 555010 }, text: "/start" },
+        },
       });
       expect(inbound.statusCode).toBe(200);
       expect(inbound.json().ok).toBe(true);
@@ -331,7 +362,10 @@ describe("Telegram connection test (what the operator must do)", () => {
     process.env.TELEGRAM_MODE = "webhook";
     getEnvFresh();
     mockTelegramApi({
-      getWebhookInfo: { status: 200, body: { ok: true, result: { url: "https://prod.example.com/integrations/telegram/webhook" } } },
+      getWebhookInfo: {
+        status: 200,
+        body: { ok: true, result: { url: "https://prod.example.com/integrations/telegram/webhook" } },
+      },
     });
     const c = newContainer();
     await c.ensureSeed();
@@ -374,15 +408,26 @@ describe("Telegram HTTP surface", () => {
     mockTelegramApi({
       // After our own setWebhook, Telegram reports the registration — switching
       // to polling must therefore clear it.
-      getWebhookInfo: { status: 200, body: { ok: true, result: { url: "https://codevia.up.railway.app/integrations/telegram/webhook" } } },
+      getWebhookInfo: {
+        status: 200,
+        body: { ok: true, result: { url: "https://codevia.up.railway.app/integrations/telegram/webhook" } },
+      },
     });
     const srv = await boot();
     await container!.startTelegram();
-    const res = await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "polling" } });
+    const res = await srv.inject({
+      method: "POST",
+      url: "/integrations/telegram/transport",
+      payload: { mode: "polling" },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json().status.transport).toBe("polling");
     expect(fetchCalls).toContain("deleteWebhook");
-    const bad = await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "carrier-pigeon" } });
+    const bad = await srv.inject({
+      method: "POST",
+      url: "/integrations/telegram/transport",
+      payload: { mode: "carrier-pigeon" },
+    });
     expect(bad.statusCode).toBe(400);
   });
 
@@ -419,7 +464,10 @@ describe("Telegram HTTP surface", () => {
     const intruder = await srv.inject({
       method: "POST",
       url: `/integrations/telegram/webhook/${body.account.id}`,
-      payload: { update_id: 5, message: { chat: { id: 424242, type: "private" }, from: { id: 424242 }, text: "/projects" } },
+      payload: {
+        update_id: 5,
+        message: { chat: { id: 424242, type: "private" }, from: { id: 424242 }, text: "/projects" },
+      },
     });
     expect(intruder.statusCode).toBe(200);
     const sent = fetchBodies.filter((b) => String(b.text ?? "").includes("not linked to a chat yet"));
@@ -465,7 +513,11 @@ describe("Telegram HTTP surface", () => {
     mockTelegramApi();
     expect(getPublicBaseUrl()).toBe("https://my-app.up.railway.app");
     const srv = await boot();
-    const res = await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "webhook" } });
+    const res = await srv.inject({
+      method: "POST",
+      url: "/integrations/telegram/transport",
+      payload: { mode: "webhook" },
+    });
     expect(res.json().ok).toBe(true);
     expect(res.json().status.webhookUrl).toBe("https://my-app.up.railway.app/integrations/telegram/webhook");
     // An explicit opt-out is still honoured for a real http-only host.
@@ -502,7 +554,11 @@ describe("Telegram HTTP surface", () => {
     getEnvFresh();
     mockTelegramApi();
     const srv = await boot();
-    const res = await srv.inject({ method: "POST", url: "/integrations/telegram/transport", payload: { mode: "webhook" } });
+    const res = await srv.inject({
+      method: "POST",
+      url: "/integrations/telegram/transport",
+      payload: { mode: "webhook" },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(false);
@@ -514,7 +570,17 @@ describe("Telegram HTTP surface", () => {
     process.env.TELEGRAM_BOT_TOKEN = "123456:codevia-token-value";
     getEnvFresh();
     mockTelegramApi({
-      getWebhookInfo: { status: 200, body: { ok: true, result: { url: "https://old.example.com/hook", pending_update_count: 3, last_error_message: "connection refused" } } },
+      getWebhookInfo: {
+        status: 200,
+        body: {
+          ok: true,
+          result: {
+            url: "https://old.example.com/hook",
+            pending_update_count: 3,
+            last_error_message: "connection refused",
+          },
+        },
+      },
     });
     const srv = await boot();
     const res = await srv.inject({ method: "GET", url: "/integrations/telegram/diagnostics" });
@@ -575,7 +641,10 @@ describe("Telegram HTTP surface", () => {
     process.env.TELEGRAM_MODE = "off";
     getEnvFresh();
     mockTelegramApi({
-      setWebhook: { status: 400, body: { ok: false, error_code: 400, description: "Bad Request: bad webhook: connect failed" } },
+      setWebhook: {
+        status: 400,
+        body: { ok: false, error_code: 400, description: "Bad Request: bad webhook: connect failed" },
+      },
     });
     const srv = await boot();
     const created = await srv.inject({

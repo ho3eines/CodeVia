@@ -21,7 +21,9 @@ export class AgentRepository extends DocumentRepository<Agent> {
   }
 
   byType(projectId: string, type: AgentType): Agent | undefined {
-    return this.findMany({ projectId }).map((r) => r.data).find((a) => a.type === type);
+    return this.findMany({ projectId })
+      .map((r) => r.data)
+      .find((a) => a.type === type);
   }
 }
 

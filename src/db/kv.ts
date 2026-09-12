@@ -10,10 +10,11 @@ export class KvStore {
 
   set(key: string, value: unknown): void {
     const serialized = JSON.stringify(value);
-    this.db.run(
-      `INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (:key, :value, :updated_at)`,
-      { key, value: serialized, updated_at: nowIso() },
-    );
+    this.db.run(`INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (:key, :value, :updated_at)`, {
+      key,
+      value: serialized,
+      updated_at: nowIso(),
+    });
   }
 
   get<T = unknown>(key: string): T | undefined {

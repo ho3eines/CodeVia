@@ -12,7 +12,8 @@ export function parseMatter(content: string): { data: Record<string, unknown>; b
   const m = String(content ?? "").match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!m) return { data: {}, body: String(content ?? "") };
   const parsed = parseYaml(m[1], { uniqueKeys: true, maxAliasCount: 0 }) as unknown;
-  if (parsed !== undefined && parsed !== null && (typeof parsed !== "object" || Array.isArray(parsed))) throw new Error("CodeVia front matter must be a mapping");
+  if (parsed !== undefined && parsed !== null && (typeof parsed !== "object" || Array.isArray(parsed)))
+    throw new Error("CodeVia front matter must be a mapping");
   const data = (parsed ?? {}) as Record<string, unknown>;
   return { data, body: m[2] };
 }

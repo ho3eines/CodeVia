@@ -137,7 +137,17 @@ describe("auth guard — strict mode with GitHub login configured", () => {
 
   it("keeps the SPA shell, static assets, socket.io and the OAuth handshake public", async () => {
     const srv = await boot();
-    for (const url of ["/", "/app.js", "/app.css", "/index.html", "/health", "/ready", "/auth/me", "/auth/github/status", "/integrations/github/status"]) {
+    for (const url of [
+      "/",
+      "/app.js",
+      "/app.css",
+      "/index.html",
+      "/health",
+      "/ready",
+      "/auth/me",
+      "/auth/github/status",
+      "/integrations/github/status",
+    ]) {
       const res = await srv.inject({ method: "GET", url });
       expect(res.statusCode, url).toBe(200);
     }
@@ -171,7 +181,11 @@ describe("auth guard — strict mode with GitHub login configured", () => {
     expect(bearer.statusCode).toBe(200);
     expect(bearer.json().authenticated).toBe(true);
     expect(bearer.json().user.role).toBe("owner");
-    const cookie = await srv.inject({ method: "GET", url: "/projects", headers: { cookie: `cv_session=${encodeURIComponent(token)}` } });
+    const cookie = await srv.inject({
+      method: "GET",
+      url: "/projects",
+      headers: { cookie: `cv_session=${encodeURIComponent(token)}` },
+    });
     expect(cookie.statusCode).toBe(200);
   });
 
@@ -180,7 +194,9 @@ describe("auth guard — strict mode with GitHub login configured", () => {
     const ok = (await srv.inject({ method: "GET", url: "/auth/github/login?format=json&next=%23%2Fadmin" })).json();
     const { readOAuthState } = await import("../auth/github-oauth.js");
     expect(readOAuthState(ok.state)?.next).toBe("#/admin");
-    const bad = (await srv.inject({ method: "GET", url: "/auth/github/login?format=json&next=https%3A%2F%2Fevil.example" })).json();
+    const bad = (
+      await srv.inject({ method: "GET", url: "/auth/github/login?format=json&next=https%3A%2F%2Fevil.example" })
+    ).json();
     expect(readOAuthState(bad.state)?.next).toBeUndefined();
   });
 });

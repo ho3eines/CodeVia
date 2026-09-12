@@ -45,7 +45,10 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
         connected: container.github.kind === "real",
         // Backups run on a schedule with no signed-in user, so they need the
         // server credential — a per-user OAuth login cannot stand in for it.
-        hint: container.github.kind === "real" ? undefined : "Backups run unattended and need a server credential: set GITHUB_TOKEN and GITHUB_ENABLED=true. Logging in with GitHub connects your projects, but does not back them up.",
+        hint:
+          container.github.kind === "real"
+            ? undefined
+            : "Backups run unattended and need a server credential: set GITHUB_TOKEN and GITHUB_ENABLED=true. Logging in with GitHub connects your projects, but does not back them up.",
       },
       schedule: {
         cron: effective.schedule,
@@ -115,7 +118,10 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
     const q = req.query as { limit?: string };
     const limit = Math.min(200, Math.max(1, Number(q.limit) || 50));
     const settings = getEffectiveBackupSettings(container.kv);
-    const backups = await container.backupService.listBackups({ repo: settings.repo, branch: settings.branch, path: settings.path }, limit);
+    const backups = await container.backupService.listBackups(
+      { repo: settings.repo, branch: settings.branch, path: settings.path },
+      limit,
+    );
     return { backups, configured: !!settings.repo, githubKind: container.github.kind };
   });
 

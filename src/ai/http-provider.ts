@@ -1,12 +1,6 @@
 import { buildDirectChatRequest, directChatText } from "./direct-chat.js";
 import { decryptSecret } from "../auth/encrypted-secrets.js";
-import type {
-  ChatRequest,
-  ChatResponse,
-  IModelProvider,
-  ProviderModelInfo,
-  Usage,
-} from "./types.js";
+import type { ChatRequest, ChatResponse, IModelProvider, ProviderModelInfo, Usage } from "./types.js";
 import type { ModelProvider } from "../domain/entities.js";
 import { buildChatEndpoint } from "./provider-urls.js";
 import { logger } from "../logger.js";
@@ -28,7 +22,10 @@ export class OpenAICompatibleProvider implements IModelProvider {
   }
 
   resolveApiKey(): string | undefined {
-    return decryptSecret(this.config.secretValueEnc, "provider-secret") ?? (this.config.secretRef ? process.env[this.config.secretRef] : undefined);
+    return (
+      decryptSecret(this.config.secretValueEnc, "provider-secret") ??
+      (this.config.secretRef ? process.env[this.config.secretRef] : undefined)
+    );
   }
 
   async health(): Promise<boolean> {
@@ -93,7 +90,9 @@ export class OpenAICompatibleProvider implements IModelProvider {
         ...(this.config.authType === "api-key" && key ? { "api-key": key } : {}),
       },
       body: JSON.stringify(custom?.body ?? body),
-      signal: req.signal ? AbortSignal.any([req.signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs),
+      signal: req.signal
+        ? AbortSignal.any([req.signal, AbortSignal.timeout(this.config.timeoutMs)])
+        : AbortSignal.timeout(this.config.timeoutMs),
     });
 
     if (!res.ok) {
@@ -108,7 +107,7 @@ export class OpenAICompatibleProvider implements IModelProvider {
       totalTokens: (json.usage?.prompt_tokens ?? 0) + (json.usage?.completion_tokens ?? 0),
     };
     const choice = json.choices?.[0];
-    const content = direct ? directChatText(json) : choice?.message?.content ?? "";
+    const content = direct ? directChatText(json) : (choice?.message?.content ?? "");
     const durationMs = Date.now() - started;
     logger.debug(`provider chat ${this.name}`, { modelId: req.modelId, durationMs, ...usage });
     return {
@@ -136,7 +135,7 @@ function tryParseJson(content: string): unknown {
   return undefined;
 }
 
-function estimateCost(modelId: string, usage: Usage, config: ModelProvider): number {
+function estimateCost(modelId: string, usage: Usage, _config: ModelProvider): number {
   // Default cost table for known models; otherwise 0. The Model Registry in
   // GitHub carries authoritative pricing; this is a runtime fallback.
   const known: Record<string, [number, number]> = {

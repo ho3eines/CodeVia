@@ -97,9 +97,7 @@ describe("session extraction", () => {
   });
 
   it("prefers Authorization header over cookie", () => {
-    expect(
-      extractSessionToken({ authorization: "Bearer head", cookie: "cv_session=cook" }),
-    ).toBe("head");
+    expect(extractSessionToken({ authorization: "Bearer head", cookie: "cv_session=cook" })).toBe("head");
   });
 
   it("builds a clearable HttpOnly cookie", () => {

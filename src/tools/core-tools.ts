@@ -1,4 +1,4 @@
-import type { ToolContext, ToolDefinition, ToolResult } from "./types.js";
+import type { ToolContext, ToolDefinition } from "./types.js";
 import type { MemoryRecord } from "../memory/store.js";
 import { verifyGithubChecks } from "./github-checks.js";
 import { cleanRepoPath } from "../agents/implementation.js";
@@ -56,7 +56,8 @@ export const readFileTool: ToolDefinition = {
   timeoutMs: 15000,
   async execute(ctx: ToolContext, input) {
     const repoName = str(input.repo) || ctx.project.configRepo;
-    if (repoName !== ctx.project.configRepo && !ctx.project.repositories?.some((r) => r.repo === repoName)) return { ok: false, output: "Repository is not linked to this project" };
+    if (repoName !== ctx.project.configRepo && !ctx.project.repositories?.some((r) => r.repo === repoName))
+      return { ok: false, output: "Repository is not linked to this project" };
     const repo = toRepoRef(repoName);
     const branch = str(input.branch) || ctx.project.branch;
     let path = str(input.path);
@@ -95,7 +96,8 @@ export const writeFileTool: ToolDefinition = {
   async execute(ctx: ToolContext, input) {
     const repo = toRepoRef(ctx.project.configRepo);
     const branch = str(input.branch);
-    if (!branch || branch === (ctx.baseBranch ?? ctx.project.branch)) return { ok: false, output: "write_file requires an explicit feature branch; base-branch writes are forbidden" };
+    if (!branch || branch === (ctx.baseBranch ?? ctx.project.branch))
+      return { ok: false, output: "write_file requires an explicit feature branch; base-branch writes are forbidden" };
     const rawFiles = Array.isArray(input.files) ? input.files : [{ path: input.path, content: input.content }];
     if (!rawFiles.length || rawFiles.length > 5) return { ok: false, output: "write_file requires 1–5 files" };
     const files = rawFiles.map((f: unknown) => {
@@ -108,12 +110,21 @@ export const writeFileTool: ToolDefinition = {
     const head = (await ctx.github.listBranches(repo)).find((b) => b.name === branch);
     if (!head) return { ok: false, output: `Feature branch ${branch} does not exist` };
     const expectedHead = str(input.expectedHead) || head.sha;
-    if (head.sha !== expectedHead) return { ok: false, output: "Repository changed after inspection; refusing to overwrite newer work" };
+    if (head.sha !== expectedHead)
+      return { ok: false, output: "Repository changed after inspection; refusing to overwrite newer work" };
     ctx.checkActive?.();
     const message = str(input.message) || `[${ctx.agent.name}] update ${files.map((f) => f.path).join(", ")}`;
     const commit = await ctx.github.commit(repo, branch, message, files, expectedHead);
-    ctx.logger.info("write_file committed", { paths: files.map((f) => f.path), sha: commit.sha, projectId: ctx.project.id });
-    return { ok: true, output: `Committed ${files.length} file(s), ${commit.sha.slice(0, 7)} to ${branch}`, data: { sha: commit.sha, branch, paths: files.map((f) => f.path) } };
+    ctx.logger.info("write_file committed", {
+      paths: files.map((f) => f.path),
+      sha: commit.sha,
+      projectId: ctx.project.id,
+    });
+    return {
+      ok: true,
+      output: `Committed ${files.length} file(s), ${commit.sha.slice(0, 7)} to ${branch}`,
+      data: { sha: commit.sha, branch, paths: files.map((f) => f.path) },
+    };
   },
 };
 
@@ -123,7 +134,12 @@ export const createPullRequestTool: ToolDefinition = {
   dangerous: true,
   inputSchema: {
     type: "object",
-    properties: { title: { type: "string" }, body: { type: "string" }, head: { type: "string" }, base: { type: "string" } },
+    properties: {
+      title: { type: "string" },
+      body: { type: "string" },
+      head: { type: "string" },
+      base: { type: "string" },
+    },
   },
   permissions: ["github.write"],
   timeoutMs: 20000,
@@ -144,11 +160,16 @@ export const createPullRequestTool: ToolDefinition = {
       });
     const head = str(input.head);
     const base = str(input.base) || ctx.baseBranch || ctx.project.branch;
-    if (!head || head === base) return { ok: false, output: "A pull request requires an explicit feature branch head different from base" };
+    if (!head || head === base)
+      return { ok: false, output: "A pull request requires an explicit feature branch head different from base" };
     const branches = await ctx.github.listBranches(repo);
-    if (!branches.some((b) => b.name === head) || !branches.some((b) => b.name === base)) return { ok: false, output: "PR head or base branch does not exist" };
-    const existing = (await ctx.github.listPullRequests(repo)).find((p) => p.head === head && p.base === base && p.state === "open");
-    const pr = existing ?? await ctx.github.createPullRequest(repo, title, body, head, base, { draft: input.draft === true });
+    if (!branches.some((b) => b.name === head) || !branches.some((b) => b.name === base))
+      return { ok: false, output: "PR head or base branch does not exist" };
+    const existing = (await ctx.github.listPullRequests(repo)).find(
+      (p) => p.head === head && p.base === base && p.state === "open",
+    );
+    const pr =
+      existing ?? (await ctx.github.createPullRequest(repo, title, body, head, base, { draft: input.draft === true }));
     ctx.logger.info("PR created", { number: pr.number, projectId: ctx.project.id });
     return { ok: true, output: `PR #${pr.number} created`, data: { number: pr.number, url: pr.htmlUrl, head, base } };
   },
@@ -158,7 +179,10 @@ export const runTestsTool: ToolDefinition = {
   name: "run_tests",
   description: "Verify the exact branch commit using GitHub CI checks (never run shell commands on the platform).",
   dangerous: false,
-  inputSchema: { type: "object", properties: { repo: { type: "string" }, ref: { type: "string" }, waitMs: { type: "number" } } },
+  inputSchema: {
+    type: "object",
+    properties: { repo: { type: "string" }, ref: { type: "string" }, waitMs: { type: "number" } },
+  },
   permissions: ["github.read"],
   timeoutMs: 120000,
   execute: verifyGithubChecks,
@@ -190,7 +214,8 @@ export const searchTool: ToolDefinition = {
       try {
         const hits = await ctx.memory.search(query);
         data.memory = hits.slice(0, limit).map((h) => ({ type: h.type, key: h.key, snippet: h.content.slice(0, 200) }));
-        for (const h of hits.slice(0, limit)) lines.push(`[memory:${h.type}] ${h.key} — ${h.content.replace(/\s+/g, " ").slice(0, 160)}`);
+        for (const h of hits.slice(0, limit))
+          lines.push(`[memory:${h.type}] ${h.key} — ${h.content.replace(/\s+/g, " ").slice(0, 160)}`);
       } catch (err) {
         ctx.logger.warn("memory search failed", { err: String(err) });
       }
@@ -221,7 +246,10 @@ export const saveMemoryTool: ToolDefinition = {
   inputSchema: {
     type: "object",
     properties: {
-      type: { type: "string", enum: ["architecture", "business", "technical", "decision", "bug", "knowledge", "lesson", "conversation"] },
+      type: {
+        type: "string",
+        enum: ["architecture", "business", "technical", "decision", "bug", "knowledge", "lesson", "conversation"],
+      },
       key: { type: "string" },
       content: { type: "string" },
       tags: { type: "array", items: { type: "string" } },
@@ -250,7 +278,8 @@ export const saveMemoryTool: ToolDefinition = {
 
 export const createBranchTool: ToolDefinition = {
   name: "create_branch",
-  description: "Create a working branch from the project's base branch (agents never commit to the base branch directly).",
+  description:
+    "Create a working branch from the project's base branch (agents never commit to the base branch directly).",
   dangerous: false,
   inputSchema: { type: "object", properties: { name: { type: "string" }, from: { type: "string" } } },
   permissions: ["github.write", "repository.write"],
@@ -264,8 +293,12 @@ export const createBranchTool: ToolDefinition = {
     if (!base) return { ok: false, output: `Base branch ${from} not found` };
     if (name === from) return { ok: false, output: "Working branch must differ from the base branch" };
     const existing = branches.find((b) => b.name === name);
-    const created = existing ?? await ctx.github.createBranch(repo, name, str(input.sha) || base.sha);
-    return { ok: true, output: `Branch ${created.name} created from ${base.name}`, data: { branch: created.name, sha: created.sha } };
+    const created = existing ?? (await ctx.github.createBranch(repo, name, str(input.sha) || base.sha));
+    return {
+      ok: true,
+      output: `Branch ${created.name} created from ${base.name}`,
+      data: { branch: created.name, sha: created.sha },
+    };
   },
 };
 
@@ -273,17 +306,53 @@ export const mergePullRequestTool: ToolDefinition = {
   name: "merge_pull_request",
   description: "Merge a pull request into its base branch. Dangerous — always requires human approval.",
   dangerous: true,
-  inputSchema: { type: "object", properties: { number: { type: "number" }, method: { type: "string", enum: ["merge", "squash", "rebase"] } }, required: ["number"] },
+  inputSchema: {
+    type: "object",
+    properties: { number: { type: "number" }, method: { type: "string", enum: ["merge", "squash", "rebase"] } },
+    required: ["number"],
+  },
   permissions: ["github.write", "deployment.write"],
   timeoutMs: 30000,
+  /**
+   * Bind the approval to the exact subject: the PR's current head SHA and the
+   * requesting actor. The worker then refuses to merge a PR whose head moved
+   * after the human approved, or a job attributed to a different actor.
+   */
+  async prepareApproval(ctx: ToolContext, input) {
+    const binding: Record<string, unknown> = { actorId: ctx.agent.id };
+    const number = Number(input.number);
+    if (Number.isFinite(number) && number > 0 && ctx.github.getPullRequest) {
+      try {
+        const pr = await ctx.github.getPullRequest(toRepoRef(ctx.project.configRepo), number);
+        if (pr?.headSha) binding.commitSha = pr.headSha;
+      } catch {
+        // Adapter can't report the head SHA — the approval simply stays unbound
+        // to a commit, which is still safer than merging with no approval at all.
+      }
+    }
+    return binding;
+  },
   async execute(ctx: ToolContext, input) {
     const repo = toRepoRef(ctx.project.configRepo);
     const number = Number(input.number);
     if (!Number.isFinite(number) || number <= 0) return { ok: false, output: "merge_pull_request: number is required" };
-    const method = (["merge", "squash", "rebase"].includes(str(input.method)) ? str(input.method) : "squash") as "merge" | "squash" | "rebase";
-    const res = await ctx.github.mergePullRequest(repo, number, { method, commitTitle: `[${ctx.agent.name}] merge PR #${number}` });
-    ctx.logger.info("PR merge attempted", { number, merged: res.merged, projectId: ctx.project.id, correlationId: ctx.correlationId });
-    return { ok: res.merged, output: res.merged ? `PR #${number} merged (${method})` : `PR #${number} not merged: ${res.message ?? "unknown"}`, data: { number, ...res } };
+    const method = (["merge", "squash", "rebase"].includes(str(input.method)) ? str(input.method) : "squash") as
+      "merge" | "squash" | "rebase";
+    const res = await ctx.github.mergePullRequest(repo, number, {
+      method,
+      commitTitle: `[${ctx.agent.name}] merge PR #${number}`,
+    });
+    ctx.logger.info("PR merge attempted", {
+      number,
+      merged: res.merged,
+      projectId: ctx.project.id,
+      correlationId: ctx.correlationId,
+    });
+    return {
+      ok: res.merged,
+      output: res.merged ? `PR #${number} merged (${method})` : `PR #${number} not merged: ${res.message ?? "unknown"}`,
+      data: { number, ...res },
+    };
   },
 };
 
@@ -302,7 +371,8 @@ export function buildPullRequestBody(opts: {
   breaking?: string[];
   correlationId?: string;
 }): string {
-  const list = (items: string[] | undefined, empty: string) => (items && items.length ? items.map((i) => `- ${i}`).join("\n") : `- ${empty}`);
+  const list = (items: string[] | undefined, empty: string) =>
+    items && items.length ? items.map((i) => `- ${i}`).join("\n") : `- ${empty}`;
   return [
     `## Summary`,
     opts.taskDescription?.trim() || opts.taskTitle,

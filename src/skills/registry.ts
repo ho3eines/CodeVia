@@ -5,7 +5,14 @@ import type { Skill } from "../domain/entities.js";
 import { BUILTIN_SKILLS } from "./catalog.js";
 import { randomUUID } from "node:crypto";
 import type { Project } from "../domain/entities.js";
-import { availableSkills, compileAssignedSkills, resolveSkillDependencies, selectTaskSkills, type SkillAgent, type SkillTask } from "./assignment.js";
+import {
+  availableSkills,
+  compileAssignedSkills,
+  resolveSkillDependencies,
+  selectTaskSkills,
+  type SkillAgent,
+  type SkillTask,
+} from "./assignment.js";
 
 export class SkillRepository extends DocumentRepository<Skill> {
   constructor(db: Db = getDb()) {
@@ -13,7 +20,8 @@ export class SkillRepository extends DocumentRepository<Skill> {
   }
 
   create(data: Omit<Skill, "id" | "createdAt" | "updatedAt">): Skill {
-    if (this.findBySlug(data.slug, data.projectId)) throw Object.assign(new Error(`Skill slug ${data.slug} already exists`), { statusCode: 409 });
+    if (this.findBySlug(data.slug, data.projectId))
+      throw Object.assign(new Error(`Skill slug ${data.slug} already exists`), { statusCode: 409 });
     const now = new Date().toISOString();
     const skill: Skill = { ...data, id: randomUUID(), createdAt: now, updatedAt: now };
     this.upsert(skill, { key: skill.slug, projectId: skill.projectId });
@@ -21,8 +29,14 @@ export class SkillRepository extends DocumentRepository<Skill> {
   }
 
   /** Marketplace templates and each project's definitions have separate namespaces. */
-  globalCatalog(): Skill[] { return this.findMany().map((r) => r.data).filter((s) => !s.projectId); }
-  byProject(projectId: string): Skill[] { return this.findMany({ projectId }).map((r) => r.data); }
+  globalCatalog(): Skill[] {
+    return this.findMany()
+      .map((r) => r.data)
+      .filter((s) => !s.projectId);
+  }
+  byProject(projectId: string): Skill[] {
+    return this.findMany({ projectId }).map((r) => r.data);
+  }
   findBySlug(slug: string, projectId?: string): Skill | undefined {
     return (projectId ? this.byProject(projectId) : this.globalCatalog()).find((s) => s.slug === slug);
   }
@@ -37,7 +51,10 @@ export class SkillRepository extends DocumentRepository<Skill> {
         seeded++;
       } else if (existing.builtIn && existing.version !== skill.version) {
         // Refresh built-in skill content while preserving id + creation date.
-        this.upsert({ ...skill, id: existing.id, enabled: existing.enabled, createdAt: existing.createdAt }, { key: skill.slug });
+        this.upsert(
+          { ...skill, id: existing.id, enabled: existing.enabled, createdAt: existing.createdAt },
+          { key: skill.slug },
+        );
       }
     }
     return seeded;
@@ -71,11 +88,17 @@ export class SkillRegistry {
   compile(slugs: string[]): string {
     const catalog = this.catalog();
     const enabled = slugs.filter((slug) => catalog.some((s) => s.slug === slug && s.enabled));
-    return compileAssignedSkills(resolveSkillDependencies(catalog, enabled).map((s) => ({
-      slug: s.slug, name: s.name, version: s.version, instructions: s.instructions, guidance: "", source: "agent",
-    })));
+    return compileAssignedSkills(
+      resolveSkillDependencies(catalog, enabled).map((s) => ({
+        slug: s.slug,
+        name: s.name,
+        version: s.version,
+        instructions: s.instructions,
+        guidance: "",
+        source: "agent",
+      })),
+    );
   }
-
 }
 
 export function getSkillRepo(): SkillRepository {

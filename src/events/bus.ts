@@ -76,7 +76,7 @@ export class EventBus {
       timestamp: new Date().toISOString(),
     };
     const list = this.handlers.get(name) ?? [];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     const typedEvent = event as any;
     for (const handler of list) {
       try {

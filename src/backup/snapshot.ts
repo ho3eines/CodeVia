@@ -315,7 +315,10 @@ export function snapshotFromFiles(files: { path: string; content: string }[]): B
     throw new Error("Backup is incomplete: missing manifest.json / records.json / jobs.json / kv.json");
   }
   const manifestObj = manifest as Record<string, unknown>;
-  const platform = manifestObj.platform === "railway" || manifestObj.platform === "docker" || manifestObj.platform === "host" ? manifestObj.platform : "host";
+  const platform =
+    manifestObj.platform === "railway" || manifestObj.platform === "docker" || manifestObj.platform === "host"
+      ? manifestObj.platform
+      : "host";
   const snapshot: BackupSnapshot = {
     version: Number(manifestObj.version) || 1,
     type: String(manifestObj.type ?? ""),

@@ -37,9 +37,21 @@ interface MockRepo {
 }
 
 /** Demo repositories seeded into every mock instance so the repo picker is never empty offline. */
-export const MOCK_DEMO_REPOS: Array<{ owner: string; name: string; description: string; language: string; private?: boolean }> = [
+export const MOCK_DEMO_REPOS: Array<{
+  owner: string;
+  name: string;
+  description: string;
+  language: string;
+  private?: boolean;
+}> = [
   { owner: "acme", name: "accounting", description: "Demo: .NET + SQL Server accounting system", language: "C#" },
-  { owner: "acme", name: "storefront", description: "Demo: React + Node.js storefront", language: "TypeScript", private: true },
+  {
+    owner: "acme",
+    name: "storefront",
+    description: "Demo: React + Node.js storefront",
+    language: "TypeScript",
+    private: true,
+  },
   { owner: "acme", name: "mobile-app", description: "Demo: Flutter mobile app", language: "Dart" },
 ];
 
@@ -57,7 +69,10 @@ export class MockGitHubService implements IGitHubService {
 
   private remember(r: MockRepo, sha: string, files: Map<string, GithubFile>): void {
     let snapshots = this.snapshots.get(r);
-    if (!snapshots) { snapshots = new Map(); this.snapshots.set(r, snapshots); }
+    if (!snapshots) {
+      snapshots = new Map();
+      this.snapshots.set(r, snapshots);
+    }
     snapshots.set(sha, new Map(files));
   }
   private readonly persistEnabled: boolean;
@@ -247,7 +262,10 @@ export class MockGitHubService implements IGitHubService {
         [
           defaultBranch,
           new Map(
-            (opts.autoInit === false ? [] : [{ path: "README.md", content: `# ${name}\n\n${opts.description ?? ""}\n` }]).map((f) => [f.path, f] as [string, GithubFile]),
+            (opts.autoInit === false
+              ? []
+              : [{ path: "README.md", content: `# ${name}\n\n${opts.description ?? ""}\n` }]
+            ).map((f) => [f.path, f] as [string, GithubFile]),
           ),
         ],
       ]),
@@ -301,7 +319,9 @@ export class MockGitHubService implements IGitHubService {
       archived: false,
       permissions: { admin: true, push: true, pull: true },
     }));
-    const filtered = list.filter((r) => !q || r.fullName.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q));
+    const filtered = list.filter(
+      (r) => !q || r.fullName.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q),
+    );
     return filtered.slice(0, Math.max(1, opts.limit ?? 300));
   }
 
@@ -316,6 +336,15 @@ export class MockGitHubService implements IGitHubService {
 
   async listPullRequests(ref: GithubRepoRef): Promise<GithubPullRequest[]> {
     return this.repo(ref).pulls;
+  }
+
+  async getPullRequest(ref: GithubRepoRef, number: number): Promise<GithubPullRequest | undefined> {
+    const r = this.repo(ref);
+    const pr = r.pulls.find((p) => p.number === number);
+    if (!pr) return undefined;
+    // The mock stores PRs by head branch name; resolve the current head SHA so
+    // merge approvals can be bound to the exact commit they reviewed.
+    return { ...pr, headSha: r.branches.get(pr.head) };
   }
 
   async listIssues(ref: GithubRepoRef): Promise<GithubIssue[]> {
@@ -335,9 +364,6 @@ export class MockGitHubService implements IGitHubService {
     if (!r.branches.has(name)) {
       const source = new Map(this.tree(r, baseSha));
       r.branches.set(name, baseSha);
-      // The new branch starts as a copy of whichever branch the base sha
-      // belongs to (default branch when the sha is unknown).
-      const baseBranch = [...r.branches.entries()].find(([, sha]) => sha === baseSha)?.[0] ?? r.defaultBranch;
       r.trees.set(name, source);
       this.remember(r, baseSha, source);
     }
@@ -345,7 +371,13 @@ export class MockGitHubService implements IGitHubService {
     return { name, sha: baseSha };
   }
 
-  async commit(ref: GithubRepoRef, branch: string, message: string, files: GithubFile[], parentSha?: string): Promise<GithubCommit> {
+  async commit(
+    ref: GithubRepoRef,
+    branch: string,
+    message: string,
+    files: GithubFile[],
+    parentSha?: string,
+  ): Promise<GithubCommit> {
     const r = this.repo(ref);
     if (parentSha && r.branches.get(branch) !== parentSha) throw new Error("Repository changed after inspection");
     const tree = this.tree(r, branch);
@@ -361,7 +393,13 @@ export class MockGitHubService implements IGitHubService {
     return commit;
   }
 
-  async deleteFiles(ref: GithubRepoRef, branch: string, message: string, paths: string[], parentSha?: string): Promise<GithubCommit> {
+  async deleteFiles(
+    ref: GithubRepoRef,
+    branch: string,
+    message: string,
+    paths: string[],
+    parentSha?: string,
+  ): Promise<GithubCommit> {
     const r = this.repo(ref);
     if (parentSha && r.branches.get(branch) !== parentSha) throw new Error("Repository changed after inspection");
     const tree = this.tree(r, branch);
@@ -377,7 +415,14 @@ export class MockGitHubService implements IGitHubService {
     return commit;
   }
 
-  async createPullRequest(ref: GithubRepoRef, title: string, body: string, head: string, base: string, opts: { draft?: boolean } = {}): Promise<GithubPullRequest> {
+  async createPullRequest(
+    ref: GithubRepoRef,
+    title: string,
+    body: string,
+    head: string,
+    base: string,
+    opts: { draft?: boolean } = {},
+  ): Promise<GithubPullRequest> {
     const r = this.repo(ref);
     const pr: GithubPullRequest = {
       number: r.pulls.length + 1,
@@ -394,7 +439,11 @@ export class MockGitHubService implements IGitHubService {
     return pr;
   }
 
-  async updatePullRequest(ref: GithubRepoRef, number: number, patch: Partial<{ title: string; body: string; state: string }>): Promise<GithubPullRequest> {
+  async updatePullRequest(
+    ref: GithubRepoRef,
+    number: number,
+    patch: Partial<{ title: string; body: string; state: string }>,
+  ): Promise<GithubPullRequest> {
     const r = this.repo(ref);
     const pr = r.pulls.find((p) => p.number === number);
     if (!pr) throw new Error(`PR #${number} not found`);
@@ -404,7 +453,7 @@ export class MockGitHubService implements IGitHubService {
     return pr;
   }
 
-  async createIssue(ref: GithubRepoRef, title: string, body: string): Promise<GithubIssue> {
+  async createIssue(ref: GithubRepoRef, title: string, _body: string): Promise<GithubIssue> {
     const r = this.repo(ref);
     const issue: GithubIssue = {
       number: r.issues.length + 1,
@@ -425,7 +474,11 @@ export class MockGitHubService implements IGitHubService {
     return;
   }
 
-  async mergePullRequest(ref: GithubRepoRef, number: number, opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string } = {}): Promise<{ merged: boolean; sha?: string; message?: string }> {
+  async mergePullRequest(
+    ref: GithubRepoRef,
+    number: number,
+    opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string } = {},
+  ): Promise<{ merged: boolean; sha?: string; message?: string }> {
     const r = this.repo(ref);
     const pr = r.pulls.find((p) => p.number === number);
     if (!pr) return { merged: false, message: `PR #${number} not found` };
@@ -435,7 +488,12 @@ export class MockGitHubService implements IGitHubService {
     const base = this.tree(r, pr.base);
     for (const [p, f] of this.tree(r, pr.head)) base.set(p, f);
     r.branches.set(pr.base, sha);
-    r.commits.unshift({ sha, message: opts.commitTitle ?? `Merge pull request #${number} (${opts.method ?? "merge"})`, author: "codevia-agent", date: new Date().toISOString() });
+    r.commits.unshift({
+      sha,
+      message: opts.commitTitle ?? `Merge pull request #${number} (${opts.method ?? "merge"})`,
+      author: "codevia-agent",
+      date: new Date().toISOString(),
+    });
     pr.state = "merged";
     this.persist();
     return { merged: true, sha };

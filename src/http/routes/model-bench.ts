@@ -22,61 +22,73 @@ import { resolveRequestUser } from "../auth.js";
  * for currently-existing models are returned so deleted models never show up.
  */
 export function registerModelBenchRoutes(app: FastifyInstance, container: Container): void {
-  app.post("/models/benchmark/run", { schema: { tags: ["models"], summary: "Start a paced math benchmark across active models" } }, async (req) => {
-    const body = (req.body ?? {}) as { problemsPerModel?: number; modelIds?: string[] };
-    const n = Math.max(2, Math.min(50, Number(body.problemsPerModel) || 8));
-    // Per-account: benchmark the caller's own models (+ the shared platform
-    // rows) only. Another account's provider must never be quizzed.
-    const ownerId = actingModelOwner(resolveRequestUser(req, container).user.id);
+  app.post(
+    "/models/benchmark/run",
+    { schema: { tags: ["models"], summary: "Start a paced math benchmark across active models" } },
+    async (req) => {
+      const body = (req.body ?? {}) as { problemsPerModel?: number; modelIds?: string[] };
+      const n = Math.max(2, Math.min(50, Number(body.problemsPerModel) || 8));
+      // Per-account: benchmark the caller's own models (+ the shared platform
+      // rows) only. Another account's provider must never be quizzed.
+      const ownerId = actingModelOwner(resolveRequestUser(req, container).user.id);
 
-    if (container.mathBench.isRunning()) {
+      if (container.mathBench.isRunning()) {
+        const p = container.mathBench.getProgress();
+        return {
+          ok: true,
+          started: false,
+          running: true,
+          alreadyRunning: true,
+          runId: p.runId,
+          message: "A benchmark run is already in progress — wait for it to finish before starting another.",
+          totalModels: p.totalModels,
+          problemCount: p.totalProblems,
+        };
+      }
+
+      const res = container.mathBench.start({ problemsPerModel: n, modelIds: body.modelIds, ownerId });
       const p = container.mathBench.getProgress();
       return {
         ok: true,
-        started: false,
+        started: res.started,
         running: true,
-        alreadyRunning: true,
-        runId: p.runId,
-        message: "A benchmark run is already in progress — wait for it to finish before starting another.",
+        alreadyRunning: res.alreadyRunning,
+        runId: res.runId,
         totalModels: p.totalModels,
         problemCount: p.totalProblems,
+        delayMs: p.delayMs,
       };
-    }
+    },
+  );
 
-    const res = container.mathBench.start({ problemsPerModel: n, modelIds: body.modelIds, ownerId });
-    const p = container.mathBench.getProgress();
-    return {
-      ok: true,
-      started: res.started,
-      running: true,
-      alreadyRunning: res.alreadyRunning,
-      runId: res.runId,
-      totalModels: p.totalModels,
-      problemCount: p.totalProblems,
-      delayMs: p.delayMs,
-    };
-  });
+  app.get(
+    "/models/benchmark/status",
+    { schema: { tags: ["models"], summary: "Live progress of the running (or last) benchmark" } },
+    async () => {
+      const progress = container.mathBench.getProgress();
+      return { running: container.mathBench.isRunning(), progress };
+    },
+  );
 
-  app.get("/models/benchmark/status", { schema: { tags: ["models"], summary: "Live progress of the running (or last) benchmark" } }, async () => {
-    const progress = container.mathBench.getProgress();
-    return { running: container.mathBench.isRunning(), progress };
-  });
-
-  app.get("/models/benchmark/stats", { schema: { tags: ["models"], summary: "Per-model benchmark stats used for smart routing" } }, async (req) => {
-    const ownerId = actingModelOwner(resolveRequestUser(req, container).user.id);
-    const stats = container.benchRepo.computeStats();
-    // Only show stats for models that still exist in the registry, so a model
-    // that has since been deleted (individually or with its provider) never
-    // reappears in the benchmark table / routing signal. Inactive models ARE
-    // included — the "Unresponsive" cleanup list needs to find failing models
-    // even after they were deactivated (the router only looks up active ones).
-    // Only models the caller can see — benchmark telemetry is per-account
-    // data and must not advertise another account's models.
-    const liveIds = new Set(container.modelRepo.listForOwner(ownerId).map((m) => m.id));
-    const liveStats = stats.filter((s) => liveIds.has(s.modelId));
-    ModelBenchmarkRepository.addSpeedNormalisation(liveStats);
-    return { stats: liveStats };
-  });
+  app.get(
+    "/models/benchmark/stats",
+    { schema: { tags: ["models"], summary: "Per-model benchmark stats used for smart routing" } },
+    async (req) => {
+      const ownerId = actingModelOwner(resolveRequestUser(req, container).user.id);
+      const stats = container.benchRepo.computeStats();
+      // Only show stats for models that still exist in the registry, so a model
+      // that has since been deleted (individually or with its provider) never
+      // reappears in the benchmark table / routing signal. Inactive models ARE
+      // included — the "Unresponsive" cleanup list needs to find failing models
+      // even after they were deactivated (the router only looks up active ones).
+      // Only models the caller can see — benchmark telemetry is per-account
+      // data and must not advertise another account's models.
+      const liveIds = new Set(container.modelRepo.listForOwner(ownerId).map((m) => m.id));
+      const liveStats = stats.filter((s) => liveIds.has(s.modelId));
+      ModelBenchmarkRepository.addSpeedNormalisation(liveStats);
+      return { stats: liveStats };
+    },
+  );
 
   app.get("/models/benchmark/results", { schema: { tags: ["models"] } }, async (req) => {
     const q = req.query as { runId?: string; modelId?: string; limit?: string };

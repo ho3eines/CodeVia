@@ -17,7 +17,9 @@ let telegram: MockTelegramService;
 let cleanup: () => void;
 
 /** A pairing state we can mutate, exactly like the account row does in production. */
-function makeAccess(initial: { ownerChatId?: string; pairCode?: string } = {}): TelegramBotAccess & { state: { ownerChatId?: string; pairCode?: string } } {
+function makeAccess(
+  initial: { ownerChatId?: string; pairCode?: string } = {},
+): TelegramBotAccess & { state: { ownerChatId?: string; pairCode?: string } } {
   const state = { ...initial };
   return {
     state,
@@ -69,11 +71,17 @@ function lastSent(): Sent {
 
 /** Project names the bot offered — they live on the keyboard buttons, not in the text. */
 function buttons(sent: Sent): string {
-  return (sent.inlineKeyboard ?? []).flat().map((b) => b.text).join(" | ");
+  return (sent.inlineKeyboard ?? [])
+    .flat()
+    .map((b) => b.text)
+    .join(" | ");
 }
 
 async function makeProject(name: string, ownerId?: string): Promise<void> {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
   await container.agentManager.createProject({
     ownerId,
     name,

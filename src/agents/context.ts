@@ -41,6 +41,14 @@ export interface RegistryEntry {
   at: string;
 }
 
+/** Limited but relevant context gathered from a non-config linked repository. */
+export interface LinkedRepoContext {
+  repo: string;
+  branch: string;
+  tree: string[];
+  totalFiles: number;
+}
+
 /** Owner file of an entity for one implementer (legacy single-path aware). */
 export function registryPathFor(
   registry: Record<string, RegistryEntry> | undefined,
@@ -63,6 +71,8 @@ export interface ContextPack {
   related: RelatedFile[];
   memory: Array<{ key: string; type: string; content: string }>;
   registry: Record<string, RegistryEntry>;
+  /** Trees of linked implementation repositories (A16: planning sees them too). */
+  linked?: LinkedRepoContext[];
 }
 
 const CONFIG_MATCHERS: Array<{ test: (name: string) => boolean; priority: number }> = [
@@ -115,9 +125,12 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
     }
   };
 
-  let allPaths: string[] = [];
+  let allPaths: string[];
   try {
-    allPaths = (await github.listFiles(ref, branch)).filter((e) => e.type === "blob").map((e) => e.path).filter((p) => !p.startsWith(".git/"));
+    allPaths = (await github.listFiles(ref, branch))
+      .filter((e) => e.type === "blob")
+      .map((e) => e.path)
+      .filter((p) => !p.startsWith(".git/"));
   } catch (err) {
     if (opts.strict) throw err;
     return empty;
@@ -137,7 +150,35 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
   }
 
   // Entity registry from the persisted context file (best-effort).
-  empty.registry = parseRegistry(await getFile(RUNTIME_CONTEXT_FILE) ?? await getFile(CONTEXT_FILE));
+  empty.registry = parseRegistry((await getFile(RUNTIME_CONTEXT_FILE)) ?? (await getFile(CONTEXT_FILE)));
+
+  // (A16) Existing code in linked implementation repositories must reach
+  // research/planning too, not only the config repo. Scan each non-config link
+  // for its tree (limited) so planning can reuse real paths across repos.
+  const linked: LinkedRepoContext[] = [];
+  for (const link of project.repositories ?? []) {
+    if (!link.repo || link.repo === project.configRepo) continue;
+    const [linkedOwner, ...linkedRest] = link.repo.split("/");
+    const linkedRef = { owner: linkedOwner, name: linkedRest.join("/") };
+    if (!linkedOwner || !linkedRef.name) continue;
+    const linkedBranch = link.branch || project.branch || "main";
+    try {
+      const paths = (await github.listFiles(linkedRef, linkedBranch))
+        .filter((e) => e.type === "blob")
+        .map((e) => e.path)
+        .filter((p) => !p.startsWith(".git/") && !p.startsWith("CodeVia/"));
+      linked.push({
+        repo: link.repo,
+        branch: linkedBranch,
+        tree: paths.slice(0, 80),
+        totalFiles: paths.length,
+      });
+    } catch (err) {
+      if (opts.strict) throw err;
+      // A private/unavailable linked repo must not break the primary context.
+    }
+  }
+  empty.linked = linked;
 
   // Manifest / architecture-defining files, in priority order.
   const ranked = empty.tree
@@ -157,10 +198,19 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
   // Siblings of the target + files matching the entity under work.
   if (opts.target) {
     const dir = opts.target.includes("/") ? opts.target.slice(0, opts.target.lastIndexOf("/")) : "";
-    const siblings = empty.tree.filter((p) => p !== opts.target && (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "") === dir).slice(0, 3);
+    const siblings = empty.tree
+      .filter((p) => p !== opts.target && (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "") === dir)
+      .slice(0, 3);
     const entityHits =
       opts.entityRoute && opts.entityRoute !== "feature"
-        ? empty.tree.filter((p) => p !== opts.target && !siblings.includes(p) && (p.split("/").pop() ?? "").toLowerCase().includes(opts.entityRoute!)).slice(0, 2)
+        ? empty.tree
+            .filter(
+              (p) =>
+                p !== opts.target &&
+                !siblings.includes(p) &&
+                (p.split("/").pop() ?? "").toLowerCase().includes(opts.entityRoute!),
+            )
+            .slice(0, 2)
         : [];
     for (const path of [...siblings, ...entityHits]) {
       const content = await getFile(path);
@@ -344,7 +394,17 @@ export function renderContextMarkdown(project: Project, pack: ContextPack): stri
     `## Conventions`,
     pack.configs.length === 0
       ? `(no manifest files detected yet)`
-      : pack.configs.map((c) => [`### ${c.path}`, ...c.content.split("\n").slice(0, 12).map((l) => `> ${l.slice(0, 140)}`)].join("\n")).join("\n\n"),
+      : pack.configs
+          .map((c) =>
+            [
+              `### ${c.path}`,
+              ...c.content
+                .split("\n")
+                .slice(0, 12)
+                .map((l) => `> ${l.slice(0, 140)}`),
+            ].join("\n"),
+          )
+          .join("\n\n"),
     ``,
     `## Entity registry`,
     registryLines.length === 0
@@ -352,7 +412,9 @@ export function renderContextMarkdown(project: Project, pack: ContextPack): stri
       : registryLines
           .map((r) => {
             const owners = Object.entries(r.paths ?? {});
-            const where = owners.length ? owners.map(([t, p]) => `${shortType(t)}: \`${p}\``).join(" · ") : `\`${r.path}\``;
+            const where = owners.length
+              ? owners.map(([t, p]) => `${shortType(t)}: \`${p}\``).join(" · ")
+              : `\`${r.path}\``;
             return `- ${r.entity} → ${where} (last: ${r.subtaskId || "?"} · ${r.at || "?"})`;
           })
           .join("\n"),
@@ -387,6 +449,10 @@ export function renderPromptContext(pack: ContextPack, target: string): string {
     lines.push(`Repository tree (${pack.totalFiles} files):`);
     lines.push(...pack.tree.slice(0, 60).map((p) => `- ${p}`));
   }
+  for (const linked of pack.linked ?? []) {
+    lines.push(`Linked repository ${linked.repo}@${linked.branch} (${linked.totalFiles} files):`);
+    lines.push(...linked.tree.slice(0, 60).map((p) => `- ${p}`));
+  }
   if (pack.projectContext) {
     lines.push(`--- CodeVia/context.md (canonical project context) ---`);
     lines.push(pack.projectContext);
@@ -417,7 +483,8 @@ type CommentStyle = { line: string } | { block: [string, string] };
 
 function commentStyleFor(path: string): CommentStyle {
   const base = path.split("/").pop() ?? path;
-  if (/\.(json|ipynb)$/.test(base)) throw new Error(`Cannot add simulation comments to ${path}; configure a real coding model`);
+  if (/\.(json|ipynb)$/.test(base))
+    throw new Error(`Cannot add simulation comments to ${path}; configure a real coding model`);
   if (/\.(css|scss|less)$/.test(base)) return { block: ["/*", "*/"] };
   if (/\.(razor|cshtml)$/.test(base)) return { block: ["@*", "*@"] };
   if (/\.(html|vue|svelte)$/.test(base)) return { block: ["<!--", "-->"] };
@@ -428,7 +495,12 @@ function commentStyleFor(path: string): CommentStyle {
 
 function commentBlock(style: CommentStyle, lines: string[]): string {
   const safeLines = lines.flatMap((line) => line.split(/\r?\n/));
-  if ("block" in style) return [style.block[0], ...safeLines.map((l) => l.split(style.block[1]).join(style.block[1].split("").join(" "))), style.block[1]].join("\n");
+  if ("block" in style)
+    return [
+      style.block[0],
+      ...safeLines.map((l) => l.split(style.block[1]).join(style.block[1].split("").join(" "))),
+      style.block[1],
+    ].join("\n");
   return safeLines.map((l) => (l ? `${style.line} ${l}` : style.line)).join("\n");
 }
 
@@ -455,14 +527,18 @@ export function extendContent(input: ExtensionInput): string {
     `Existing implementation preserved below — new work ships as TODOs:`,
     ...input.todos.map((t) => `TODO: ${t}`),
   ]);
-  const foot = commentBlock(style, [`TODO (${input.subtaskId}): ${input.taskTitle}`, ...input.todos.map((t) => `- ${t}`)]);
+  const foot = commentBlock(style, [
+    `TODO (${input.subtaskId}): ${input.taskTitle}`,
+    ...input.todos.map((t) => `- ${t}`),
+  ]);
   // Keep executable-file headers at byte zero. Never truncate existing code.
   if (input.existing.startsWith("#!")) {
     const nl = input.existing.indexOf("\n");
     if (nl >= 0) return `${input.existing.slice(0, nl + 1)}${head}\n${input.existing.slice(nl + 1)}\n${foot}\n`;
   }
   if (/\.php$/i.test(input.path)) {
-    if (!input.existing.startsWith("<?php") || input.existing.includes("?>")) throw new Error("Mixed PHP templates require a real coding model");
+    if (!input.existing.startsWith("<?php") || input.existing.includes("?>"))
+      throw new Error("Mixed PHP templates require a real coding model");
     return `<?php\n${head}\n${input.existing.slice(5)}\n${foot}\n`;
   }
   return `${head}\n${input.existing}\n${foot}\n`;
@@ -478,7 +554,12 @@ export async function syncProjectContext(opts: {
   entries?: Array<{ entity: string; path: string; agentType: string; subtaskId: string; at: string }>;
 }): Promise<boolean> {
   if (!opts.files) return false;
-  const pack = await buildContextPack({ github: opts.github, project: opts.project, memoryRepo: opts.memoryRepo, strict: true });
+  const pack = await buildContextPack({
+    github: opts.github,
+    project: opts.project,
+    memoryRepo: opts.memoryRepo,
+    strict: true,
+  });
   const existing = parseRegistry(await opts.files.readContext(opts.project));
   pack.registry = mergeRegistry(existing, opts.entries ?? []);
   return opts.files.syncContext(opts.project, renderContextMarkdown(opts.project, pack));

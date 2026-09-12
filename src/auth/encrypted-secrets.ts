@@ -20,17 +20,25 @@ export interface EncryptedValue {
 }
 
 function keyFor(context: string, secret?: string): Buffer {
-  return createHash("sha256").update(`${secret ?? getAuthSecret()}:${context}`).digest();
+  return createHash("sha256")
+    .update(`${secret ?? getAuthSecret()}:${context}`)
+    .digest();
 }
 
-export function encryptSecret(value: string, context: "provider-secret" | "telegram-token" = "provider-secret"): EncryptedValue {
+export function encryptSecret(
+  value: string,
+  context: "provider-secret" | "telegram-token" = "provider-secret",
+): EncryptedValue {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", keyFor(context), iv);
   const ct = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return { v: 1, iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ct: ct.toString("base64") };
 }
 
-export function decryptSecret(rec: EncryptedValue | string | undefined, context: "provider-secret" | "telegram-token" = "provider-secret"): string | undefined {
+export function decryptSecret(
+  rec: EncryptedValue | string | undefined,
+  context: "provider-secret" | "telegram-token" = "provider-secret",
+): string | undefined {
   let parsed: EncryptedValue | undefined;
   if (typeof rec === "string") {
     try {

@@ -2,7 +2,7 @@
 
 **تاریخ:** ۲۰۲۶-۰۹-۰۷ · **شاخه:** `arena/01a07bd5-codevia` · **مبنای بررسی:** snapshot پیش از پیاده‌سازی repository-first.
 
-> **یادداشت پس از ممیزی:** این گزارش و نتایج ۱۸ سناریوی آن تاریخی‌اند. پیاده‌سازی جدیدِ [مرجعیت پوشهٔ CodeVia](REPOSITORY_STATE.md) بعد از این ممیزی انجام شده و آزمون‌های مستقل برای حفظ تعریف‌ها، بازیابی کامل اسکیل/حافظه و عدم احیای تسک لغوشده دارد. probeهای قدیمیِ متکی به تغییر مستقیم DB یا کاتالوگ سراسری، بدون تطبیق با قرارداد جدید شاخص درستی برای این قابلیت نیستند. مشکلات احراز هویت، realtime، QA و صف با این یادداشت حل‌شده اعلام نمی‌شوند.
+> **یادداشت پس از ممیزی (به‌روزرسانی ۲۰۲۶-۰۹-۱۲):** این گزارش تاریخی است و بدنهٔ آن وضعیتِ زمانِ ممیزی را ثبت می‌کند. از آن زمان همهٔ ۱۸ سناریو بسته شده‌اند؛ commit `15c8496` روی شاخهٔ `arena/01a0965f-codevia` را ببینید. اجرای `node --import tsx scripts/audit-pipeline.mjs` اکنون با خروجی `0` تمام می‌شود (۱۸/۱۸ پاس) و `scripts/audit-repository-state.mjs` نیز خروجی `0` دارد. خلاصهٔ رفع‌ها: A01–A04 در فاز امنیت؛ A05 حفظ تنظیمات دستی ایجنت در re-onboard؛ A08 بازیابی تعریف اسکیل سفارشی در فضای نام پروژه؛ A12 بازیابی job رهاشده با lease؛ A13 توقف پیاده‌سازی هنگام BLOCKER پژوهشی (تسک `waiting_for_approval`، بدون source write)؛ A14 تحویل قرارداد producer به consumer حتی در یک مخزن؛ A15 رأی ساخت‌یافتهٔ مدل QA برای هر معیار پذیرش در کنار شواهد CI؛ A16 دیدن مخزن‌های پیاده‌سازی مرتبط پیش از planning؛ A17 نود telegram از طریق adapter ارسال می‌کند و webhook/trigger صریحاً unsupported شکست می‌خورند؛ A18 توقف cooperative عملیات زیرین در timeout ابزار.
 
 ## پاسخ صریح در زمان ممیزی
 
@@ -32,6 +32,8 @@
 | `npm audit --omit=dev --json` | **۲ هشدار وابستگی runtime: یک high و یک moderate** |
 
 محیط اجرای بررسی: Node `v22.22.3` و npm `10.9.8`. لاگ تست‌ها در `/home/user/codevia-deep-baseline.log` و لاگ smoke در `/home/user/codevia-deep-smoke.log` ثبت شده‌اند.
+
+> **بررسی دوباره پس از رفع (۲۰۲۶-۰۹-۱۲):** `npm test` → **۵۳ فایل / ۶۹۸ تست موفق**؛ `npm run typecheck`، `npm run lint`، `npm run format:check`، `npm run check:app` و `npm run build` همه موفق؛ `scripts/audit-pipeline.mjs` → **خروجی `0` (۱۸/۱۸ پاس)**؛ `scripts/audit-repository-state.mjs` → خروجی `0`.
 
 ## انطباق با درخواست اصلی
 

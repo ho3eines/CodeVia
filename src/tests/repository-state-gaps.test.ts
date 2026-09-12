@@ -3,7 +3,14 @@ import type { FastifyInstance } from "fastify";
 import { Container } from "../app/container.js";
 import { buildServer } from "../http/app.js";
 import { buildContextPack, renderPromptContext } from "../agents/context.js";
-import { CONTEXT_FILE, PROJECT_FILE, matter, parseMatter, renderAgentFile, renderTaskFile } from "../github/project-files.js";
+import {
+  CONTEXT_FILE,
+  PROJECT_FILE,
+  matter,
+  parseMatter,
+  renderAgentFile,
+  renderTaskFile,
+} from "../github/project-files.js";
 import { renderRulesFile, renderRunFile } from "../github/state-codec.js";
 import { freshDb } from "./test-helpers.js";
 import type { Agent, Project } from "../domain/entities.js";
@@ -28,7 +35,11 @@ const repo = (p: Project) => {
 const nextTick = () => new Promise((resolve) => setImmediate(resolve));
 /** Mock-only fixture helper: seed a repository into the in-memory mock GitHub. */
 const seedRepo = (name: string, files: Array<{ path: string; content: string }>): void =>
-  (container.github as unknown as { seedRepo: (owner: string, name: string, state: { files: Array<{ path: string; content: string }> }) => void }).seedRepo("audit", name, { files });
+  (
+    container.github as unknown as {
+      seedRepo: (owner: string, name: string, state: { files: Array<{ path: string; content: string }> }) => void;
+    }
+  ).seedRepo("audit", name, { files });
 
 async function boot(): Promise<void> {
   cleanup = freshDb().cleanup;
@@ -54,14 +65,27 @@ afterEach(async () => {
   cleanup?.();
 });
 
-async function copy(name: string, transform: (files: Array<{ path: string; content: string }>) => Array<{ path: string; content: string }> = (files) => files): Promise<Project> {
+async function copy(
+  name: string,
+  transform: (files: Array<{ path: string; content: string }>) => Array<{ path: string; content: string }> = (files) =>
+    files,
+): Promise<Project> {
   const state = await container.projectFiles.pull(project);
   seedRepo(name, transform([...state.contents].map(([path, content]) => ({ path, content }))));
-  return container.agentManager.createProject({ name, description: "Reuse repository material", configRepo: `audit/${name}` });
+  return container.agentManager.createProject({
+    name,
+    description: "Reuse repository material",
+    configRepo: `audit/${name}`,
+  });
 }
 
 async function research(): Promise<ReturnType<Container["agentManager"]["runTask"]>> {
-  const task = container.agentManager.createTask({ projectId: project.id, title: "Inspect implementation", description: "Explain existing conventions", agentType: "research" });
+  const task = container.agentManager.createTask({
+    projectId: project.id,
+    title: "Inspect implementation",
+    description: "Explain existing conventions",
+    agentType: "research",
+  });
   return container.agentManager.runTask(task.id);
 }
 
@@ -72,10 +96,16 @@ describe("R01 — stored project context reaches the model", () => {
     const marker = "REPOSITORY_ONLY_ARCHITECTURE_CONSTRAINT_9281";
     const rulesMarker = "POSITIVE_CONTROL_RULE_REACHES_MODEL_7162";
     await container.github.commit(repo(project), project.branch, "Edit architecture", [
-      { path: CONTEXT_FILE, content: `# Architecture\n\n${marker}\nAll session behavior must follow the existing contract.` },
+      {
+        path: CONTEXT_FILE,
+        content: `# Architecture\n\n${marker}\nAll session behavior must follow the existing contract.`,
+      },
       { path: "CodeVia/rules.md", content: renderRulesFile([rulesMarker]) },
     ]);
-    const config = container.providerRepo.findMany().map((r) => r.data).find((v) => v.type === "mock");
+    const config = container.providerRepo
+      .findMany()
+      .map((r) => r.data)
+      .find((v) => v.type === "mock");
     expect(config).toBeDefined();
     const provider = container.providerRegistry.resolve(config!);
     const original = provider.chat.bind(provider);
@@ -92,7 +122,13 @@ describe("R01 — stored project context reaches the model", () => {
       expect(requests.some((r) => r.messages.some((m) => m.content.includes(rulesMarker)))).toBe(true);
       // The gap: the canonical context document must reach the model too.
       expect(requests.some((r) => r.messages.some((m) => m.content.includes(marker)))).toBe(true);
-      const pack = await buildContextPack({ github: container.github, project, memoryRepo: container.memoryRepo, target: "src/session.ts", strict: true });
+      const pack = await buildContextPack({
+        github: container.github,
+        project,
+        memoryRepo: container.memoryRepo,
+        target: "src/session.ts",
+        strict: true,
+      });
       expect(renderPromptContext(pack, "src/session.ts")).toContain(marker);
     } finally {
       (provider as { chat: unknown }).chat = original;
@@ -109,7 +145,10 @@ describe("R02 — completed history is not DB-authoritative", () => {
     const description = "REPOSITORY_EDITED_TASK_DESCRIPTION";
     const summary = "REPOSITORY_EDITED_RUN_SUMMARY";
     await container.github.commit(repo(project), project.branch, "Correct completed history", [
-      { path: container.projectFiles.pathFor(project, "task", task.id), content: renderTaskFile({ ...task, title, description }) },
+      {
+        path: container.projectFiles.pathFor(project, "task", task.id),
+        content: renderTaskFile({ ...task, title, description }),
+      },
       { path: `CodeVia/runs/${run.id}.md`, content: renderRunFile({ ...run, summary }) },
     ]);
     const rt = await app!.inject({ method: "GET", url: `/tasks/${task.id}` });
@@ -129,14 +168,18 @@ describe("R03 — workflow tombstones survive repository copies", () => {
     const removed = container.workflowRepo.byProject(project.id).find((w) => w.slug === "bug-diagnosis-loop")!;
     expect((await app!.inject({ method: "DELETE", url: `/workflows/${removed.id}` })).statusCode).toBe(200);
     const path = container.projectFiles.pathFor(project, "workflow", removed.id);
-    expect(parseMatter((await container.github.getFile(repo(project), path, project.branch))!.content).data.deleted).toBe(true);
+    expect(
+      parseMatter((await container.github.getFile(repo(project), path, project.branch))!.content).data.deleted,
+    ).toBe(true);
     await container.agentManager.onboardProject(project.id);
     expect(container.workflowRepo.byProject(project.id).some((w) => w.slug === removed.slug)).toBe(false);
     const cloned = await copy("workflow-tombstone-copy");
     const regenerated = container.workflowRepo.byProject(cloned.id).find((w) => w.slug === removed.slug);
     expect(regenerated).toBeUndefined();
     // The tombstone itself survives the copy.
-    expect(parseMatter((await container.github.getFile(repo(cloned), path, cloned.branch))!.content).data.deleted).toBe(true);
+    expect(parseMatter((await container.github.getFile(repo(cloned), path, cloned.branch))!.content).data.deleted).toBe(
+      true,
+    );
   });
 });
 
@@ -144,7 +187,9 @@ describe("R04 — agent deletion refers to an identity, not a filename", () => {
   it("keeps a default-role agent deleted after its file was moved in Git", async () => {
     const old = container.agentRepo.byType(project.id, "research")!;
     const movedPath = "CodeVia/agents/custom-research-location.md";
-    const cloned = await copy("moved-agent", (files) => files.map((f) => (f.path === old.configPath ? { ...f, path: movedPath } : f)));
+    const cloned = await copy("moved-agent", (files) =>
+      files.map((f) => (f.path === old.configPath ? { ...f, path: movedPath } : f)),
+    );
     const agent = container.agentRepo.byType(cloned.id, "research")!;
     expect(agent.configPath).toBe(movedPath);
     expect((await app!.inject({ method: "DELETE", url: `/agents/${agent.id}` })).statusCode).toBe(200);
@@ -167,7 +212,17 @@ describe("R05 — migration preserves a DB-only legacy agent", () => {
     seedRepo("legacy-agent", [{ path: "README.md", content: "Legacy project" }]);
     container.projectRepo.upsert(legacy, { key: legacy.slug });
     const source = container.agentRepo.byType(project.id, "research")!;
-    const agent = { ...source, id: "legacy-custom-research", projectId: legacy.id, systemPrompt: "GENUINE_LEGACY_CUSTOM_PROMPT", tokenBudget: 321, enabled: false, tools: [], permissions: [], repositoryRevision: undefined };
+    const agent = {
+      ...source,
+      id: "legacy-custom-research",
+      projectId: legacy.id,
+      systemPrompt: "GENUINE_LEGACY_CUSTOM_PROMPT",
+      tokenBudget: 321,
+      enabled: false,
+      tools: [],
+      permissions: [],
+      repositoryRevision: undefined,
+    };
     container.agentRepo.upsert(agent, { projectId: legacy.id });
     await container.agentManager.onboardProject(legacy.id);
     const afterFirst = container.agentRepo.byType(legacy.id, "research");
@@ -204,7 +259,18 @@ describe("R06 — legacy DB workflows migrate too", () => {
       edges: [],
     });
     const files = [
-      { path: PROJECT_FILE, content: matter({ id: legacy.id, slug: legacy.slug, capabilities: legacy.capabilities, promptSettings: { rules: legacy.settings.rules } }, "# Legacy manifest") },
+      {
+        path: PROJECT_FILE,
+        content: matter(
+          {
+            id: legacy.id,
+            slug: legacy.slug,
+            capabilities: legacy.capabilities,
+            promptSettings: { rules: legacy.settings.rules },
+          },
+          "# Legacy manifest",
+        ),
+      },
       { path: ".ai-engineering/workflows/custom-disabled-flow.json", content: JSON.stringify(w) },
     ];
     for (const source of container.agentRepo.byProject(project.id)) {
@@ -242,7 +308,18 @@ describe("R05 — stale .ai-engineering config paths heal instead of dead-letter
     seedRepo("stale-path", [{ path: "README.md", content: "Legacy project" }]);
     container.projectRepo.upsert(legacy, { key: legacy.slug });
     const source = container.agentRepo.byProject(project.id)[0];
-    const stale: Agent = { ...source, id: "agent-release-proj-6ac28e8e", projectId: legacy.id, type: "release", slug: "release", configPath: ".ai-engineering/agents/release.yaml", systemPrompt: "GENUINE_LEGACY_RELEASE_PROMPT", tokenBudget: 321, enabled: false, repositoryRevision: undefined };
+    const stale: Agent = {
+      ...source,
+      id: "agent-release-proj-6ac28e8e",
+      projectId: legacy.id,
+      type: "release",
+      slug: "release",
+      configPath: ".ai-engineering/agents/release.yaml",
+      systemPrompt: "GENUINE_LEGACY_RELEASE_PROMPT",
+      tokenBudget: 321,
+      enabled: false,
+      repositoryRevision: undefined,
+    };
     container.agentRepo.upsert(stale, { projectId: legacy.id });
     return { project: legacy, stale };
   }
@@ -255,10 +332,20 @@ describe("R05 — stale .ai-engineering config paths heal instead of dead-letter
 
     const healed = container.agentRepo.findById(stale.id)?.data;
     expect(healed?.configPath).toBe("CodeVia/agents/release.md");
-    expect(healed).toMatchObject({ type: "release", slug: "release", enabled: false, systemPrompt: "GENUINE_LEGACY_RELEASE_PROMPT", tokenBudget: 321 });
-    expect((await container.github.getFile(repo(project), "CodeVia/agents/release.md", project.branch))?.content).toContain("GENUINE_LEGACY_RELEASE_PROMPT");
+    expect(healed).toMatchObject({
+      type: "release",
+      slug: "release",
+      enabled: false,
+      systemPrompt: "GENUINE_LEGACY_RELEASE_PROMPT",
+      tokenBudget: 321,
+    });
+    expect(
+      (await container.github.getFile(repo(project), "CodeVia/agents/release.md", project.branch))?.content,
+    ).toContain("GENUINE_LEGACY_RELEASE_PROMPT");
     // Nothing may be written at the legacy location.
-    expect(await container.github.getFile(repo(project), ".ai-engineering/agents/release.yaml", project.branch)).toBeUndefined();
+    expect(
+      await container.github.getFile(repo(project), ".ai-engineering/agents/release.yaml", project.branch),
+    ).toBeUndefined();
     // Healing is one-time: a second refresh neither rewrites nor drops the record.
     await container.agentManager.refreshProject(project.id);
     expect(container.agentRepo.findById(stale.id)?.data.configPath).toBe("CodeVia/agents/release.md");
@@ -266,8 +353,16 @@ describe("R05 — stale .ai-engineering config paths heal instead of dead-letter
 
   it("defers to a live definition the repository already holds and drops the stale duplicate", async () => {
     const { project, stale } = await projectWithStaleRecord();
-    const current = { ...stale, id: "agent-release-current", configPath: "CodeVia/agents/release.md", systemPrompt: "REPO_VERSION_PROMPT", enabled: true };
-    await container.github.commit(repo(project), project.branch, "Seed the current release definition", [{ path: "CodeVia/agents/release.md", content: renderAgentFile(current) }]);
+    const current = {
+      ...stale,
+      id: "agent-release-current",
+      configPath: "CodeVia/agents/release.md",
+      systemPrompt: "REPO_VERSION_PROMPT",
+      enabled: true,
+    };
+    await container.github.commit(repo(project), project.branch, "Seed the current release definition", [
+      { path: "CodeVia/agents/release.md", content: renderAgentFile(current) },
+    ]);
 
     await container.agentManager.refreshProject(project.id);
 
@@ -277,7 +372,15 @@ describe("R05 — stale .ai-engineering config paths heal instead of dead-letter
 
   it("respects an intentional tombstone instead of resurrecting or regenerating the agent", async () => {
     const { project, stale } = await projectWithStaleRecord();
-    await container.github.commit(repo(project), project.branch, "Tombstone the release agent", [{ path: "CodeVia/agents/release.md", content: matter({ deleted: true, kind: "agent", id: stale.id, slug: "release", type: "release" }, "Intentionally removed. Do not regenerate automatically.") }]);
+    await container.github.commit(repo(project), project.branch, "Tombstone the release agent", [
+      {
+        path: "CodeVia/agents/release.md",
+        content: matter(
+          { deleted: true, kind: "agent", id: stale.id, slug: "release", type: "release" },
+          "Intentionally removed. Do not regenerate automatically.",
+        ),
+      },
+    ]);
 
     await container.agentManager.refreshProject(project.id);
 
@@ -288,7 +391,11 @@ describe("R05 — stale .ai-engineering config paths heal instead of dead-letter
 
 describe("R07 — failed cancellation persistence retries and reports unsynced state", () => {
   it("flags repositorySynced=false during an outage and completes the sync on retry", async () => {
-    const task = container.agentManager.createTask({ projectId: project.id, title: "Cancelled fixture", description: "No execution" });
+    const task = container.agentManager.createTask({
+      projectId: project.id,
+      title: "Cancelled fixture",
+      description: "No execution",
+    });
     await container.agentManager.syncTaskFile(project.id, task);
     const original = container.github.commit.bind(container.github);
     container.github.commit = async () => {
@@ -308,7 +415,9 @@ describe("R07 — failed cancellation persistence retries and reports unsynced s
     expect(retry.statusCode).toBe(200);
     expect(retry.json().alreadyFinal).toBe(true);
     expect(retry.json().repositorySynced).toBe(true);
-    const statusInGit = parseMatter((await container.github.getFile(repo(project), `CodeVia/tasks/${task.id}.md`, project.branch))!.content).data.status;
+    const statusInGit = parseMatter(
+      (await container.github.getFile(repo(project), `CodeVia/tasks/${task.id}.md`, project.branch))!.content,
+    ).data.status;
     expect(statusInGit).toBe("cancelled");
   });
 });
@@ -345,7 +454,10 @@ describe("hardening — trailing runtime-state writes never dead-letter a finish
     const mutated = { ...run, summary: "OUTBOX_RUN_SUMMARY", updatedAt: new Date().toISOString() };
     const path = `CodeVia/runs/${run.id}.md`;
     const fileSummary = async (): Promise<string | undefined> =>
-      (parseMatter((await container.github.getFile(repo(project), path, project.branch))!.content).data.run as { summary?: string } | undefined)?.summary;
+      (
+        parseMatter((await container.github.getFile(repo(project), path, project.branch))!.content).data.run as
+          { summary?: string } | undefined
+      )?.summary;
     // Sanity: the live run file is not yet the mutated revision.
     expect(await fileSummary()).not.toContain("OUTBOX_RUN_SUMMARY");
 
@@ -389,34 +501,42 @@ describe("hardening — trailing runtime-state writes never dead-letter a finish
       throw Object.assign(new Error("GitHub 404 https://api.github.com/repos/audit/source/git/trees"), { status: 404 });
     };
     try {
-      await expect(container.projectFiles.syncMemory(project, [{
-        id: "mem-404",
-        projectId: project.id,
-        scope: "project",
-        type: "knowledge",
-        key: "404-probe",
-        content: "probe",
-        tags: [],
-        refs: [],
-        source: "test",
-        version: 1,
-        createdAt: project.createdAt,
-        updatedAt: project.updatedAt,
-      }])).rejects.toThrow(/cannot access|does not exist under the connected account/);
-      await expect(container.projectFiles.syncMemory(project, [{
-        id: "mem-404b",
-        projectId: project.id,
-        scope: "project",
-        type: "knowledge",
-        key: "404-probe-b",
-        content: "probe",
-        tags: [],
-        refs: [],
-        source: "test",
-        version: 1,
-        createdAt: project.createdAt,
-        updatedAt: project.updatedAt,
-      }])).rejects.toThrow(new RegExp(`${project.configRepo.split("/")[0]}/${project.configRepo.split("/")[1]}`));
+      await expect(
+        container.projectFiles.syncMemory(project, [
+          {
+            id: "mem-404",
+            projectId: project.id,
+            scope: "project",
+            type: "knowledge",
+            key: "404-probe",
+            content: "probe",
+            tags: [],
+            refs: [],
+            source: "test",
+            version: 1,
+            createdAt: project.createdAt,
+            updatedAt: project.updatedAt,
+          },
+        ]),
+      ).rejects.toThrow(/cannot access|does not exist under the connected account/);
+      await expect(
+        container.projectFiles.syncMemory(project, [
+          {
+            id: "mem-404b",
+            projectId: project.id,
+            scope: "project",
+            type: "knowledge",
+            key: "404-probe-b",
+            content: "probe",
+            tags: [],
+            refs: [],
+            source: "test",
+            version: 1,
+            createdAt: project.createdAt,
+            updatedAt: project.updatedAt,
+          },
+        ]),
+      ).rejects.toThrow(new RegExp(`${project.configRepo.split("/")[0]}/${project.configRepo.split("/")[1]}`));
     } finally {
       container.github.commit = original as unknown as typeof container.github.commit;
     }

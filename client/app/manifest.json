@@ -1,0 +1,70 @@
+{
+  "output": "public/app.js",
+  "description": "Ordered source fragments of the SPA. scripts/build-app.mjs concatenates these (in this order) into public/app.js. Each entry's from/to is the 1-indexed inclusive line range of the generated artifact; the drift-guard test asserts every fragment still matches that slice.",
+  "modules": [
+    { "file": "00-header.js", "module": "IIFE header + 'use strict'", "from": 1, "to": 4 },
+    {
+      "file": "10-core.js",
+      "module": "API client · auth/session · DOM & format helpers · capability badges · verdict dialog · modal · tabs · SVG chart kit",
+      "from": 5,
+      "to": 466
+    },
+    {
+      "file": "20-app-shell.js",
+      "module": "realtime socket · router · current-project context · command palette · theme/direction · mobile sidebar",
+      "from": 467,
+      "to": 966
+    },
+    { "file": "30-dashboard.js", "module": "dashboard view", "from": 967, "to": 1124 },
+    {
+      "file": "40-projects.js",
+      "module": "projects list · multi-select chips · repo picker · new-project modal",
+      "from": 1125,
+      "to": 1418
+    },
+    {
+      "file": "50-project-detail.js",
+      "module": "project detail tabs · chat · workspace overview",
+      "from": 1419,
+      "to": 2462
+    },
+    {
+      "file": "60-project-actions.js",
+      "module": "project sub-resource actions (tasks/workflows/agents/memory/skills/issues/PRs/conversations)",
+      "from": 2463,
+      "to": 2685
+    },
+    { "file": "70-agents.js", "module": "agents list + agent detail", "from": 2686, "to": 2848 },
+    { "file": "80-models.js", "module": "models list · tabs · pager · search", "from": 2849, "to": 3074 },
+    {
+      "file": "90-model-benchmark.js",
+      "module": "smart-routing benchmark panel · model edit · multi-select bulk",
+      "from": 3075,
+      "to": 3724
+    },
+    {
+      "file": "100-model-tools.js",
+      "module": "unresponsive cleanup list · groups · add model · streaming chat modal",
+      "from": 3725,
+      "to": 4331
+    },
+    { "file": "110-providers.js", "module": "providers dashboard · filters · bulk actions", "from": 4332, "to": 4942 },
+    { "file": "120-skills-workflows.js", "module": "skills · workflow list + builder", "from": 4943, "to": 5111 },
+    { "file": "130-runs-tasks.js", "module": "tasks · runs · approvals · logs rows", "from": 5112, "to": 5213 },
+    {
+      "file": "140-conversations-memory-github.js",
+      "module": "conversations · conversation detail · memory · github repos",
+      "from": 5214,
+      "to": 5557
+    },
+    {
+      "file": "150-login-telegram.js",
+      "module": "login-result toasts · create repo · telegram",
+      "from": 5558,
+      "to": 5900
+    },
+    { "file": "160-settings.js", "module": "settings hub", "from": 5901, "to": 6007 },
+    { "file": "170-admin.js", "module": "admin console", "from": 6008, "to": 6408 },
+    { "file": "180-search-boot.js", "module": "search · boot", "from": 6409, "to": 6430 }
+  ]
+}

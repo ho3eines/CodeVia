@@ -29,10 +29,19 @@ async function bootstrapMissingState(c: Container, projectId: string): Promise<v
   }
   try {
     await c.agentManager.refreshProject(projectId);
-    logger.info("auto-initialized missing project state", { component: "project-state", projectId, repo: p.configRepo });
+    logger.info("auto-initialized missing project state", {
+      component: "project-state",
+      projectId,
+      repo: p.configRepo,
+    });
   } catch (err) {
     // The read already succeeded; a failed bootstrap must not break the page.
-    logger.warn("auto-initialization of missing project state failed", { component: "project-state", projectId, repo: p.configRepo, err: String(err) });
+    logger.warn("auto-initialization of missing project state failed", {
+      component: "project-state",
+      projectId,
+      repo: p.configRepo,
+      err: String(err),
+    });
   }
 }
 
@@ -52,7 +61,12 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
   app.addHook("preHandler", async (req) => {
     const route = req.routeOptions.url ?? "";
     const resource = route.split("/")[1];
-    if (!["projects", "agents", "skills", "memory", "workflows", "conversations", "tasks", "runs", "search"].includes(resource)) return;
+    if (
+      !["projects", "agents", "skills", "memory", "workflows", "conversations", "tasks", "runs", "search"].includes(
+        resource,
+      )
+    )
+      return;
     if (route === "/projects/options" || route === "/agents/types" || route === "/skills/categories") return;
     // Runs/retry and live executor routes must keep working during a GitHub
     // outage, so they are handled below (guarded + bound) but never force a
@@ -62,9 +76,24 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
     const params = (req.params ?? {}) as Record<string, string>;
     const query = (req.query ?? {}) as Record<string, unknown>;
     const body = (req.body ?? {}) as Record<string, unknown>;
-    let projectId = resource === "projects" ? params.id : typeof query.projectId === "string" ? query.projectId : typeof body.projectId === "string" ? body.projectId : undefined;
+    let projectId =
+      resource === "projects"
+        ? params.id
+        : typeof query.projectId === "string"
+          ? query.projectId
+          : typeof body.projectId === "string"
+            ? body.projectId
+            : undefined;
     if (!projectId && params.id) {
-      const repos = { agents: c.agentRepo, skills: c.skillRepo, memory: c.memoryRepo, workflows: c.workflowRepo, conversations: c.conversationRepo, tasks: c.taskRepo, runs: c.runRepo };
+      const repos = {
+        agents: c.agentRepo,
+        skills: c.skillRepo,
+        memory: c.memoryRepo,
+        workflows: c.workflowRepo,
+        conversations: c.conversationRepo,
+        tasks: c.taskRepo,
+        runs: c.runRepo,
+      };
       const repo = repos[resource as keyof typeof repos];
       projectId = repo?.findById(params.id)?.data.projectId;
     }
@@ -73,7 +102,8 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
     const actingUserId = authenticated && getUserGitHubToken(c.kv, user.id) ? user.id : undefined;
     const bind = (p: { id: string }) => {
       const stored = c.projectRepo.findById(p.id)?.data;
-      if (stored) adoptProjectConnection({ kv: c.kv, projectRepo: c.projectRepo, project: stored, userId: actingUserId });
+      if (stored)
+        adoptProjectConnection({ kv: c.kv, projectRepo: c.projectRepo, project: stored, userId: actingUserId });
     };
 
     if (projectId) {
@@ -85,13 +115,24 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
       // project the caller is entitled to take over.
       let p = stored;
       if (!canAccessProject(user, p)) {
-        const adopted = adoptStrandedProject({ kv: c.kv, projectRepo: c.projectRepo, project: p, userId: actingUserId });
+        const adopted = adoptStrandedProject({
+          kv: c.kv,
+          projectRepo: c.projectRepo,
+          project: p,
+          userId: actingUserId,
+        });
         if (!adopted) notFound();
         p = adopted;
       }
       bind(p);
       // Live executor / cancellation routes never block on a repository read.
       if (isOfflineOk) return;
+      // Project definition writes (PATCH capabilities/settings, attach skills,
+      // pull, ask, …) manage their own Git interaction — PATCH calls save()
+      // which syncs, pull/restore re-reads explicitly. Restoring from Git here
+      // would clobber local edits that have not been synced yet (A05: editing
+      // capabilities must not reset a manually configured agent).
+      if (resource === "projects" && req.method !== "GET") return;
       // Chat is local-first. Restoring CodeVia/* on every GET/POST
       // /conversations used to wipe the in-page thread when Git had no
       // conversation files (empty repo, or persist failed) and then 404
@@ -104,7 +145,13 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
         // A GitHub 404 from the wrong token must not 500 GET list/detail.
         // Writes to agents, workflows, etc. still fail closed.
         if (req.method === "GET") {
-          logger.warn("project restore skipped", { component: "project-state", projectId, resource, method: req.method, err: String(err) });
+          logger.warn("project restore skipped", {
+            component: "project-state",
+            projectId,
+            resource,
+            method: req.method,
+            err: String(err),
+          });
           return;
         }
         throw err;
@@ -126,7 +173,11 @@ export function registerProjectStateHook(app: FastifyInstance, c: Container): vo
             await bootstrapMissingState(c, p.id);
           } catch (err) {
             // One project's GitHub outage must not 500 the project/conversation list.
-            logger.warn("project restore skipped while listing", { component: "project-state", projectId: p.id, err: String(err) });
+            logger.warn("project restore skipped while listing", {
+              component: "project-state",
+              projectId: p.id,
+              err: String(err),
+            });
           }
         }
       }

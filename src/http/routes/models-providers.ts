@@ -36,25 +36,89 @@ const API_FORMATS: ModelProvider["apiFormat"][] = ["openai", "anthropic", "gemin
 /** Sensible defaults per provider type so the "Add Provider" form only needs a name. */
 export const PROVIDER_PRESETS: Record<
   ModelProvider["type"],
-  { baseUrl?: string; secretRef?: string; authType: ModelProvider["authType"]; apiFormat: ModelProvider["apiFormat"]; label: string }
+  {
+    baseUrl?: string;
+    secretRef?: string;
+    authType: ModelProvider["authType"];
+    apiFormat: ModelProvider["apiFormat"];
+    label: string;
+  }
 > = {
-  openai: { baseUrl: "https://api.openai.com/v1", secretRef: "OPENAI_API_KEY", authType: "bearer", apiFormat: "openai", label: "OpenAI" },
-  anthropic: { baseUrl: "https://api.anthropic.com", secretRef: "ANTHROPIC_API_KEY", authType: "api-key", apiFormat: "anthropic", label: "Anthropic" },
-  gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", secretRef: "GEMINI_API_KEY", authType: "api-key", apiFormat: "gemini", label: "Google Gemini" },
-  openrouter: { baseUrl: "https://openrouter.ai/api/v1", secretRef: "OPENROUTER_API_KEY", authType: "bearer", apiFormat: "openai", label: "OpenRouter" },
-  "azure-openai": { baseUrl: "https://<resource>.openai.azure.com/openai", secretRef: "AZURE_OPENAI_API_KEY", authType: "api-key", apiFormat: "openai", label: "Azure OpenAI" },
-  ollama: { baseUrl: "http://localhost:11434/v1", secretRef: undefined, authType: "none", apiFormat: "ollama", label: "Ollama (local)" },
-  "openai-compatible": { baseUrl: "http://localhost:8000/v1", secretRef: "LLM_API_KEY", authType: "bearer", apiFormat: "openai", label: "OpenAI-compatible" },
-  "custom-http": { baseUrl: "", secretRef: "CUSTOM_LLM_API_KEY", authType: "bearer", apiFormat: "custom", label: "Custom HTTP" },
+  openai: {
+    baseUrl: "https://api.openai.com/v1",
+    secretRef: "OPENAI_API_KEY",
+    authType: "bearer",
+    apiFormat: "openai",
+    label: "OpenAI",
+  },
+  anthropic: {
+    baseUrl: "https://api.anthropic.com",
+    secretRef: "ANTHROPIC_API_KEY",
+    authType: "api-key",
+    apiFormat: "anthropic",
+    label: "Anthropic",
+  },
+  gemini: {
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    secretRef: "GEMINI_API_KEY",
+    authType: "api-key",
+    apiFormat: "gemini",
+    label: "Google Gemini",
+  },
+  openrouter: {
+    baseUrl: "https://openrouter.ai/api/v1",
+    secretRef: "OPENROUTER_API_KEY",
+    authType: "bearer",
+    apiFormat: "openai",
+    label: "OpenRouter",
+  },
+  "azure-openai": {
+    baseUrl: "https://<resource>.openai.azure.com/openai",
+    secretRef: "AZURE_OPENAI_API_KEY",
+    authType: "api-key",
+    apiFormat: "openai",
+    label: "Azure OpenAI",
+  },
+  ollama: {
+    baseUrl: "http://localhost:11434/v1",
+    secretRef: undefined,
+    authType: "none",
+    apiFormat: "ollama",
+    label: "Ollama (local)",
+  },
+  "openai-compatible": {
+    baseUrl: "http://localhost:8000/v1",
+    secretRef: "LLM_API_KEY",
+    authType: "bearer",
+    apiFormat: "openai",
+    label: "OpenAI-compatible",
+  },
+  "custom-http": {
+    baseUrl: "",
+    secretRef: "CUSTOM_LLM_API_KEY",
+    authType: "bearer",
+    apiFormat: "custom",
+    label: "Custom HTTP",
+  },
   mock: { baseUrl: undefined, secretRef: undefined, authType: "none", apiFormat: "custom", label: "Mock AI (offline)" },
 };
 
-function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
+function fail(
+  reply: FastifyReply,
+  status: number,
+  message: string,
+  extra: Record<string, unknown> = {},
+): { error: string } {
   reply.code(status);
   return { error: message, ...extra };
 }
 
-function withStatus(p: ModelProvider): ModelProvider & { readiness: ReturnType<typeof providerReadiness>; keyPresent: boolean; secretValuePresent: boolean; secretMasked: string } {
+function withStatus(p: ModelProvider): ModelProvider & {
+  readiness: ReturnType<typeof providerReadiness>;
+  keyPresent: boolean;
+  secretValuePresent: boolean;
+  secretMasked: string;
+} {
   const readiness = providerReadiness(p);
   return {
     ...p,
@@ -154,7 +218,10 @@ async function discoverAndAddModels(
   // De-duplicate against models ALREADY in the Models section for THIS provider
   // (a model id can legitimately exist for more than one provider).
   const existingModels = new Set(
-    container.modelRepo.listForOwner(ownerId).filter((m) => m.providerId === providerId).map((m) => m.modelId),
+    container.modelRepo
+      .listForOwner(ownerId)
+      .filter((m) => m.providerId === providerId)
+      .map((m) => m.modelId),
   );
 
   const added: string[] = [];
@@ -180,10 +247,7 @@ async function discoverAndAddModels(
       added.push(modelId);
       existingModels.add(modelId);
     } catch (err) {
-      logger.warn(
-        `Failed to add model ${modelId} for provider ${providerId}`,
-        { err: String(err) },
-      );
+      logger.warn(`Failed to add model ${modelId} for provider ${providerId}`, { err: String(err) });
     }
   }
 
@@ -216,9 +280,9 @@ async function attachDiscovery(
     status.message = `${base} (mock provider — no live model catalog)`;
     return;
   }
-  let added: string[] = [];
+  let added: string[];
   let test: ProviderTestResult;
-  let fromKnownCatalog = false;
+  let fromKnownCatalog: boolean;
   try {
     ({ added, test, fromKnownCatalog } = await discoverAndAddModels(p.id, p, container));
   } catch (err) {
@@ -278,7 +342,9 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     // a provider's catalog, so manual entry is a first-class path here. The id is
     // normalized (a pasted `models/gemini-…` prefix is stripped) but never
     // validated against the catalog.
-    const modelId = String(b.modelId ?? "").trim().replace(/^models\//, "");
+    const modelId = String(b.modelId ?? "")
+      .trim()
+      .replace(/^models\//, "");
     if (!modelId) return fail(reply, 400, "modelId is required (the provider's model name, e.g. gpt-4o-mini)");
     const duplicate = container.modelRepo
       .listForOwner(actor(req))
@@ -286,7 +352,11 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     // Idempotent: re-adding an existing model returns it instead of creating a
     // second row (the UI shows a "already in the registry" notice).
     if (duplicate) {
-      return { ...duplicate, duplicate: true, message: `Model "${modelId}" is already in the registry for this provider` };
+      return {
+        ...duplicate,
+        duplicate: true,
+        message: `Model "${modelId}" is already in the registry for this provider`,
+      };
     }
     // Capabilities are auto-detected when the client does not supply them.
     const detectedCapabilities = detectModelCapabilities(modelId);
@@ -310,7 +380,9 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       tags: Array.isArray(b.tags) ? (b.tags as string[]) : [],
       // Optional per-model tuning — needed by routes that mandate a specific
       // temperature (or reject the parameter entirely).
-      ...(typeof optionalNumber(b.temperature) === "number" ? { temperature: optionalNumber(b.temperature) as number } : {}),
+      ...(typeof optionalNumber(b.temperature) === "number"
+        ? { temperature: optionalNumber(b.temperature) as number }
+        : {}),
       ...(typeof optionalNumber(b.maxTokens) === "number" ? { maxTokens: optionalNumber(b.maxTokens) as number } : {}),
       ...(b.omitTemperature === true ? { omitTemperature: true } : {}),
       ...(typeof b.notes === "string" && b.notes.trim() ? { notes: b.notes.trim() } : {}),
@@ -353,7 +425,8 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (b.inputCostPer1k !== undefined) patch.inputCostPer1k = numberOr(b.inputCostPer1k, r.data.inputCostPer1k);
     if (b.outputCostPer1k !== undefined) patch.outputCostPer1k = numberOr(b.outputCostPer1k, r.data.outputCostPer1k);
     if (b.priority !== undefined) patch.priority = numberOr(b.priority, r.data.priority);
-    if (b.fallbackPriority !== undefined) patch.fallbackPriority = numberOr(b.fallbackPriority, r.data.fallbackPriority);
+    if (b.fallbackPriority !== undefined)
+      patch.fallbackPriority = numberOr(b.fallbackPriority, r.data.fallbackPriority);
     if (b.active !== undefined) patch.active = b.active !== false;
     if (Array.isArray(b.tags)) patch.tags = (b.tags as unknown[]).map((t) => String(t).trim()).filter(Boolean);
     if (isMeaningfulCapabilities(b.capabilities)) {
@@ -369,7 +442,8 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       else if (typeof t === "number") {
         // Temperature is the model's creativity dial: 0.0 = deterministic,
         // 1.0 = most creative.
-        if (t < 0 || t > 1) return fail(reply, 400, "temperature must be between 0.0 and 1.0 (0 = deterministic, 1 = most creative)");
+        if (t < 0 || t > 1)
+          return fail(reply, 400, "temperature must be between 0.0 and 1.0 (0 = deterministic, 1 = most creative)");
         patch.temperature = t;
       }
     }
@@ -583,7 +657,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const m = visibleModel(req, id);
     if (!m) return fail(reply, 404, "model not found");
-    if (protectedShared(m, req)) return fail(reply, 409, "The built-in mock models are shared platform rows and cannot be deleted — deactivate them instead");
+    if (protectedShared(m, req))
+      return fail(
+        reply,
+        409,
+        "The built-in mock models are shared platform rows and cannot be deleted — deactivate them instead",
+      );
     container.modelRepo.deleteById(id);
     container.benchRepo.purgeForModel(id);
     return { ok: true };
@@ -629,17 +708,24 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   app.post("/providers", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const type = String(b.type ?? "openai") as ModelProvider["type"];
-    if (!PROVIDER_TYPES.includes(type)) return fail(reply, 400, `Unknown provider type "${type}"`, { allowed: PROVIDER_TYPES });
+    if (!PROVIDER_TYPES.includes(type))
+      return fail(reply, 400, `Unknown provider type "${type}"`, { allowed: PROVIDER_TYPES });
     const preset = PROVIDER_PRESETS[type];
     const name = String(b.name ?? "").trim() || preset.label;
     const authType = (typeof b.authType === "string" ? b.authType : preset.authType) as ModelProvider["authType"];
-    if (!AUTH_TYPES.includes(authType)) return fail(reply, 400, `Unknown authType "${authType}"`, { allowed: AUTH_TYPES });
+    if (!AUTH_TYPES.includes(authType))
+      return fail(reply, 400, `Unknown authType "${authType}"`, { allowed: AUTH_TYPES });
     const apiFormat = (typeof b.apiFormat === "string" ? b.apiFormat : preset.apiFormat) as ModelProvider["apiFormat"];
-    if (!API_FORMATS.includes(apiFormat)) return fail(reply, 400, `Unknown apiFormat "${apiFormat}"`, { allowed: API_FORMATS });
+    if (!API_FORMATS.includes(apiFormat))
+      return fail(reply, 400, `Unknown apiFormat "${apiFormat}"`, { allowed: API_FORMATS });
     const baseUrl = typeof b.baseUrl === "string" && b.baseUrl.trim() ? b.baseUrl.trim() : preset.baseUrl;
     const secretRef = typeof b.secretRef === "string" && b.secretRef.trim() ? b.secretRef.trim() : preset.secretRef;
     if (secretRef && !/^[A-Z][A-Z0-9_]*$/i.test(secretRef)) {
-      return fail(reply, 400, "secretRef must be an environment variable NAME (e.g. OPENAI_API_KEY); to store an API key directly use the secretValue field");
+      return fail(
+        reply,
+        400,
+        "secretRef must be an environment variable NAME (e.g. OPENAI_API_KEY); to store an API key directly use the secretValue field",
+      );
     }
     const secretValue = typeof b.secretValue === "string" && b.secretValue.trim() ? b.secretValue.trim() : undefined;
     if (secretValue && secretValue.length < 6) return fail(reply, 400, "secretValue looks too short to be an API key");
@@ -694,7 +780,8 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   app.post("/providers/test", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const type = String(b.type ?? "openai") as ModelProvider["type"];
-    if (!PROVIDER_TYPES.includes(type)) return fail(reply, 400, `Unknown provider type "${type}"`, { allowed: PROVIDER_TYPES });
+    if (!PROVIDER_TYPES.includes(type))
+      return fail(reply, 400, `Unknown provider type "${type}"`, { allowed: PROVIDER_TYPES });
     const preset = PROVIDER_PRESETS[type];
     const authType = (typeof b.authType === "string" ? b.authType : preset.authType) as ModelProvider["authType"];
     if (!AUTH_TYPES.includes(authType)) return fail(reply, 400, `Unknown authType "${authType}"`);
@@ -750,9 +837,14 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     // a shared row is visible to everyone, so an in-place edit would publish
     // this account's API key to every other user.
     const r = { data: adoptRowForMutation(found, actor(req)) };
-    if (typeof b.type === "string" && !PROVIDER_TYPES.includes(b.type as ModelProvider["type"])) return fail(reply, 400, `Unknown provider type "${b.type}"`);
+    if (typeof b.type === "string" && !PROVIDER_TYPES.includes(b.type as ModelProvider["type"]))
+      return fail(reply, 400, `Unknown provider type "${b.type}"`);
     if (typeof b.secretRef === "string" && b.secretRef && !/^[A-Z][A-Z0-9_]*$/i.test(b.secretRef)) {
-      return fail(reply, 400, "secretRef must be an environment variable NAME; use secretValue to store a key directly");
+      return fail(
+        reply,
+        400,
+        "secretRef must be an environment variable NAME; use secretValue to store a key directly",
+      );
     }
     const patch = { ...b };
     if (typeof patch.secretValue === "string") {
@@ -762,7 +854,13 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       if (v) patch.secretValueEnc = JSON.stringify(encryptSecret(v, "provider-secret"));
     }
     delete patch.secretValue;
-    const p = { ...r.data, ...patch, id, createdAt: r.data.createdAt, updatedAt: new Date().toISOString() } as ModelProvider;
+    const p = {
+      ...r.data,
+      ...patch,
+      id,
+      createdAt: r.data.createdAt,
+      updatedAt: new Date().toISOString(),
+    } as ModelProvider;
     container.providerRepo.upsert(p);
     container.providerRegistry.invalidate(id);
     // 🤖 Re-run model discovery after the edit (same behavior as on create): any
@@ -897,7 +995,11 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
           continue;
         }
       }
-      container.providerRepo.upsert({ ...adoptRowForMutation(p, actor(req)), active: activate, updatedAt: new Date().toISOString() });
+      container.providerRepo.upsert({
+        ...adoptRowForMutation(p, actor(req)),
+        active: activate,
+        updatedAt: new Date().toISOString(),
+      });
       container.providerRegistry.invalidate(id);
       affected.push(id);
     }
@@ -957,11 +1059,14 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const r = visibleProvider(req, id);
     if (!r) return fail(reply, 404, "provider not found");
-    if (isBuiltInMock(r)) return fail(reply, 400, "The built-in mock provider cannot be deleted (deactivate it instead)");
+    if (isBuiltInMock(r))
+      return fail(reply, 400, "The built-in mock provider cannot be deleted (deactivate it instead)");
     const models = container.modelRepo.listForOwner(actor(req)).filter((m) => m.providerId === id);
     const q = req.query as { cascade?: string };
     if (models.length && q.cascade !== "true") {
-      return fail(reply, 409, `Provider has ${models.length} model(s). Delete them first or call with ?cascade=true`, { models: models.map((m) => m.id) });
+      return fail(reply, 409, `Provider has ${models.length} model(s). Delete them first or call with ?cascade=true`, {
+        models: models.map((m) => m.id),
+      });
     }
     for (const m of models) container.modelRepo.deleteById(m.id);
     if (models.length) container.benchRepo.purgeForModels(models.map((m) => m.id));

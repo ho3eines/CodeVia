@@ -16,9 +16,23 @@ import { freshDb } from "./test-helpers.js";
  * ------------------------------------------------------------------ */
 
 const ROUTES = [
-  "/dashboard", "/projects", "/agents", "/models", "/providers", "/skills",
-  "/workflows", "/tasks", "/runs", "/approvals", "/logs", "/memory",
-  "/github", "/telegram", "/settings", "/admin", "/search",
+  "/dashboard",
+  "/projects",
+  "/agents",
+  "/models",
+  "/providers",
+  "/skills",
+  "/workflows",
+  "/tasks",
+  "/runs",
+  "/approvals",
+  "/logs",
+  "/memory",
+  "/github",
+  "/telegram",
+  "/settings",
+  "/admin",
+  "/search",
 ];
 
 let cleanup: (() => void) | undefined;
@@ -44,7 +58,18 @@ afterAll(async () => {
 });
 
 /** Minimal structural stand-ins — tsconfig uses the Node lib, not DOM. */
-type El = { className: string; textContent: string | null; querySelectorAll(sel: string): { length: number } & Iterable<El>; querySelector(sel: string): El | null; hidden: boolean; dataset: Record<string, string | undefined>; click(): void; hasAttribute(a: string): boolean; getAttribute(a: string): string | null; dispatchEvent(e: unknown): boolean };
+type El = {
+  className: string;
+  textContent: string | null;
+  querySelectorAll(sel: string): { length: number } & Iterable<El>;
+  querySelector(sel: string): El | null;
+  hidden: boolean;
+  dataset: Record<string, string | undefined>;
+  click(): void;
+  hasAttribute(a: string): boolean;
+  getAttribute(a: string): string | null;
+  dispatchEvent(e: unknown): boolean;
+};
 
 /** Boot the SPA in jsdom and return helpers to drive it. */
 async function boot() {
@@ -75,8 +100,12 @@ async function boot() {
   return { win, errors, go, settle };
 }
 
-beforeEach(() => { vi.useRealTimers(); });
-afterEach(() => { vi.unstubAllGlobals(); });
+beforeEach(() => {
+  vi.useRealTimers();
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("UI shell", () => {
   it("renders every top-level route without an error state", async () => {
@@ -99,22 +128,53 @@ describe("UI shell", () => {
     expect(links.length, `nav must have exactly 3 items, got ${JSON.stringify(links)}`).toBe(3);
     const texts = links.map((l) => l.text);
     for (const expected of ["Chat", "Project", "Settings"]) {
-      expect(texts.some((t) => t.includes(expected)), `nav missing ${expected}`).toBe(true);
+      expect(
+        texts.some((t) => t.includes(expected)),
+        `nav missing ${expected}`,
+      ).toBe(true);
     }
     // Everything else (agents/models/.../admin/search) must NOT be a nav item.
-    const banned = ["Agents", "Models", "Providers", "Skills", "Workflows", "Tasks", "Runs", "Approvals", "Logs", "Memory", "GitHub", "Telegram", "Admin", "Search", "Conversations", "Dashboard"];
+    const banned = [
+      "Agents",
+      "Models",
+      "Providers",
+      "Skills",
+      "Workflows",
+      "Tasks",
+      "Runs",
+      "Approvals",
+      "Logs",
+      "Memory",
+      "GitHub",
+      "Telegram",
+      "Admin",
+      "Search",
+      "Conversations",
+      "Dashboard",
+    ];
     for (const b of banned) {
-      expect(texts.some((t) => t.includes(b)), `"${b}" leaked into the primary nav`).toBe(false);
+      expect(
+        texts.some((t) => t.includes(b)),
+        `"${b}" leaked into the primary nav`,
+      ).toBe(false);
     }
   }, 30000);
 
   it("opens Chat as a standalone AI chat (home) while project-connected chat lives in the project section, and every moved section is reachable from Settings", async () => {
-    await container.agentManager.createProject({ name: "Home Hub QA", description: "Home surface", configRepo: "acme/home-hub-qa", branch: "main" });
+    await container.agentManager.createProject({
+      name: "Home Hub QA",
+      description: "Home surface",
+      configRepo: "acme/home-hub-qa",
+      branch: "main",
+    });
     const { win, go, errors } = await boot();
     // Home = simple standalone AI chat: no project switcher, no project composer.
     const chat = await go("#/chat");
-    expect((chat.textContent ?? "")).not.toMatch(/Something went wrong/);
-    expect(win.document.querySelector("#ws-project-switch"), "standalone chat must not carry a project switcher").toBeFalsy();
+    expect(chat.textContent ?? "").not.toMatch(/Something went wrong/);
+    expect(
+      win.document.querySelector("#ws-project-switch"),
+      "standalone chat must not carry a project switcher",
+    ).toBeFalsy();
     expect(chat.querySelector(".p-chat-composer"), "standalone chat must not show the project composer").toBeFalsy();
     expect(chat.querySelector("#chat-messages"), "standalone chat shows messages").toBeTruthy();
     expect(chat.querySelector("#chat-input"), "standalone chat shows the input").toBeTruthy();
@@ -122,20 +182,43 @@ describe("UI shell", () => {
     expect(chat.querySelector("#chat-new"), "standalone chat offers a new-chat button").toBeTruthy();
 
     // Project-connected chat exists only inside the project section.
-    const created = container.projectRepo.findMany().map((r) => r.data).find((p) => p.name === "Home Hub QA");
+    const created = container.projectRepo
+      .findMany()
+      .map((r) => r.data)
+      .find((p) => p.name === "Home Hub QA");
     expect(created, "test project exists").toBeTruthy();
     const projectChat = await go(`#/projects/${created!.id}`);
-    expect((projectChat.textContent ?? "")).not.toMatch(/Something went wrong/);
-    expect(projectChat.querySelector(".p-chat-composer"), "project page shows the project-connected composer").toBeTruthy();
+    expect(projectChat.textContent ?? "").not.toMatch(/Something went wrong/);
+    expect(
+      projectChat.querySelector(".p-chat-composer"),
+      "project page shows the project-connected composer",
+    ).toBeTruthy();
 
     const proj = await go("#/project");
-    expect((proj.textContent ?? "")).not.toMatch(/Something went wrong/);
+    expect(proj.textContent ?? "").not.toMatch(/Something went wrong/);
     expect(win.document.querySelector("#ws-project-switch"), "project page has a project switcher").toBeTruthy();
 
     // Settings is the hub: every moved top-level section is linkable from it.
     const settings = await go("#/settings");
     const hubLinks = [...settings.querySelectorAll("a")].map((a) => (a as El).getAttribute("href"));
-    for (const target of ["#/agents", "#/models", "#/providers", "#/skills", "#/workflows", "#/tasks", "#/runs", "#/approvals", "#/logs", "#/memory", "#/github", "#/telegram", "#/admin", "#/search", "#/conversations", "#/dashboard"]) {
+    for (const target of [
+      "#/agents",
+      "#/models",
+      "#/providers",
+      "#/skills",
+      "#/workflows",
+      "#/tasks",
+      "#/runs",
+      "#/approvals",
+      "#/logs",
+      "#/memory",
+      "#/github",
+      "#/telegram",
+      "#/admin",
+      "#/search",
+      "#/conversations",
+      "#/dashboard",
+    ]) {
       expect(hubLinks, `Settings hub must link every moved section`).toContain(target);
     }
     expect(errors).toEqual([]);
@@ -152,7 +235,9 @@ describe("UI shell", () => {
     const content = await go(`#/projects/${project.id}`);
     const bar = content.querySelector(".action-row") as El;
     expect(bar, "project action bar rendered").toBeTruthy();
-    const buttons = [...bar.querySelectorAll("button")] as Array<El & { textContent: string | null; getAttribute(a: string): string | null; click(): void }>;
+    const buttons = [...bar.querySelectorAll("button")] as Array<
+      El & { textContent: string | null; getAttribute(a: string): string | null; click(): void }
+    >;
     // ❓ Ask AI · ▶ Run Agent · ＋ Create Task · 🔀 Run Workflow · 🧪 Dry Run · 📏 Rules
     // ↻ Load / fill missing · ⬇ Pull · 📱 Telegram · ⇩ Export · ⇧ Import · ⏸ Deactivate · ⚙ Edit
     expect(buttons.length).toBeGreaterThanOrEqual(13);
@@ -169,11 +254,18 @@ describe("UI shell", () => {
       const original = win[fn];
       expect(typeof original, `${fn} is defined on window`).toBe("function");
       let args: unknown[] | undefined;
-      win[fn] = (...a: unknown[]) => { args = a; called.set(fn, a); };
+      win[fn] = (...a: unknown[]) => {
+        args = a;
+        called.set(fn, a);
+      };
       // jsdom with runScripts:"outside-only" never executes inline handler
       // attributes on click, so run the exact code the browser would run.
       // With the old truncated markup this throws a SyntaxError instead.
-      try { win.eval(attr!); } finally { win[fn] = original; }
+      try {
+        win.eval(attr!);
+      } finally {
+        win[fn] = original;
+      }
       expect(args, `${fn} was invoked by clicking "${btn.textContent?.trim()}"`).toBeDefined();
       expect(args![0], `${fn} receives the project id`).toBe(project.id);
     }
@@ -196,11 +288,28 @@ describe("UI shell", () => {
     const { go } = await boot();
     // All legacy deep links must render; top-level tabs are now Chat/Project/Settings (3)
     // but sub-resource pages (agents/tasks/...) reuse the Settings tab and render their own content card.
-    for (const suffix of ["", "/project", "/settings", "/agents", "/repositories", "/workflows", "/tasks", "/runs", "/tests", "/issues", "/pull-requests", "/skills", "/memory"]) {
+    for (const suffix of [
+      "",
+      "/project",
+      "/settings",
+      "/agents",
+      "/repositories",
+      "/workflows",
+      "/tasks",
+      "/runs",
+      "/tests",
+      "/issues",
+      "/pull-requests",
+      "/skills",
+      "/memory",
+    ]) {
       const content = await go(`#/projects/${project.id}${suffix}`);
       const text = content.textContent ?? "";
       if (!content.querySelector(".project-tabs")) {
-        console.error(`route ${suffix || "/"} missing tabs; content preview:`, (content as any).innerHTML?.slice(0, 500));
+        console.error(
+          `route ${suffix || "/"} missing tabs; content preview:`,
+          (content as any).innerHTML?.slice(0, 500),
+        );
       }
       expect(text, `project route ${suffix || "/"} rendered an error state`).not.toMatch(/Something went wrong/);
       expect(text).toContain("Project Detail QA");
@@ -212,15 +321,29 @@ describe("UI shell", () => {
   }, 60000);
 
   it("shows the planned owners, criteria and task-local skills in task details and run evidence", async () => {
-    const project = await container.agentManager.createProject({ name: "Skill Trace UI", description: "Store", configRepo: "acme/skill-trace-ui", capabilities: { platforms: ["web"], languages: ["typescript"], frameworks: ["react"] } });
-    const task = container.agentManager.createTask({ projectId: project.id, title: "Add login page and API", description: "Session login", input: { executionMode: "autonomous" } });
+    const project = await container.agentManager.createProject({
+      name: "Skill Trace UI",
+      description: "Store",
+      configRepo: "acme/skill-trace-ui",
+      capabilities: { platforms: ["web"], languages: ["typescript"], frameworks: ["react"] },
+    });
+    const task = container.agentManager.createTask({
+      projectId: project.id,
+      title: "Add login page and API",
+      description: "Session login",
+      input: { executionMode: "autonomous" },
+    });
     await container.agentManager.runTask(task.id);
-    const child = container.taskRepo.findMany({ parentId: task.id }).find((r) => r.data.agentType === "frontend-developer")!.data;
+    const child = container.taskRepo
+      .findMany({ parentId: task.id })
+      .find((r) => r.data.agentType === "frontend-developer")!.data;
     const { win, go, errors } = await boot();
     await win.projectViewTask(task.id);
     expect(win.document.querySelector(".task-plan").textContent).toContain("frontend-developer");
     expect(win.document.querySelector("#modal-body").textContent).toContain("Skills");
-    const childButton = [...win.document.querySelectorAll("#modal-body button")].find((el: any) => el.getAttribute("onclick")?.includes(child.id)) as any;
+    const childButton = [...win.document.querySelectorAll("#modal-body button")].find((el: any) =>
+      el.getAttribute("onclick")?.includes(child.id),
+    ) as any;
     expect(childButton.getAttribute("onclick")).toBe(`projectViewTask(${JSON.stringify(child.id)})`);
     await win.projectViewTask(child.id);
     const modal = win.document.querySelector("#modal-body");
@@ -240,7 +363,9 @@ describe("UI shell", () => {
   it("auto-detects Persian text direction in the model chat", async () => {
     const { win, go, settle } = await boot();
     await go("#/models");
-    const models = await fetch(`${baseUrl}/models`).then((r) => r.json() as Promise<Array<{ id: string; providerId: string }>>);
+    const models = await fetch(`${baseUrl}/models`).then(
+      (r) => r.json() as Promise<Array<{ id: string; providerId: string }>>,
+    );
     const mock = models.find((m) => m.providerId === "provider-mock") ?? models[0];
     expect(mock).toBeTruthy();
 
@@ -294,7 +419,9 @@ describe("UI shell", () => {
     win.TextDecoder = TextDecoder;
     win.TextEncoder = TextEncoder;
     await go("#/models");
-    const models = await fetch(`${baseUrl}/models`).then((r) => r.json() as Promise<Array<{ id: string; providerId: string }>>);
+    const models = await fetch(`${baseUrl}/models`).then(
+      (r) => r.json() as Promise<Array<{ id: string; providerId: string }>>,
+    );
     const mock = models.find((m) => m.providerId === "provider-mock") ?? models[0];
     win.openModelChat(mock.id);
     const input = win.document.querySelector("#chat-input") as any;
@@ -321,7 +448,9 @@ describe("UI shell", () => {
   it("keeps the AI bubble on the left (text right-aligned) and the send button clear of the right edge", async () => {
     const { win, go, settle } = await boot();
     await go("#/models");
-    const models = await fetch(`${baseUrl}/models`).then((r) => r.json() as Promise<Array<{ id: string; providerId: string }>>);
+    const models = await fetch(`${baseUrl}/models`).then(
+      (r) => r.json() as Promise<Array<{ id: string; providerId: string }>>,
+    );
     const mock = models.find((m) => m.providerId === "provider-mock") ?? models[0];
     win.openModelChat(mock.id);
     const input = win.document.querySelector("#chat-input") as any;
@@ -439,7 +568,18 @@ describe("theming", () => {
     const light = tokensFor('[data-theme="light"]');
     // Light mode must redefine the colour-bearing tokens rather than inherit
     // dark values, otherwise it reads as a washed-out dark theme.
-    for (const key of ["--bg", "--text", "--text-muted", "--surface", "--stroke", "--primary", "--ok", "--warn", "--err", "--glass"]) {
+    for (const key of [
+      "--bg",
+      "--text",
+      "--text-muted",
+      "--surface",
+      "--stroke",
+      "--primary",
+      "--ok",
+      "--warn",
+      "--err",
+      "--glass",
+    ]) {
       expect(light[key], `light mode is missing ${key}`).toBeTruthy();
       expect(light[key], `${key} is identical in both themes`).not.toBe(dark[key]);
     }
@@ -589,7 +729,7 @@ describe("test verdict dialog", () => {
     });
     const body = win.document.querySelector("#verdict-body") as El;
     expect(body.querySelectorAll(".verdict.err").length).toBe(1);
-    expect((body.textContent ?? "")).toContain("401 Unauthorized");
+    expect(body.textContent ?? "").toContain("401 Unauthorized");
     expect((body.querySelector(".verdict-hint") as El).textContent).toContain("Check that the API key is set.");
     // noisy endpoint list is collapsed, not dumped inline
     const details = body.querySelector(".verdict-details") as El;
@@ -663,7 +803,7 @@ describe("no-reload refresh behavior", () => {
 
   it("retry button on the error state refreshes in place, not via reload", () => {
     const js = readFileSync(resolve(process.cwd(), "public", "app.js"), "utf8");
-    expect(js).toMatch(/onclick=\"refreshCurrent\(\)\"/);
+    expect(js).toMatch(/onclick="refreshCurrent\(\)"/);
   });
 });
 
@@ -687,10 +827,14 @@ describe("inline event handler markup", () => {
     const needle = "${esc(JSON.stringify(";
     const broken: string[] = [];
     for (let i = js.indexOf(needle); i !== -1; i = js.indexOf(needle, i + 1)) {
-      let depth = 0, j = i + 1; // j sits on the "{" of "${"
+      let depth = 0,
+        j = i + 1; // j sits on the "{" of "${"
       for (; j < js.length; j++) {
         if (js[j] === "{") depth++;
-        else if (js[j] === "}") { depth--; if (depth === 0) break; }
+        else if (js[j] === "}") {
+          depth--;
+          if (depth === 0) break;
+        }
       }
       const expr = js.slice(i, j + 1);
       if (!/\)\)\}$/.test(expr)) broken.push(expr);

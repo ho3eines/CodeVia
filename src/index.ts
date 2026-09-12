@@ -68,10 +68,11 @@ async function main() {
 }
 
 main().catch((err) => {
-  const detail = err instanceof Error ? (err.stack || `${err.name}: ${err.message}`) : String(err);
+  const detail = err instanceof Error ? err.stack || `${err.name}: ${err.message}` : String(err);
   // A storage failure has an actionable hint; surface it in the message too, not
   // just in the metadata (platform log viewers often show only the message).
-  const headline = err instanceof StoragePreflightError ? `unusable storage path: ${err.message}` : detail.split("\n")[0];
+  const headline =
+    err instanceof StoragePreflightError ? `unusable storage path: ${err.message}` : detail.split("\n")[0];
   const errno = (err as NodeJS.ErrnoException | null)?.code;
   logger.fatal(`fatal startup error: ${headline}`, { error: detail, code: errno });
   // Railway's log viewer may display only the structured message and hide

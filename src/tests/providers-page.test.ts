@@ -58,11 +58,25 @@ describe("providers: model counts and summary", () => {
   it("reports how many models are attached to each provider", async () => {
     stubEmptyCatalog();
     const srv = await boot();
-    await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "gpt-count-a" } });
-    const off = (await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "gpt-count-b" } })).json();
+    await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId: "provider-openai", modelId: "gpt-count-a" },
+    });
+    const off = (
+      await srv.inject({
+        method: "POST",
+        url: "/models",
+        payload: { providerId: "provider-openai", modelId: "gpt-count-b" },
+      })
+    ).json();
     await srv.inject({ method: "POST", url: `/models/${off.id}/deactivate` });
 
-    const list = (await srv.inject({ method: "GET", url: "/providers" })).json() as Array<{ id: string; modelCount: number; activeModelCount: number }>;
+    const list = (await srv.inject({ method: "GET", url: "/providers" })).json() as Array<{
+      id: string;
+      modelCount: number;
+      activeModelCount: number;
+    }>;
     const openai = list.find((p) => p.id === "provider-openai")!;
     expect(openai.modelCount).toBe(2);
     expect(openai.activeModelCount).toBe(1);
@@ -112,14 +126,18 @@ describe("providers: bulk actions", () => {
     const ids = ["provider-openai", "provider-anthropic", "provider-gemini"];
     await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "deactivate", ids } });
 
-    const res = (await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "activate", ids } })).json();
+    const res = (
+      await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "activate", ids } })
+    ).json();
     expect(res.ids).toContain("provider-openai");
     expect(res.skipped.map((s: { id: string }) => s.id).sort()).toEqual(["provider-anthropic", "provider-gemini"]);
     expect(container.providerRepo.findById("provider-openai")!.data.active).toBe(true);
     expect(container.providerRepo.findById("provider-anthropic")!.data.active).toBe(false);
 
     // force overrides the readiness gate
-    const forced = (await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "activate", ids, force: true } })).json();
+    const forced = (
+      await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "activate", ids, force: true } })
+    ).json();
     expect(forced.affected).toBe(3);
     expect(container.providerRepo.findById("provider-anthropic")!.data.active).toBe(true);
   });
@@ -127,17 +145,29 @@ describe("providers: bulk actions", () => {
   it("deletes with cascade, protects the mock provider and reports missing ids", async () => {
     stubEmptyCatalog();
     const srv = await boot();
-    await srv.inject({ method: "POST", url: "/models", payload: { providerId: "provider-openai", modelId: "gpt-doomed" } });
+    await srv.inject({
+      method: "POST",
+      url: "/models",
+      payload: { providerId: "provider-openai", modelId: "gpt-doomed" },
+    });
 
-    const blocked = (await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "delete", ids: ["provider-openai"] } })).json();
+    const blocked = (
+      await srv.inject({
+        method: "POST",
+        url: "/providers/bulk",
+        payload: { action: "delete", ids: ["provider-openai"] },
+      })
+    ).json();
     expect(blocked.affected).toBe(0);
     expect(blocked.skipped[0].reason).toMatch(/model/i);
 
-    const res = (await srv.inject({
-      method: "POST",
-      url: "/providers/bulk",
-      payload: { action: "delete", ids: ["provider-openai", "provider-mock", "ghost"], cascade: true },
-    })).json();
+    const res = (
+      await srv.inject({
+        method: "POST",
+        url: "/providers/bulk",
+        payload: { action: "delete", ids: ["provider-openai", "provider-mock", "ghost"], cascade: true },
+      })
+    ).json();
     expect(res.ids).toEqual(["provider-openai"]);
     expect(res.deletedModels).toBe(1);
     expect(res.missing).toEqual(["ghost"]);
@@ -148,14 +178,26 @@ describe("providers: bulk actions", () => {
   it("rejects unknown actions and empty id lists", async () => {
     stubEmptyCatalog();
     const srv = await boot();
-    expect((await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "explode", ids: ["x"] } })).statusCode).toBe(400);
-    expect((await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "activate", ids: [] } })).statusCode).toBe(400);
+    expect(
+      (await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "explode", ids: ["x"] } }))
+        .statusCode,
+    ).toBe(400);
+    expect(
+      (await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "activate", ids: [] } }))
+        .statusCode,
+    ).toBe(400);
   });
 
   it("runs a health check across many providers in one call", async () => {
     stubCatalog(["m1"]);
     const srv = await boot();
-    const res = (await srv.inject({ method: "POST", url: "/providers/bulk", payload: { action: "test", ids: ["provider-mock", "provider-openai"] } })).json();
+    const res = (
+      await srv.inject({
+        method: "POST",
+        url: "/providers/bulk",
+        payload: { action: "test", ids: ["provider-mock", "provider-openai"] },
+      })
+    ).json();
     expect(res.results).toHaveLength(2);
     expect(res.results.every((r: { name: string; message: string }) => r.name && r.message)).toBe(true);
   });
@@ -165,11 +207,18 @@ describe("providers: duplicate", () => {
   it("clones a provider inactive with a unique name and the stored key", async () => {
     stubEmptyCatalog();
     const srv = await boot();
-    const stored = (await srv.inject({
-      method: "POST",
-      url: "/providers",
-      payload: { name: "Origin", type: "openai-compatible", baseUrl: "https://llm.example/v1", secretValue: "sk-abcdef123456" },
-    })).json();
+    const stored = (
+      await srv.inject({
+        method: "POST",
+        url: "/providers",
+        payload: {
+          name: "Origin",
+          type: "openai-compatible",
+          baseUrl: "https://llm.example/v1",
+          secretValue: "sk-abcdef123456",
+        },
+      })
+    ).json();
 
     const copy = (await srv.inject({ method: "POST", url: `/providers/${stored.id}/duplicate`, payload: {} })).json();
     expect(copy.name).toBe("Origin (copy)");

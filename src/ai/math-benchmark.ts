@@ -128,7 +128,11 @@ export class MathBenchmarkService {
    * Kick off a benchmark run in the background and return immediately.
    * If one is already running, that run's id is returned instead (no double-run).
    */
-  start(opts: { problemsPerModel?: number; modelIds?: string[]; ownerId?: string } = {}): { started: boolean; runId: string; alreadyRunning: boolean } {
+  start(opts: { problemsPerModel?: number; modelIds?: string[]; ownerId?: string } = {}): {
+    started: boolean;
+    runId: string;
+    alreadyRunning: boolean;
+  } {
     if (this.executing) {
       return { started: false, runId: this.progress.runId, alreadyRunning: true };
     }
@@ -389,7 +393,6 @@ export class MathBenchmarkService {
       }
       case "word-problem": {
         const apples = randomInt(3, 30);
-        const friends = randomInt(2, 8);
         const given = randomInt(1, apples);
         const remaining = apples - given;
         return {

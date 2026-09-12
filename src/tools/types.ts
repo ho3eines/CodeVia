@@ -15,6 +15,13 @@ export interface ToolContext {
   baseBranch?: string;
   /** Cooperative cancellation and budget check, also used after approval waits. */
   checkActive?: () => void;
+  /**
+   * Abort signal bound to the tool's execution window. The registry aborts it
+   * when the tool's timeout elapses (or the caller's own signal aborts), so a
+   * cooperative tool can stop its underlying operation instead of merely racing
+   * its promise. Tools performing multi-step or network work must observe it.
+   */
+  signal?: AbortSignal;
   /** Requests a human approval for a dangerous operation. */
   requestApproval?: (action: string, detail: Record<string, unknown>) => Promise<boolean>;
   /** Set by the caller when approval for this invocation was already granted (skip the dangerous-tool gate). */
@@ -40,6 +47,16 @@ export interface ToolDefinition {
   permissions: string[];
   timeoutMs: number;
   execute(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult>;
+  /**
+   * Optional hook that enriches the approval detail for a dangerous tool before
+   * the human-approval gate fires. Used to bind the approval to the exact
+   * subject being authorized — e.g. a merge approval carries the PR head SHA so
+   * a PR that moves on after approval cannot be merged under a stale grant.
+   */
+  prepareApproval?(
+    ctx: ToolContext,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> | Record<string, unknown>;
 }
 
 export interface IToolRegistry {

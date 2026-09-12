@@ -60,7 +60,11 @@ export function dispatchProjectAsk(
   if (params.agentType) {
     if (!isKnownAgentType(params.agentType)) return { status: 400, error: `Unknown agent type: ${params.agentType}` };
     if (mode === "autonomous" && !IMPLEMENTERS.includes(params.agentType as AgentType)) {
-      return { status: 400, error: "Autonomous mode requires an implementer agent (backend/frontend/database/uiux/etc.). Use executionMode: agent for research, QA, code review, etc." };
+      return {
+        status: 400,
+        error:
+          "Autonomous mode requires an implementer agent (backend/frontend/database/uiux/etc.). Use executionMode: agent for research, QA, code review, etc.",
+      };
     }
     routedAgentType = params.agentType as AgentType;
   } else if (mode === "agent") {
@@ -85,20 +89,31 @@ export function dispatchProjectAsk(
   }
   if (workflowId) {
     const wf = container.workflowRepo.findById(workflowId)?.data;
-    if (!wf?.enabled || wf.projectId !== projectId) return { status: 400, error: "Workflow must be enabled and belong to this project" };
+    if (!wf?.enabled || wf.projectId !== projectId)
+      return { status: 400, error: "Workflow must be enabled and belong to this project" };
   }
 
   if (mode === "simulation") {
     const agent = routedAgentType ? container.agentRepo.byType(projectId, routedAgentType) : undefined;
     const plan = agent
       ? defaultPlanFor(agent, {
-          id: "simulation", projectId, title, description, status: "created",
-          agentType: routedAgentType, correlationId: "simulation", input: {},
-          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          id: "simulation",
+          projectId,
+          title,
+          description,
+          status: "created",
+          agentType: routedAgentType,
+          correlationId: "simulation",
+          input: {},
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
         })
       : [];
     return {
-      simulation: true, routedAgentType, workflowId, executionMode: mode,
+      simulation: true,
+      routedAgentType,
+      workflowId,
+      executionMode: mode,
       plan: plan.map((s) => ({ label: s.label, tool: s.tool, requiresApproval: Boolean(s.requiresApproval) })),
     };
   }
@@ -111,16 +126,35 @@ export function dispatchProjectAsk(
     workflowId,
     input: { routedAgentType, agentHint: params.agentType, executionMode: mode, requestUserId: params.requestUserId },
   });
-  const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: params.correlationId ?? task.correlationId });
+  const job = container.queue.enqueue(
+    "agent.run",
+    { taskId: task.id },
+    { correlationId: params.correlationId ?? task.correlationId },
+  );
   const queued = { ...task, status: "queued" as const, updatedAt: new Date().toISOString() };
   container.taskRepo.upsert(queued, { projectId: task.projectId, parentId: task.parentTaskId });
   return { task: queued, jobId: job.id, routedAgentType, workflowId, executionMode: mode };
 }
 
 const ALL_TYPES = new Set<string>([
-  "orchestrator","project-manager","business-analyst","research","system-architect",
-  "backend-developer","frontend-developer","uiux","database","devops","qa-test",
-  "security","code-reviewer","documentation","debugging","refactoring","performance","release",
+  "orchestrator",
+  "project-manager",
+  "business-analyst",
+  "research",
+  "system-architect",
+  "backend-developer",
+  "frontend-developer",
+  "uiux",
+  "database",
+  "devops",
+  "qa-test",
+  "security",
+  "code-reviewer",
+  "documentation",
+  "debugging",
+  "refactoring",
+  "performance",
+  "release",
 ]);
 function isKnownAgentType(t: unknown): t is string {
   return typeof t === "string" && ALL_TYPES.has(t);

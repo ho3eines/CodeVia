@@ -92,20 +92,13 @@ export class ModelBenchmarkRepository extends DocumentRepository<ModelBenchmarkR
   }
 
   private aggregate(modelId: string, results: ModelBenchmarkResult[]): ModelPerformanceStats {
-    const providerId = results[0]?.providerId ?? "";
     const success = results.filter((r) => r.answered && !r.error);
     const errors = results.length - success.length;
     const correct = success.filter((r) => r.correct).length;
     const latencies = success.map((r) => r.latencyMs).sort((a, b) => a - b);
-    const avgLatency = latencies.length
-      ? Math.round(latencies.reduce((s, x) => s + x, 0) / latencies.length)
-      : 0;
-    const p95 = latencies.length
-      ? latencies[Math.min(latencies.length - 1, Math.floor(latencies.length * 0.95))]
-      : 0;
-    const avgCost = success.length
-      ? success.reduce((s, r) => s + (r.costUsd || 0), 0) / success.length
-      : 0;
+    const avgLatency = latencies.length ? Math.round(latencies.reduce((s, x) => s + x, 0) / latencies.length) : 0;
+    const p95 = latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(latencies.length * 0.95))] : 0;
+    const avgCost = success.length ? success.reduce((s, r) => s + (r.costUsd || 0), 0) / success.length : 0;
     const accuracy = success.length ? correct / success.length : 0;
     const errorRate = results.length ? errors / results.length : 0;
 
@@ -132,9 +125,7 @@ export class ModelBenchmarkRepository extends DocumentRepository<ModelBenchmarkR
       undefined as string | undefined,
     );
     // Most recent error message (for the "Unresponsive" cleanup list in the UI).
-    const lastError = results
-      .filter((r) => r.error)
-      .sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))[0]?.error;
+    const lastError = results.filter((r) => r.error).sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))[0]?.error;
     return {
       modelId,
       totalAttempts: results.length,

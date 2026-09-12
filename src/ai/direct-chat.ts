@@ -5,7 +5,7 @@ import type { ChatMessage } from "./types.js";
 export function buildDirectChatRequest(config: ModelProvider, modelId: string, messages: ChatMessage[], key?: string) {
   const url = config.baseUrl?.trim();
   if (!url) throw new Error("Custom chat requires a full endpoint URL");
-  if (messages.some(m => m.role === "tool")) throw new Error("Custom chat does not support native tool messages");
+  if (messages.some((m) => m.role === "tool")) throw new Error("Custom chat does not support native tool messages");
   const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json" };
   if (key && config.authType === "bearer") headers.authorization = `Bearer ${key}`;
   if (key && config.authType === "api-key") headers["api-key"] = key;

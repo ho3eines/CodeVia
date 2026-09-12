@@ -12,10 +12,7 @@ import {
   SESSION_TTL_MS,
   signSession,
 } from "../../auth/github-oauth.js";
-import {
-  getEffectiveGitHubLoginSettings,
-  getEffectiveOAuthConfig,
-} from "../../auth/admin-settings.js";
+import { getEffectiveGitHubLoginSettings, getEffectiveOAuthConfig } from "../../auth/admin-settings.js";
 import { resolveRequestUser } from "../auth.js";
 import { getEnv } from "../../config/env.js";
 import { logger } from "../../logger.js";
@@ -63,7 +60,9 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
       reply.code(503);
       return {
         error: "GitHub OAuth is not configured",
-        hint: eff.setupHint ?? "An admin can set the Client ID in Admin → GitHub Login; GITHUB_CLIENT_SECRET must be set in the environment. See docs/GITHUB_SETUP.md.",
+        hint:
+          eff.setupHint ??
+          "An admin can set the Client ID in Admin → GitHub Login; GITHUB_CLIENT_SECRET must be set in the environment. See docs/GITHUB_SETUP.md.",
         diagnostics: {
           clientIdMissing: eff.diagnostics.clientIdMissing,
           clientSecretMissing: eff.diagnostics.clientSecretMissing,
@@ -85,8 +84,7 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
       state,
     });
     const wantsJson =
-      String(q.format ?? "") === "json" ||
-      String(req.headers.accept ?? "").includes("application/json");
+      String(q.format ?? "") === "json" || String(req.headers.accept ?? "").includes("application/json");
     if (wantsJson) return { url, state };
     reply.redirect(url, 302);
     return reply;
@@ -188,12 +186,19 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
   app.get("/auth/me", { schema: { tags: ["auth"] } }, async (req) => {
     const { user, authenticated } = resolveRequestUser(req, container);
     const eff = getEffectiveGitHubLoginSettings(container.kv);
-    const gh = authenticated ? describeUserGitHubToken(container.kv, user.id) : { stored: false, scopes: [], canReadPrivateRepos: false };
+    const gh = authenticated
+      ? describeUserGitHubToken(container.kv, user.id)
+      : { stored: false, scopes: [], canReadPrivateRepos: false };
     return {
       authenticated,
       user,
       /** Whether this session can list the user's own GitHub repositories. */
-      githubToken: { stored: gh.stored, scopes: gh.scopes, canReadPrivateRepos: gh.canReadPrivateRepos, login: gh.login },
+      githubToken: {
+        stored: gh.stored,
+        scopes: gh.scopes,
+        canReadPrivateRepos: gh.canReadPrivateRepos,
+        login: gh.login,
+      },
       // Login config + strict mode (env REQUIRE_AUTH, overridden by the Admin
       // panel toggle). `loginEnabled` matches what the guard actually enforces:
       // strict mode only rejects when OAuth is configured (otherwise the

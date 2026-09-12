@@ -7,9 +7,8 @@ import { MockProvider } from "../ai/mock-provider.js";
 import { AuditRepository, NotificationRepository } from "../observability/repos.js";
 import { logger } from "../logger.js";
 import { KvStore } from "../db/kv.js";
-import { saveBackupSettings, getBackupSettings } from "./settings.js";
+import { saveBackupSettings } from "./settings.js";
 import { DocumentRepository } from "../db/repository.js";
-import type { Project } from "../domain/entities.js";
 
 interface ProjectDoc {
   id: string;
@@ -92,7 +91,13 @@ describe("BackupService", () => {
 
   it("uses explicit repo/path overrides when restoring the latest GitHub snapshot", async () => {
     github.seedRepo("acme", "other-backups", { files: [{ path: "README.md", content: "# empty backup target\n" }] });
-    projectRepo.upsert({ id: "p-override", name: "Override Restore", slug: "override", configRepo: "acme/app", branch: "main" });
+    projectRepo.upsert({
+      id: "p-override",
+      name: "Override Restore",
+      slug: "override",
+      configRepo: "acme/app",
+      branch: "main",
+    });
     saveBackupSettings(kv, {
       enabled: true,
       repo: "acme/codevia-backups",
@@ -130,7 +135,16 @@ describe("BackupService", () => {
       databasePath: "test.db",
       platform: "host",
       records: [
-        { id: "p2", type: "project", projectId: undefined, parentId: undefined, key: undefined, data: { id: "p2", name: "Restored" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+        {
+          id: "p2",
+          type: "project",
+          projectId: undefined,
+          parentId: undefined,
+          key: undefined,
+          data: { id: "p2", name: "Restored" },
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
       ],
       jobs: [],
       kv: [{ key: "foo", value: { bar: 1 }, updatedAt: new Date().toISOString() }],

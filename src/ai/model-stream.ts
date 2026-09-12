@@ -4,7 +4,6 @@ import type { ChatMessage } from "./types.js";
 import {
   buildChatEndpoint,
   buildAnthropicChatEndpoint,
-  buildGeminiChatEndpoint,
   buildOllamaChatEndpoint,
   ensureVersionPath,
   maskUrlSecrets,
@@ -59,7 +58,10 @@ export function buildStreamRequest(
         accept: "text/event-stream",
       };
       if (apiKey) headers["x-api-key"] = apiKey;
-      const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+      const system = messages
+        .filter((m) => m.role === "system")
+        .map((m) => m.content)
+        .join("\n\n");
       return {
         url: buildAnthropicChatEndpoint(config),
         headers,
@@ -76,7 +78,10 @@ export function buildStreamRequest(
       };
     }
     case "gemini": {
-      const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+      const system = messages
+        .filter((m) => m.role === "system")
+        .map((m) => m.content)
+        .join("\n\n");
       return {
         url: buildGeminiStreamEndpoint(config, modelId, apiKey),
         headers: { "content-type": "application/json", accept: "text/event-stream" },
@@ -332,7 +337,9 @@ export async function* streamModelChat(
       message: aborted
         ? `POST ${displayUrl} → timed out or cancelled after ${Date.now() - started}ms`
         : `POST ${displayUrl} → network error: ${err instanceof Error ? err.message : String(err)}`,
-      hint: aborted ? undefined : "The server could not reach the provider — check the Base URL or outbound network access.",
+      hint: aborted
+        ? undefined
+        : "The server could not reach the provider — check the Base URL or outbound network access.",
     };
   } finally {
     clearTimeout(timer);

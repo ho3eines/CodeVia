@@ -88,7 +88,9 @@ export function getBackupSettings(kv: KvStore): BackupSettings {
 export function saveBackupSettings(kv: KvStore, input: SaveBackupSettingsInput, updatedBy?: string): BackupSettings {
   const repo = clean(input.repo);
   if (input.repo !== undefined && (!repo || !parseRepoFullName(repo))) {
-    throw Object.assign(new Error("Repository must be in owner/name form (or a valid GitHub URL)"), { statusCode: 400 });
+    throw Object.assign(new Error("Repository must be in owner/name form (or a valid GitHub URL)"), {
+      statusCode: 400,
+    });
   }
   const branch = clean(input.branch);
   if (input.branch !== undefined) {
@@ -98,15 +100,24 @@ export function saveBackupSettings(kv: KvStore, input: SaveBackupSettingsInput, 
   }
   const path = clean(input.path);
   if (input.path !== undefined) {
-    if (!path || path.startsWith("/") || path.includes("\\") || path.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) {
-      throw Object.assign(new Error("Backup path must be a safe repo-relative path (e.g. .codevia/backups)"), { statusCode: 400 });
+    if (
+      !path ||
+      path.startsWith("/") ||
+      path.includes("\\") ||
+      path.split("/").some((seg) => seg === "" || seg === "." || seg === "..")
+    ) {
+      throw Object.assign(new Error("Backup path must be a safe repo-relative path (e.g. .codevia/backups)"), {
+        statusCode: 400,
+      });
     }
   }
   const schedule = clean(input.schedule);
   if (input.schedule !== undefined) {
     if (!schedule || !isValidCron(schedule)) {
       throw Object.assign(
-        new Error('Schedule must be a five-field cron expression: "minute hour day-of-month month day-of-week" (e.g. "0 * * * *" for hourly)'),
+        new Error(
+          'Schedule must be a five-field cron expression: "minute hour day-of-month month day-of-week" (e.g. "0 * * * *" for hourly)',
+        ),
         { statusCode: 400 },
       );
     }
@@ -142,7 +153,18 @@ export function saveBackupSettings(kv: KvStore, input: SaveBackupSettingsInput, 
 /** Rewrite only the last-run bookkeeping fields (not form-editable config). */
 export function updateBackupStatus(
   kv: KvStore,
-  patch: Partial<Pick<BackupSettings, "lastRunAt" | "lastRunStatus" | "lastRunError" | "lastRunCommit" | "lastRunFiles" | "lastRunBytes" | "lastRunCounts">>,
+  patch: Partial<
+    Pick<
+      BackupSettings,
+      | "lastRunAt"
+      | "lastRunStatus"
+      | "lastRunError"
+      | "lastRunCommit"
+      | "lastRunFiles"
+      | "lastRunBytes"
+      | "lastRunCounts"
+    >
+  >,
 ): BackupSettings {
   const prev = getBackupSettings(kv);
   const next: BackupSettings = {
@@ -155,7 +177,9 @@ export function updateBackupStatus(
 }
 
 /** Effective settings with defaults filled in, for service + UI display. */
-export function getEffectiveBackupSettings(kv: KvStore): Required<Pick<BackupSettings, "enabled" | "branch" | "path" | "schedule" | "retain">> & BackupSettings {
+export function getEffectiveBackupSettings(
+  kv: KvStore,
+): Required<Pick<BackupSettings, "enabled" | "branch" | "path" | "schedule" | "retain">> & BackupSettings {
   const s = getBackupSettings(kv);
   return {
     enabled: s.enabled ?? false,

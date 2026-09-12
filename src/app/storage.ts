@@ -68,8 +68,7 @@ function deepestMountFor(mounts: MountEntry[], target: string): MountEntry | und
   let best: MountEntry | undefined;
   for (const m of mounts) {
     const covers =
-      target === m.mountPoint ||
-      target.startsWith(m.mountPoint.endsWith("/") ? m.mountPoint : m.mountPoint + "/");
+      target === m.mountPoint || target.startsWith(m.mountPoint.endsWith("/") ? m.mountPoint : m.mountPoint + "/");
     if (covers && (!best || m.mountPoint.length > best.mountPoint.length)) best = m;
   }
   return best;

@@ -186,7 +186,13 @@ export class ApprovalService {
         this.waiters.delete(req.id);
         const current = this.get(req.id);
         if (current && current.status === "pending") {
-          this.finalize({ ...current, status: "expired", decidedAt: new Date().toISOString(), decidedBy: "timeout", decisionSource: "system" });
+          this.finalize({
+            ...current,
+            status: "expired",
+            decidedAt: new Date().toISOString(),
+            decidedBy: "timeout",
+            decisionSource: "system",
+          });
         }
         resolve(false);
       }, policy.timeoutMs);
@@ -197,21 +203,37 @@ export class ApprovalService {
     // Close the cancellation race between checking the task and publishing the
     // pending approval (including cancellation by a separate API process).
     if (watchedTask && this.deps.taskRepo) {
-      try { assertTaskActive(this.deps.taskRepo, watchedTask); }
-      catch {
-        this.decide(req.id, "reject", { source: "system", user: "task-cancellation", note: "Task is no longer active" });
+      try {
+        assertTaskActive(this.deps.taskRepo, watchedTask);
+      } catch {
+        this.decide(req.id, "reject", {
+          source: "system",
+          user: "task-cancellation",
+          note: "Task is no longer active",
+        });
         return pending;
       }
     }
     // Approvals are project-scoped in practice; "" keeps a (theoretical)
     // projectless request fail-closed instead of leaking it to every room.
-    live.emit({ type: "notification", projectId: req.projectId ?? "", data: { kind: "approval.required", approvalId: req.id, action } });
-    void eventBus.publish("approval.required", { approvalId: req.id, action, projectId: req.projectId, taskId: req.taskId }, { correlationId: req.correlationId, projectId: req.projectId });
+    live.emit({
+      type: "notification",
+      projectId: req.projectId ?? "",
+      data: { kind: "approval.required", approvalId: req.id, action },
+    });
+    void eventBus.publish(
+      "approval.required",
+      { approvalId: req.id, action, projectId: req.projectId, taskId: req.taskId },
+      { correlationId: req.correlationId, projectId: req.projectId },
+    );
     // Register the waiter before exposing the request. Notification delivery
     // must not delay an immediate decision or a task cancellation.
-    if (this.deps.notify) void Promise.resolve().then(() => this.deps.notify!(req)).catch((err) => {
-      logger.warn("approval notify hook failed", { err: String(err), approvalId: req.id });
-    });
+    if (this.deps.notify)
+      void Promise.resolve()
+        .then(() => this.deps.notify!(req))
+        .catch((err) => {
+          logger.warn("approval notify hook failed", { err: String(err), approvalId: req.id });
+        });
 
     return pending;
   }
@@ -222,7 +244,8 @@ export class ApprovalService {
     const children = new Map<string, string[]>();
     if (task && this.deps.taskRepo) {
       for (const { data: child } of this.deps.taskRepo.findMany({ projectId: task.projectId })) {
-        if (child.parentTaskId) children.set(child.parentTaskId, [...(children.get(child.parentTaskId) ?? []), child.id]);
+        if (child.parentTaskId)
+          children.set(child.parentTaskId, [...(children.get(child.parentTaskId) ?? []), child.id]);
       }
     }
     const ids = new Set<string>();
@@ -236,14 +259,21 @@ export class ApprovalService {
     for (const id of ids) {
       const current = this.deps.taskRepo?.findById(id)?.data;
       if (current && ["created", "queued", "running", "waiting_for_approval"].includes(current.status)) {
-        this.deps.taskRepo!.upsert({ ...current, status: "cancelled", updatedAt: new Date().toISOString() }, { projectId: current.projectId, parentId: current.parentTaskId });
+        this.deps.taskRepo!.upsert(
+          { ...current, status: "cancelled", updatedAt: new Date().toISOString() },
+          { projectId: current.projectId, parentId: current.parentTaskId },
+        );
         live.emit({ type: "task.updated", taskId: id, projectId: current.projectId, data: { status: "cancelled" } });
       }
     }
     let count = 0;
     for (const request of this.list({ projectId: task?.projectId, status: "pending" })) {
       if (request.taskId && ids.has(request.taskId)) {
-        this.decide(request.id, "reject", { source: "system", user: "task-cancellation", note: "Owning task was cancelled or deleted" });
+        this.decide(request.id, "reject", {
+          source: "system",
+          user: "task-cancellation",
+          note: "Owning task was cancelled or deleted",
+        });
         count += 1;
       }
     }
@@ -263,14 +293,23 @@ export class ApprovalService {
       throw Object.assign(new Error(`approval ${id} already ${current.status}`), { statusCode: 409 });
     }
     const approved = decision === "approve";
+    const now = new Date();
     const next: ApprovalRequest = {
       ...current,
       status: approved ? "approved" : "rejected",
-      decidedAt: new Date().toISOString(),
+      decidedAt: now.toISOString(),
       decidedBy: by.user ?? by.source,
       decisionSource: by.source,
       note: by.note,
     };
+    // A granted approval is itself time-limited: refresh the validity window so
+    // the gated action (e.g. a merge) must execute within one policy window of
+    // the decision. Pending requests still expire by their original deadline;
+    // auto-approve grants (expiresAt unset) stay unbounded, as intended in
+    // dev/simulation mode.
+    if (approved && current.expiresAt) {
+      next.expiresAt = new Date(now.getTime() + this.policy().timeoutMs).toISOString();
+    }
     this.finalize(next);
     const waiter = this.waiters.get(id);
     if (waiter) {
@@ -301,7 +340,11 @@ export class ApprovalService {
     // The task resumes (approved) or the step is skipped (rejected/expired) — either
     // way it is no longer waiting on a human.
     this.setTaskStatus(next.taskId, "running");
-    live.emit({ type: "notification", projectId: next.projectId ?? "", data: { kind: `approval.${next.status}`, approvalId: next.id } });
+    live.emit({
+      type: "notification",
+      projectId: next.projectId ?? "",
+      data: { kind: `approval.${next.status}`, approvalId: next.id },
+    });
     void eventBus.publish(
       approved ? "approval.granted" : "approval.rejected",
       { approvalId: next.id, action: next.action, projectId: next.projectId, taskId: next.taskId, status: next.status },
@@ -317,7 +360,12 @@ export class ApprovalService {
     if (status === "running" && rec.data.status !== "waiting_for_approval") return;
     if (status === "waiting_for_approval" && ["succeeded", "failed", "cancelled"].includes(rec.data.status)) return;
     this.deps.taskRepo.upsert(
-      { ...rec.data, status, approvalRequired: status === "waiting_for_approval" ? true : rec.data.approvalRequired, updatedAt: new Date().toISOString() },
+      {
+        ...rec.data,
+        status,
+        approvalRequired: status === "waiting_for_approval" ? true : rec.data.approvalRequired,
+        updatedAt: new Date().toISOString(),
+      },
       { projectId: rec.data.projectId, parentId: rec.data.parentTaskId },
     );
     live.emit({ type: "task.updated", taskId, projectId: rec.data.projectId, data: { status } });

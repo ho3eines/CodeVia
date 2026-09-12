@@ -24,7 +24,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
   };
   app.get("/workflows", { schema: { tags: ["workflows"] } }, async (req) => {
     const owned = accessibleProjectIds(req, container);
-    return container.workflowRepo.findMany().filter((r) => owned.has(r.data.projectId)).map((r) => r.data);
+    return container.workflowRepo
+      .findMany()
+      .filter((r) => owned.has(r.data.projectId))
+      .map((r) => r.data);
   });
 
   app.post("/workflows", { schema: { tags: ["workflows"] } }, async (req, reply) => {
@@ -46,7 +49,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
     const { id } = req.params as { id: string };
     const r = container.workflowRepo.findById(id);
     if (!r) return reply.code(404).send({ error: "workflow not found" });
-    if (!guardProject(req, reply, container, r.data.projectId)) return reply.code(404).send({ error: "workflow not found" });
+    if (!guardProject(req, reply, container, r.data.projectId))
+      return reply.code(404).send({ error: "workflow not found" });
     return r.data;
   });
 
@@ -54,8 +58,16 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
     const { id } = req.params as { id: string };
     const b = req.body as Record<string, unknown>;
     const r = container.workflowRepo.findById(id);
-    if (!r || !guardProject(req, reply, container, r.data.projectId)) return reply.code(404).send({ error: "workflow not found" });
-    const w = { ...r.data, ...b, id, projectId: r.data.projectId, version: r.data.version + 1, updatedAt: new Date().toISOString() } as Workflow;
+    if (!r || !guardProject(req, reply, container, r.data.projectId))
+      return reply.code(404).send({ error: "workflow not found" });
+    const w = {
+      ...r.data,
+      ...b,
+      id,
+      projectId: r.data.projectId,
+      version: r.data.version + 1,
+      updatedAt: new Date().toISOString(),
+    } as Workflow;
     container.workflowRepo.upsert(w, { projectId: w.projectId });
     return persist(w);
   });
@@ -65,7 +77,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
     const { id } = req.params as { id: string };
     const b = req.body as Record<string, unknown>;
     const w = container.workflowRepo.findById(id);
-    if (!w || !guardProject(req, reply, container, w.data.projectId)) return reply.code(404).send({ error: "workflow not found" });
+    if (!w || !guardProject(req, reply, container, w.data.projectId))
+      return reply.code(404).send({ error: "workflow not found" });
     const task = container.agentManager.createTask({
       projectId: w.data.projectId,
       title: String(b.title ?? `Run ${w.data.name}`),
@@ -82,11 +95,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, container: Containe
   app.delete("/workflows/:id", { schema: { tags: ["workflows"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const w = container.workflowRepo.findById(id)?.data;
-    if (!w || !guardProject(req, reply, container, w.projectId)) return reply.code(404).send({ error: "workflow not found" });
+    if (!w || !guardProject(req, reply, container, w.projectId))
+      return reply.code(404).send({ error: "workflow not found" });
     const p = container.projectRepo.findById(w.projectId)?.data;
     // The tombstone records the workflow identity (R03): slug + id survive
     // repository copies where IDs are re-bound to a new project.
-    if (p) await container.projectFiles.tombstone(p, container.projectFiles.pathFor(p, "workflow", id), { kind: "workflow", id: w?.id ?? id, slug: w?.slug });
+    if (p)
+      await container.projectFiles.tombstone(p, container.projectFiles.pathFor(p, "workflow", id), {
+        kind: "workflow",
+        id: w?.id ?? id,
+        slug: w?.slug,
+      });
     container.workflowRepo.deleteById(id);
     return { ok: true };
   });

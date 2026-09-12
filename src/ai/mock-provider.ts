@@ -1,9 +1,4 @@
-import type {
-  ChatRequest,
-  ChatResponse,
-  IModelProvider,
-  ProviderModelInfo,
-} from "./types.js";
+import type { ChatRequest, ChatResponse, IModelProvider, ProviderModelInfo } from "./types.js";
 import type { ID } from "../types.js";
 import { logger } from "../logger.js";
 

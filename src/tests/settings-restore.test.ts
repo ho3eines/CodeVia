@@ -2,11 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { getEnvFresh } from "../config/env.js";
 import { Container } from "../app/container.js";
 import { buildServer } from "../http/app.js";
-import {
-  ADMIN_GITHUB_SETTINGS_KEY,
-  getGitHubAdminSettings,
-  saveGitHubAdminSettings,
-} from "../auth/admin-settings.js";
+import { ADMIN_GITHUB_SETTINGS_KEY, getGitHubAdminSettings, saveGitHubAdminSettings } from "../auth/admin-settings.js";
 import { freshDb } from "./test-helpers.js";
 import type { FastifyInstance } from "fastify";
 

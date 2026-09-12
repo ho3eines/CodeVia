@@ -33,12 +33,36 @@ function restoredProject(over: Partial<Project> = {}): Project {
   const repo = over.configRepo ?? "ho3eines/Projects";
   const branch = over.branch ?? "main";
   return {
-    id: "proj-restored", slug: "agent", name: "Agent", description: "restored project",
-    configRepo: repo, branch,
+    id: "proj-restored",
+    slug: "agent",
+    name: "Agent",
+    description: "restored project",
+    configRepo: repo,
+    branch,
     repositories: over.repositories ?? [{ repo, branch, role: "primary", isConfigRepo: true }],
-    capabilities: { platforms: [], languages: [], frameworks: [], databases: [], deploymentTargets: [], features: [], integrations: [], agentTypes: [] },
-    settings: { environment: "development", notifications: [], rules: [], skills: [], workflows: [], budget: { maxTokensPerRun: 20000, maxCallsPerRun: 20, maxCostUsdPerRun: 5, maxDurationMs: 600000 }, permissions: {}, metadata: {} },
-    active: true, createdAt: now, updatedAt: now,
+    capabilities: {
+      platforms: [],
+      languages: [],
+      frameworks: [],
+      databases: [],
+      deploymentTargets: [],
+      features: [],
+      integrations: [],
+      agentTypes: [],
+    },
+    settings: {
+      environment: "development",
+      notifications: [],
+      rules: [],
+      skills: [],
+      workflows: [],
+      budget: { maxTokensPerRun: 20000, maxCallsPerRun: 20, maxCostUsdPerRun: 5, maxDurationMs: 600000 },
+      permissions: {},
+      metadata: {},
+    },
+    active: true,
+    createdAt: now,
+    updatedAt: now,
     ...over,
   } as Project;
 }
@@ -71,14 +95,18 @@ describe("MockGitHubService auto-provisioning", () => {
     // The repository is real from now on: it is listed and can carry commits.
     const listed = await mock.listRepositories({ query: "ho3eines/Projects" });
     expect(listed.map((r) => r.fullName)).toContain("ho3eines/Projects");
-    await expect(mock.commit(ref, "main", "first commit", [{ path: "README.md", content: "# hi\n" }])).resolves.toHaveProperty("sha");
+    await expect(
+      mock.commit(ref, "main", "first commit", [{ path: "README.md", content: "# hi\n" }]),
+    ).resolves.toHaveProperty("sha");
   });
 
   it("never wipes an existing repository (auto-provision is create-only)", async () => {
     const mock = new MockGitHubService({ seedDemoRepos: false });
     mock.seedRepo("acme", "kept", { files: [{ path: "README.md", content: "# original\n" }] });
     await mock.listBranches({ owner: "acme", name: "kept" }); // triggers the access path
-    expect(await mock.getFile({ owner: "acme", name: "kept" }, "README.md", "main")).toMatchObject({ content: "# original\n" });
+    expect(await mock.getFile({ owner: "acme", name: "kept" }, "README.md", "main")).toMatchObject({
+      content: "# original\n",
+    });
   });
 });
 
@@ -88,7 +116,15 @@ describe("restored project whose mock repository is missing", () => {
     const srv = await server();
 
     // Before the fix every one of these answered 502 "Mock repo not found".
-    for (const path of ["/projects", "/projects/proj-restored", "/projects/proj-restored/agents", "/projects/proj-restored/tasks", "/projects/proj-restored/overview", "/projects/proj-restored/branches", "/projects/proj-restored/files"]) {
+    for (const path of [
+      "/projects",
+      "/projects/proj-restored",
+      "/projects/proj-restored/agents",
+      "/projects/proj-restored/tasks",
+      "/projects/proj-restored/overview",
+      "/projects/proj-restored/branches",
+      "/projects/proj-restored/files",
+    ]) {
       const res = await srv.inject({ method: "GET", url: path });
       expect(res.statusCode, path).toBe(200);
     }
@@ -98,12 +134,22 @@ describe("restored project whose mock repository is missing", () => {
     expect(agents.length).toBeGreaterThan(0);
     const stored = c.projectRepo.findById("proj-restored")!.data;
     expect(stored.repositoryState?.generation).toBe("simulation");
-    expect((await gh.listFiles({ owner: "ho3eines", name: "Projects" }, "main")).map((f) => f.path)).toContain("CodeVia/project.md");
+    expect((await gh.listFiles({ owner: "ho3eines", name: "Projects" }, "main")).map((f) => f.path)).toContain(
+      "CodeVia/project.md",
+    );
 
     // Project options work: issues, dry-run and AI tasks on the fresh repository.
-    const issue = await srv.inject({ method: "POST", url: "/projects/proj-restored/issues", payload: { title: "Test issue" } });
+    const issue = await srv.inject({
+      method: "POST",
+      url: "/projects/proj-restored/issues",
+      payload: { title: "Test issue" },
+    });
     expect(issue.statusCode).toBe(201);
-    const dry = await srv.inject({ method: "POST", url: "/projects/proj-restored/dry-run", payload: { title: "Fix login", description: "login throws 500" } });
+    const dry = await srv.inject({
+      method: "POST",
+      url: "/projects/proj-restored/dry-run",
+      payload: { title: "Fix login", description: "login throws 500" },
+    });
     expect(dry.statusCode).toBe(200);
     expect(dry.json().simulation).toBe(true);
 
@@ -111,32 +157,46 @@ describe("restored project whose mock repository is missing", () => {
     const commit = vi.spyOn(gh, "commit");
     const again = await srv.inject({ method: "GET", url: "/projects/proj-restored" });
     expect(again.statusCode).toBe(200);
-    expect(commit.mock.calls.map((call) => call[2]).some((message) => message.includes("initialize missing project state"))).toBe(false);
+    expect(
+      commit.mock.calls.map((call) => call[2]).some((message) => message.includes("initialize missing project state")),
+    ).toBe(false);
   });
 
   it("uses the project's own (non-default) branch and provisions extra linked repositories", async () => {
-    c.projectRepo.upsert(restoredProject({
-      configRepo: "ho3eines/agent", branch: "develop",
-      repositories: [
-        { repo: "ho3eines/agent", branch: "develop", role: "primary", isConfigRepo: true },
-        { repo: "ho3eines/other", branch: "main", role: "other" },
-      ],
-    }), { key: "agent" });
+    c.projectRepo.upsert(
+      restoredProject({
+        configRepo: "ho3eines/agent",
+        branch: "develop",
+        repositories: [
+          { repo: "ho3eines/agent", branch: "develop", role: "primary", isConfigRepo: true },
+          { repo: "ho3eines/other", branch: "main", role: "other" },
+        ],
+      }),
+      { key: "agent" },
+    );
     const srv = await server();
 
     expect((await srv.inject({ method: "GET", url: "/projects/proj-restored" })).statusCode).toBe(200);
     const branches = (await srv.inject({ method: "GET", url: "/projects/proj-restored/branches" })).json();
     expect(branches.map((b: { name: string }) => b.name)).toContain("develop");
     // State was committed on the project branch, not on a replacement.
-    expect((await gh.listFiles({ owner: "ho3eines", name: "agent" }, "develop")).map((f) => f.path)).toContain("CodeVia/project.md");
+    expect((await gh.listFiles({ owner: "ho3eines", name: "agent" }, "develop")).map((f) => f.path)).toContain(
+      "CodeVia/project.md",
+    );
     // Additional linked repositories are usable too (issues/PRs pickers).
-    const other = (await srv.inject({ method: "GET", url: "/projects/proj-restored/branches?repo=ho3eines/other" })).json();
+    const other = (
+      await srv.inject({ method: "GET", url: "/projects/proj-restored/branches?repo=ho3eines/other" })
+    ).json();
     expect(other.map((b: { name: string }) => b.name)).toContain("main");
   });
 
   it("leaves an already-initialized project untouched", async () => {
     // Normal creation flow (state committed during onboarding).
-    const p = await c.agentManager.createProject({ name: "Canonical", configRepo: "acme/canonical", description: "ok" });
+    const p = await c.agentManager.createProject({
+      name: "Canonical",
+      configRepo: "acme/canonical",
+      description: "ok",
+    });
     const srv = await server();
     const commit = vi.spyOn(gh, "commit");
     const res = await srv.inject({ method: "GET", url: `/projects/${p.id}` });
@@ -158,7 +218,10 @@ describe("restored project whose mock repository is missing", () => {
     const before = (await gh.listFiles(ref, "main")).map((f) => f.path);
     expect(before).toContain("CodeVia/project.md");
 
-    const commit = await gh.deleteFiles!(ref, "main", "[CodeVia] remove project state", ["CodeVia/project.md", "CodeVia/agents/research.md"]);
+    const commit = await gh.deleteFiles!(ref, "main", "[CodeVia] remove project state", [
+      "CodeVia/project.md",
+      "CodeVia/agents/research.md",
+    ]);
     expect(commit).toHaveProperty("sha");
 
     const after = (await gh.listFiles(ref, "main")).map((f) => f.path);
@@ -170,17 +233,31 @@ describe("restored project whose mock repository is missing", () => {
   });
 
   it("removeProject purges CodeVia/* so a new project on the same repo starts clean", async () => {
-    const first = await c.agentManager.createProject({ name: "Stale One", description: "old", configRepo: "ho3eines/recycle" });
+    const first = await c.agentManager.createProject({
+      name: "Stale One",
+      description: "old",
+      configRepo: "ho3eines/recycle",
+    });
     await c.agentManager.syncProjectState(first.id);
-    expect((await gh.listFiles({ owner: "ho3eines", name: "recycle" }, "main")).map((f) => f.path)).toContain("CodeVia/project.md");
+    expect((await gh.listFiles({ owner: "ho3eines", name: "recycle" }, "main")).map((f) => f.path)).toContain(
+      "CodeVia/project.md",
+    );
 
     c.projectRepo.deleteById(first.id);
     await c.projectFiles.removeProject(first);
 
-    expect((await gh.listFiles({ owner: "ho3eines", name: "recycle" }, "main")).map((f) => f.path).filter((f) => f.startsWith("CodeVia/"))).toHaveLength(0);
+    expect(
+      (await gh.listFiles({ owner: "ho3eines", name: "recycle" }, "main"))
+        .map((f) => f.path)
+        .filter((f) => f.startsWith("CodeVia/")),
+    ).toHaveLength(0);
 
     // The same repo can host a brand-new project with its own identity.
-    const second = await c.agentManager.createProject({ name: "Fresh Reborn", description: "new", configRepo: "ho3eines/recycle" });
+    const second = await c.agentManager.createProject({
+      name: "Fresh Reborn",
+      description: "new",
+      configRepo: "ho3eines/recycle",
+    });
     const stored = c.projectRepo.findById(second.id)?.data;
     expect(stored?.name).toBe("Fresh Reborn");
     expect(stored?.description).toBe("new");
@@ -189,7 +266,23 @@ describe("restored project whose mock repository is missing", () => {
   it("DELETE /projects/:id cascades to all project-scoped records", async () => {
     const p = await c.agentManager.createProject({ name: "Cascade", description: "d", configRepo: "ho3eines/cascade" });
     c.agentManager.createTask({ projectId: p.id, title: "T", description: "d" });
-    c.memoryRepo.upsert({ id: "mem-x", projectId: p.id, scope: "project", type: "decision", key: "k", content: "v", tags: [], refs: [], source: "web", version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, { projectId: p.id, key: "k" });
+    c.memoryRepo.upsert(
+      {
+        id: "mem-x",
+        projectId: p.id,
+        scope: "project",
+        type: "decision",
+        key: "k",
+        content: "v",
+        tags: [],
+        refs: [],
+        source: "web",
+        version: 1,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      { projectId: p.id, key: "k" },
+    );
     expect(c.agentRepo.byProject(p.id).length).toBeGreaterThan(0);
 
     const srv = await server();

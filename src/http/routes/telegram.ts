@@ -18,7 +18,12 @@ import { resolveRequestUser } from "../auth.js";
 import { getEnv } from "../../config/env.js";
 import { logger } from "../../logger.js";
 
-function fail(reply: FastifyReply, status: number, message: string, extra: Record<string, unknown> = {}): { error: string } {
+function fail(
+  reply: FastifyReply,
+  status: number,
+  message: string,
+  extra: Record<string, unknown> = {},
+): { error: string } {
   reply.code(status);
   return { error: message, ...extra };
 }
@@ -78,11 +83,11 @@ export function registerTelegramRoutes(app: FastifyInstance, container: Containe
    * in the UI yet could never hear a message.
    */
   function sameTokenAsPlatformBot(token: string): boolean {
-  const global = getEnv().TELEGRAM_BOT_TOKEN;
-  return Boolean(global) && global === token;
-}
+    const global = getEnv().TELEGRAM_BOT_TOKEN;
+    return Boolean(global) && global === token;
+  }
 
-async function connectAccount(account: TelegramAccount, publicBase?: string): Promise<TelegramAccount> {
+  async function connectAccount(account: TelegramAccount, publicBase?: string): Promise<TelegramAccount> {
     const token = accountTelegramToken(account);
     const now = () => new Date().toISOString();
     if (!token) {
@@ -218,7 +223,7 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
         ? mode === "off"
           ? "Telegram receiving is off; sending still works."
           : `receiving via ${status.transport}`
-        : status.webhookError ?? status.fixes[0] ?? `could not switch to ${mode}`,
+        : (status.webhookError ?? status.fixes[0] ?? `could not switch to ${mode}`),
       status,
     };
   });
@@ -277,7 +282,12 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
       webhookUrl: runtime.status().webhookUrl ?? webhookUrlFor(getPublicBaseUrl()),
       // Tell the user exactly where their bot is now listening, and what to do
       // if they'd rather have a webhook (serverless/multi-replica setups).
-      receiving: connected.transport === "polling" ? "long polling (getUpdates)" : connected.webhookSet ? "webhook" : "nothing — see lastError",
+      receiving:
+        connected.transport === "polling"
+          ? "long polling (getUpdates)"
+          : connected.webhookSet
+            ? "webhook"
+            : "nothing — see lastError",
       chatIdHint: !accountId
         ? "Tip: message your bot, send /id to it, and put that number in AccountId so updates route to your account."
         : undefined,
@@ -304,7 +314,12 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
       ...account,
       name: typeof b.name === "string" ? b.name.trim() || undefined : account.name,
       accountId: typeof b.accountId === "string" ? b.accountId.trim() || undefined : account.accountId,
-      chatId: typeof b.chatId === "string" ? b.chatId.trim() || undefined : (typeof b.accountId === "string" ? (b.accountId.trim() || undefined) : account.chatId),
+      chatId:
+        typeof b.chatId === "string"
+          ? b.chatId.trim() || undefined
+          : typeof b.accountId === "string"
+            ? b.accountId.trim() || undefined
+            : account.chatId,
       updatedAt: new Date().toISOString(),
     };
     // Clearing the chat id un-pairs the bot and issues a fresh code, which is how
@@ -349,7 +364,7 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
         webhookSet: false,
         lastCheckedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        lastError: status?.running ? undefined : status?.note ?? "poller not running",
+        lastError: status?.running ? undefined : (status?.note ?? "poller not running"),
       };
       container.telegramAccountRepo.upsert(updated);
       return { ok: !!status?.running, account: serialize(updated), status };
@@ -375,11 +390,17 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
   const handleWebhook = async (body: unknown, accountId?: string, req?: FastifyRequest) => {
     let account: TelegramAccount | undefined;
     if (accountId) {
-      account = container.telegramAccountRepo.findMany().map((r) => r.data).find((a) => a.id === accountId);
+      account = container.telegramAccountRepo
+        .findMany()
+        .map((r) => r.data)
+        .find((a) => a.id === accountId);
     }
     // If no account was named, route by the sender's telegram id / chat id.
     if (!account) {
-      const update = body as { message?: { chat?: { id?: number }; from?: { id?: number } }; callback_query?: { from?: { id?: number } } };
+      const update = body as {
+        message?: { chat?: { id?: number }; from?: { id?: number } };
+        callback_query?: { from?: { id?: number } };
+      };
       const telegramId = update.message?.chat?.id ?? update.message?.from?.id ?? update.callback_query?.from?.id;
       account = container.telegramAccountRepo.byTelegramId(telegramId != null ? String(telegramId) : undefined)[0];
     }
@@ -440,7 +461,13 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
 
   // Manually drive a telegram-style message (for the web UI "Telegram" preview).
   app.post("/integrations/telegram/command", { schema: { tags: ["telegram"] } }, async (req) => {
-    const b = req.body as { chatId?: string; text?: string; callbackData?: string; deliver?: boolean; accountId?: string };
+    const b = req.body as {
+      chatId?: string;
+      text?: string;
+      callbackData?: string;
+      deliver?: boolean;
+      accountId?: string;
+    };
     // Previewing through a user's own bot (their token, their projects) instead of
     // the operator's global one — that is what "what will MY bot answer" means.
     const account = b.accountId
@@ -448,8 +475,19 @@ async function connectAccount(account: TelegramAccount, publicBase?: string): Pr
       : undefined;
     const previewBot = account ? botFor(accountTelegramService(account), account) : botFor();
     const payload: Record<string, unknown> = b.callbackData
-      ? { update_id: Date.now(), callback_query: { id: `web-${Date.now()}`, data: b.callbackData, from: { id: b.chatId ?? "web" }, message: { chat: { id: b.chatId ?? "web", type: "private" }, message_id: 1 } } }
-      : { update_id: Date.now(), message: { chat: { id: b.chatId ?? "web", type: "private" }, from: { id: b.chatId ?? "web" }, text: b.text } };
+      ? {
+          update_id: Date.now(),
+          callback_query: {
+            id: `web-${Date.now()}`,
+            data: b.callbackData,
+            from: { id: b.chatId ?? "web" },
+            message: { chat: { id: b.chatId ?? "web", type: "private" }, message_id: 1 },
+          },
+        }
+      : {
+          update_id: Date.now(),
+          message: { chat: { id: b.chatId ?? "web", type: "private" }, from: { id: b.chatId ?? "web" }, text: b.text },
+        };
     // "Deliver" actually sends through the configured service (a real bot gets
     // the message); otherwise this is a dry-run preview of what the bot replies.
     if (b.deliver) {

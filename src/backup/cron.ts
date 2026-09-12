@@ -61,7 +61,9 @@ function parseField(expr: string, min: number, max: number): Set<number> | undef
 
 /** Parse a five-field cron expression, or `undefined` when invalid. */
 export function parseCron(expr: string): CronParts | undefined {
-  const parts = String(expr ?? "").trim().split(/\s+/);
+  const parts = String(expr ?? "")
+    .trim()
+    .split(/\s+/);
   if (parts.length !== 5) return undefined;
   const fields = [];
   for (let i = 0; i < 5; i++) {
@@ -140,11 +142,12 @@ export function cronIsDue(expr: string, now: Date, lastRunAt?: string): boolean 
   if (!cronMatches(expr, now)) return false;
   if (!lastRunAt) return true;
   const last = new Date(lastRunAt);
-  return !Number.isNaN(last.getTime()) && (
-    last.getFullYear() !== now.getFullYear() ||
-    last.getMonth() !== now.getMonth() ||
-    last.getDate() !== now.getDate() ||
-    last.getHours() !== now.getHours() ||
-    last.getMinutes() !== now.getMinutes()
+  return (
+    !Number.isNaN(last.getTime()) &&
+    (last.getFullYear() !== now.getFullYear() ||
+      last.getMonth() !== now.getMonth() ||
+      last.getDate() !== now.getDate() ||
+      last.getHours() !== now.getHours() ||
+      last.getMinutes() !== now.getMinutes())
   );
 }
