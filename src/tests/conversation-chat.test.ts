@@ -470,6 +470,6 @@ describe("standalone chat (no project)", () => {
     await app.inject({ method: "POST", url: "/conversations", payload: { title: "List me", userId: "local-user" } });
     const after = (await app.inject({ method: "GET", url: "/conversations" })).json();
     expect(after.length).toBe(before.length + 1);
-    expect(after.some((c) => c.title === "List me" && !c.projectId)).toBe(true);
+    expect(after.some((c: { title?: string; projectId?: string }) => c.title === "List me" && !c.projectId)).toBe(true);
   }, 30000);
 });

@@ -3,6 +3,7 @@ import type { ProjectRepository } from "../domain/repos.js";
 import type { KvStore } from "../db/kv.js";
 import { describeUserGitHubToken, getUserGitHubToken } from "./github-tokens.js";
 import { DEMO_USER_ID } from "./identity.js";
+import { isServerGitHubEnabled } from "../github/registry.js";
 
 /**
  * Bind a project's GitHub connection to the account that is actually using it.
@@ -51,5 +52,57 @@ export function adoptProjectConnection(deps: {
   } catch {
     // Never fail the request over bookkeeping — the token above still works.
     return false;
+  }
+}
+
+/**
+ * Hand a whole stranded project to the connected account — owner AND
+ * connection.
+ *
+ * A project is stranded when it predates GitHub login: it is owned by the
+ * pre-login `user-demo` identity, or by nobody at all, and its connection is
+ * dead (`mock`) or belongs to a token that no longer exists. Project lists and
+ * every project route filter on `ownerId`, so such a project is invisible to
+ * every signed-in account — and its background runs keep failing against a
+ * credential nobody owns.
+ *
+ * This runs BEFORE the ownership gate (see `registerProjectStateHook` and the
+ * `/projects/:id` routes): adopting after the gate is useless, because the
+ * gate has already answered 404 for a project the caller is entitled to take.
+ *
+ * Guardrails — an account can only ever take a project nobody else is using:
+ *   - the caller must be authenticated and hold a stored GitHub token,
+ *   - a project owned by another real account is never touched,
+ *   - a working `user-oauth` connection of another account is never stolen,
+ *   - a `server-token` project keeps working while the server token is set.
+ *
+ * Returns the adopted project (already persisted) or `undefined` when there is
+ * nothing to adopt.
+ */
+export function adoptStrandedProject(deps: {
+  kv: KvStore;
+  projectRepo: Pick<ProjectRepository, "update">;
+  project: Project;
+  userId: string | undefined;
+}): Project | undefined {
+  const { kv, projectRepo, project, userId } = deps;
+  // Only a connected, signed-in account can take a project over.
+  if (!userId || userId === DEMO_USER_ID || !getUserGitHubToken(kv, userId)) return undefined;
+  const ownerId = project.ownerId;
+  // Owned by another real account — never touch it.
+  if (ownerId && ownerId !== DEMO_USER_ID && ownerId !== userId) return undefined;
+  const connection = project.githubConnection;
+  // A live connection of another account is not stranded.
+  if (connection?.kind === "user-oauth" && connection.userId && connection.userId !== userId && getUserGitHubToken(kv, connection.userId)) return undefined;
+  // A server-token project still works while GITHUB_TOKEN is configured.
+  if (connection?.kind === "server-token" && isServerGitHubEnabled()) return undefined;
+  const login = describeUserGitHubToken(kv, userId).login;
+  const next: Project = { ...project, ownerId: userId, githubConnection: { kind: "user-oauth", userId, login } };
+  try {
+    projectRepo.update(next);
+    return next;
+  } catch {
+    // Never fail the request over bookkeeping — the identity above still works.
+    return next;
   }
 }

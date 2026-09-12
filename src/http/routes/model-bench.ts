@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import type { Container } from "../../app/container.js";
 import { ModelBenchmarkRepository } from "../../observability/model-bench-repo.js";
+import { actingModelOwner } from "../../ai/ownership.js";
+import { resolveRequestUser } from "../auth.js";
 
 /**
  * Model benchmarking routes.
@@ -23,6 +25,9 @@ export function registerModelBenchRoutes(app: FastifyInstance, container: Contai
   app.post("/models/benchmark/run", { schema: { tags: ["models"], summary: "Start a paced math benchmark across active models" } }, async (req) => {
     const body = (req.body ?? {}) as { problemsPerModel?: number; modelIds?: string[] };
     const n = Math.max(2, Math.min(50, Number(body.problemsPerModel) || 8));
+    // Per-account: benchmark the caller's own models (+ the shared platform
+    // rows) only. Another account's provider must never be quizzed.
+    const ownerId = actingModelOwner(resolveRequestUser(req, container).user.id);
 
     if (container.mathBench.isRunning()) {
       const p = container.mathBench.getProgress();
@@ -38,7 +43,7 @@ export function registerModelBenchRoutes(app: FastifyInstance, container: Contai
       };
     }
 
-    const res = container.mathBench.start({ problemsPerModel: n, modelIds: body.modelIds });
+    const res = container.mathBench.start({ problemsPerModel: n, modelIds: body.modelIds, ownerId });
     const p = container.mathBench.getProgress();
     return {
       ok: true,
@@ -57,14 +62,17 @@ export function registerModelBenchRoutes(app: FastifyInstance, container: Contai
     return { running: container.mathBench.isRunning(), progress };
   });
 
-  app.get("/models/benchmark/stats", { schema: { tags: ["models"], summary: "Per-model benchmark stats used for smart routing" } }, async () => {
+  app.get("/models/benchmark/stats", { schema: { tags: ["models"], summary: "Per-model benchmark stats used for smart routing" } }, async (req) => {
+    const ownerId = actingModelOwner(resolveRequestUser(req, container).user.id);
     const stats = container.benchRepo.computeStats();
     // Only show stats for models that still exist in the registry, so a model
     // that has since been deleted (individually or with its provider) never
     // reappears in the benchmark table / routing signal. Inactive models ARE
     // included — the "Unresponsive" cleanup list needs to find failing models
     // even after they were deactivated (the router only looks up active ones).
-    const liveIds = new Set(container.modelRepo.findMany().map((r) => r.data.id));
+    // Only models the caller can see — benchmark telemetry is per-account
+    // data and must not advertise another account's models.
+    const liveIds = new Set(container.modelRepo.listForOwner(ownerId).map((m) => m.id));
     const liveStats = stats.filter((s) => liveIds.has(s.modelId));
     ModelBenchmarkRepository.addSpeedNormalisation(liveStats);
     return { stats: liveStats };
@@ -72,7 +80,10 @@ export function registerModelBenchRoutes(app: FastifyInstance, container: Contai
 
   app.get("/models/benchmark/results", { schema: { tags: ["models"] } }, async (req) => {
     const q = req.query as { runId?: string; modelId?: string; limit?: string };
+    const ownerId = actingModelOwner(resolveRequestUser(req, container).user.id);
+    const visibleModelIds = new Set(container.modelRepo.listForOwner(ownerId).map((m) => m.id));
     let recs = container.benchRepo.findMany({});
+    recs = recs.filter((r) => visibleModelIds.has(r.data.modelId));
     if (q.runId) recs = recs.filter((r) => r.data.benchmarkRunId === q.runId);
     if (q.modelId) recs = recs.filter((r) => r.data.modelId === q.modelId);
     const limit = Math.min(500, Number(q.limit) || 200);

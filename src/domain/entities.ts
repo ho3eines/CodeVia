@@ -60,6 +60,13 @@ export interface ModelProvider {
   active: boolean;
   createdAt: ISODate;
   updatedAt: ISODate;
+  /**
+   * Owning account. Absent = platform/shared row (seeded defaults and rows
+   * written before per-account ownership existed): visible to every account,
+   * and taken over (`adoptRowForMutation`) by the first account that edits it.
+   * See `src/ai/ownership.ts` — the rule mirrors `canAccessProject`.
+   */
+  ownerId?: ID;
 }
 
 /* ------------------------------------------------------------------ *
@@ -108,6 +115,11 @@ export interface Model {
   notes?: string;
   createdAt: ISODate;
   updatedAt: ISODate;
+  /**
+   * Owning account — normally the owner of the model's provider. Absent means
+   * platform/shared (see `ModelProvider.ownerId` and `src/ai/ownership.ts`).
+   */
+  ownerId?: ID;
 }
 
 /* ------------------------------------------------------------------ *

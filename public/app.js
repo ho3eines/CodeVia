@@ -3466,6 +3466,7 @@
           <div class="mono model-id" title="${esc(m.modelId)}">${esc(m.modelId)}${tuningBadge(m)}</div>
         </div>
         ${m.active ? '<span class="badge badge-ok">active</span>' : '<span class="badge badge-muted">inactive</span>'}
+        ${m.ownerId ? "" : '<span class="badge badge-muted" title="Shared platform model — every account can see and route to it. Editing it makes it yours.">👥 shared</span>'}
       </div>
       <div class="model-card-facts">
         <span title="Context window">🧠 ${ctx ? ctx.toLocaleString() : "—"}</span>
@@ -4438,6 +4439,7 @@
         <div>
           <h1>Providers</h1>
           <p>Connect any OpenAI-, Anthropic-, Gemini- or Ollama-compatible endpoint. Keys can live in an env var or be stored encrypted here.</p>
+          <p class="field-hint">Providers you add are <strong>yours alone</strong> — other accounts never see them, and agent runs only ever use your own models. Rows marked <span class="badge badge-muted">👥 shared</span> are platform defaults: everyone can use them until you edit one, which makes it yours.</p>
         </div>
         <div class="flex">
           <button class="btn" onclick="providerTestAll()" title="Run a connection test against every active provider">🩺 Health check</button>
@@ -4531,6 +4533,7 @@
           <div class="provider-head-sub">${esc(p.type)} · ${esc(p.apiFormat)} API · ${esc(p.authType)} auth</div>
         </div>
         <span class="badge badge-${h.cls} provider-health" title="${esc(h.tip)}">${h.icon} ${esc(h.label)}</span>
+        ${p.ownerId ? "" : '<span class="badge badge-muted" title="Shared platform provider — every account can see and use it. Editing it makes it yours (your key stays private); duplicate it to keep a personal copy.">👥 shared</span>'}
       </div>
 
       <div class="provider-facts">

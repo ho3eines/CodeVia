@@ -25,6 +25,12 @@ export interface AiTextRequest {
   /** Optional hard latency budget (ms); router de-prioritises models whose
    *  benchmark p95 is far above this. */
   maxLatencyMs?: number;
+  /**
+   * The account whose models may serve this call (project owner, or the
+   * signed-in user). Another account's provider is never a candidate, so a
+   * request can never spend someone else's key. See `src/ai/ownership.ts`.
+   */
+  ownerId?: string;
 }
 
 export interface AiTextResult {
@@ -64,11 +70,13 @@ export class AiTextService {
   ) {}
 
   async complete(req: AiTextRequest): Promise<AiTextResult | null> {
-    const available = this.deps.modelRepo.listActive().map(toCandidate);
+    // Per-account pool: this account's models + the shared platform rows.
+    const pool = this.deps.modelRepo.listActiveForOwner(req.ownerId);
+    const available = pool.map(toCandidate);
     const perfStats = this.deps.benchRepo.computeStats();
     // Ignore telemetry for models that no longer exist (deleted/deactivated), so
     // a stale model can never skew the speed normalisation or be routed to.
-    const liveIds = new Set(this.deps.modelRepo.listActive().map((m) => m.id));
+    const liveIds = new Set(pool.map((m) => m.id));
     ModelBenchmarkRepository.addSpeedNormalisation(perfStats.filter((s) => liveIds.has(s.modelId)));
     const candidates = this.deps.modelRouter.route(
       available,
@@ -82,7 +90,7 @@ export class AiTextService {
     );
     let lastError: unknown;
     for (const candidate of candidates) {
-      const model = this.deps.modelRepo.findById(candidate.id)?.data;
+      const model = this.deps.modelRepo.findVisibleById(candidate.id, req.ownerId);
       if (!model) continue;
       const providerConfig = this.deps.providerRepo.findById(model.providerId)?.data;
       if (!providerConfig || !providerConfig.active) continue;

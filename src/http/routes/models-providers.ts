@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { Model, ModelProvider } from "../../domain/entities.js";
 import {
@@ -15,6 +15,8 @@ import { streamModelChat } from "../../ai/model-stream.js";
 import type { ChatMessage } from "../../ai/types.js";
 import { knownModelInfos } from "../../ai/known-models.js";
 import { decryptSecret, encryptSecret, maskSecret } from "../../auth/encrypted-secrets.js";
+import { resolveRequestUser, DEMO_USER_ID } from "../auth.js";
+import { adoptRowForMutation, isProtectedSharedRow, isSharedRow, rowVisibleTo } from "../../ai/ownership.js";
 import { logger } from "../../logger.js";
 
 const PROVIDER_TYPES: ModelProvider["type"][] = [
@@ -72,12 +74,14 @@ function withStatus(p: ModelProvider): ModelProvider & { readiness: ReturnType<t
 function withStatusAndCounts(
   p: ModelProvider,
   container: Container,
+  /** Only count models this account may see (see src/ai/ownership.ts). */
+  ownerId?: string,
 ): ReturnType<typeof withStatus> & { modelCount: number; activeModelCount: number } {
-  const models = container.modelRepo.findMany().filter((m) => m.data.providerId === p.id);
+  const models = container.modelRepo.listForOwner(ownerId).filter((m) => m.providerId === p.id);
   return {
     ...withStatus(p),
     modelCount: models.length,
-    activeModelCount: models.filter((m) => m.data.active).length,
+    activeModelCount: models.filter((m) => m.active).length,
   };
 }
 
@@ -136,6 +140,8 @@ async function discoverAndAddModels(
   providerId: string,
   config: ModelProvider,
   container: Container,
+  /** Models inherit the provider's owner so they stay visible to the same account. */
+  ownerId: string | undefined = config.ownerId,
 ): Promise<{ added: string[]; test: ProviderTestResult; fromKnownCatalog: boolean }> {
   const testResult = await testProviderConnection(config, { timeoutMs: 15000 });
 
@@ -148,7 +154,7 @@ async function discoverAndAddModels(
   // De-duplicate against models ALREADY in the Models section for THIS provider
   // (a model id can legitimately exist for more than one provider).
   const existingModels = new Set(
-    container.modelRepo.findMany().filter((m) => m.data.providerId === providerId).map((m) => m.data.modelId),
+    container.modelRepo.listForOwner(ownerId).filter((m) => m.providerId === providerId).map((m) => m.modelId),
   );
 
   const added: string[] = [];
@@ -159,6 +165,7 @@ async function discoverAndAddModels(
     try {
       container.modelRepo.create({
         providerId,
+        ownerId,
         modelId,
         displayName: info.displayName || modelId,
         contextWindow: Number(info.contextWindow) || 128000,
@@ -237,15 +244,35 @@ async function attachDiscovery(
 }
 
 export function registerModelRoutes(app: FastifyInstance, container: Container): void {
-  app.get("/models", { schema: { tags: ["models"] } }, async () => {
-    return container.modelRepo.findMany().map((r) => r.data);
+  /**
+   * The account this request acts as (the pre-login demo identity when logged
+   * out). Models and providers are per-account: an account sees its own rows
+   * plus the shared platform rows, never another account's keys or models.
+   */
+  const actor = (req: FastifyRequest): string => resolveRequestUser(req, container).user.id;
+  /** Read a provider only when the acting account may see it. */
+  const visibleProvider = (req: FastifyRequest, id: string): ModelProvider | undefined =>
+    container.providerRepo.findVisibleById(id, actor(req));
+  /** Read a model only when the acting account may see it. */
+  const visibleModel = (req: FastifyRequest, id: string): Model | undefined =>
+    container.modelRepo.findVisibleById(id, actor(req));
+  /**
+   * The platform's offline fallback (the built-in mock provider and its
+   * models) is shared and must stay available to every account — deleting it
+   * would take the offline path away from other users.
+   */
+  const protectedShared = (row: { id: string; ownerId?: string }, req: FastifyRequest): boolean =>
+    isSharedRow(row) && isProtectedSharedRow(row) && actor(req) !== DEMO_USER_ID;
+
+  app.get("/models", { schema: { tags: ["models"] } }, async (req) => {
+    return container.modelRepo.listForOwner(actor(req));
   });
 
   app.post("/models", { schema: { tags: ["models"] } }, async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const providerId = String(b.providerId ?? "").trim();
     if (!providerId) return fail(reply, 400, "providerId is required");
-    const prow = container.providerRepo.findById(providerId);
+    const prow = visibleProvider(req, providerId);
     if (!prow) return fail(reply, 400, `Unknown provider "${providerId}"`);
     // `modelId` may be typed by hand — many free/preview models are missing from
     // a provider's catalog, so manual entry is a first-class path here. The id is
@@ -254,12 +281,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const modelId = String(b.modelId ?? "").trim().replace(/^models\//, "");
     if (!modelId) return fail(reply, 400, "modelId is required (the provider's model name, e.g. gpt-4o-mini)");
     const duplicate = container.modelRepo
-      .findMany()
-      .find((m) => m.data.providerId === providerId && m.data.modelId === modelId);
+      .listForOwner(actor(req))
+      .find((m) => m.providerId === providerId && m.modelId === modelId);
     // Idempotent: re-adding an existing model returns it instead of creating a
     // second row (the UI shows a "already in the registry" notice).
     if (duplicate) {
-      return { ...duplicate.data, duplicate: true, message: `Model "${modelId}" is already in the registry for this provider` };
+      return { ...duplicate, duplicate: true, message: `Model "${modelId}" is already in the registry for this provider` };
     }
     // Capabilities are auto-detected when the client does not supply them.
     const detectedCapabilities = detectModelCapabilities(modelId);
@@ -268,6 +295,9 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       : detectedCapabilities;
     const model = container.modelRepo.create({
       providerId,
+      // Inherit the provider's owner: a model added to a shared provider stays
+      // shared, one added to a personal provider belongs to that account.
+      ownerId: prow.ownerId,
       modelId,
       displayName: String(b.displayName ?? modelId),
       contextWindow: numberOr(b.contextWindow, detectModelInfo(modelId).contextWindow),
@@ -291,28 +321,32 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
 
   app.get("/models/:id", { schema: { tags: ["models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const m = container.modelRepo.findById(id)?.data;
+    const m = visibleModel(req, id);
     return m ?? fail(reply, 404, "model not found");
   });
 
   app.patch("/models/:id", { schema: { tags: ["models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const b = (req.body ?? {}) as Record<string, unknown>;
-    const r = container.modelRepo.findById(id);
-    if (!r) return fail(reply, 404, "model not found");
+    const found = visibleModel(req, id);
+    if (!found) return fail(reply, 404, "model not found");
+    // Editing a shared/legacy row hands it to this account — a shared row is
+    // visible to everyone, so editing it in place would publish this account's
+    // tuning (and its provider) to other users.
+    const r = { data: adoptRowForMutation(found, actor(req)) };
 
     const patch: Partial<Model> = {};
     if (typeof b.displayName === "string" && b.displayName.trim()) patch.displayName = b.displayName.trim();
     if (typeof b.modelId === "string" && b.modelId.trim()) {
       const modelId = b.modelId.trim().replace(/^models\//, "");
       const clash = container.modelRepo
-        .findMany()
-        .find((m) => m.data.id !== id && m.data.providerId === (b.providerId ?? r.data.providerId) && m.data.modelId === modelId);
+        .listForOwner(actor(req))
+        .find((m) => m.id !== id && m.providerId === (b.providerId ?? r.data.providerId) && m.modelId === modelId);
       if (clash) return fail(reply, 409, `Model "${modelId}" already exists for this provider`);
       patch.modelId = modelId;
     }
     if (typeof b.providerId === "string" && b.providerId.trim()) {
-      if (!container.providerRepo.findById(b.providerId.trim())) return fail(reply, 400, `Unknown provider "${b.providerId}"`);
+      if (!visibleProvider(req, b.providerId.trim())) return fail(reply, 400, `Unknown provider "${b.providerId}"`);
       patch.providerId = b.providerId.trim();
     }
     if (b.contextWindow !== undefined) patch.contextWindow = numberOr(b.contextWindow, r.data.contextWindow);
@@ -359,18 +393,18 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
 
   app.post("/models/:id/activate", { schema: { tags: ["models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const r = container.modelRepo.findById(id);
-    if (!r) return fail(reply, 404, "model not found");
-    const m = { ...r.data, active: true, updatedAt: new Date().toISOString() };
+    const found = visibleModel(req, id);
+    if (!found) return fail(reply, 404, "model not found");
+    const m = { ...adoptRowForMutation(found, actor(req)), active: true, updatedAt: new Date().toISOString() };
     container.modelRepo.upsert(m);
     return m;
   });
 
   app.post("/models/:id/deactivate", { schema: { tags: ["models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const r = container.modelRepo.findById(id);
-    if (!r) return fail(reply, 404, "model not found");
-    const m = { ...r.data, active: false, updatedAt: new Date().toISOString() };
+    const found = visibleModel(req, id);
+    if (!found) return fail(reply, 404, "model not found");
+    const m = { ...adoptRowForMutation(found, actor(req)), active: false, updatedAt: new Date().toISOString() };
     container.modelRepo.upsert(m);
     return m;
   });
@@ -385,14 +419,14 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const b = (req.body ?? {}) as Record<string, unknown>;
     const providerId = String(b.providerId ?? "").trim();
     if (!providerId) return fail(reply, 400, "providerId is required");
-    const prow = container.providerRepo.findById(providerId);
+    const prow = visibleProvider(req, providerId);
     if (!prow) return fail(reply, 400, `Unknown provider "${providerId}"`);
     const modelId = String(b.modelId ?? "").trim();
     if (!modelId) return fail(reply, 400, "modelId is required");
     const info = detectModelInfo(modelId);
     const message = typeof b.message === "string" ? b.message.trim() : "";
     if (message) {
-      const chat = await testModelChat(prow.data, info.id, {
+      const chat = await testModelChat(prow, info.id, {
         message,
         timeoutMs: 15000,
         tuning: {
@@ -409,7 +443,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       };
     }
     // Detection-only mode: verify reachability + catalog membership, no completion call.
-    const test = await testProviderConnection(prow.data, { timeoutMs: 15000 });
+    const test = await testProviderConnection(prow, { timeoutMs: 15000 });
     const catalogChecked = Array.isArray(test.models);
     const found = catalogChecked ? test.models!.includes(info.id) : undefined;
     return {
@@ -430,8 +464,8 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const b = (req.body ?? {}) as Record<string, unknown>;
     const r = container.modelRepo.findById(id);
-    if (!r) return fail(reply, 404, "model not found");
-    const prow = container.providerRepo.findById(r.data.providerId);
+    if (!r || !rowVisibleTo(r.data, actor(req))) return fail(reply, 404, "model not found");
+    const prow = visibleProvider(req, r.data.providerId);
     if (!prow) return fail(reply, 404, `Provider not found for model "${r.data.modelId}"`);
     const modelId = r.data.modelId;
     const message = typeof b.message === "string" && b.message.trim() ? b.message : DEFAULT_MODEL_TEST_MESSAGE;
@@ -441,9 +475,9 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (typeof b.temperature === "number") tuning.temperature = b.temperature;
     if (typeof b.maxTokens === "number") tuning.maxTokens = b.maxTokens;
     if (b.omitTemperature !== undefined) tuning.omitTemperature = b.omitTemperature === true;
-    const chat = await testModelChat(prow.data, modelId, { message, timeoutMs: 15000, tuning });
+    const chat = await testModelChat(prow, modelId, { message, timeoutMs: 15000, tuning });
     return {
-      providerId: prow.data.id,
+      providerId: prow.id,
       capabilities: r.data.capabilities,
       detectedCapabilities: detectModelInfo(modelId).capabilities,
       ...chat,
@@ -459,8 +493,8 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const b = (req.body ?? {}) as Record<string, unknown>;
     const r = container.modelRepo.findById(id);
-    if (!r) return fail(reply, 404, "model not found");
-    const prow = container.providerRepo.findById(r.data.providerId);
+    if (!r || !rowVisibleTo(r.data, actor(req))) return fail(reply, 404, "model not found");
+    const prow = visibleProvider(req, r.data.providerId);
     if (!prow) return fail(reply, 404, `Provider not found for model "${r.data.modelId}"`);
 
     // Accept either a single `message` or a full `messages` history so the
@@ -486,7 +520,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const ctrl = new AbortController();
     reply.raw.on("close", () => ctrl.abort());
     try {
-      for await (const ev of streamModelChat(prow.data, r.data.modelId, {
+      for await (const ev of streamModelChat(prow, r.data.modelId, {
         messages,
         temperature: typeof b.temperature === "number" ? b.temperature : r.data.temperature,
         maxTokens: typeof b.maxTokens === "number" ? b.maxTokens : r.data.maxTokens,
@@ -517,32 +551,39 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     if (!ids.length) return fail(reply, 400, "ids[] is required");
     const affected: string[] = [];
     const missing: string[] = [];
+    const skipped: Array<{ id: string; reason: string }> = [];
     for (const id of ids) {
-      const row = container.modelRepo.findById(id);
+      const row = visibleModel(req, id);
       if (!row) {
         missing.push(id);
         continue;
       }
       if (action === "delete") {
+        if (protectedShared(row, req)) {
+          skipped.push({ id, reason: "The built-in mock models are shared platform rows and cannot be deleted" });
+          continue;
+        }
         container.modelRepo.deleteById(id);
         // Drop this model's benchmark rows so a deleted model never shows up
         // again in the benchmark table / smart-router stats.
         container.benchRepo.purgeForModel(id);
       } else {
         container.modelRepo.upsert({
-          ...row.data,
+          ...adoptRowForMutation(row, actor(req)),
           active: action === "activate",
           updatedAt: new Date().toISOString(),
         });
       }
       affected.push(id);
     }
-    return { ok: true, action, affected: affected.length, ids: affected, missing };
+    return { ok: true, action, affected: affected.length, ids: affected, missing, skipped };
   });
 
   app.delete("/models/:id", { schema: { tags: ["models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    if (!container.modelRepo.findById(id)) return fail(reply, 404, "model not found");
+    const m = visibleModel(req, id);
+    if (!m) return fail(reply, 404, "model not found");
+    if (protectedShared(m, req)) return fail(reply, 409, "The built-in mock models are shared platform rows and cannot be deleted — deactivate them instead");
     container.modelRepo.deleteById(id);
     container.benchRepo.purgeForModel(id);
     return { ok: true };
@@ -553,17 +594,19 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     return { types: PROVIDER_TYPES, authTypes: AUTH_TYPES, apiFormats: API_FORMATS, presets: PROVIDER_PRESETS };
   });
 
-  app.get("/providers", { schema: { tags: ["providers"] } }, async () => {
-    return container.providerRepo.findMany().map((r) => withStatusAndCounts(r.data, container));
+  app.get("/providers", { schema: { tags: ["providers"] } }, async (req) => {
+    return container.providerRepo.listForOwner(actor(req)).map((p) => withStatusAndCounts(p, container, actor(req)));
   });
 
   /**
    * Provider dashboard summary — the numbers shown at the top of the Providers
    * page (total / active / ready / needs a key, plus attached model counts).
    */
-  app.get("/providers/summary", { schema: { tags: ["providers"] } }, async () => {
-    const providers = container.providerRepo.findMany().map((r) => r.data);
-    const models = container.modelRepo.findMany().map((r) => r.data);
+  app.get("/providers/summary", { schema: { tags: ["providers"] } }, async (req) => {
+    // Per-account totals: the counters must describe what this account can
+    // actually see and use, not the whole installation.
+    const providers = container.providerRepo.listForOwner(actor(req));
+    const models = container.modelRepo.listForOwner(actor(req));
     const ready = providers.filter((p) => providerReadiness(p).ready);
     const active = providers.filter((p) => p.active);
     return {
@@ -601,10 +644,13 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const secretValue = typeof b.secretValue === "string" && b.secretValue.trim() ? b.secretValue.trim() : undefined;
     if (secretValue && secretValue.length < 6) return fail(reply, 400, "secretValue looks too short to be an API key");
     if (type !== "mock" && !baseUrl) return fail(reply, 400, "baseUrl is required for this provider type");
-    if (container.providerRepo.findMany().some((r) => r.data.name.toLowerCase() === name.toLowerCase())) {
+    if (container.providerRepo.listForOwner(actor(req)).some((p) => p.name.toLowerCase() === name.toLowerCase())) {
       return fail(reply, 409, `A provider named "${name}" already exists`);
     }
     const draft: Omit<ModelProvider, "id" | "createdAt" | "updatedAt"> = {
+      // A created provider belongs to the account that created it — another
+      // account must never see, edit or spend its key.
+      ownerId: actor(req),
       name,
       type,
       baseUrl,
@@ -624,7 +670,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     draft.active = b.active === false ? false : readiness.ready;
     const p = container.providerRepo.create(draft);
     reply.code(201);
-    const status: ProviderStatus = withStatusAndCounts(p, container);
+    const status: ProviderStatus = withStatusAndCounts(p, container, actor(req));
 
     // 🤖 Auto-discover and add models from the newly created provider (real catalog,
     //    capabilities auto-detected). The live test result is surfaced so the UI can
@@ -635,8 +681,8 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
 
   app.get("/providers/:id", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const p = container.providerRepo.findById(id)?.data;
-    return p ? withStatusAndCounts(p, container) : fail(reply, 404, "provider not found");
+    const p = visibleProvider(req, id);
+    return p ? withStatusAndCounts(p, container, actor(req)) : fail(reply, 404, "provider not found");
   });
 
   // Pre-registration connectivity test — never saves anything. Feeds the
@@ -662,8 +708,10 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     let inheritedSecretValueEnc: string | undefined;
     const editProviderId = typeof b.providerId === "string" ? b.providerId.trim() : "";
     if (!secretValue && editProviderId) {
-      const stored = container.providerRepo.findById(editProviderId);
-      if (stored) inheritedSecretValueEnc = stored.data.secretValueEnc;
+      // Only a provider the caller may see: inheriting the stored key of a
+      // foreign provider would spend (and probe) someone else's credential.
+      const stored = visibleProvider(req, editProviderId);
+      if (stored) inheritedSecretValueEnc = stored.secretValueEnc;
     }
     const name = String(b.name ?? "").trim() || preset.label;
     const draft: ModelProvider = {
@@ -696,8 +744,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   app.patch("/providers/:id", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const b = (req.body ?? {}) as Record<string, unknown>;
-    const r = container.providerRepo.findById(id);
-    if (!r) return fail(reply, 404, "provider not found");
+    const found = visibleProvider(req, id);
+    if (!found) return fail(reply, 404, "provider not found");
+    // Editing a shared/legacy row hands it to this account (see adoptRowForMutation):
+    // a shared row is visible to everyone, so an in-place edit would publish
+    // this account's API key to every other user.
+    const r = { data: adoptRowForMutation(found, actor(req)) };
     if (typeof b.type === "string" && !PROVIDER_TYPES.includes(b.type as ModelProvider["type"])) return fail(reply, 400, `Unknown provider type "${b.type}"`);
     if (typeof b.secretRef === "string" && b.secretRef && !/^[A-Z][A-Z0-9_]*$/i.test(b.secretRef)) {
       return fail(reply, 400, "secretRef must be an environment variable NAME; use secretValue to store a key directly");
@@ -717,7 +769,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     //    model in the provider's live catalog that is missing from the Models
     //    section is added automatically. Best-effort — a failed catalog call
     //    never fails the edit itself.
-    const status: ProviderStatus = withStatusAndCounts(p, container);
+    const status: ProviderStatus = withStatusAndCounts(p, container, actor(req));
     await attachDiscovery(status, p, container, "updated");
     return status;
   });
@@ -726,8 +778,9 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   app.post("/providers/:id/activate", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const q = req.query as { force?: string };
-    const r = container.providerRepo.findById(id);
-    if (!r) return fail(reply, 404, "provider not found");
+    const found = visibleProvider(req, id);
+    if (!found) return fail(reply, 404, "provider not found");
+    const r = { data: adoptRowForMutation(found, actor(req)) };
     const readiness = providerReadiness(r.data);
     if (!readiness.ready && q.force !== "true") {
       return fail(reply, 422, readiness.reason ?? "Provider is not ready", { hint: readiness.hint, readiness });
@@ -735,25 +788,25 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     const p = { ...r.data, active: true, updatedAt: new Date().toISOString() };
     container.providerRepo.upsert(p);
     container.providerRegistry.invalidate(id);
-    return withStatusAndCounts(p, container);
+    return withStatusAndCounts(p, container, actor(req));
   });
 
   app.post("/providers/:id/deactivate", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const r = container.providerRepo.findById(id);
-    if (!r) return fail(reply, 404, "provider not found");
-    const p = { ...r.data, active: false, updatedAt: new Date().toISOString() };
+    const found = visibleProvider(req, id);
+    if (!found) return fail(reply, 404, "provider not found");
+    const p = { ...adoptRowForMutation(found, actor(req)), active: false, updatedAt: new Date().toISOString() };
     container.providerRepo.upsert(p);
     container.providerRegistry.invalidate(id);
-    return withStatusAndCounts(p, container);
+    return withStatusAndCounts(p, container, actor(req));
   });
 
   // Live connectivity check (key presence + model catalog call) for a saved provider.
   app.post("/providers/:id/test", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const r = container.providerRepo.findById(id);
+    const r = visibleProvider(req, id);
     if (!r) return fail(reply, 404, "provider not found");
-    const result = await testProviderConnection(r.data);
+    const result = await testProviderConnection(r);
     return { providerId: id, ...result };
   });
 
@@ -765,9 +818,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
    */
   app.post("/providers/:id/sync-models", { schema: { tags: ["providers", "models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const r = container.providerRepo.findById(id);
-    if (!r) return fail(reply, 404, "provider not found");
-    const status: ProviderStatus = withStatusAndCounts(r.data, container);
+    const found = visibleProvider(req, id);
+    if (!found) return fail(reply, 404, "provider not found");
+    // Syncing writes models into a shared provider's catalog — take ownership
+    // first so the discovered models land in this account's registry.
+    const r = { data: adoptRowForMutation(found, actor(req)) };
+    const status: ProviderStatus = withStatusAndCounts(r.data, container, actor(req));
     await attachDiscovery(status, r.data, container, "updated");
     return {
       ok: true,
@@ -775,7 +831,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
       added: status.discoveredModels ?? 0,
       message: status.message,
       test: status.test,
-      ...withStatusAndCounts(r.data, container),
+      ...withStatusAndCounts(r.data, container, actor(req)),
     };
   });
 
@@ -803,12 +859,12 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
     let deletedModels = 0;
 
     for (const id of ids) {
-      const row = container.providerRepo.findById(id);
+      const row = visibleProvider(req, id);
       if (!row) {
         missing.push(id);
         continue;
       }
-      const p = row.data;
+      const p = row;
       if (action === "test") {
         const t = await testProviderConnection(p, { timeoutMs: 15000 });
         results.push({ id, name: p.name, ok: t.ok, message: t.message });
@@ -820,13 +876,13 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
           skipped.push({ id, reason: "The built-in mock provider cannot be deleted" });
           continue;
         }
-        const models = container.modelRepo.findMany().filter((m) => m.data.providerId === id);
+        const models = container.modelRepo.listForOwner(actor(req)).filter((m) => m.providerId === id);
         if (models.length && !cascade) {
           skipped.push({ id, reason: `Provider has ${models.length} model(s) — retry with cascade` });
           continue;
         }
-        for (const m of models) container.modelRepo.deleteById(m.data.id);
-        if (models.length) container.benchRepo.purgeForModels(models.map((m) => m.data.id));
+        for (const m of models) container.modelRepo.deleteById(m.id);
+        if (models.length) container.benchRepo.purgeForModels(models.map((m) => m.id));
         deletedModels += models.length;
         container.providerRepo.deleteById(id);
         container.providerRegistry.invalidate(id);
@@ -841,7 +897,7 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
           continue;
         }
       }
-      container.providerRepo.upsert({ ...p, active: activate, updatedAt: new Date().toISOString() });
+      container.providerRepo.upsert({ ...adoptRowForMutation(p, actor(req)), active: activate, updatedAt: new Date().toISOString() });
       container.providerRegistry.invalidate(id);
       affected.push(id);
     }
@@ -855,20 +911,22 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
    */
   app.post("/providers/:id/duplicate", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const r = container.providerRepo.findById(id);
+    const r = visibleProvider(req, id);
     if (!r) return fail(reply, 404, "provider not found");
     const b = (req.body ?? {}) as Record<string, unknown>;
-    const existingNames = new Set(container.providerRepo.findMany().map((x) => x.data.name.toLowerCase()));
-    let name = String(b.name ?? "").trim() || `${r.data.name} (copy)`;
+    const existingNames = new Set(container.providerRepo.listForOwner(actor(req)).map((x) => x.name.toLowerCase()));
+    let name = String(b.name ?? "").trim() || `${r.name} (copy)`;
     if (existingNames.has(name.toLowerCase())) {
       let n = 2;
       while (existingNames.has(`${name} ${n}`.toLowerCase())) n += 1;
       name = `${name} ${n}`;
     }
-    const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = r.data;
-    const copy = container.providerRepo.create({ ...rest, name, active: false });
+    const { id: _id, createdAt: _c, updatedAt: _u, ...rest } = r;
+    // The copy is always the caller's own — duplicating a shared provider is
+    // how an account gets a personal, editable instance of it.
+    const copy = container.providerRepo.create({ ...rest, ownerId: actor(req), name, active: false });
     reply.code(201);
-    return withStatusAndCounts(copy, container);
+    return withStatusAndCounts(copy, container, actor(req));
   });
 
   // List the live model catalog for a saved provider. Powers the "Add Model"
@@ -876,13 +934,13 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
   // capabilities) instead of typing model ids manually.
   app.get("/providers/:id/models", { schema: { tags: ["providers", "models"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const r = container.providerRepo.findById(id);
+    const r = visibleProvider(req, id);
     if (!r) return fail(reply, 404, "provider not found");
-    const result = await testProviderConnection(r.data, { timeoutMs: 15000 });
+    const result = await testProviderConnection(r, { timeoutMs: 15000 });
     return {
       providerId: id,
-      providerName: r.data.name,
-      apiFormat: r.data.apiFormat,
+      providerName: r.name,
+      apiFormat: r.apiFormat,
       catalogUrl: result.catalogUrl,
       chatUrl: result.chatUrl,
       urls: result.urls,
@@ -897,16 +955,16 @@ export function registerModelRoutes(app: FastifyInstance, container: Container):
 
   app.delete("/providers/:id", { schema: { tags: ["providers"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const r = container.providerRepo.findById(id);
+    const r = visibleProvider(req, id);
     if (!r) return fail(reply, 404, "provider not found");
-    if (isBuiltInMock(r.data)) return fail(reply, 400, "The built-in mock provider cannot be deleted (deactivate it instead)");
-    const models = container.modelRepo.findMany().filter((m) => m.data.providerId === id);
+    if (isBuiltInMock(r)) return fail(reply, 400, "The built-in mock provider cannot be deleted (deactivate it instead)");
+    const models = container.modelRepo.listForOwner(actor(req)).filter((m) => m.providerId === id);
     const q = req.query as { cascade?: string };
     if (models.length && q.cascade !== "true") {
-      return fail(reply, 409, `Provider has ${models.length} model(s). Delete them first or call with ?cascade=true`, { models: models.map((m) => m.data.id) });
+      return fail(reply, 409, `Provider has ${models.length} model(s). Delete them first or call with ?cascade=true`, { models: models.map((m) => m.id) });
     }
-    for (const m of models) container.modelRepo.deleteById(m.data.id);
-    if (models.length) container.benchRepo.purgeForModels(models.map((m) => m.data.id));
+    for (const m of models) container.modelRepo.deleteById(m.id);
+    if (models.length) container.benchRepo.purgeForModels(models.map((m) => m.id));
     container.providerRepo.deleteById(id);
     container.providerRegistry.invalidate(id);
     return { ok: true, deletedModels: models.length };

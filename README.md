@@ -2,7 +2,7 @@
 
 A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled** AI engineering platform under active development. CodeVia provides agent definitions and execution paths for research, architecture, backend/frontend development, UI/UX, database, DevOps, QA, security, code review, documentation, debugging, refactoring, performance, and release; not all roles have a complete autonomous implementation.
 
-> **Readiness warning (2026-09-07):** the [historical completeness audit](docs/PIPELINE_AUDIT.md) reproduced 18 targeted gaps before the repository-first work. This update addresses project-state persistence/reuse; it is **not** a complete security, QA or queue-recovery remediation. Authentication/authorization and realtime limitations still make public or sensitive multi-user deployment unsafe.
+> **Readiness warning (2026-09-11):** the [historical completeness audit](docs/PIPELINE_AUDIT.md) reproduced 18 targeted gaps before the repository-first work. This update addresses project-state persistence/reuse and **per-account isolation** (GitHub credentials, projects, models and providers — see [docs/MULTI_USER_ISOLATION.md](docs/MULTI_USER_ISOLATION.md)); it is **not** a complete security, QA or queue-recovery remediation. Global admin feeds (notifications, audit log) are still shared, so review the [remaining gaps](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here) before a sensitive multi-user deployment.
 
 > **Repository-backed project knowledge — not yet complete.** The platform stores full skills, agents/prompts and prompt history, rules, memory, workflows, tasks, runs and conversations under **`CodeVia/`**. Standard initialization/reuse and many restore paths are tested, but the [current repository-state audit](docs/REPOSITORY_STATE_AUDIT.md) reproduces **8 remaining gaps** in actual context consumption, terminal history, deletion/copy, legacy migration and error handling. Do not assume every path is repository-authoritative yet. Credentials, accounts and live queue state remain local; keep a database backup, particularly before migrating legacy projects. See the [format and usage guide](docs/REPOSITORY_STATE.md).
 
@@ -10,16 +10,16 @@ A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled
 
 ## ✨ Highlights
 
-- 🔀 **Multi-project organization** — project-scoped agents, model assignments, skills, memory, prompts, workflows and Telegram chats. Tenant authorization is incomplete; see the readiness warning above.
+- 🔀 **Multi-project organization** — project-scoped agents, model assignments, skills, memory, prompts, workflows and Telegram chats. Projects, models and providers are isolated per account (a signed-in account sees only its own); see [docs/MULTI_USER_ISOLATION.md](docs/MULTI_USER_ISOLATION.md).
 - 🤖 **18 built-in agent types** generated automatically from your project description (**AI Agent Generator**).
-- 🧠 **Provider-agnostic model system** — OpenAI, Anthropic, Gemini, Azure OpenAI, OpenRouter, Ollama, custom OpenAI-compatible + a built-in **Mock AI provider** so the whole platform runs offline.
+- 🧠 **Provider-agnostic model system** — OpenAI, Anthropic, Gemini, Azure OpenAI, OpenRouter, Ollama, custom OpenAI-compatible + a built-in **Mock AI provider** so the whole platform runs offline. Providers and models belong to the account that created them; routing never spends another account's key.
 - 🎯 **Intelligent Model Router** — picks a model per task by capability, budget, cost, latency, context size; auto-falls back A → B → C on failure.
 - 🗂️ **GitHub-backed Memory** — architecture, decisions, bugs, knowledge, lessons and conversation summaries versioned via commits.
 - 🔀 **Workflow Engine** — visual DAG of agent / tool / condition / approval / parallel / trigger nodes.
 - 🏃 **Background Worker + Queue** — agent executions never block the UI/API thread; retries, exponential backoff, dead-letter, idempotency.
 - 📱 **Telegram bot** — project-aware inline keyboards, natural-language requests (فارسی included) and human approval via Telegram. It receives updates over a **webhook when one is reachable, long polling otherwise**, so a bot token alone is enough — no ngrok, no public URL, and `/ping` tells you exactly which path is live.
 - 📊 **Observability** — AI Run Console (observable steps, never chain-of-thought), cost tracking, agent dashboards, audit log, notifications, system health.
-- 🔐 **Security building blocks** — secret references, OAuth login, role definitions, webhook signature validation, approval controls and audit events. Enforcement is incomplete; these are not an end-to-end security guarantee.
+- 🔐 **Security building blocks** — secret references, OAuth login, per-account GitHub tokens (every project action runs with *your* token, not a server PAT), role definitions, webhook signature validation, approval controls and audit events. Some global admin feeds are still shared; see the [remaining gaps](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here).
 - 🐳 **Dockerized + Railway-ready** — multi-stage Dockerfile, health/readiness/liveness endpoints, `railway.json`, `docker-compose.yml`, `.env.example`.
 
 ---
@@ -48,7 +48,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (493 tests)
+npm test            # unit + integration + end-to-end (675 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run typecheck   # strict TypeScript
 npm run build       # compile + copy static UI into dist/

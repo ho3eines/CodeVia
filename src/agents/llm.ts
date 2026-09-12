@@ -34,6 +34,12 @@ export interface ChatDeps {
   checkActive: () => void;
   /** Analysis/demo runs may use Mock; code generation never silently falls back to it. */
   allowMock?: boolean;
+  /**
+   * The account whose models this run may spend: normally the project owner.
+   * A run must never fall back to another account's provider — see
+   * `src/ai/ownership.ts`. Undefined = shared/platform rows only.
+   */
+  ownerId?: string;
 }
 
 /**
@@ -43,7 +49,10 @@ export interface ChatDeps {
  * not permission to commit a placeholder implementation.
  */
 export function realChatFor(deps: ChatDeps): RealChat | undefined {
-  const models = deps.modelRepo.listActive().filter((m) => {
+  // Per-account pool: the project owner's models plus the shared/platform
+  // rows. Another account's provider is never a candidate — a run must not
+  // spend (or expose) a key it does not own.
+  const models = deps.modelRepo.listActiveForOwner(deps.ownerId).filter((m) => {
     const p = deps.providerRepo.findById(m.providerId)?.data;
     return p?.active && (deps.allowMock || p.type !== "mock");
   });

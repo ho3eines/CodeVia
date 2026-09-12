@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
-import { ROLE_PERMISSIONS } from "../auth.js";
+import { ROLE_PERMISSIONS, resolveRequestUser } from "../auth.js";
 import { getStorageInfo } from "../../app/storage.js";
 import {
   getBackupSettings,
@@ -61,7 +61,15 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
     if (!requireAdmin(req, reply)) return { error: "Forbidden" };
     const b = (req.body ?? {}) as SaveBackupSettingsInput;
     try {
-      const stored = saveBackupSettings(container.kv, b, req.user.id);
+      // The account configuring the backup lends its GitHub token to the
+      // unattended job (backups run on a schedule, with no request to borrow a
+      // credential from). GITHUB_TOKEN stays as the fallback.
+      const { user, authenticated } = resolveRequestUser(req, container);
+      const stored = saveBackupSettings(
+        container.kv,
+        { ...b, ...(b.githubUserId === undefined && authenticated ? { githubUserId: user.id } : {}) },
+        req.user.id,
+      );
       await container.auditRepo.record({
         userId: req.user.id,
         action: "admin.backup.settings.update",

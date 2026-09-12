@@ -277,7 +277,7 @@ export class AgentManager {
   async authorDefinition<T extends Agent | Skill>(project: Project, value: T, kind: "agent" | "skill"): Promise<T> {
     if (!this.deps.providerRegistry) throw new Error("AI provider registry is unavailable");
     const generator = new ProjectStateGenerator({ modelRepo: this.deps.modelRepo, providerRepo: this.deps.providerRepo, providerRegistry: this.deps.providerRegistry, costRepo: this.deps.costRepo });
-    const reference = this.deps.agentRepo.byType(project.id, "research") ?? this.deps.agentGenerator.generate(project, { agentTypes: ["research"], persist: false })[0];
+    const reference = this.deps.agentRepo.byType(project.id, "research") ?? this.deps.agentGenerator.generate(project, { agentTypes: ["research"], persist: false, ownerId: project.ownerId })[0];
     const author = { ...reference, models: project.defaultModelId ? { primary: project.defaultModelId, fallbacks: [], specialized: {} } : kind === "agent" ? (value as Agent).models : reference.models };
     const result = await generator.generate(project, { agents: kind === "agent" ? [value as Agent] : [], skills: kind === "skill" ? [value as Skill] : [], workflows: [] }, author, project.description, this.githubFor(project).kind === "mock");
     return (kind === "agent" ? result.draft.agents[0] : result.draft.skills[0]) as T;

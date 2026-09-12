@@ -15,7 +15,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
 
 /** A demo/default owner so local (unauthenticated) usage works out of the box. */
 export { DEMO_USER, DEMO_USER_ID } from "../auth/identity.js";
-import { DEMO_USER } from "../auth/identity.js";
+import { DEMO_USER, DEMO_USER_ID } from "../auth/identity.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -58,21 +58,26 @@ export function resolveRequestUser(req: FastifyRequest, container?: Container): 
 /**
  * Can this user see and drive this project? Rules, shared with the Socket.io
  * handshake/room authorization so HTTP and realtime enforce the same rule:
- *   1. `ownerId` empty or `user-demo` means "shared/legacy" — pre-login rows
- *      and single-user installs stay visible to every account, and any
- *      connected user may adopt them (see adoptStrandedProjects /
- *      adoptProjectConnection).
- *   2. The unauthenticated demo user sees everything: in demo/simulation
+ *   1. The unauthenticated demo user sees everything: in demo/simulation
  *      mode there is no real multi-user isolation, so nothing disappears.
  *      (Strict auth 401s before routes when login is configured, so this
  *      clause only ever applies when auth is off.)
- *   3. Otherwise only the owner may access their own project.
+ *   2. A signed-in account sees ONLY its own projects.
+ *
+ * (2) used to be "own projects + every shared/unowned project". That shared
+ * clause is exactly how one account ended up listing — and then opening —
+ * another account's projects: the row is visible, the repository is not, so
+ * the first GitHub call with *this* account's token fails (404 / no access)
+ * and the project page errors out for a project that was never theirs.
+ *
+ * Pre-login rows (owned by `user-demo` or by nobody at all) are therefore not
+ * left globally visible: `adoptStrandedProjects` hands them to the account at
+ * login, and `adoptProjectConnection` / the project route hand one over when
+ * its owner opens it directly.
  */
 export function canAccessProject(user: User, project: Pick<Project, "ownerId">): boolean {
-  const ownerId = project.ownerId;
-  if (!ownerId || ownerId === "user-demo") return true; // shared / legacy, adoptable
-  if (user.id === "user-demo") return true; // demo/single-user mode sees everything
-  return ownerId === user.id;
+  if (!user.id || user.id === DEMO_USER_ID) return true; // demo/single-user mode sees everything
+  return project.ownerId === user.id;
 }
 
 export function authMiddleware(opts: { container: Container; can?: Permission }) {

@@ -29,6 +29,7 @@ function heuristicSummary(messages: ConversationMessage[] | undefined, take: num
 async function summarizeConversation(
   container: Container,
   conv: { id: string; projectId?: string; modelId?: string; summary?: string; messages?: ConversationMessage[] },
+  ownerId?: string,
 ): Promise<{ summary: string; method: "ai" | "heuristic"; modelId?: string }> {
   const messages = conv.messages ?? [];
   const transcript = messages
@@ -41,6 +42,7 @@ async function summarizeConversation(
       preferredModelId: conv.modelId,
       projectId: conv.projectId,
       correlationId: `conv-${conv.id}`,
+      ownerId: ownerId ?? (conv.projectId ? container.projectRepo.findById(conv.projectId)?.data.ownerId : undefined),
       maxTokens: 600,
       messages: [
         { role: "system", content: SUMMARY_SYSTEM_PROMPT },
@@ -174,9 +176,11 @@ Be helpful, concise, and accurate. Answer questions directly; if a question need
 function resolveOrderedModels(
   container: Container,
   preferredModelId?: string,
+  ownerId?: string,
 ): Array<{ model: Model; provider: ModelProvider }> {
   try {
-    const available = container.modelRepo.listActive().map(toCandidate);
+    // Per-account pool: this account's models + the shared platform rows.
+    const available = container.modelRepo.listActiveForOwner(ownerId).map(toCandidate);
     if (!available.length) return [];
     const perfStats = container.benchRepo.computeStats();
     const liveIds = new Set(available.map((m) => m.id));
@@ -190,7 +194,7 @@ function resolveOrderedModels(
     );
     const out: Array<{ model: Model; provider: ModelProvider }> = [];
     for (const c of candidates) {
-      const model = container.modelRepo.findById(c.id)?.data;
+      const model = container.modelRepo.findVisibleById(c.id, ownerId);
       if (!model) continue;
       const provider = container.providerRepo.findById(model.providerId)?.data;
       if (!provider || !provider.active) continue;
@@ -232,7 +236,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     const current = container.conversationRepo.findById(convId)?.data;
     const len = current?.messages?.length ?? 0;
     if (!current || len < 20 || len % 20 !== 0) return;
-    void summarizeConversation(container, current)
+    void summarizeConversation(container, current, current.projectId ? container.projectRepo.findById(current.projectId)?.data.ownerId : undefined)
       .then((r) => {
         container.conversationRepo.updateSummary(convId, r.summary);
         persistAsync(container.conversationRepo.findById(convId)?.data);
@@ -427,6 +431,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           category: "fast",
           preferredModelId: b.modelId ?? updated.modelId ?? safeProject?.defaultModelId,
           projectId: updated.projectId,
+          ownerId: safeProject?.ownerId ?? resolveRequestUser(req, container).user.id,
           correlationId: `conv-chat-${id}-${Date.now()}`,
           maxTokens: 2000,
           temperature: typeof b.temperature === "number" ? b.temperature : undefined,
@@ -630,7 +635,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           )) ?? "")
         : "";
       const messages = buildChatMessages({ safeProject, updated: current, content, attachments, repoBrief });
-      const ordered = resolveOrderedModels(container, b.modelId ?? current.modelId ?? safeProject?.defaultModelId);
+      // The project owner's models serve project chats; a standalone chat
+      // uses the signed-in user's own models.
+      const ordered = resolveOrderedModels(container, b.modelId ?? current.modelId ?? safeProject?.defaultModelId, safeProject?.ownerId ?? resolveRequestUser(req, container).user.id);
       if (!ordered.length) {
         const errMsg: ConversationMessage = {
           id: randomUUID(),
@@ -747,7 +754,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     const conv = container.conversationRepo.findById(id);
     if (!conv) return { error: "conversation not found" };
     if ((conv.data.messages ?? []).length === 0) return { summary: "", method: "heuristic" };
-    const result = await summarizeConversation(container, conv.data);
+    const result = await summarizeConversation(container, conv.data, conv.data.projectId ? container.projectRepo.findById(conv.data.projectId)?.data.ownerId : undefined);
     container.conversationRepo.updateSummary(id, result.summary);
     persistAsync(container.conversationRepo.findById(id)?.data);
     return result;
