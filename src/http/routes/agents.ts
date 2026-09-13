@@ -6,7 +6,7 @@ import { AGENT_TYPES, AgentGenerator, isAgentType, scaffoldFor } from "../../age
 import { hydrateProject } from "../../domain/project-options.js";
 import { diffLines, diffSummary } from "../../prompts/versions.js";
 import { resolveRequestUser } from "../auth.js";
-import { accessibleProjectIds } from "../project-access.js";
+import { accessibleProjectIds, canAccessEntity, resolveProjectForRequest } from "../project-access.js";
 
 function validateAgentEdit(agent: Agent): void {
   try {
@@ -86,8 +86,11 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
   app.post("/agents", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const projectId = String(body.projectId ?? "");
-    const projectRec = projectId ? container.projectRepo.findById(projectId) : undefined;
-    if (!projectRec) {
+    // (S01) Direct gate: creating into a foreign project reads as 404, same
+    // as a missing one (the global hook also checks, but the point of use
+    // must not depend on hook ordering).
+    const projectOwned = projectId ? resolveProjectForRequest(req, container, projectId) : undefined;
+    if (!projectOwned) {
       reply.code(404);
       return { error: "project not found — an agent must belong to a project" };
     }
@@ -97,7 +100,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     }
     const type: AgentType = body.type;
     const scaffold = scaffoldFor(type);
-    const project = hydrateProject(projectRec.data);
+    const project = hydrateProject(projectOwned);
     await container.projectFiles.ensurePromptHistory(project);
     const nonEmptyStrings = (v: unknown): string[] | undefined =>
       Array.isArray(v) ? v.map((x) => String(x)) : undefined;
@@ -167,11 +170,16 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     return r.data;
   });
 
-  app.patch("/agents/:id", { schema: { tags: ["agents"] } }, async (req) => {
+  app.patch("/agents/:id", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = req.body as Record<string, unknown>;
     let r = container.agentRepo.findById(id);
     if (!r) return { error: "agent not found" };
+    // (S01) Gate before any side effect (ensureBaseline writes prompt history).
+    if (!canAccessEntity(req, container, r.data)) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     await ensureBaseline(r.data);
     r = container.agentRepo.findById(id);
     if (!r) return { error: "agent not found" };
@@ -227,7 +235,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
   app.get("/agents/:id/prompt-versions", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
-    if (!r) {
+    if (!r || !canAccessEntity(req, container, r.data)) {
       reply.code(404);
       return { error: "agent not found" };
     }
@@ -242,7 +250,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const q = req.query as { from?: string; to?: string };
     const r = container.agentRepo.findById(id);
-    if (!r) {
+    if (!r || !canAccessEntity(req, container, r.data)) {
       reply.code(404);
       return { error: "agent not found" };
     }
@@ -265,7 +273,7 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
   app.post("/agents/:id/prompt-versions/:version/restore", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id, version } = req.params as { id: string; version: string };
     const r = container.agentRepo.findById(id);
-    if (!r) {
+    if (!r || !canAccessEntity(req, container, r.data)) {
       reply.code(404);
       return { error: "agent not found" };
     }
@@ -306,8 +314,17 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     const { id, version } = req.params as { id: string; version: string };
     const body = (req.body ?? {}) as { targetAgentId?: string };
     const sourceAgent = container.agentRepo.findById(id)?.data;
-    if (sourceAgent) await ensureBaseline(sourceAgent);
     const targetAgent = container.agentRepo.findById(body.targetAgentId ?? id)?.data;
+    // (S01) Both ends of the clone must belong to the caller — the source
+    // prompt and the target agent may live in different projects.
+    if (
+      (sourceAgent && !canAccessEntity(req, container, sourceAgent)) ||
+      (targetAgent && !canAccessEntity(req, container, targetAgent))
+    ) {
+      reply.code(404);
+      return { error: "version or target agent not found" };
+    }
+    if (sourceAgent) await ensureBaseline(sourceAgent);
     if (targetAgent && targetAgent.id !== id) await ensureBaseline(targetAgent);
     const source = container.promptVersionRepo.forAgent(id).find((v) => v.version === Number(version));
     const targetRec = container.agentRepo.findById(body.targetAgentId ?? id);
@@ -333,10 +350,14 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     return { agent: target, version: snap };
   });
 
-  app.post("/agents/:id/enable", { schema: { tags: ["agents"] } }, async (req) => {
+  app.post("/agents/:id/enable", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
     if (!r) return { error: "agent not found" };
+    if (!canAccessEntity(req, container, r.data)) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     await ensureBaseline(r.data);
     const a = { ...r.data, enabled: true, updatedAt: new Date().toISOString() };
     container.agentRepo.upsert(a, { projectId: a.projectId });
@@ -344,10 +365,14 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     return a;
   });
 
-  app.post("/agents/:id/disable", { schema: { tags: ["agents"] } }, async (req) => {
+  app.post("/agents/:id/disable", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
     if (!r) return { error: "agent not found" };
+    if (!canAccessEntity(req, container, r.data)) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     await ensureBaseline(r.data);
     const a = { ...r.data, enabled: false, updatedAt: new Date().toISOString() };
     container.agentRepo.upsert(a, { projectId: a.projectId });
@@ -355,8 +380,14 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     return a;
   });
 
-  app.get("/agents/:id/history", { schema: { tags: ["agents"] } }, async (req) => {
+  app.get("/agents/:id/history", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    // (S01) Run history is sensitive: gate the agent before listing its runs.
+    const agent = container.agentRepo.findById(id)?.data;
+    if (!agent || !canAccessEntity(req, container, agent)) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     // Runs are indexed by parent task, so filter by agent explicitly.
     return container.runRepo
       .findMany()
@@ -364,9 +395,13 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
       .filter((r) => r.agentId === id);
   });
 
-  app.delete("/agents/:id", { schema: { tags: ["agents"] } }, async (req) => {
+  app.delete("/agents/:id", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
+    if (r && !canAccessEntity(req, container, r.data)) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     if (r) {
       const p = container.projectRepo.findById(r.data.projectId)?.data;
       // The tombstone records the agent's identity (R04): a copied repository

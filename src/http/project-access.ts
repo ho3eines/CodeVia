@@ -63,9 +63,12 @@ export function projectOfEntity(req: FastifyRequest, c: Container, projectId: st
  *
  *   - Entity has a project → the caller must be able to access that project
  *     (same rule as everywhere else: demo sees all, signed-in sees own).
- *   - Entity has NO project → it is only reachable in demo/single-user mode;
- *     a signed-in account gets `false` (the handler answers 404, leaking
- *     neither existence nor ownership).
+ *   - Entity has NO project → governed by `opts.detached`:
+ *       "demo-only" (default) — reachable only in demo/single-user mode; a
+ *         signed-in account gets `false` (handlers answer 404, leaking
+ *         neither existence nor ownership). For restored/legacy rows.
+ *       "shared" — intentionally global by design (marketplace skill
+ *         templates, platform-wide memory); visible to every caller.
  *
  * Handlers must call this AFTER confirming the entity exists and answer 404
  * for both "not found" and "not yours" so foreign ids stay indistinguishable.
@@ -74,11 +77,13 @@ export function canAccessEntity(
   req: FastifyRequest,
   c: Container,
   entity: { projectId?: string } | undefined,
+  opts: { detached?: "demo-only" | "shared" } = {},
 ): boolean {
   if (!entity) return false;
   const projectId = typeof entity.projectId === "string" ? entity.projectId.trim() : "";
   const { user } = resolveRequestUser(req, c);
   if (!projectId) {
+    if (opts.detached === "shared") return true; // global template / platform memory
     // Detached entity: demo/single-user installs keep working; a signed-in
     // account can never prove the entity exists.
     return !user.id || user.id === DEMO_USER_ID;

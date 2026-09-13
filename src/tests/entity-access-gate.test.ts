@@ -299,3 +299,206 @@ describe("S01 — approvals of a foreign project are hidden", () => {
     expect(await waiting).toBe(true);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Extended coverage: agents, workflows, memory and skills.
+ * The global project-state hook gated these only indirectly; every by-id
+ * handler now checks ownership itself, and project-local skills are gated
+ * while marketplace templates (no project) stay intentionally public.
+ * ------------------------------------------------------------------ */
+describe("S01 — agents, workflows, memory and skills gate directly", () => {
+  async function aliceWorld(srv: FastifyInstance) {
+    const alice = makeUser(11, "ext-alice");
+    const bob = makeUser(12, "ext-bob");
+    const project = await createProject(srv, alice, "ExtAlice");
+    return { alice, bob, project };
+  }
+
+  it("blocks read, edit, enable, history and delete of another account's agents", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const { alice, bob, project } = await aliceWorld(srv);
+    const agent = container.agentRepo.byProject(project)[0];
+    expect(agent).toBeDefined();
+
+    for (const attempt of [
+      { method: "GET", url: `/agents/${agent.id}` },
+      { method: "PATCH", url: `/agents/${agent.id}`, payload: { name: "hijacked" } },
+      { method: "POST", url: `/agents/${agent.id}/enable`, payload: {} },
+      { method: "POST", url: `/agents/${agent.id}/disable`, payload: {} },
+      { method: "GET", url: `/agents/${agent.id}/history` },
+      { method: "GET", url: `/agents/${agent.id}/prompt-versions` },
+      { method: "DELETE", url: `/agents/${agent.id}` },
+    ] as const) {
+      const res = await srv.inject({ ...attempt, headers: bob.bearer });
+      expect(res.statusCode, `${attempt.method} ${attempt.url}`).toBe(404);
+    }
+    expect(container.agentRepo.findById(agent.id)?.data.name).not.toBe("hijacked");
+    expect(container.agentRepo.findById(agent.id)).toBeDefined();
+
+    // The owner still manages the same agent.
+    expect((await srv.inject({ method: "GET", url: `/agents/${agent.id}`, headers: alice.bearer })).statusCode).toBe(
+      200,
+    );
+  });
+
+  it("blocks reading, running, editing and deleting another account's workflows", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const { alice, bob, project } = await aliceWorld(srv);
+    const workflow = container.workflowRepo.byProject(project)[0];
+    expect(workflow).toBeDefined();
+
+    for (const attempt of [
+      { method: "GET", url: `/workflows/${workflow.id}` },
+      { method: "PATCH", url: `/workflows/${workflow.id}`, payload: { name: "hijacked" } },
+      { method: "POST", url: `/workflows/${workflow.id}/run`, payload: {} },
+      { method: "DELETE", url: `/workflows/${workflow.id}` },
+    ] as const) {
+      const res = await srv.inject({ ...attempt, headers: bob.bearer });
+      expect(res.statusCode, `${attempt.method} ${attempt.url}`).toBe(404);
+    }
+    expect(container.workflowRepo.findById(workflow.id)).toBeDefined();
+    expect(
+      (await srv.inject({ method: "GET", url: `/workflows/${workflow.id}`, headers: alice.bearer })).statusCode,
+    ).toBe(200);
+  });
+
+  it("blocks foreign project memory but keeps platform memory shared", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const { alice, bob, project } = await aliceWorld(srv);
+    // Create through the API so the entry is persisted into the (mock) repo
+    // and survives the repository restore that the state hook performs.
+    const memRes = await srv.inject({
+      method: "POST",
+      url: "/memory",
+      headers: alice.bearer,
+      payload: { projectId: project, type: "knowledge", key: "alice-secret-note", content: "private" },
+    });
+    expect(memRes.statusCode).toBe(200);
+    const projectMemory = memRes.json() as { id: string };
+    const platformMemory = {
+      ...(
+        await srv.inject({
+          method: "POST",
+          url: "/memory",
+          payload: { type: "knowledge", key: "platform", content: "shared" },
+        })
+      ).json(),
+    } as { id: string };
+
+    for (const attempt of [
+      { method: "GET", url: `/memory/${projectMemory.id}` },
+      { method: "PATCH", url: `/memory/${projectMemory.id}`, payload: { content: "hijacked" } },
+      { method: "DELETE", url: `/memory/${projectMemory.id}` },
+    ] as const) {
+      const res = await srv.inject({ ...attempt, headers: bob.bearer });
+      expect(res.statusCode, `${attempt.method} ${attempt.url}`).toBe(404);
+    }
+    expect(container.memoryRepo.findById(projectMemory.id)?.data.content).toBe("private");
+
+    // Platform (ownerless) memory is shared by design — same as the list.
+    expect(
+      (await srv.inject({ method: "GET", url: `/memory/${platformMemory.id}`, headers: bob.bearer })).statusCode,
+    ).toBe(200);
+    // The owner reaches her own project memory.
+    expect(
+      (await srv.inject({ method: "GET", url: `/memory/${projectMemory.id}`, headers: alice.bearer })).statusCode,
+    ).toBe(200);
+  });
+
+  it("blocks project-local skills but keeps marketplace templates public", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const { alice, bob, project } = await aliceWorld(srv);
+    // Create through the API so the definition is written to the (mock) repo
+    // and survives the repository restore that the state hook performs.
+    const skillRes = await srv.inject({
+      method: "POST",
+      url: "/skills",
+      headers: alice.bearer,
+      payload: { projectId: project, slug: "alice-local-skill", name: "Alice local skill", instructions: "private" },
+    });
+    expect(skillRes.statusCode).toBe(200);
+    const localSkill = skillRes.json() as { id: string };
+    const template = container.skillRepo.globalCatalog().find((s) => !s.projectId);
+    expect(template).toBeDefined();
+
+    for (const attempt of [
+      { method: "GET", url: `/skills/${localSkill.id}` },
+      { method: "PATCH", url: `/skills/${localSkill.id}`, payload: { name: "hijacked" } },
+      { method: "POST", url: `/skills/${localSkill.id}/disable`, payload: {} },
+      { method: "DELETE", url: `/skills/${localSkill.id}` },
+    ] as const) {
+      const res = await srv.inject({ ...attempt, headers: bob.bearer });
+      expect(res.statusCode, `${attempt.method} ${attempt.url}`).toBe(404);
+    }
+    expect(container.skillRepo.findById(localSkill.id)?.data.name).not.toBe("hijacked");
+
+    // Marketplace templates stay public for every account.
+    expect((await srv.inject({ method: "GET", url: `/skills/${template!.id}`, headers: bob.bearer })).statusCode).toBe(
+      200,
+    );
+    // The owner still manages her project skill.
+    expect(
+      (await srv.inject({ method: "GET", url: `/skills/${localSkill.id}`, headers: alice.bearer })).statusCode,
+    ).toBe(200);
+  });
+
+  it("refuses creating tasks, agents, memory or skills into a foreign project", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const { alice, bob, project } = await aliceWorld(srv);
+
+    const taskRes = await srv.inject({
+      method: "POST",
+      url: "/tasks",
+      headers: bob.bearer,
+      payload: { projectId: project, title: "Bob's intrusion" },
+    });
+    expect(taskRes.statusCode).toBe(404);
+
+    const agentRes = await srv.inject({
+      method: "POST",
+      url: "/agents",
+      headers: bob.bearer,
+      payload: { projectId: project, type: "research" },
+    });
+    expect(agentRes.statusCode).toBe(404);
+
+    const memoryRes = await srv.inject({
+      method: "POST",
+      url: "/memory",
+      headers: bob.bearer,
+      payload: { projectId: project, type: "knowledge", key: "intrusion", content: "x" },
+    });
+    expect(memoryRes.statusCode).toBe(404);
+
+    const skillRes = await srv.inject({
+      method: "POST",
+      url: "/skills",
+      headers: bob.bearer,
+      payload: { projectId: project, slug: "intrusion-skill", instructions: "manual" },
+    });
+    expect(skillRes.statusCode).toBe(404);
+
+    // Nothing was written into Alice's project.
+    expect(container.taskRepo.findMany({ projectId: project }).some((t) => t.data.title === "Bob's intrusion")).toBe(
+      false,
+    );
+    expect(container.memoryRepo.byProject(project).some((m) => m.key === "intrusion")).toBe(false);
+    expect(container.skillRepo.findBySlug("intrusion-skill", project)).toBeUndefined();
+    // Alice can still create in her own project.
+    expect(
+      (
+        await srv.inject({
+          method: "POST",
+          url: "/tasks",
+          headers: alice.bearer,
+          payload: { projectId: project, title: "Alice own task" },
+        })
+      ).statusCode,
+    ).toBe(200);
+  });
+});
