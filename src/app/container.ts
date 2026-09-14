@@ -32,6 +32,7 @@ import { WorkflowEngine } from "../workflow/engine.js";
 import { Worker } from "../workers/worker.js";
 import { logger } from "../logger.js";
 import type { IGitHubService } from "../github/types.js";
+import { WorkspaceManager } from "../github/workspace.js";
 import { ProjectFilesService } from "../github/project-files.js";
 import { BackupService } from "../backup/service.js";
 import { BackupScheduler } from "../backup/scheduler.js";
@@ -98,6 +99,16 @@ export class Container {
   readonly github: IGitHubService = resolveGitHubService();
   readonly githubForProject = (project: Project, requestUserId?: string): IGitHubService =>
     resolveGitHubForProject({ project, kv: this.kv, fallback: this.github, requestUserId });
+  /**
+   * Local repository workspaces (clone-first read layer). The chat and context
+   * surfaces read whole trees from a fresh shallow checkout instead of issuing
+   * one GitHub API call per directory; agent writes keep using the API/PR path.
+   */
+  readonly workspaces = new WorkspaceManager({
+    rootDir: getEnv().WORKSPACES_DIR || "./data/workspaces",
+    enabled: getEnv().WORKSPACES_ENABLED,
+    maxAgeMs: Math.max(0, getEnv().WORKSPACES_MAX_AGE_SECONDS) * 1000,
+  });
   /** Project folder (CodeVia/*) sync between the database and the project repo. Shares the platform github instance. */
   readonly projectFiles: ProjectFilesService = new ProjectFilesService({
     github: this.github,

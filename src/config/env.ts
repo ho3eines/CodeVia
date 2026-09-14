@@ -72,6 +72,16 @@ const EnvSchema = z.object({
   // Database (runtime state / cache / index — NOT the source of truth for projects)
   DATABASE_PATH: z.string().default("./data/codevia.db"),
 
+  // Local repository workspaces: shallow clones the platform keeps fresh so the
+  // chat and agents can READ real code without hammering the GitHub API.
+  // Writes still go through the branch + draft-PR path. Blank = default.
+  WORKSPACES_DIR: z.string().default("./data/workspaces"),
+  // Master switch for the workspace clone layer (tests/CI turn it off so no
+  // network clone is ever attempted from unit tests).
+  WORKSPACES_ENABLED: envBoolean(true),
+  // A workspace younger than this is reused without re-fetching (seconds).
+  WORKSPACES_MAX_AGE_SECONDS: envNumber(300, 0),
+
   // Model provider secrets (Secret References)
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),

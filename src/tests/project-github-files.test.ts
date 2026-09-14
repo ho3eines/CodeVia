@@ -59,6 +59,16 @@ beforeEach(async () => {
     const url = new URL(String(input));
     if (url.pathname === "/repos/acme/oauth-files/branches")
       return json([{ name: "main", commit: { sha: "remote-head" } }]);
+    // The recursive Git Trees endpoint — listFiles prefers it (one request for
+    // the whole tree). The fake honours whatever ref the caller asked for.
+    const treesPrefix = "/repos/acme/oauth-files/git/trees/";
+    if (url.pathname.startsWith(treesPrefix)) {
+      return json({
+        sha: "tree-root",
+        truncated: false,
+        tree: [...files.keys()].map((path) => ({ path, type: "blob", size: 1 })),
+      });
+    }
     const prefix = "/repos/acme/oauth-files/contents/";
     if (!url.pathname.startsWith(prefix)) throw new Error(`Unexpected GitHub path: ${url.pathname}`);
     const path = decodeURIComponent(url.pathname.slice(prefix.length));
@@ -94,7 +104,8 @@ describe("project-owned GitHub file browsing", () => {
     });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toContainEqual(expect.objectContaining({ path: remoteFile }));
-    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/contents/CodeVia?ref=feature"))).toBe(true);
+    // Listing now rides the single-request trees API for the requested branch.
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes("/git/trees/feature"))).toBe(true);
     expect(fallback).not.toHaveBeenCalled();
   });
 

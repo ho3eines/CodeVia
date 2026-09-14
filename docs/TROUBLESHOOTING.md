@@ -39,6 +39,65 @@ The platform runs in **Mock AI** mode. Providers, models and skills are seeded; 
 - Set `GITHUB_TOKEN` (or App/OAuth credentials) and `GITHUB_ENABLED=true` to hit real repos.
 - The context/memory engine degrades gracefully when a repo is missing — a missing repo won't crash agent runs.
 
+## The project chat says it "can't see the repository" / claims a `404` that isn't real
+
+Symptom: in a project's Chat tab the assistant answers *"I cannot see your code,
+repository `owner/repo` returns 404"* — but the repository exists and opens fine
+in the browser. Historically this had three different root causes; all three are
+now fixed and the chat states the real reason instead of guessing:
+
+1. **The old file listing was too slow for real repos.** `listFiles` walked the
+   Contents API one directory per request — hundreds of calls on a normal repo —
+   and never finished inside the chat's ~8s evidence budget. The model then
+   received **no** repository evidence and invented the `404` itself. Listing now
+   rides the single-request **Git Trees API** (`/git/trees/<ref>?recursive=1`),
+   with the old directory walk kept only as a fallback for hosts without it.
+2. **A stale branch reads exactly like a missing repo.** If the project stores
+   `main` but the repository's default branch is `master` (or moved), GitHub
+   answers 404. The read path now heals automatically: on a 404 it fetches the
+   repository metadata and retries once with the real default branch (the chat
+   mentions it when that happened).
+3. **The credential couldn't see the repo.** An expired/revoked OAuth token or a
+   token without the `repo` scope for a private repo also surfaces as 404.
+
+What you get now, instead of a fabricated error:
+
+- **Clone-first evidence.** For real repositories the platform keeps a **local
+  workspace** — a shallow clone under `WORKSPACES_DIR` (default
+  `./data/workspaces`) — and the chat reads the tree, README and manifests from
+  disk. The first clone refreshes in the background; while it runs the chat
+  falls back to the API path. Repeat questions cost zero GitHub calls. See
+  [Local repository workspaces](#local-repository-workspaces-clone-first-reads).
+- **An honest failure note.** When the repository truly is unreadable, the prompt
+  carries the exact cause (`repo-not-found` / expired credential / missing scope
+  / timeout) with the matching fix, plus a hard instruction not to speculate —
+  so the assistant relays the fix instead of inventing files or HTTP codes.
+
+If the chat still reports *repo-not-found*: the repository name in the project
+settings is wrong **or** the signed-in account genuinely has no access — check
+the repo name, or log out and in with GitHub again (a fresh token fixes stale
+credentials; see the 404-on-save section below).
+
+## Local repository workspaces (clone-first reads)
+
+Agents and the chat READ code from a local shallow checkout the platform keeps
+fresh; WRITES still go through the GitHub API path (branch `agent-task-<id>`,
+atomic commit, draft PR, CI checks, human merge) — the workspace is a read
+layer, never a silent writer.
+
+- Location: `WORKSPACES_DIR` (default `./data/workspaces/<owner>--<repo>/<branch>`).
+- Freshness: a workspace younger than `WORKSPACES_MAX_AGE_SECONDS` (default 300)
+  is reused without re-fetching; otherwise it is refreshed (git fetch+reset, or
+  re-download). Failed materialisations back off for 60s instead of retrying on
+  every message.
+- Strategies (first that works wins): `git` shallow clone → GitHub tarball →
+  file-by-file through the adapter (also how mock/demo repos are materialised).
+- Safety: repo/branch names are path-sanitised, file reads cannot escape the
+  workspace root, snapshots are capped (30k files / 300 MB), credentials are
+  passed via git config env vars and never logged or persisted, and a failing
+  workspace never breaks a chat send or agent run (callers fall back to the API).
+- Disable with `WORKSPACES_ENABLED=false` (tests/CI do this automatically).
+
 ## Blank page / `GET /app.js 401 (Unauthorized)` / "Authentication required (GitHub login)"
 
 Strict login mode (`REQUIRE_AUTH`) is on, but no GitHub session exists.

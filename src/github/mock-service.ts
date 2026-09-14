@@ -10,6 +10,7 @@ import type {
   GithubRelease,
   GithubFile,
   GithubTreeEntry,
+  GithubRepositoryInfo,
   ListRepositoriesOptions,
   CreateRepositoryOptions,
 } from "./types.js";
@@ -185,6 +186,13 @@ export class MockGitHubService implements IGitHubService {
 
   async getViewer(): Promise<GithubViewer> {
     return { login: "mock-user", name: "Mock GitHub User", scopes: ["repo", "read:user", "user:email"] };
+  }
+
+  async getRepository(ref: GithubRepoRef): Promise<GithubRepositoryInfo | undefined> {
+    // Metadata read only — must NOT auto-provision (repo() creates missing repos).
+    const r = this.repos.get(`${ref.owner}/${ref.name}`);
+    if (!r) return undefined;
+    return { fullName: `${ref.owner}/${ref.name}`, defaultBranch: r.defaultBranch, private: r.private };
   }
 
   /**

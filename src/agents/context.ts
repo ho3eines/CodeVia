@@ -4,6 +4,7 @@ import type { IGitHubService } from "../github/types.js";
 import { detectStack, type Stack } from "./scaffold.js";
 import { matter, parseMatter, CONTEXT_FILE, RUNTIME_CONTEXT_FILE } from "../github/project-files.js";
 import type { ProjectFilesService } from "../github/project-files.js";
+import { listRepoPaths, repoUnreadableNote, type RepoListing, type RepoReadFailure } from "../github/repo-read.js";
 
 /**
  * Project context pack — what an implementer reads BEFORE writing code.
@@ -116,9 +117,12 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
   empty.stackSummary = `backend ${empty.stack.backend} · frontend ${empty.stack.frontend} · project ${empty.stack.project}`;
   if (!owner || !ref.name) return empty;
 
+  // The branch actually read — usually the configured one, but a stale branch
+  // heals to the repository's default (see listRepoPaths).
+  let effectiveBranch = branch;
   const getFile = async (path: string): Promise<string | undefined> => {
     try {
-      return (await github.getFile(ref, path, branch))?.content;
+      return (await github.getFile(ref, path, effectiveBranch))?.content;
     } catch (err) {
       if (opts.strict) throw err;
       return undefined;
@@ -127,10 +131,13 @@ export async function buildContextPack(opts: PackOptions): Promise<ContextPack> 
 
   let allPaths: string[];
   try {
-    allPaths = (await github.listFiles(ref, branch))
-      .filter((e) => e.type === "blob")
-      .map((e) => e.path)
-      .filter((p) => !p.startsWith(".git/"));
+    const listing = await listRepoPaths(github, ref, branch);
+    if (!listing.ok) {
+      if (opts.strict) throw new Error(listing.failureDetail ?? `Repository unreadable (${listing.failure})`);
+      return empty;
+    }
+    allPaths = listing.paths;
+    effectiveBranch = listing.branch;
   } catch (err) {
     if (opts.strict) throw err;
     return empty;
@@ -240,64 +247,63 @@ export interface RepoBriefOptions {
   maxManifest?: number;
 }
 
+export interface RepoBriefResult {
+  /** The assembled evidence text ("" only when the project has no repo at all). */
+  brief: string;
+  /** True when real repository evidence was read. */
+  ok: boolean;
+  /** The branch actually read (may be the healed default branch). */
+  branch?: string;
+  /** Failure category when ok=false (repo-not-found / auth / forbidden / …). */
+  failure?: RepoReadFailure;
+  /** Machine/human detail about the failure. */
+  failureDetail?: string;
+}
+
 /**
- * Compact repository brief for surfaces that answer questions without going
- * through the full agent ContextEngine — most importantly the project chat.
- *
- * The chat assistant was previously given only the project record (name,
- * description, repo list) and therefore answered "review this project" by
- * hallucinating a generic structure (e.g. a Python `main.py`/`requirements.txt`)
- * and, when asked to read the README, claimed it "doesn't exist" — even though
- * the repository is a Blazor app with a real README. This brief supplies real
- * evidence instead: the file tree, the README (or Agent.md), and manifest
- * excerpts.
- *
- * Advisory only — never throws, so a missing/private repository can't break the
- * surrounding call.
+ * Assemble the brief from an already-resolved file list + reader. Kept
+ * separate from the GitHub round-trips so the same evidence can also be built
+ * from a local workspace clone (no API calls at all).
  */
-export async function buildRepoBrief(opts: RepoBriefOptions): Promise<string> {
-  const { github, project } = opts;
-  const branch = opts.branch || project.branch || "main";
-  const maxTree = opts.maxTree ?? 40;
-  const maxReadme = opts.maxReadme ?? 4000;
-  const maxManifest = opts.maxManifest ?? 1500;
-  const [owner, ...rest] = String(project.configRepo ?? "").split("/");
-  const ref = { owner, name: rest.join("/") };
-  if (!owner || !ref.name) return "";
-
-  const getFile = async (path: string): Promise<string | undefined> => {
-    try {
-      return (await github.getFile(ref, path, branch))?.content;
-    } catch {
-      return undefined;
-    }
-  };
-
-  let paths: string[] = [];
-  try {
-    paths = (await github.listFiles(ref, branch))
-      .filter((e) => e.type === "blob")
-      .map((e) => e.path)
-      .filter((p) => !p.startsWith(".git/") && !p.startsWith("CodeVia/"));
-  } catch {
-    /* advisory */
-  }
+export async function assembleRepoBrief(input: {
+  paths: string[];
+  readFile: (path: string) => Promise<string | undefined> | string | undefined;
+  branch: string;
+  note?: string;
+  maxTree?: number;
+  maxReadme?: number;
+  maxManifest?: number;
+}): Promise<string> {
+  const maxTree = input.maxTree ?? 40;
+  const maxReadme = input.maxReadme ?? 4000;
+  const maxManifest = input.maxManifest ?? 1500;
+  const paths = input.paths.filter((p) => !p.startsWith(".git/") && !p.startsWith("CodeVia/"));
 
   const README_CANDIDATES = ["README.md", "readme.md", "README", "Agent.md", "AGENTS.md"];
   const sections: string[] = [];
 
+  if (input.note) sections.push(input.note);
+
   if (paths.length) {
     sections.push(
-      `Repository files (${paths.length}):`,
+      `Repository files on "${input.branch}" (${paths.length}):`,
       ...paths.slice(0, maxTree).map((p) => `- ${p}`),
       ...(paths.length > maxTree ? [`- … +${paths.length - maxTree} more`] : []),
     );
   }
 
+  const read = async (path: string): Promise<string | undefined> => {
+    try {
+      return await input.readFile(path);
+    } catch {
+      return undefined;
+    }
+  };
+
   // The README (or an agent-facing instruction file) is the single most
   // valuable signal for "what is this project".
   for (const candidate of README_CANDIDATES) {
-    const content = await getFile(candidate);
+    const content = await read(candidate);
     if (content) {
       sections.push(`--- ${candidate} ---`, content.slice(0, maxReadme));
       break;
@@ -316,12 +322,86 @@ export async function buildRepoBrief(opts: RepoBriefOptions): Promise<string> {
     .sort((a, b) => a.priority - b.priority)
     .slice(0, 3);
   for (const { path } of manifests) {
-    const content = await getFile(path);
+    const content = await read(path);
     if (content) sections.push(`--- ${path} ---`, content.slice(0, maxManifest));
   }
 
   return sections.join("\n");
 }
+
+/**
+ * Compact repository brief for surfaces that answer questions without going
+ * through the full agent ContextEngine — most importantly the project chat.
+ *
+ * The chat assistant was previously given only the project record (name,
+ * description, repo list) and therefore answered "review this project" by
+ * hallucinating a generic structure (e.g. a Python `main.py`/`requirements.txt`)
+ * and, when asked to read the README, claimed it "doesn't exist" — even though
+ * the repository is a Blazor app with a real README. This brief supplies real
+ * evidence instead: the file tree, the README (or Agent.md), and manifest
+ * excerpts.
+ *
+ * When the repository is unreadable the brief is NOT silently empty: an empty
+ * brief made the model invent its own excuses (a fabricated "404", generic
+ * checklists). Instead the brief states the exact observed failure and the fix,
+ * with a hard instruction not to speculate. Advisory only — never throws, so a
+ * missing/private repository can't break the surrounding call.
+ */
+export async function buildRepoBrief(opts: RepoBriefOptions): Promise<string> {
+  return (await buildRepoBriefDetailed(opts)).brief;
+}
+
+export async function buildRepoBriefDetailed(opts: RepoBriefOptions): Promise<RepoBriefResult> {
+  const { github, project } = opts;
+  const wanted = opts.branch || project.branch || "main";
+  const [owner, ...rest] = String(project.configRepo ?? "").split("/");
+  const ref = { owner, name: rest.join("/") };
+  if (!owner || !ref.name) return { brief: "", ok: false };
+
+  const listing = await listRepoPaths(github, ref, wanted).catch((err): RepoListing => ({
+    ok: false,
+    paths: [],
+    branch: wanted,
+    fellBackToDefault: false,
+    totalFiles: 0,
+    failure: "error",
+    failureDetail: err instanceof Error ? err.message : String(err),
+  }));
+
+  if (!listing.ok) {
+    const brief = repoUnreadableNote({
+      repo: `${owner}/${ref.name}`,
+      branch: wanted,
+      failure: listing.failure ?? "error",
+      detail: listing.failureDetail,
+    });
+    return { brief, ok: false, failure: listing.failure, failureDetail: listing.failureDetail };
+  }
+
+  const branch = listing.branch;
+  const brief = await assembleRepoBrief({
+    paths: listing.paths,
+    branch,
+    maxTree: opts.maxTree,
+    maxReadme: opts.maxReadme,
+    maxManifest: opts.maxManifest,
+    note: listing.fellBackToDefault
+      ? `Note: branch "${wanted}" was not found; the repository's default branch "${branch}" was read instead.`
+      : undefined,
+    readFile: async (path) => {
+      try {
+        return (await github.getFile(ref, path, branch))?.content;
+      } catch {
+        return undefined;
+      }
+    },
+  });
+  return { brief, ok: true, branch };
+}
+
+// repoUnreadableNote lives in ../github/repo-read.js (re-exported for callers
+// that already import from this module).
+export { repoUnreadableNote } from "../github/repo-read.js";
 
 export function parseRegistry(markdown: string | undefined): Record<string, RegistryEntry> {
   const out: Record<string, RegistryEntry> = {};

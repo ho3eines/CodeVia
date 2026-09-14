@@ -11,6 +11,7 @@ import type {
   GithubRelease,
   GithubFile,
   GithubTreeEntry,
+  GithubRepositoryInfo,
   ListRepositoriesOptions,
   CreateRepositoryOptions,
 } from "./types.js";
@@ -157,8 +158,100 @@ export class RealGitHubService implements IGitHubService {
     return toRepository(raw);
   }
 
-  /** Recursively list repository files under `path` (default root) via the contents API. */
+  async getRepository(repo: GithubRepoRef): Promise<GithubRepositoryInfo | undefined> {
+    try {
+      const r = await this.json<{ full_name: string; default_branch?: string; private?: boolean }>(
+        `/repos/${repo.owner}/${repo.name}`,
+      );
+      return {
+        fullName: r.full_name ?? `${repo.owner}/${repo.name}`,
+        defaultBranch: r.default_branch || "main",
+        private: !!r.private,
+      };
+    } catch (err) {
+      if ((err as { status?: number }).status === 404) return undefined;
+      throw err;
+    }
+  }
+
+  /**
+   * Download the repository tarball for a ref — one request for the whole
+   * snapshot, used by the local workspace clone.
+   *
+   * GitHub answers the archive endpoint with a 302 to `codeload.github.com`.
+   * A plain `redirect: "follow"` would work for public repos, but the Fetch
+   * spec strips the Authorization header on cross-origin redirects — so a
+   * PRIVATE repository archive would 404 on codeload. We therefore follow the
+   * redirect manually, re-attaching the credential, and use a longer budget
+   * because the body is the entire repository (a large repo must not be
+   * aborted mid-download by the default 20s request timeout).
+   */
+  async downloadTarball(repo: GithubRepoRef, branch?: string): Promise<Uint8Array> {
+    const ref = branch ? encodeURIComponent(branch) : "";
+    const url = `${this.base}/repos/${repo.owner}/${repo.name}/tarball${ref ? `/${ref}` : ""}`;
+    const signal = AbortSignal.timeout(120_000);
+    const res = await this.fetchImpl(url, { headers: this.headers(), redirect: "manual", signal });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location) throw new Error(`GitHub archive redirect had no Location (${res.status})`);
+      const target = location.startsWith("http") ? location : new URL(location, url).toString();
+      const follow = await this.fetchImpl(target, { headers: this.headers(), redirect: "follow", signal });
+      if (!follow.ok) {
+        if (follow.status === 401 || follow.status === 403)
+          throw new GitHubAuthError(`GitHub ${follow.status} (${this.label}) archive: forbidden`, follow.status);
+        throw Object.assign(new Error(`GitHub ${follow.status} archive download failed`), { status: follow.status });
+      }
+      return new Uint8Array(await follow.arrayBuffer());
+    }
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403)
+        throw new GitHubAuthError(`GitHub ${res.status} (${this.label}) archive: forbidden`, res.status);
+      throw Object.assign(new Error(`GitHub ${res.status} archive request failed`), { status: res.status });
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  /**
+   * Recursively list repository files. Prefers the Git Trees API — one request
+   * returns the whole recursive tree, no matter how deep or large the repo is —
+   * and only falls back to the per-directory Contents walk for hosts where the
+   * trees endpoint is unusable (truncated response, odd GHES behaviour). The old
+   * contents-only walk issued one request per directory, which for a real repo
+   * meant hundreds of calls and effectively never finished inside the chat's
+   * 8-second evidence budget.
+   */
   async listFiles(repo: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]> {
+    const prefix = path && path !== "." ? (path.endsWith("/") ? path : path + "/") : "";
+    try {
+      const q = branch ? encodeURIComponent(branch) : "HEAD";
+      const tree = await this.json<{
+        sha: string;
+        truncated?: boolean;
+        tree: Array<{ path: string; type: string; size?: number }>;
+      }>(`/repos/${repo.owner}/${repo.name}/git/trees/${q}?recursive=1`);
+      if (tree.truncated) throw Object.assign(new Error("tree truncated"), { status: 422 });
+      const out: GithubTreeEntry[] = [];
+      for (const e of tree.tree ?? []) {
+        if (prefix && !e.path.startsWith(prefix)) continue;
+        out.push({ path: e.path, type: e.type === "tree" ? "tree" : "blob", size: e.size });
+        if (out.length >= 8000) throw new Error("GitHub tree limit reached; refusing a truncated listing");
+      }
+      return out;
+    } catch (err) {
+      // Genuine repo/branch errors must surface unchanged — callers rely on the
+      // HTTP status (404 branch fallback, 401/403 auth notes). Fall back to the
+      // directory walk only when the trees endpoint itself is unusable: empty
+      // repository (409), our own truncated marker (422), or a GHES 5xx.
+      const status = (err as { status?: number }).status;
+      const retryable = status === 409 || status === 422 || (status !== undefined && status >= 500);
+      if (!retryable) throw err;
+      if (err instanceof Error && err.message.includes("tree limit reached")) throw err;
+    }
+    return this.listFilesViaContents(repo, branch, path);
+  }
+
+  /** Fallback walker: one Contents API request per directory. */
+  private async listFilesViaContents(repo: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]> {
     const out: GithubTreeEntry[] = [];
     const seen = new Set<string>();
     const q = branch ? `?ref=${encodeURIComponent(branch)}` : "";
