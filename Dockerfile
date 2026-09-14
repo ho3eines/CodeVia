@@ -21,6 +21,12 @@ WORKDIR /app
 # Install only production dependencies in the runtime image (as root, so npm
 # has a writable cache), then clean the cache to keep the image small.
 # npm_config_cache is pinned to /tmp so npm never touches a home directory.
+#
+# NOTE: npm runs package.json's `prepare` script even under --omit=dev, and
+# husky is a devDependency — so `prepare` MUST tolerate a missing husky
+# binary ("husky || true", husky's documented workaround). Without it this
+# stage dies with `sh: 1: husky: not found` (exit 127). Do not "clean up"
+# that `|| true` in package.json.
 ENV npm_config_cache=/tmp/.npm
 COPY --from=build /app/package.json /app/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && rm -rf /tmp/.npm

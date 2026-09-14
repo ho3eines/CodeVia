@@ -27,7 +27,7 @@
     "check": "npm run typecheck && npm run lint && npm run check:app",
     "seed": "tsx src/db/seed.ts",
     "mock:telegram": "node scripts/mock-telegram-api.mjs",
-    "prepare": "husky"
+    "prepare": "husky || true"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",
