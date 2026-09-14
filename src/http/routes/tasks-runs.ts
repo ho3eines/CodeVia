@@ -3,7 +3,7 @@ import { live } from "../../realtime/live.js";
 import { executionTask } from "../../agents/execution.js";
 import type { Container } from "../../app/container.js";
 import { matter } from "../../github/project-files.js";
-import { accessibleProjectIds, canAccessEntity } from "../project-access.js";
+import { accessibleProjectIds, canAccessEntity, resolveProjectForRequest } from "../project-access.js";
 import { resolveRequestUser } from "../auth.js";
 
 export function registerTaskRoutes(app: FastifyInstance, container: Container): void {
@@ -16,8 +16,13 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     return tasks.map((r) => r.data);
   });
 
-  app.post("/tasks", { schema: { tags: ["tasks"] } }, async (req) => {
+  app.post("/tasks", { schema: { tags: ["tasks"] } }, async (req, reply) => {
     const b = req.body as Record<string, unknown>;
+    // (S01) Direct gate: queueing work into a foreign project reads as 404.
+    if (!resolveProjectForRequest(req, container, typeof b.projectId === "string" ? b.projectId : undefined)) {
+      reply.code(404);
+      return { error: "project not found" };
+    }
     const { user: reqUser, authenticated: reqAuth } = resolveRequestUser(req, container);
     const input = (b.input as Record<string, unknown> | undefined) ?? {};
     if (reqAuth) input.requestUserId = reqUser.id;

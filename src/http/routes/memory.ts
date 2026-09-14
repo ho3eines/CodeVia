@@ -3,7 +3,7 @@ import type { Container } from "../../app/container.js";
 import type { MemoryEntry } from "../../domain/entities.js";
 import { randomUUID } from "node:crypto";
 import { localId, memorySchema } from "../../github/state-codec.js";
-import { accessibleProjectIds } from "../project-access.js";
+import { accessibleProjectIds, canAccessEntity, resolveProjectForRequest } from "../project-access.js";
 
 export function registerMemoryRoutes(app: FastifyInstance, container: Container): void {
   app.get("/memory", { schema: { tags: ["memory"] } }, async (req) => {
@@ -41,7 +41,8 @@ export function registerMemoryRoutes(app: FastifyInstance, container: Container)
       updatedAt: now,
     });
     if (projectId) {
-      const p = container.projectRepo.findById(projectId)?.data;
+      // (S01) Writing memory into a foreign project reads as 404.
+      const p = resolveProjectForRequest(req, container, projectId);
       if (!p) return reply.code(404).send({ error: "project not found" });
       await container.projectFiles.updateMemory(p, (entries) => {
         if (entries.some((e) => e.id === entry.id))
@@ -51,17 +52,19 @@ export function registerMemoryRoutes(app: FastifyInstance, container: Container)
     } else container.memoryRepo.upsert(entry, { key });
     return entry;
   });
-  app.get(
-    "/memory/:id",
-    { schema: { tags: ["memory"] } },
-    async (req, reply) =>
-      container.memoryRepo.findById((req.params as { id: string }).id)?.data ??
-      reply.code(404).send({ error: "memory entry not found" }),
-  );
+  app.get("/memory/:id", { schema: { tags: ["memory"] } }, async (req, reply) => {
+    const entry = container.memoryRepo.findById((req.params as { id: string }).id)?.data;
+    // (S01) Direct gate: project memory needs project access; ownerless
+    // platform memory stays shared, matching the list endpoint.
+    if (!entry || !canAccessEntity(req, container, entry, { detached: "shared" }))
+      return reply.code(404).send({ error: "memory entry not found" });
+    return entry;
+  });
   app.patch("/memory/:id", { schema: { tags: ["memory"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const rec = container.memoryRepo.findById(id)?.data;
-    if (!rec) return reply.code(404).send({ error: "memory entry not found" });
+    if (!rec || !canAccessEntity(req, container, rec, { detached: "shared" }))
+      return reply.code(404).send({ error: "memory entry not found" });
     const b = (req.body ?? {}) as Record<string, unknown>;
     const patch = Object.fromEntries(
       ["key", "content", "tags", "refs", "type", "scope"].filter((k) => b[k] !== undefined).map((k) => [k, b[k]]),
@@ -93,10 +96,13 @@ export function registerMemoryRoutes(app: FastifyInstance, container: Container)
     }
     return updated!;
   });
-  app.delete("/memory/:id", { schema: { tags: ["memory"] } }, async (req) => {
+  app.delete("/memory/:id", { schema: { tags: ["memory"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const entry = container.memoryRepo.findById(id)?.data;
-    if (entry?.projectId) {
+    if (!entry) return { ok: true };
+    if (!canAccessEntity(req, container, entry, { detached: "shared" }))
+      return reply.code(404).send({ error: "memory entry not found" });
+    if (entry.projectId) {
       const p = container.projectRepo.findById(entry.projectId)!.data;
       await container.projectFiles.updateMemory(p, (entries) => entries.filter((e) => e.id !== id));
     } else container.memoryRepo.deleteById(id);

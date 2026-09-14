@@ -1,8 +1,9 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
 import type { Skill } from "../../domain/entities.js";
 import { randomUUID } from "node:crypto";
 import { localId, renderSkillFile, SKILL_DIR, skillSchema, statePath } from "../../github/state-codec.js";
+import { canAccessEntity, resolveProjectForRequest } from "../project-access.js";
 
 export function registerSkillRoutes(app: FastifyInstance, container: Container): void {
   const save = async (skill: Skill): Promise<Skill> => {
@@ -57,22 +58,29 @@ export function registerSkillRoutes(app: FastifyInstance, container: Container):
       createdAt: now,
       updatedAt: now,
     });
-    if (projectId && b.instructions === undefined) {
-      const p = container.projectRepo.findById(projectId)?.data;
+    if (projectId) {
+      // (S01) Authoring a skill into a foreign project reads as 404.
+      const p = resolveProjectForRequest(req, container, projectId);
       if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
-      draft = await container.agentManager.authorDefinition(p, draft, "skill");
+      if (b.instructions === undefined) draft = await container.agentManager.authorDefinition(p, draft, "skill");
     }
     return save(draft);
   });
+  // (S01) Skills without a projectId are marketplace templates — global by
+  // design; project-local skills require access to their project.
+  const skillAllowed = (req: FastifyRequest, skill: Skill | undefined): skill is Skill =>
+    !!skill && canAccessEntity(req, container, skill, { detached: "shared" });
+
   app.get("/skills/:id", { schema: { tags: ["skills"] } }, async (req, reply) => {
     const skill = container.skillRepo.findById((req.params as { id: string }).id)?.data;
-    return skill ?? reply.code(404).send({ error: "skill not found" });
+    if (!skillAllowed(req, skill)) return reply.code(404).send({ error: "skill not found" });
+    return skill;
   });
   app.patch("/skills/:id", { schema: { tags: ["skills"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const b = req.body as Record<string, unknown>;
     const old = container.skillRepo.findById(id)?.data;
-    if (!old) return reply.code(404).send({ error: "skill not found" });
+    if (!skillAllowed(req, old)) return reply.code(404).send({ error: "skill not found" });
     if (b.projectId !== undefined && b.projectId !== old.projectId)
       return reply.code(400).send({ error: "Skill namespace cannot be changed" });
     if (old.projectId && b.slug !== undefined && b.slug !== old.slug)
@@ -82,12 +90,13 @@ export function registerSkillRoutes(app: FastifyInstance, container: Container):
   for (const action of ["enable", "disable"] as const)
     app.post(`/skills/:id/${action}`, { schema: { tags: ["skills"] } }, async (req, reply) => {
       const old = container.skillRepo.findById((req.params as { id: string }).id)?.data;
-      if (!old) return reply.code(404).send({ error: "skill not found" });
+      if (!skillAllowed(req, old)) return reply.code(404).send({ error: "skill not found" });
       return save({ ...old, enabled: action === "enable", updatedAt: new Date().toISOString() });
     });
-  app.delete("/skills/:id", { schema: { tags: ["skills"] } }, async (req) => {
+  app.delete("/skills/:id", { schema: { tags: ["skills"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const old = container.skillRepo.findById(id)?.data;
+    if (old && !skillAllowed(req, old)) return reply.code(404).send({ error: "skill not found" });
     if (old?.projectId) {
       const p = container.projectRepo.findById(old.projectId)?.data;
       if (p) await container.projectFiles.tombstone(p, statePath(SKILL_DIR, old.slug));

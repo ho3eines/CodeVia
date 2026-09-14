@@ -39,7 +39,7 @@ The platform is built to land each phase as a horizontally-functional baseline, 
 - **Worker `github.op` jobs** — comment/issue/PR update/branch/merge (merge requires an approval id).
 - **HTTP hardening** — security headers + per-IP rate limit (`RATE_LIMIT_PER_MINUTE`, `SECURITY_HEADERS`), health/webhooks exempt.
 - **Memory bug fix** — local memory `search()` without `types` never matched (iterated `Object.keys([...])`).
-- **Direct entity ownership gates (S01)** — every by-id route (`/tasks/:id`, `/runs/:id`, `/conversations/:id`, `/approvals/:id`) checks `canAccessEntity` at the handler instead of relying on the global hook alone; entities with no project are hidden from signed-in accounts (`src/tests/entity-access-gate.test.ts`).
+- **Direct entity ownership gates (S01)** — every by-id route checks `canAccessEntity` at the handler instead of relying on the global hook alone: tasks, runs, conversations, approvals, agents, workflows, memory and project-local skills, plus the task/agent/memory/skill create routes. Project-less entities are hidden from signed-in accounts, except intentionally shared rows (marketplace skill templates, platform memory) (`src/tests/entity-access-gate.test.ts`, 10 tests).
 - **Structured logging + secret redaction (S06)** — per-response access log with correlation ids; credential-looking keys are redacted before any log sink.
 - **Clean runtime dependency audit (S02)** — `@fastify/swagger-ui` → `^6.1.1` (0 npm-audit vulnerabilities), enforced in CI with `npm audit --omit=dev --audit-level=high`.
 

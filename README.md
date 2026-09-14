@@ -13,7 +13,7 @@ A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled
 | ID | Gap | Status |
 |----|-----|--------|
 | R01–R08 | Repository-state audit gaps (context consumption, terminal history, tombstones, legacy migration, sync retry, fail-closed schema) | ✅ Closed — `scripts/audit-repository-state.mjs` exits 0 |
-| S01 | By-id routes (`/runs/:id`, `/tasks/:id`, `/conversations/:id`, `/approvals/:id`) gated only indirectly | ✅ Closed — direct `canAccessEntity` gate in every handler + regression tests |
+| S01 | By-id routes gated only indirectly through the global hook | ✅ Closed — direct `canAccessEntity` gate in every by-id handler (tasks, runs, conversations, approvals, agents, workflows, memory, project-local skills) and the create routes; marketplace templates and platform memory stay shared by design. 10 regression tests |
 | S02 | Runtime dependency advisories (npm audit high/moderate) | ✅ Closed — 0 vulnerabilities (`npm audit --omit=dev`), audited in CI |
 | S03 | Admin-level feeds shared across accounts | ⚠️ Operator endpoints by design; project-scoped feeds are per-account |
 | S04 | SPA without a build step | 🗺️ Roadmap — incremental React/Vite migration planned |
@@ -63,7 +63,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (707 tests)
+npm test            # unit + integration + end-to-end (744 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run typecheck   # strict TypeScript
 npm run build       # compile + copy static UI into dist/
