@@ -248,6 +248,39 @@ export function resolveGitHubForProject(opts: {
 const projectMocks = new WeakMap<IGitHubService, MockGitHubService>();
 
 /**
+ * The decryptable token behind whatever `resolveGitHubForProject` would pick —
+ * used to clone PRIVATE repositories into local workspaces. Mirrors that
+ * function's identity rules exactly (request user first, then the connection's
+ * identity); returns `undefined` when the effective service would be the mock
+ * or the credential is unavailable. Never logged, never persisted.
+ */
+export function resolveGitHubTokenForProject(opts: {
+  project: import("../domain/entities.js").Project;
+  kv: KvStore;
+  requestUserId?: string;
+}): string | undefined {
+  const requestUserId = opts.requestUserId ?? githubRequestActorId();
+  if (requestUserId) {
+    const stored = getUserGitHubToken(opts.kv, requestUserId);
+    if (stored) return stored.token;
+  }
+  const connection = opts.project.githubConnection;
+  if (!connection) return isServerGitHubEnabled() ? process.env.GITHUB_TOKEN : undefined;
+  if (connection.kind === "user-oauth") {
+    const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
+    return userId ? getUserGitHubToken(opts.kv, userId)?.token : undefined;
+  }
+  if (connection.kind === "server-token") {
+    const ownerUserId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
+    if (ownerUserId) return getUserGitHubToken(opts.kv, ownerUserId)?.token;
+    return isServerGitHubEnabled() ? process.env.GITHUB_TOKEN : undefined;
+  }
+  // mock-persisted connection: the stored user token (sole-user legacy allowed).
+  const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project);
+  return userId ? getUserGitHubToken(opts.kv, userId)?.token : undefined;
+}
+
+/**
  * Re-bind projects that no longer have a usable GitHub identity onto `userId`.
  *
  * Projects created before GitHub login existed were stored with the pre-login

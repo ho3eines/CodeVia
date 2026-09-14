@@ -26,21 +26,25 @@ const json = (value: unknown, status = 200) => new Response(JSON.stringify(value
 
 describe("real GitHub adapter contract", () => {
   it("recurses Contents API directories (type=dir) and preserves file/directory types", async () => {
-    const fetcher = vi.fn(async (url: unknown) =>
-      String(url).includes("/contents/src?")
+    const fetcher = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      // The trees endpoint is unavailable on this host → listFiles must fall
+      // back to the per-directory Contents walk (the contract under test).
+      if (u.includes("/git/trees/")) return json({ message: "unsupported" }, 409);
+      return u.includes("/contents/src?")
         ? json([{ type: "file", path: "src/app.ts", size: 30 }])
         : json([
             { type: "file", path: "README.md" },
             { type: "dir", path: "src" },
-          ]),
-    );
+          ]);
+    });
     const gh = new RealGitHubService({ token: "test-only", fetchImpl: fetcher as typeof fetch });
     expect(await gh.listFiles(repo, "main")).toEqual([
       { path: "README.md", type: "blob", size: undefined },
       { path: "src", type: "tree", size: undefined },
       { path: "src/app.ts", type: "blob", size: 30 },
     ]);
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.filter(([u]) => String(u).includes("/contents/"))).toHaveLength(2);
   });
 
   it("only treats 404 as missing; server errors cannot trigger blind creation", async () => {

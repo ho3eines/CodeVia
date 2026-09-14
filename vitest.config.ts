@@ -7,6 +7,9 @@ export default defineConfig({
     globals: true,
     testTimeout: 20000,
     pool: "forks",
+    // The local workspace layer must never attempt a real network clone from
+    // unit tests; tests that exercise it construct WorkspaceManager directly.
+    env: { WORKSPACES_ENABLED: "false" },
     // Node's experimental `node:sqlite` is not a Vite-recognized builtin; mark it
     // external so it is loaded straight from the Node runtime at test time.
     deps: {

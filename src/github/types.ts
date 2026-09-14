@@ -91,6 +91,13 @@ export interface GithubTreeEntry {
   size?: number;
 }
 
+/** Repository metadata used to heal wrong branches and diagnose access errors. */
+export interface GithubRepositoryInfo {
+  fullName: string;
+  defaultBranch: string;
+  private: boolean;
+}
+
 export interface CreateRepositoryOptions {
   name: string;
   owner?: string;
@@ -117,6 +124,19 @@ export interface IGitHubService {
   listIssues(repo: GithubRepoRef): Promise<GithubIssue[]>;
   listReleases(repo: GithubRepoRef): Promise<GithubRelease[]>;
   getFile(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFile | undefined>;
+  /**
+   * Repository metadata (default branch, visibility). Returns `undefined` when
+   * the repository does not exist or is invisible to the current credential —
+   * callers use that to distinguish "wrong branch" from "unreachable repo".
+   * Optional: legacy/mock adapters may not know about repository metadata.
+   */
+  getRepository?(repo: GithubRepoRef): Promise<GithubRepositoryInfo | undefined>;
+  /**
+   * Download the repository tarball for a ref (fast bulk snapshot for local
+   * workspace clones). Optional — adapters without it fall back to file-by-file
+   * materialisation.
+   */
+  downloadTarball?(repo: GithubRepoRef, branch?: string): Promise<Uint8Array>;
   createBranch(repo: GithubRepoRef, name: string, baseSha: string): Promise<GithubBranch>;
   commit(
     repo: GithubRepoRef,

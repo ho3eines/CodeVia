@@ -6,7 +6,7 @@ import { accessibleProjectIds } from "../project-access.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
 import { hydrateProject } from "../../domain/project-options.js";
-import { buildRepoBrief } from "../../agents/context.js";
+import { projectChatEvidence } from "../../agents/chat-evidence.js";
 import { logger } from "../../logger.js";
 import { streamModelChat } from "../../ai/model-stream.js";
 import { candidatesFor } from "../../ai/model-router.js";
@@ -473,15 +473,16 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       // Give the assistant real repository evidence (file tree, README, manifest
       // excerpts) so questions like "review this project" or "read the README"
       // are answered from the repo instead of invented from the project name.
-      // Advisory only: a missing/private repo must never break the send — and a
-      // slow GitHub must never stall it either (8s budget, then chat without it).
-      // Standalone chats simply skip this (no project → no repo brief).
+      // Clone-first: the evidence is read from the local workspace when one is
+      // fresh, otherwise from the GitHub API. Advisory only: a missing/private
+      // repo must never break the send — and a slow GitHub/clone must never
+      // stall it either (8s budget, then chat without it). Standalone chats
+      // simply skip this (no project → no repo brief).
       const repoBrief = safeProject?.configRepo
         ? ((await withTimeout(
-            buildRepoBrief({
-              github: container.githubForProject(safeProject, resolveRequestUser(req, container).user.id),
-              project: safeProject,
-            }).catch(() => ""),
+            projectChatEvidence(container, safeProject, resolveRequestUser(req, container).user.id)
+              .then((e) => e.brief)
+              .catch(() => ""),
             8000,
           )) ?? "")
         : "";
@@ -700,12 +701,14 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       }
 
       const current = container.conversationRepo.findById(id)?.data ?? afterUser;
+      // Clone-first repository evidence, same path as the JSON endpoint (see
+      // projectChatEvidence): workspace when fresh, API fallback, honest note
+      // when the repository is unreadable.
       const repoBrief = safeProject?.configRepo
         ? ((await withTimeout(
-            buildRepoBrief({
-              github: container.githubForProject(safeProject, resolveRequestUser(req, container).user.id),
-              project: safeProject,
-            }).catch(() => ""),
+            projectChatEvidence(container, safeProject, resolveRequestUser(req, container).user.id)
+              .then((e) => e.brief)
+              .catch(() => ""),
             8000,
           )) ?? "")
         : "";
