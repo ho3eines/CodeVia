@@ -2,7 +2,7 @@ import type { ToolContext, ToolDefinition } from "./types.js";
 import type { MemoryRecord } from "../memory/store.js";
 import { verifyGithubChecks } from "./github-checks.js";
 import { cleanRepoPath } from "../agents/implementation.js";
-
+import { invalidateRepoBrief } from "../agents/repo-brief.js";
 /** Coerce an input value to string. */
 function str(v: unknown): string {
   return v == null ? "" : String(v);
@@ -120,6 +120,10 @@ export const writeFileTool: ToolDefinition = {
       sha: commit.sha,
       projectId: ctx.project.id,
     });
+    // Chat/ask surfaces cache the repository listing per repo+branch; a fresh
+    // commit makes every cached snapshot of this repository stale right away
+    // instead of after the TTL (so "what did you just change?" sees the tree).
+    invalidateRepoBrief({ repo: `${repo.owner}/${repo.name}` });
     return {
       ok: true,
       output: `Committed ${files.length} file(s), ${commit.sha.slice(0, 7)} to ${branch}`,
@@ -196,7 +200,8 @@ export const runBuildTool: ToolDefinition = {
 
 export const searchTool: ToolDefinition = {
   name: "search",
-  description: "Search project memory/knowledge and repository file paths by keyword.",
+  description:
+    "Search project memory/knowledge, repository file paths, and (when a local read-only mirror exists) repository file contents.",
   dangerous: false,
   inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } } },
   permissions: ["memory.read", "github.read"],
@@ -221,18 +226,37 @@ export const searchTool: ToolDefinition = {
       }
     }
 
-    // 2. Repository paths whose name matches any term.
+    // 2. Repository paths whose name matches any term. The local read-only
+    //    mirror (git ls-tree) is tried first — it is free and whole-tree; the
+    //    GitHub API listing remains the fallback. Nothing is executed.
+    const mirrorOpts = { scope: ctx.mirrorScope, token: ctx.mirrorToken, branch: ctx.project.branch };
     try {
       const repo = toRepoRef(ctx.project.configRepo);
-      const entries = await ctx.github.listFiles(repo, ctx.project.branch);
-      const files = entries
-        .map((e) => e.path)
-        .filter((p) => terms.some((t) => p.toLowerCase().includes(t)))
-        .slice(0, limit);
+      const local = ctx.mirror?.isEnabled ? await ctx.mirror.listFiles(ctx.project.configRepo, mirrorOpts) : undefined;
+      const paths = local ?? (await ctx.github.listFiles(repo, ctx.project.branch)).map((e) => e.path);
+      const listedFrom = local ? "mirror" : "api";
+      const files = paths.filter((p) => terms.some((t) => p.toLowerCase().includes(t))).slice(0, limit);
       data.files = files;
+      data.filesVia = listedFrom;
       for (const f of files) lines.push(`[file] ${f}`);
     } catch (err) {
       ctx.logger.warn("repository search failed", { err: String(err) });
+    }
+
+    // 3. Content search — only possible from the mirror (`git grep`); the REST
+    //    API has no bounded equivalent. Absent mirror → silently skipped.
+    if (ctx.mirror?.isEnabled) {
+      try {
+        const hits = await ctx.mirror.search(ctx.project.configRepo, query, mirrorOpts);
+        if (hits) {
+          const shown = hits.slice(0, limit);
+          data.matches = shown;
+          data.matchesVia = "mirror";
+          for (const h of shown) lines.push(`[match] ${h.path}:${h.line} — ${h.text.trim().slice(0, 160)}`);
+        }
+      } catch (err) {
+        ctx.logger.warn("repository content search failed", { err: String(err) });
+      }
     }
 
     return { ok: true, output: lines.length ? lines.join("\n") : `No matches for "${query}"`, data };

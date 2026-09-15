@@ -50,6 +50,15 @@ The stored `Provider` config stores only `secretRef` (e.g. `OPENAI_API_KEY`) —
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | GitHub App (installation) |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for `/webhooks/github` signature validation |
 | `GITHUB_ENABLED` | Set `true` to use the real adapter; otherwise the mock is used for local dev/test (even if a token is present) |
+| `REPO_BRIEF_TTL_MS` | `120000` — how long the repository brief (file tree + README + manifests) that feeds the project chat is cached per account+repository+branch. `0` disables caching. A chat message re-reads GitHub only after the TTL, a `?refresh=1` health check, or a restart |
+| `REPO_MIRROR_ENABLED` | `true` — keep a **read-only bare clone** of connected repositories and read repository evidence from disk with git plumbing (`ls-tree` / `cat-file` / `grep`). Any mirror problem falls back to the GitHub API; repository code is never executed. `false` disables the whole path |
+| `REPO_MIRROR_DIR` | `<dirname(DATABASE_PATH)>/mirrors` — where mirrors live, stored **per acting account** (`<acct-…>/<owner>/<name>.git`) so readability and content never leak across accounts. Keep it on the persistent volume |
+| `REPO_MIRROR_REFRESH_MS` | `300000` — re-fetch at most this often; a fresh mirror answers without any network. `POST /projects/:id/repo-mirror/refresh` forces a fetch |
+| `REPO_MIRROR_TIMEOUT_MS` / `REPO_MIRROR_READ_TIMEOUT_MS` | `120000` / `20000` — clone/fetch budget, and the budget for a single plumbing read |
+| `REPO_MIRROR_MAX_MB` / `REPO_MIRROR_MAX_FILES` / `REPO_MIRROR_MAX_READ_BYTES` | `2000` / `20000` / `524288` — refuse a repository bigger than this (evidence then comes from the API), cap the listed paths, cap one file read |
+| `REPO_MIRROR_MAX_SEARCH_HITS` | `60` — bound on `git grep` results returned to a tool |
+| `REPO_MIRROR_URL_TEMPLATE` | `https://github.com/{repo}.git` — clone URL template; change it for GitHub Enterprise or another git host |
+| `REPO_MIRROR_GIT_PATH` | `git` — explicit git binary when it is not on `PATH` |
 
 > In production (`NODE_ENV=production`) with a token, the real adapter is used automatically.
 

@@ -4,6 +4,7 @@ import type { IGitHubService } from "../github/types.js";
 import { detectStack, type Stack } from "./scaffold.js";
 import { matter, parseMatter, CONTEXT_FILE, RUNTIME_CONTEXT_FILE } from "../github/project-files.js";
 import type { ProjectFilesService } from "../github/project-files.js";
+import { readRepoBrief } from "./repo-brief.js";
 
 /**
  * Project context pack — what an implementer reads BEFORE writing code.
@@ -232,12 +233,18 @@ export interface RepoBriefOptions {
   github: IGitHubService;
   project: Project;
   branch?: string;
-  /** Cap on the file-tree lines shown (default 40). */
+  /** Cap on the file-tree lines shown (default 120). */
   maxTree?: number;
   /** Cap on the README/Agent.md excerpt (default 4000 chars). */
   maxReadme?: number;
   /** Cap per manifest excerpt (default 1500 chars). */
   maxManifest?: number;
+  /** Cache isolation scope — the acting account id. */
+  cacheScope?: string;
+  /** Bypass the cache. */
+  refresh?: boolean;
+  /** Internal budget; on expiry the brief reports a timeout (default 8000 ms). */
+  timeoutMs?: number;
 }
 
 /**
@@ -252,75 +259,19 @@ export interface RepoBriefOptions {
  * evidence instead: the file tree, the README (or Agent.md), and manifest
  * excerpts.
  *
+ * The implementation moved to `./repo-brief.ts`, which also reports *why* the
+ * evidence is missing (404 / credential / timeout / empty) instead of returning
+ * a silent empty string, caches the answer per repository+branch, and falls back
+ * to the repository's default branch when the configured one does not exist.
+ * Use `readRepoBrief()` directly when you need that diagnosis; this wrapper
+ * stays for callers that only want the prompt text.
+ *
  * Advisory only — never throws, so a missing/private repository can't break the
  * surrounding call.
  */
 export async function buildRepoBrief(opts: RepoBriefOptions): Promise<string> {
-  const { github, project } = opts;
-  const branch = opts.branch || project.branch || "main";
-  const maxTree = opts.maxTree ?? 40;
-  const maxReadme = opts.maxReadme ?? 4000;
-  const maxManifest = opts.maxManifest ?? 1500;
-  const [owner, ...rest] = String(project.configRepo ?? "").split("/");
-  const ref = { owner, name: rest.join("/") };
-  if (!owner || !ref.name) return "";
-
-  const getFile = async (path: string): Promise<string | undefined> => {
-    try {
-      return (await github.getFile(ref, path, branch))?.content;
-    } catch {
-      return undefined;
-    }
-  };
-
-  let paths: string[] = [];
-  try {
-    paths = (await github.listFiles(ref, branch))
-      .filter((e) => e.type === "blob")
-      .map((e) => e.path)
-      .filter((p) => !p.startsWith(".git/") && !p.startsWith("CodeVia/"));
-  } catch {
-    /* advisory */
-  }
-
-  const README_CANDIDATES = ["README.md", "readme.md", "README", "Agent.md", "AGENTS.md"];
-  const sections: string[] = [];
-
-  if (paths.length) {
-    sections.push(
-      `Repository files (${paths.length}):`,
-      ...paths.slice(0, maxTree).map((p) => `- ${p}`),
-      ...(paths.length > maxTree ? [`- … +${paths.length - maxTree} more`] : []),
-    );
-  }
-
-  // The README (or an agent-facing instruction file) is the single most
-  // valuable signal for "what is this project".
-  for (const candidate of README_CANDIDATES) {
-    const content = await getFile(candidate);
-    if (content) {
-      sections.push(`--- ${candidate} ---`, content.slice(0, maxReadme));
-      break;
-    }
-  }
-
-  // Manifest/config excerpts, excluding the README we already included.
-  const manifests = paths
-    .filter((p) => !README_CANDIDATES.includes(p))
-    .map((p) => {
-      const base = p.split("/").pop() ?? p;
-      const m = CONFIG_MATCHERS.find((c) => c.test(base));
-      return m ? { path: p, priority: m.priority } : undefined;
-    })
-    .filter((x): x is { path: string; priority: number } => !!x)
-    .sort((a, b) => a.priority - b.priority)
-    .slice(0, 3);
-  for (const { path } of manifests) {
-    const content = await getFile(path);
-    if (content) sections.push(`--- ${path} ---`, content.slice(0, maxManifest));
-  }
-
-  return sections.join("\n");
+  const brief = await readRepoBrief(opts);
+  return brief.text;
 }
 
 export function parseRegistry(markdown: string | undefined): Record<string, RegistryEntry> {

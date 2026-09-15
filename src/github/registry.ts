@@ -117,6 +117,35 @@ export function resolveGitHubForUser(opts: {
   };
 }
 
+/**
+ * The bearer token a *local, read-only* operation may use for a project —
+ * the same precedence `resolveGitHubForProject` applies, but returning the
+ * credential itself (used by the repository mirror, which clones over HTTPS).
+ *
+ * Returns `undefined` when no personal token applies: public repositories are
+ * then cloned anonymously. A different account's token is never handed out.
+ */
+export function resolveGitHubTokenForProject(opts: {
+  kv: KvStore;
+  project: import("../domain/entities.js").Project;
+  requestUserId?: string;
+}): string | undefined {
+  const requestUserId = opts.requestUserId ?? githubRequestActorId();
+  if (requestUserId) {
+    const own = getUserGitHubToken(opts.kv, requestUserId);
+    if (own) return own.token;
+  }
+  const connection = opts.project.githubConnection;
+  const identity = connection?.userId || opts.project.ownerId;
+  if (identity) {
+    const stored = getUserGitHubToken(opts.kv, identity);
+    if (stored) return stored.token;
+  }
+  if (!connection && isServerGitHubEnabled()) return process.env.GITHUB_TOKEN || undefined;
+  if (connection?.kind === "server-token" && isServerGitHubEnabled()) return process.env.GITHUB_TOKEN || undefined;
+  return undefined;
+}
+
 export type { IGitHubService, GithubRepoRef } from "./types.js";
 
 /**
