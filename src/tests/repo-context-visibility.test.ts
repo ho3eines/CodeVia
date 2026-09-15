@@ -346,6 +346,7 @@ describe("repository brief — evidence instead of silence", () => {
       fetchedAt: new Date().toISOString(),
       ageMs: 0,
       source: "github",
+      via: "api",
       elapsedMs: 1,
     });
     expect(blocked).toContain("UNAVAILABLE");
@@ -364,6 +365,7 @@ describe("repository brief — evidence instead of silence", () => {
       fetchedAt: new Date().toISOString(),
       ageMs: 0,
       source: "github",
+      via: "api",
       elapsedMs: 1,
     });
     expect(ok).toContain("Repository files (2)");
@@ -382,6 +384,7 @@ describe("repository brief — evidence instead of silence", () => {
       fetchedAt: new Date().toISOString(),
       ageMs: 0,
       source: "cache",
+      via: "api",
       elapsedMs: 3,
     });
     expect(summary).toBeDefined();
@@ -726,6 +729,7 @@ describe("project chat UI — repository banner", () => {
         hint: "Verify the repository name and branch, then re-connect GitHub.",
         errorKind: "not-found",
         source: "github",
+        via: "api",
         elapsedMs: 120,
       },
       healthy: false,

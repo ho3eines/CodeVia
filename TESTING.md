@@ -143,7 +143,20 @@ npm run dev
 6. **بی‌CI بودن:** روی ریپویی بدون `.github/workflows/` بنر باید هشدار دهد که QA فقط
    `unverified` می‌دهد (تست واقعی از Check Runهای GitHub Actions خوانده می‌شود، نه اجرای محلی).
 
-تست خودکار: `npx vitest run src/tests/repo-context-visibility.test.ts src/tests/agent-github-contract.test.ts`
+7. **آینهٔ محلی فقط‌خواندنی:** روی همان پروژه:
+   ```bash
+   curl -s localhost:8080/projects/<id>/repo-status | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["brief"]["via"], d["mirror"])'
+   curl -sX POST localhost:8080/projects/<id>/repo-mirror/refresh | python3 -m json.tool
+   du -sh data/mirrors/*
+   ```
+   انتظار: اولین پیام چت یک clone می‌سازد (`via: "mirror"`)، بنر چت خط
+   `📚 local read-only mirror ready · <size> MB · synced <n>s ago` را نشان می‌دهد،
+   پیام‌های بعدی **بدون درخواست گیت‌هاب** جواب می‌گیرند، و `refresh` یک `git fetch` می‌زند.
+   اگر `git` نصب نباشد یا ریپو از `REPO_MIRROR_MAX_MB` بزرگ‌تر باشد، بنر باید
+   `📚 local mirror unavailable (…)` بگوید و `via` روی `"api"` بماند — هیچ‌وقت «ریپو خوانده نشد».
+   در هیچ حالتی کد مخزن اجرا نمی‌شود: زیر `data/mirrors` فقط مخزن **bare** است (بدون working tree).
+
+تست خودکار: `npx vitest run src/tests/repo-context-visibility.test.ts src/tests/repo-mirror.test.ts src/tests/repo-mirror-wiring.test.ts src/tests/agent-github-contract.test.ts`
 
 ## عیب‌یابی
 

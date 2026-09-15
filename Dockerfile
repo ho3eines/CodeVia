@@ -27,6 +27,17 @@ WORKDIR /app
 # binary ("husky || true", husky's documented workaround). Without it this
 # stage dies with `sh: 1: husky: not found` (exit 127). Do not "clean up"
 # that `|| true` in package.json.
+# `git` powers the read-only repository mirror: bare clones read through git
+# *plumbing* (ls-tree / cat-file / grep) so repository evidence comes from disk
+# instead of the GitHub API. node:22-slim ships without git, and without it the
+# mirror reports "git not installed" and every read silently falls back to the
+# API — correct, but slow on large repositories. ca-certificates is needed for
+# the HTTPS clone. No repository code is ever executed from the mirror.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && git --version
+
 ENV npm_config_cache=/tmp/.npm
 COPY --from=build /app/package.json /app/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && rm -rf /tmp/.npm
@@ -56,6 +67,10 @@ EXPOSE 8080
 ENV PORT=8080
 ENV HOST=0.0.0.0
 ENV DATABASE_PATH=/app/data/codevia.db
+# Read-only repository mirrors live next to the database (inside the mounted
+# volume, so they survive restarts). Set REPO_MIRROR_ENABLED=false to turn the
+# mirror off entirely — reads then always go through the GitHub API.
+ENV REPO_MIRROR_DIR=/app/data/mirrors
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

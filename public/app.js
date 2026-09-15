@@ -5584,6 +5584,29 @@
    * ("your repository returns 404, so I'll analyse it from the README").
    * This banner renders the measured truth from GET /projects/:id/repo-status.
    * ------------------------------------------------------------------ */
+  /**
+   * One honest line about the *local read-only mirror* — the bare clone the
+   * platform reads repository evidence from (git ls-tree / cat-file / grep)
+   * instead of walking the GitHub API. It is an optimisation: when it is absent
+   * or disabled the banner says so and the evidence came from the API instead.
+   * Repository code is never executed either way.
+   */
+  function mirrorBitHtml(mirror, via) {
+    if (!mirror || mirror.enabled === false) return "";
+    if (mirror.ready) {
+      const size = typeof mirror.sizeMb === "number" && mirror.sizeMb ? ` · ${mirror.sizeMb} MB` : "";
+      const age = typeof mirror.ageMs === "number"
+        ? ` · synced ${mirror.ageMs < 60000 ? Math.max(1, Math.round(mirror.ageMs / 1000)) + "s" : Math.round(mirror.ageMs / 60000) + "min"} ago`
+        : "";
+      const used = via === "mirror" ? "this evidence was read from disk" : "available for deeper reads (file contents, grep)";
+      return `📚 local read-only mirror ready${size}${age} — ${used}`;
+    }
+    if (!mirror.gitAvailable)
+      return `📚 local mirror unavailable: git is not installed on this host — repository evidence is read through the GitHub API`;
+    const why = mirror.blocker || mirror.error || "not cloned yet";
+    return `📚 local mirror unavailable (${esc(String(why).slice(0, 120))}) — repository evidence is read through the GitHub API`;
+  }
+
   function repoBannerHtml(status, briefOverride) {
     const brief = briefOverride || (status && status.brief) || null;
     if (!brief || !brief.repo) return "";
@@ -5606,6 +5629,7 @@
       const branchNote = brief.configuredBranch
         ? `<div class="field-hint warn">Project branch <code>${esc(brief.configuredBranch)}</code> does not exist — read from <code>${esc(brief.branch)}</code> instead. ${esc(brief.hint || "")}</div>`
         : "";
+      const mirrorBit = mirrorBitHtml((status && status.mirror) || brief.mirror || null, brief.via);
       const noCi = repos.some((r) => r.readable && !asArray(r.ciWorkflows).length);
       const tone = branchNote || noCi ? " warn" : "";
       return `<div class="notice${tone}"><div style="display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap">
@@ -5614,6 +5638,7 @@
           ${branchNote}
           ${noCi ? `<div class="field-hint warn">No GitHub Actions workflow found: agents verify their work through CI check runs, so QA can only report “unverified”. Add a build/test workflow (docs/AGENT_EXECUTION.md → real build/test).</div>` : ""}
           <div class="field-hint">${connBit} · ${brief.source === "cache" ? `cached ${Math.round((brief.ageMs || 0) / 1000)}s ago` : `read in ${brief.elapsedMs || 0}ms`}</div>
+          ${mirrorBit ? `<div class="field-hint">${mirrorBit}</div>` : ""}
         </div>${recheck}</div></div>`;
     }
     const problems = repos.filter((r) => r.error).map((r) =>
@@ -5624,6 +5649,7 @@
         ${brief.hint ? `<div class="field-hint" style="margin-top:4px">Fix: ${esc(brief.hint)}</div>` : ""}
         ${problems}
         <div class="field-hint">${connBit}</div>
+        ${(function () { const m = mirrorBitHtml((status && status.mirror) || brief.mirror || null, brief.via); return m ? `<div class="field-hint">${m}</div>` : ""; })()}
       </div>${recheck}</div></div>`;
   }
 

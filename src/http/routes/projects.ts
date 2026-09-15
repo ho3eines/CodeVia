@@ -23,7 +23,7 @@ import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
 import { isAgentType } from "../../agents/generator.js";
 import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
-import { readRepoBrief, repoContextFor } from "../../agents/repo-brief.js";
+import { invalidateRepoBrief, readRepoBrief, repoContextFor } from "../../agents/repo-brief.js";
 
 function fail(
   reply: FastifyReply,
@@ -896,6 +896,9 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     return p.repositories.map((r) => ({ ...r, path: r.isConfigRepo ? "CodeVia" : undefined }));
   });
 
+  /** How often the local mirror is re-fetched (reported to the UI, advisory). */
+  const mirrorStatusRefreshMs = (): number => Number(process.env.REPO_MIRROR_REFRESH_MS ?? 300_000);
+
   /**
    * Repository health — the answer to "why can't the AI see my code?".
    *
@@ -1037,18 +1040,107 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     }
 
     // 3) Exactly what the chat prompt gets (cached; ?refresh=1 forces a re-read).
+    //    The read-only local mirror is the preferred transport; the GitHub API is
+    //    the fallback, so the brief matches what the chat actually receives.
     const brief = gh
-      ? repoContextFor(await readRepoBrief({ github: gh, project: p, cacheScope: userId, refresh, timeoutMs: 15000 }))
+      ? repoContextFor(
+          await readRepoBrief({
+            github: gh,
+            project: p,
+            cacheScope: userId,
+            refresh,
+            timeoutMs: 15000,
+            mirror: container.repoMirror,
+            mirrorToken: container.githubTokenForProject(p, userId),
+          }),
+        )
       : undefined;
+
+    // 4) The local read-only mirror: how much repository context the chat can
+    //    read from disk instead of the GitHub API. Advisory — a mirror that is
+    //    absent, stale or disabled never makes a repository "unreadable".
+    const mirror = container.repoMirror;
+    const git = await mirror.detectGit();
+    const mirrorState = await mirror.status(String(p.configRepo ?? ""), { scope: userId });
+    const mirrorInfo = {
+      enabled: mirror.isEnabled,
+      gitAvailable: git.available,
+      gitVersion: git.version,
+      gitReason: git.reason,
+      root: mirror.mirrorRoot,
+      refreshMs: mirrorStatusRefreshMs(),
+      ready: mirrorState.ready,
+      exists: mirrorState.exists,
+      headSha: mirrorState.headSha,
+      defaultBranch: mirrorState.defaultBranch,
+      sizeMb: mirrorState.sizeMb,
+      ageMs: mirrorState.ageMs,
+      refreshInMs: mirrorState.refreshInMs,
+      blocker: mirrorState.blocker,
+      error: mirrorState.error,
+      note: "Read-only bare clone used for repository evidence (git ls-tree / cat-file / grep). Repository code is never executed.",
+    };
 
     return {
       project: { id: p.id, name: p.name, configRepo: p.configRepo, branch: p.branch || "main" },
       connection,
       repositories,
       brief,
+      mirror: mirrorInfo,
       healthy: !connectionError && repositories.length > 0 && repositories.every((r) => r.readable === true),
       checkedAt: new Date().toISOString(),
     };
+  });
+
+  /**
+   * Force a refresh of the project's read-only local mirror (the UI's
+   * "Refresh mirror" action). Owner-only, same access rule as repo-status.
+   */
+  app.post("/projects/:id/repo-mirror/refresh", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    // Same acting identity rule as repo-status/the chat brief, so this refreshes
+    // the mirror that will actually be read (mirrors are stored per scope).
+    const { user, authenticated } = resolveRequestUser(req, container);
+    const userId = authenticated ? user.id : undefined;
+    const repo = String(p.configRepo ?? "").trim();
+    if (!repo.includes("/")) return fail(reply, 400, "this project has no connected repository");
+    const mirror = container.repoMirror;
+    if (!mirror.isEnabled)
+      return fail(reply, 409, "the local repository mirror is disabled (REPO_MIRROR_ENABLED=false)");
+    const git = await mirror.detectGit();
+    if (!git.available)
+      return fail(
+        reply,
+        409,
+        `git is not available on this host (${git.reason ?? "not installed"}) — the mirror cannot refresh`,
+      );
+    const state = await mirror.sync(repo, {
+      scope: userId,
+      token: container.githubTokenForProject(p, userId),
+      force: true,
+    });
+    invalidateRepoBrief({ repo, scope: userId });
+    return { ...state, refreshedAt: new Date().toISOString() };
+  });
+
+  /**
+   * Delete the project's local mirror copy. Nothing else is touched — the
+   * repository on GitHub and the project's configuration are unchanged, and the
+   * next chat message recreates the mirror (or falls back to the GitHub API).
+   */
+  app.delete("/projects/:id/repo-mirror", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    const { user, authenticated } = resolveRequestUser(req, container);
+    const userId = authenticated ? user.id : undefined;
+    const repo = String(p.configRepo ?? "").trim();
+    if (!repo.includes("/")) return fail(reply, 400, "this project has no connected repository");
+    const removed = await container.repoMirror.remove(repo, userId);
+    invalidateRepoBrief({ repo, scope: userId });
+    return { repo, removed, deletedAt: new Date().toISOString() };
   });
 
   // Link a repository (picked from the connected GitHub account) to a project.

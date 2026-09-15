@@ -1,4 +1,5 @@
 import type { Project } from "../domain/entities.js";
+import type { MirrorState, RepoMirrorService } from "../github/repo-mirror.js";
 import type { IGitHubService } from "../github/types.js";
 import { logger } from "../logger.js";
 
@@ -55,6 +56,19 @@ export interface RepoBrief {
   fetchedAt: string;
   ageMs: number;
   source: "cache" | "github";
+  /** Which transport produced the evidence: the local mirror or the GitHub API. */
+  via: "mirror" | "api";
+  /** Mirror state for the UI (present only when a mirror was attempted). */
+  mirror?: {
+    ready: boolean;
+    headSha?: string;
+    defaultBranch?: string;
+    sizeMb?: number;
+    fetchedAt?: string;
+    /** Why the mirror could not be used (empty repository, git missing, …). */
+    blocker?: string;
+    error?: string;
+  };
   elapsedMs: number;
 }
 
@@ -81,6 +95,18 @@ export interface RepoBriefOptions {
   refresh?: boolean;
   /** Internal budget; on expiry the brief reports `timeout` (default 8000 ms). */
   timeoutMs?: number;
+  /**
+   * Read-only local mirror of the repository. When enabled, evidence comes from
+   * disk (`ls-tree` + `cat-file`) instead of the GitHub API, and any mirror
+   * failure falls back to the API — the mirror is an optimisation, never a new
+   * dependency. Nothing in the repository is ever executed.
+   */
+  mirror?: RepoMirrorService;
+  /**
+   * Bearer token for mirroring a private repository (resolved from the *acting*
+   * account). Used only as a git HTTP header; never persisted, never logged.
+   */
+  mirrorToken?: string;
 }
 
 const README_CANDIDATES = ["README.md", "readme.md", "README", "Agent.md", "AGENTS.md"];
@@ -227,11 +253,18 @@ function rollupDirectories(paths: string[], maxDirs: number): Array<{ path: stri
   return out.slice(0, maxDirs);
 }
 
+/** Disk-backed reader used when the local mirror is ready. */
+export interface MirrorAccess {
+  list(branch: string): Promise<string[] | undefined>;
+  read(branch: string, path: string): Promise<string | undefined>;
+}
+
 async function readOnce(
   opts: RepoBriefOptions,
   github: IGitHubService,
   repo: string,
   branch: string,
+  mirror?: MirrorAccess,
 ): Promise<RepoBrief> {
   const maxTree = opts.maxTree ?? 120;
   const maxReadme = opts.maxReadme ?? 4000;
@@ -252,10 +285,15 @@ async function readOnce(
     fetchedAt: new Date(started).toISOString(),
     ageMs: 0,
     source: "github",
+    via: mirror ? "mirror" : "api",
     elapsedMs: Date.now() - started,
   });
 
   const getFile = async (path: string): Promise<string | undefined> => {
+    if (mirror) {
+      const local = await mirror.read(branch, path);
+      if (local !== undefined) return local;
+    }
     try {
       return (await github.getFile(ref, path, branch))?.content;
     } catch {
@@ -263,21 +301,25 @@ async function readOnce(
     }
   };
 
-  let paths: string[];
-  try {
-    paths = (await github.listFiles(ref, branch))
-      .filter((e) => e.type === "blob")
-      .map((e) => e.path)
-      .filter((p) => !p.startsWith(".git/") && !p.startsWith("CodeVia/"));
-  } catch (err) {
-    const c = classify(err, repo, branch);
-    logger.warn("repository brief unavailable", { repo, branch, kind: c.kind, err: c.reason });
-    return { ...base("unavailable"), reason: c.reason, hint: c.hint, errorKind: c.kind };
+  let paths: string[] | undefined;
+  if (mirror) paths = await mirror.list(branch);
+  if (!paths) {
+    try {
+      paths = (await github.listFiles(ref, branch)).filter((e) => e.type === "blob").map((e) => e.path);
+    } catch (err) {
+      const c = classify(err, repo, branch);
+      logger.warn("repository brief unavailable", { repo, branch, kind: c.kind, err: c.reason });
+      return { ...base("unavailable"), via: "api", reason: c.reason, hint: c.hint, errorKind: c.kind };
+    }
   }
+  paths = paths.filter((p) => !p.startsWith(".git/") && !p.startsWith("CodeVia/"));
+  const viaMirror = Boolean(mirror) && paths.length > 0;
 
   const directories = rollupDirectories(paths, maxDirs);
   const sections: string[] = [
-    `Repository: ${repo} @ ${branch} — ${paths.length} file(s) read from the connected GitHub account.`,
+    viaMirror
+      ? `Repository: ${repo} @ ${branch} — ${paths.length} file(s) read from the local read-only mirror of the connected GitHub account.`
+      : `Repository: ${repo} @ ${branch} — ${paths.length} file(s) read from the connected GitHub account.`,
   ];
   if (directories.length)
     sections.push(`Top-level folders: ${directories.map((d) => `${d.path}/ (${d.files})`).join(", ")}`);
@@ -316,6 +358,7 @@ async function readOnce(
   const text = sections.join("\n");
   return {
     ...base(paths.length ? "ok" : "empty"),
+    via: viaMirror ? "mirror" : "api",
     text: paths.length ? text : "",
     files: paths.length,
     listed: Math.min(paths.length, maxTree),
@@ -353,6 +396,7 @@ export async function readRepoBrief(opts: RepoBriefOptions): Promise<RepoBrief> 
     fetchedAt: new Date(started).toISOString(),
     ageMs: 0,
     source: "github",
+    via: "api",
     elapsedMs: Date.now() - started,
   });
 
@@ -374,17 +418,50 @@ export async function readRepoBrief(opts: RepoBriefOptions): Promise<RepoBrief> 
     }
   }
 
+  // ── Local read-only mirror ───────────────────────────────────────────────
+  // One clone/fetch on disk replaces the per-message API walk; every read after
+  // it is a local git *plumbing* call (ls-tree / cat-file). Nothing in the
+  // repository is ever executed. Any mirror problem degrades to the API path and
+  // is reported in `brief.mirror` — never as "repository unreadable".
+  let mirrorState: MirrorState | undefined;
+  let mirrorAccess: MirrorAccess | undefined;
+  const prepareMirror = async (): Promise<MirrorAccess | undefined> => {
+    const mirror = opts.mirror;
+    if (!mirror?.isEnabled) return undefined;
+    try {
+      mirrorState = await mirror.sync(repo, {
+        scope: opts.cacheScope,
+        token: opts.mirrorToken,
+        force: opts.refresh === true,
+      });
+    } catch (err) {
+      mirrorState = undefined;
+      logger.warn("repository mirror sync failed", { repo, err: String(err instanceof Error ? err.message : err) });
+      return undefined;
+    }
+    if (!mirrorState.ready) return undefined;
+    return {
+      list: (b) => mirror.listFiles(repo, { scope: opts.cacheScope, branch: b }),
+      read: (b, path) => mirror.readFile(repo, path, { scope: opts.cacheScope, branch: b }),
+    };
+  };
+
   let brief: RepoBrief;
   try {
     brief = await Promise.race([
-      readOnce(opts, opts.github, repo, branch),
+      (async () => {
+        mirrorAccess = await prepareMirror();
+        return readOnce(opts, opts.github, repo, branch, mirrorAccess);
+      })(),
       new Promise<RepoBrief>((resolve) =>
         setTimeout(
           () =>
             resolve(
               unavailable(
                 `Reading ${repo}@${branch} took longer than ${Math.round(timeoutMs / 1000)} s and was aborted.`,
-                "Retry — the repository context is cached afterwards, so the next message is fast.",
+                opts.mirror?.isEnabled
+                  ? "Retry — if this repository is large the first local mirror clone may still be running; it finishes in the background and the next message reads from disk."
+                  : "Retry — the repository context is cached afterwards, so the next message is fast.",
                 "timeout",
               ),
             ),
@@ -410,7 +487,7 @@ export async function readRepoBrief(opts: RepoBriefOptions): Promise<RepoBrief> 
         branches.find((b) => b.name === "main")?.name ||
         branches.find((b) => b.name === "master")?.name;
       if (fallback && fallback !== branch) {
-        const retried = await readOnce({ ...opts, branch: fallback }, opts.github, repo, fallback);
+        const retried = await readOnce({ ...opts, branch: fallback }, opts.github, repo, fallback, mirrorAccess);
         if (retried.status === "ok") {
           brief = {
             ...retried,
@@ -424,6 +501,20 @@ export async function readRepoBrief(opts: RepoBriefOptions): Promise<RepoBrief> 
       /* keep the original diagnosis */
     }
   }
+
+  if (mirrorState)
+    brief = {
+      ...brief,
+      mirror: {
+        ready: mirrorState.ready,
+        headSha: mirrorState.headSha,
+        defaultBranch: mirrorState.defaultBranch,
+        sizeMb: mirrorState.sizeMb,
+        fetchedAt: mirrorState.fetchedAt,
+        blocker: mirrorState.blocker,
+        error: mirrorState.error,
+      },
+    };
 
   if (ttl > 0) put(key, brief);
   return { ...brief, ageMs: 0, elapsedMs: Date.now() - started };
@@ -452,6 +543,7 @@ export function unavailableRepoBrief(
     fetchedAt: new Date(now).toISOString(),
     ageMs: 0,
     source: "github",
+    via: "api",
     elapsedMs: 0,
   };
 }
@@ -477,6 +569,17 @@ export function repoContextFor(brief: RepoBrief | undefined): Record<string, unk
     fetchedAt: brief.fetchedAt,
     ageMs: brief.ageMs,
     source: brief.source,
+    via: brief.via,
+    mirror: brief.mirror
+      ? {
+          ready: brief.mirror.ready,
+          headSha: brief.mirror.headSha,
+          sizeMb: brief.mirror.sizeMb,
+          fetchedAt: brief.mirror.fetchedAt,
+          blocker: brief.mirror.blocker,
+          error: brief.mirror.error,
+        }
+      : undefined,
     elapsedMs: brief.elapsedMs,
   };
 }

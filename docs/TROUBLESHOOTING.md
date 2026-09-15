@@ -55,6 +55,36 @@ imagination:
 | `not readable` + `credential (401/403)` | The stored token is expired/revoked, or the login granted no repository scope | re-connect GitHub; the OAuth scope must include `repo` |
 | `not readable` + `did not answer in time` | GitHub was slow or unreachable for that read | press **↻ Re-check**; successful reads are cached (`REPO_BRIEF_TTL_MS`) |
 | `running on the simulated (mock) GitHub` | No real connection: the platform is in demo mode, so there is no real code to read | log in with GitHub and link the real repository |
+| `📚 local read-only mirror ready …` | Repository evidence is read from a local bare clone (git `ls-tree` / `cat-file` / `grep`) instead of the GitHub API — faster, and content search becomes possible | nothing to fix; press **↻ Re-check** to force a `git fetch` |
+| `📚 local mirror unavailable: git is not installed …` | The host/container has no `git`, so every read goes through the GitHub API (correct, just slower and without content grep) | install `git` (the official image already ships it) or leave it — nothing breaks |
+| `📚 local mirror unavailable (too-large / clone-failed …)` | The mirror refused this repository: bigger than `REPO_MIRROR_MAX_MB`, a failed clone/fetch, or a credential that cannot read it | evidence still comes from the API; raise the cap, fix the credential, or `DELETE /projects/:id/repo-mirror` to drop the stale copy |
+
+### The local read-only mirror (repository evidence from disk)
+
+`GET /projects/:id/repo-status` reports a `mirror` block: `enabled`, `gitAvailable`,
+`ready`, `sizeMb`, `ageMs`, `blocker`, `error`. The mirror is a **bare, read-only
+clone per acting account** (`<REPO_MIRROR_DIR>/<acct-…>/<owner>/<name>.git`) read
+only through git plumbing — `ls-tree` for the whole tree, `cat-file` for a file,
+`grep` for content search. It is re-fetched at most every `REPO_MIRROR_REFRESH_MS`
+and is an optimisation only: no `git`, no clone, too large, or a failed fetch all
+degrade to the GitHub API path, and the banner says which one produced the
+evidence (`brief.via: "mirror" | "api"`).
+
+**Nothing in the repository is ever executed.** There is no checkout, no
+`npm install`, no build and no test run on the CodeVia host; writes still go
+through the GitHub API and verification still reads GitHub check runs
+([AGENT_EXECUTION.md](AGENT_EXECUTION.md) → read-only mirror). The credential is
+passed as a git HTTP header for the duration of the clone/fetch only — never in
+argv, never written into the mirror's config, never logged.
+
+Useful calls (project-owner only):
+
+```bash
+curl -s  "$BASE/projects/$ID/repo-status"        | jq '.mirror, .brief.via'
+curl -sX POST "$BASE/projects/$ID/repo-mirror/refresh" | jq '{ready, sizeMb, headSha, blocker, error}'
+curl -sX DELETE "$BASE/projects/$ID/repo-mirror"       | jq   # drop the local copy (GitHub is untouched)
+du -sh data/mirrors/*                             # disk used by mirrors
+```
 
 Historical note (fixed 2026-09-14): repository listings walked the GitHub
 Contents API **one directory at a time**. A real 906-file repository cost ~99

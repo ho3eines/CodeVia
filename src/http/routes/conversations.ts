@@ -127,6 +127,10 @@ async function readProjectRepoBrief(
       github: container.githubForProject(safeProject, userId),
       project: safeProject,
       cacheScope: userId,
+      // Local read-only mirror first (whole tree + files off disk); the GitHub
+      // API stays the fallback, so a missing `git` binary degrades gracefully.
+      mirror: container.repoMirror,
+      mirrorToken: container.githubTokenForProject(safeProject, userId),
     });
   } catch (err) {
     // Resolving the connection itself can fail ("needs to be reconnected by its
