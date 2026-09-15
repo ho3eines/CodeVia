@@ -6,7 +6,13 @@ import { accessibleProjectIds } from "../project-access.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
 import { hydrateProject } from "../../domain/project-options.js";
-import { buildRepoBrief } from "../../agents/context.js";
+import {
+  readRepoBrief,
+  repoContextPrompt,
+  repoContextFor,
+  unavailableRepoBrief,
+  type RepoBrief,
+} from "../../agents/repo-brief.js";
 import { logger } from "../../logger.js";
 import { streamModelChat } from "../../ai/model-stream.js";
 import { candidatesFor } from "../../ai/model-router.js";
@@ -95,15 +101,45 @@ function parseAttachments(raw: unknown): ParsedAttachment[] {
   }));
 }
 
-/** Race a promise against a timeout; resolves `undefined` when the timer wins. */
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<undefined>((resolve) => {
-    timer = setTimeout(() => resolve(undefined), ms);
-  });
-  return Promise.race([p, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
+/**
+ * Repository evidence for a project chat message — and, when there is none, the
+ * real reason instead of a silent empty string.
+ *
+ * The previous version wrapped `buildRepoBrief()` in an 8 s timeout and
+ * `.catch(() => "")`, so a slow or unreadable repository produced *no* context
+ * and *no* explanation: the model then told the user "your repository returns
+ * 404, I cannot see your code" for repositories that were perfectly reachable
+ * (the listing simply needed ~99 sequential GitHub calls on a 900-file repo).
+ * `readRepoBrief()` reports the cause, caches the answer per
+ * account+repository+branch, and self-heals a wrong branch, so a chat message
+ * either carries real evidence or an honest, actionable diagnosis.
+ */
+async function readProjectRepoBrief(
+  container: Container,
+  req: FastifyRequest,
+  safeProject: Project | undefined,
+): Promise<RepoBrief | undefined> {
+  if (!safeProject?.configRepo) return undefined;
+  const userId = resolveRequestUser(req, container).user.id;
+  const branch = safeProject.branch || "main";
+  try {
+    return await readRepoBrief({
+      github: container.githubForProject(safeProject, userId),
+      project: safeProject,
+      cacheScope: userId,
+    });
+  } catch (err) {
+    // Resolving the connection itself can fail ("needs to be reconnected by its
+    // owner", "refusing a mock fallback"). That is a diagnosis, not a mystery.
+    logger.warn("repository brief unavailable", { projectId: safeProject.id, err: String(err) });
+    return unavailableRepoBrief(
+      safeProject.configRepo,
+      branch,
+      `The platform could not resolve a GitHub connection for this project: ${String((err as Error)?.message ?? err).slice(0, 240)}`,
+      "Re-connect GitHub for this project (Settings → GitHub, or the project's Repositories tab) and retry.",
+      "auth",
+    );
+  }
 }
 
 /**
@@ -115,7 +151,8 @@ function buildChatMessages(opts: {
   updated: Conversation;
   content: string;
   attachments: ParsedAttachment[];
-  repoBrief: string;
+  /** Structured repository evidence — including the reason when there is none. */
+  repoBrief?: RepoBrief;
 }): ChatMessage[] {
   const { safeProject, updated, content, attachments, repoBrief } = opts;
   const attachmentNote = attachments.length
@@ -134,7 +171,7 @@ function buildChatMessages(opts: {
 Project description: ${safeProject.description || "No description provided"}
 Repositories: ${(safeProject.repositories ?? []).map((r) => r.repo).join(", ")}
 Language: Respond in the same language the user uses in their message.
-Be helpful, concise, and accurate. When relevant, reference project context, skills, and agents available.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}${repoBrief ? `\n\nRepository context (read this before answering questions about the codebase; never claim a file is missing without checking this list):\n${repoBrief}` : ""}`
+Be helpful, concise, and accurate. When relevant, reference project context, skills, and agents available.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}${repoBrief ? repoContextPrompt(repoBrief) : ""}`
     : `You are CodeVia's AI assistant, a friendly general-purpose helper.
 Language: Respond in the same language the user uses in their message.
 Be helpful, concise, and accurate. Answer questions directly; if a question needs project or repository context you don't have, say so briefly.${attachmentNote ? "\n\nFile attachments the user included are listed in the final user message." : ""}`;
@@ -406,6 +443,11 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       return { error: "project not found" };
     }
 
+    // Repository evidence for this message (undefined for task modes / standalone
+    // chats). Returned alongside the conversation so the UI can show *why* the
+    // assistant could not see the code instead of leaving the model to invent it.
+    let repoBrief: RepoBrief | undefined;
+
     // If the user asked for an execution mode other than plain chat, dispatch
     // a task and return a status message instead of a normal chat reply.
     const mode = b.executionMode ?? "chat";
@@ -474,17 +516,9 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       // excerpts) so questions like "review this project" or "read the README"
       // are answered from the repo instead of invented from the project name.
       // Advisory only: a missing/private repo must never break the send — and a
-      // slow GitHub must never stall it either (8s budget, then chat without it).
-      // Standalone chats simply skip this (no project → no repo brief).
-      const repoBrief = safeProject?.configRepo
-        ? ((await withTimeout(
-            buildRepoBrief({
-              github: container.githubForProject(safeProject, resolveRequestUser(req, container).user.id),
-              project: safeProject,
-            }).catch(() => ""),
-            8000,
-          )) ?? "")
-        : "";
+      // slow GitHub must never stall it either (the brief has its own budget and
+      // reports a timeout instead of hanging). Standalone chats skip it.
+      repoBrief = await readProjectRepoBrief(container, req, safeProject);
       const messages = buildChatMessages({ safeProject, updated, content, attachments, repoBrief });
 
       try {
@@ -533,7 +567,8 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     // on network calls.
     persistAsync(latest);
     maybeAutoSummarize(id);
-    return latest ?? { error: "conversation not found" };
+    const repoContext = repoContextFor(repoBrief);
+    return latest ? { ...latest, repoContext } : { error: "conversation not found", repoContext };
   });
 
   /**
@@ -700,15 +735,10 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       }
 
       const current = container.conversationRepo.findById(id)?.data ?? afterUser;
-      const repoBrief = safeProject?.configRepo
-        ? ((await withTimeout(
-            buildRepoBrief({
-              github: container.githubForProject(safeProject, resolveRequestUser(req, container).user.id),
-              project: safeProject,
-            }).catch(() => ""),
-            8000,
-          )) ?? "")
-        : "";
+      const repoBrief = await readProjectRepoBrief(container, req, safeProject);
+      // The UI renders this as a banner: "reading 906 files from main" or the
+      // actual reason the repository could not be read.
+      send({ type: "repoContext", repoContext: repoContextFor(repoBrief) });
       const messages = buildChatMessages({ safeProject, updated: current, content, attachments, repoBrief });
       // The project owner's models serve project chats; a standalone chat
       // uses the signed-in user's own models.

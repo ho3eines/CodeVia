@@ -39,6 +39,33 @@ The platform runs in **Mock AI** mode. Providers, models and skills are seeded; 
 - Set `GITHUB_TOKEN` (or App/OAuth credentials) and `GITHUB_ENABLED=true` to hit real repos.
 - The context/memory engine degrades gracefully when a repo is missing — a missing repo won't crash agent runs.
 
+## The project chat says "I cannot see your repository / it returns 404"
+
+The assistant only knows what the platform handed it. Open the project's **Chat**
+tab and read the banner above the thread — it is generated from
+`GET /projects/:id/repo-status`, i.e. from measurements, not from the model's
+imagination:
+
+| Banner says | What it means | Fix |
+|---|---|---|
+| `Repository context: available — N file(s)` | The chat prompt really contains the file tree, README and manifests | nothing to fix; ask about specific files |
+| `CI ✗` / "No GitHub Actions workflow" | The repo is readable, but agents verify work through GitHub **check runs** — without CI, QA can only report `unverified` | add a build/test workflow ([AGENT_EXECUTION.md](AGENT_EXECUTION.md) → real build/test) |
+| `Branch "X" does not exist — read from "Y" instead` | The project's stored branch is wrong; the brief self-healed onto the default branch for reading | set the project branch to `Y` (Project → Settings → Repositories) so agents also **write** there |
+| `not readable` + `GitHub answered 404 …` | GitHub hides private repositories behind 404: either the name/branch is wrong, or the acting credential cannot see it | open `https://github.com/<owner>/<repo>` as the connected account, then sign out and in again (a fresh token with the `repo` scope is stored) and press **↻ Re-check** |
+| `not readable` + `credential (401/403)` | The stored token is expired/revoked, or the login granted no repository scope | re-connect GitHub; the OAuth scope must include `repo` |
+| `not readable` + `did not answer in time` | GitHub was slow or unreachable for that read | press **↻ Re-check**; successful reads are cached (`REPO_BRIEF_TTL_MS`) |
+| `running on the simulated (mock) GitHub` | No real connection: the platform is in demo mode, so there is no real code to read | log in with GitHub and link the real repository |
+
+Historical note (fixed 2026-09-14): repository listings walked the GitHub
+Contents API **one directory at a time**. A real 906-file repository cost ~99
+sequential requests (~12 s) against the chat's 8 s context budget, so the brief
+was dropped *silently* on every message and the model answered "your repository
+returns 404" for a repository that was perfectly reachable. Listings now use the
+Git Trees API (one request; the same repository reads in ~0.6 s), the result is
+cached per account+repository+branch, a wrong branch falls back to the default
+branch, and an unreadable repository is reported to the model *and* to the UI
+with its real reason instead of an empty string.
+
 ## Blank page / `GET /app.js 401 (Unauthorized)` / "Authentication required (GitHub login)"
 
 Strict login mode (`REQUIRE_AUTH`) is on, but no GitHub session exists.

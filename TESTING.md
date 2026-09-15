@@ -116,6 +116,35 @@ npm run dev
 
 تست خودکار: `npx vitest run src/tests/model-load-balancer.test.ts src/tests/chat-load-balancing.test.ts src/tests/models-routing-ui.test.ts`
 
+## ۵-ب) چت پروژه باید کد واقعی ریپوزیتوری را ببیند
+
+هدف: AI دیگر نگوید «نمی‌توانم کد پروژه را ببینم / ریپو 404 می‌دهد» مگر اینکه واقعاً
+نتوانسته باشد بخواند — و در آن صورت **دلیل واقعی و راه‌حل** را بگوید.
+
+1. **بنر بالای چت:** پروژه‌ای با ریپوی واقعی (اتصال GitHub با اسکوپ `repo`) را باز کن → تب **Chat**.
+   باید بنر `🔗 Repository context: available` با تعداد فایل، `README ✓` و وضعیت `CI ✓/✗` دیده شود،
+   همراه با هویت اتصال (`connected as <login> · scope repo`) و زمان خواندن/کش.
+2. **یک درخواست، نه ۹۹ درخواست:** یک پیام بفرست («ساختار پروژه را بگو»). پاسخ باید به
+   **فایل‌ها و پوشه‌های واقعی** همان ریپو اشاره کند. پیام دوم باید فوری باشد (کش
+   `REPO_BRIEF_TTL_MS`) — در لاگ سرور فقط یک فراخوانی `git/trees` دیده می‌شود.
+3. **سلامت ریپو از API:**
+   ```bash
+   curl -s localhost:8080/projects/<id>/repo-status | python3 -m json.tool
+   curl -s "localhost:8080/projects/<id>/repo-status?refresh=1" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["healthy"], d["brief"]["status"], d["brief"]["files"])'
+   ```
+   خروجی باید `connection.source/login/scopes`، به ازای هر مخزن `readable/branchExists/files/readme/ciWorkflows`
+   و در صورت مشکل `error` + `hint` عملیاتی بدهد.
+4. **شاخهٔ غلط:** شاخهٔ پروژه را روی چیزی که در ریپو نیست بگذار (مثلاً `release-9`) →
+   `repo-status` باید `branchExists:false` + `availableBranches` + `hint` بدهد و بنر چت
+   بگوید از شاخهٔ پیش‌فرض خوانده است (`configuredBranch`). شاخه را درست کن و **↻ Re-check** را بزن.
+5. **ریپوی غیرقابل خواندن:** نام ریپو را عمداً غلط بگذار (یا با حسابی که دسترسی ندارد وارد شو) →
+   بنر قرمز `Repository context: not readable` با دلیل (`GitHub answered 404 …`) و راهنما
+   (`… sign out and in again`)؛ پاسخ AI هم باید **همان دلیل** را بگوید و فایلِ ندیده‌شده را توصیف نکند.
+6. **بی‌CI بودن:** روی ریپویی بدون `.github/workflows/` بنر باید هشدار دهد که QA فقط
+   `unverified` می‌دهد (تست واقعی از Check Runهای GitHub Actions خوانده می‌شود، نه اجرای محلی).
+
+تست خودکار: `npx vitest run src/tests/repo-context-visibility.test.ts src/tests/agent-github-contract.test.ts`
+
 ## عیب‌یابی
 
 | مشکل | راه‌حل |

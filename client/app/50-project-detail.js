@@ -105,6 +105,18 @@
   }
 
   async function mountProjectChat(projectId, convId) {
+    // Repository context banner — the measured answer to "why can't the AI see
+    // my repository?" (GET /projects/:id/repo-status). Rendered above the thread
+    // so a missing branch / credential problem is visible before the model
+    // starts guessing about the codebase.
+    const chatWrap = document.querySelector(".p-chat-wrap");
+    if (chatWrap && !document.getElementById("cv-repo")) {
+      const holder = document.createElement("div");
+      holder.id = "cv-repo";
+      holder.dataset.projectId = projectId;
+      chatWrap.insertBefore(holder, chatWrap.firstChild);
+    }
+    void loadRepoContext(projectId);
     // Cleanup registry: when the user navigates away, tear down polling &
     // socket listeners so we don't leak handlers or refresh a dead view.
     const _projectChatCleanup = [];
@@ -316,6 +328,10 @@
             if (mt && ev.displayName) mt.innerHTML = `<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(ev.displayName)}</span>`;
           },
           onRetry: (ev) => { const s = document.getElementById(uid + "-status"); if (s) s.textContent = ev.message || "trying fallback…"; },
+          // Repository evidence used for THIS reply — shown in the banner above
+          // the thread. Not counted as "the stream started": it is sent before
+          // the first delta, and must not suppress the JSON send fallback.
+          onRepoContext: (ev) => { if (ev.repoContext) updateRepoBanner(ev.repoContext); },
           onDelta: (ev) => {
             gotEvent = true;
             const t = document.getElementById(uid + "-text");

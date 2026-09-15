@@ -2,7 +2,7 @@ import type { ToolContext, ToolDefinition } from "./types.js";
 import type { MemoryRecord } from "../memory/store.js";
 import { verifyGithubChecks } from "./github-checks.js";
 import { cleanRepoPath } from "../agents/implementation.js";
-
+import { invalidateRepoBrief } from "../agents/repo-brief.js";
 /** Coerce an input value to string. */
 function str(v: unknown): string {
   return v == null ? "" : String(v);
@@ -120,6 +120,10 @@ export const writeFileTool: ToolDefinition = {
       sha: commit.sha,
       projectId: ctx.project.id,
     });
+    // Chat/ask surfaces cache the repository listing per repo+branch; a fresh
+    // commit makes every cached snapshot of this repository stale right away
+    // instead of after the TTL (so "what did you just change?" sees the tree).
+    invalidateRepoBrief({ repo: `${repo.owner}/${repo.name}` });
     return {
       ok: true,
       output: `Committed ${files.length} file(s), ${commit.sha.slice(0, 7)} to ${branch}`,

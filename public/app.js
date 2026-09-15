@@ -1523,6 +1523,18 @@
   }
 
   async function mountProjectChat(projectId, convId) {
+    // Repository context banner — the measured answer to "why can't the AI see
+    // my repository?" (GET /projects/:id/repo-status). Rendered above the thread
+    // so a missing branch / credential problem is visible before the model
+    // starts guessing about the codebase.
+    const chatWrap = document.querySelector(".p-chat-wrap");
+    if (chatWrap && !document.getElementById("cv-repo")) {
+      const holder = document.createElement("div");
+      holder.id = "cv-repo";
+      holder.dataset.projectId = projectId;
+      chatWrap.insertBefore(holder, chatWrap.firstChild);
+    }
+    void loadRepoContext(projectId);
     // Cleanup registry: when the user navigates away, tear down polling &
     // socket listeners so we don't leak handlers or refresh a dead view.
     const _projectChatCleanup = [];
@@ -1734,6 +1746,10 @@
             if (mt && ev.displayName) mt.innerHTML = `<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(ev.displayName)}</span>`;
           },
           onRetry: (ev) => { const s = document.getElementById(uid + "-status"); if (s) s.textContent = ev.message || "trying fallback…"; },
+          // Repository evidence used for THIS reply — shown in the banner above
+          // the thread. Not counted as "the stream started": it is sent before
+          // the first delta, and must not suppress the JSON send fallback.
+          onRepoContext: (ev) => { if (ev.repoContext) updateRepoBanner(ev.repoContext); },
           onDelta: (ev) => {
             gotEvent = true;
             const t = document.getElementById(uid + "-text");
@@ -5429,6 +5445,7 @@
             <button class="btn btn-danger" onclick="conversationDelete(${esc(JSON.stringify(c.id))}, true)">🗑 Delete</button>
           </div>
         </div>
+        <div id="cv-repo" data-project-id="${esc(c.projectId || "")}"></div>
         ${c.summary ? `<div class="card card-body"><div class="card-title">Context summary <span class="sub">auto-updates every 20 messages</span></div><pre class="mini-pre" dir="auto">${esc(c.summary)}</pre></div>` : ""}
         <div class="card card-body mt" style="padding:0">
           <div id="cv-messages" style="display:flex;flex-direction:column;gap:10px;padding:16px;max-height:65vh;overflow-y:auto;background:var(--bg,#0b0d17)">
@@ -5441,6 +5458,9 @@
           <div class="field-hint" style="padding:0 16px 12px">Enter sends · Shift+Enter for newline · last ${Math.min(msgs.length, 50)} messages visible to AI; older context is auto-summarized.</div>
         </div>`;
       setTimeout(() => { const box = $("#cv-messages"); if (box) box.scrollTop = box.scrollHeight; }, 30);
+      // Show whether the assistant can actually read this project's repository
+      // (and why not) instead of letting the model guess a reason mid-answer.
+      if (c.projectId) void loadRepoContext(c.projectId);
       const input = $("#cv-input");
       const sendBtn = $("#cv-send");
       input.focus();
@@ -5484,6 +5504,9 @@
               if (mt && ev.displayName) mt.innerHTML = `<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(ev.displayName)}</span>`;
             },
             onRetry: (ev) => { const s = document.getElementById(uid + "-status"); if (s) s.textContent = ev.message || "trying fallback…"; },
+            // Repository evidence used for THIS message (does not count as
+            // "the stream started" — it is sent before the first delta).
+            onRepoContext: (ev) => { if (ev.repoContext) updateRepoBanner(ev.repoContext); },
             onDelta: (ev) => {
               gotEvent = true;
               const t = document.getElementById(uid + "-text");
@@ -5517,6 +5540,7 @@
             // fall back to the classic request/response send.
             try {
               const updated = await api(`/conversations/${id}/messages`, { method: "POST", body: { role: "user", content } });
+              if (updated && updated.repoContext) updateRepoBanner(updated.repoContext);
               await render(updated && updated.id ? updated : undefined);
             } catch (e2) {
               toast("Send failed", e2.message, "err");
@@ -5549,6 +5573,91 @@
     };
     await render();
   });
+
+  /* ------------------------------------------------------------------ *
+   * Repository context banner (project chat).
+   *
+   * The assistant can only reason about code it was actually handed. When the
+   * platform cannot read the linked repository — a branch that does not exist,
+   * a credential without access, GitHub unreachable, the read budget exceeded —
+   * the chat used to show nothing at all and the model invented a reason
+   * ("your repository returns 404, so I'll analyse it from the README").
+   * This banner renders the measured truth from GET /projects/:id/repo-status.
+   * ------------------------------------------------------------------ */
+  function repoBannerHtml(status, briefOverride) {
+    const brief = briefOverride || (status && status.brief) || null;
+    if (!brief || !brief.repo) return "";
+    const repos = asArray(status && status.repositories);
+    const conn = (status && status.connection) || {};
+    const recheck = `<button class="btn btn-ghost" id="cv-repo-recheck" style="padding:2px 9px;font-size:11px;white-space:nowrap">↻ Re-check</button>`;
+    const scopes = asArray(conn.scopes);
+    const connBit = conn.login
+      ? `connected as <strong>${esc(conn.login)}</strong>${scopes.length ? ` · scope ${esc(scopes.join(", "))}` : ""}`
+      : conn.kind === "mock"
+        ? `running on the <strong>simulated (mock) GitHub</strong> — no real repository is read`
+        : conn.error ? `GitHub connection error: ${esc(String(conn.error).slice(0, 160))}` : `no GitHub identity reported`;
+    if (brief.status === "ok") {
+      const rows = repos.map((r) => {
+        const ci = asArray(r.ciWorkflows);
+        const count = typeof r.codeFiles === "number" ? r.codeFiles : r.files || 0;
+        const bits = [`${count} code file(s)`, r.readme ? "README ✓" : "README ✗", ci.length ? `CI ✓ (${ci.length})` : "CI ✗"];
+        return `<div><code>${esc(r.repo)}@${esc(r.branch)}</code> — ${bits.join(" · ")}</div>`;
+      }).join("");
+      const branchNote = brief.configuredBranch
+        ? `<div class="field-hint warn">Project branch <code>${esc(brief.configuredBranch)}</code> does not exist — read from <code>${esc(brief.branch)}</code> instead. ${esc(brief.hint || "")}</div>`
+        : "";
+      const noCi = repos.some((r) => r.readable && !asArray(r.ciWorkflows).length);
+      const tone = branchNote || noCi ? " warn" : "";
+      return `<div class="notice${tone}"><div style="display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">🔗 <strong>Repository context: available</strong> — the AI reads this before answering.
+          ${rows}
+          ${branchNote}
+          ${noCi ? `<div class="field-hint warn">No GitHub Actions workflow found: agents verify their work through CI check runs, so QA can only report “unverified”. Add a build/test workflow (docs/AGENT_EXECUTION.md → real build/test).</div>` : ""}
+          <div class="field-hint">${connBit} · ${brief.source === "cache" ? `cached ${Math.round((brief.ageMs || 0) / 1000)}s ago` : `read in ${brief.elapsedMs || 0}ms`}</div>
+        </div>${recheck}</div></div>`;
+    }
+    const problems = repos.filter((r) => r.error).map((r) =>
+      `<div class="field-hint warn" style="margin-top:4px"><code>${esc(r.repo)}</code>: ${esc(String(r.error).slice(0, 220))}${r.hint ? ` — ${esc(r.hint)}` : ""}</div>`).join("");
+    return `<div class="notice err"><div style="display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap">
+      <div style="flex:1;min-width:240px">⚠️ <strong>Repository context: ${brief.status === "empty" ? "the repository is empty" : "not readable"}</strong> — this answer is generated <u>without</u> your code.
+        <div style="margin-top:4px">${esc(brief.reason || "")}</div>
+        ${brief.hint ? `<div class="field-hint" style="margin-top:4px">Fix: ${esc(brief.hint)}</div>` : ""}
+        ${problems}
+        <div class="field-hint">${connBit}</div>
+      </div>${recheck}</div></div>`;
+  }
+
+  /** Fetch the measured repository health for a project chat and render it. */
+  async function loadRepoContext(projectId, opts) {
+    if (!projectId) return;
+    const box = document.getElementById("cv-repo");
+    if (box && (!opts || !opts.keep)) box.innerHTML = `<div class="notice"><span class="sub">Checking repository access…</span></div>`;
+    const status = await api(`/projects/${encodeURIComponent(projectId)}/repo-status${opts && opts.refresh ? "?refresh=1" : ""}`).catch(() => null);
+    const current = document.getElementById("cv-repo");
+    if (!current) return;
+    if (!status) { current.innerHTML = ""; return; }
+    current.dataset.projectId = projectId;
+    current.innerHTML = repoBannerHtml(status);
+    const btn = document.getElementById("cv-repo-recheck");
+    if (btn) btn.onclick = async () => {
+      btn.disabled = true;
+      await loadRepoContext(projectId, { refresh: true });
+      toast("Repository check done", "Re-read from GitHub", "ok");
+    };
+  }
+
+  /** Live banner update from a chat send (SSE `repoContext` frame / JSON reply). */
+  function updateRepoBanner(brief) {
+    const box = document.getElementById("cv-repo");
+    if (!box || !brief) return;
+    const projectId = box.dataset.projectId;
+    box.innerHTML = repoBannerHtml(null, brief);
+    const btn = document.getElementById("cv-repo-recheck");
+    if (btn && projectId) btn.onclick = async () => {
+      btn.disabled = true;
+      await loadRepoContext(projectId, { refresh: true });
+    };
+  }
 
   /**
    * POST a message to a conversation over the SSE streaming endpoint and
@@ -5632,6 +5741,9 @@
           if (mt && ev.displayName) mt.innerHTML = `<span class="badge" style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">${esc(ev.displayName)}</span>`;
         },
         onRetry: (ev) => { const s = document.getElementById(uid + "-status"); if (s) s.textContent = ev.message || "trying fallback…"; },
+        // Project chats show which repository evidence the reply used; a
+        // standalone chat has no banner and this is a no-op.
+        onRepoContext: (ev) => { if (ev.repoContext) updateRepoBanner(ev.repoContext); },
         onDelta: (ev) => {
           gotEvent = true;
           const t = document.getElementById(uid + "-text");

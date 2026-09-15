@@ -50,6 +50,7 @@ The stored `Provider` config stores only `secretRef` (e.g. `OPENAI_API_KEY`) —
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | GitHub App (installation) |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for `/webhooks/github` signature validation |
 | `GITHUB_ENABLED` | Set `true` to use the real adapter; otherwise the mock is used for local dev/test (even if a token is present) |
+| `REPO_BRIEF_TTL_MS` | `120000` — how long the repository brief (file tree + README + manifests) that feeds the project chat is cached per account+repository+branch. `0` disables caching. A chat message re-reads GitHub only after the TTL, a `?refresh=1` health check, or a restart |
 
 > In production (`NODE_ENV=production`) with a token, the real adapter is used automatically.
 

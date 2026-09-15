@@ -23,6 +23,7 @@ import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
 import { isAgentType } from "../../agents/generator.js";
 import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
+import { readRepoBrief, repoContextFor } from "../../agents/repo-brief.js";
 
 function fail(
   reply: FastifyReply,
@@ -893,6 +894,161 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
     return p.repositories.map((r) => ({ ...r, path: r.isConfigRepo ? "CodeVia" : undefined }));
+  });
+
+  /**
+   * Repository health — the answer to "why can't the AI see my code?".
+   *
+   * Every symptom the chat used to guess at ("the repository returns 404") is
+   * measured here instead: which credential is acting (and with which scopes),
+   * whether the repository is reachable at all, whether the *configured branch*
+   * exists, how many files are readable, whether a README and CI workflows are
+   * present (QA verifies runs through GitHub check runs — a repository without
+   * CI can never be test-verified), plus the exact repository brief the chat
+   * prompt receives. One call, cached listing, actionable `hint` per problem.
+   */
+  app.get("/projects/:id/repo-status", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    const q = (req.query ?? {}) as { refresh?: string };
+    const refresh = q.refresh === "1" || q.refresh === "true";
+    const { user, authenticated } = resolveRequestUser(req, container);
+    const userId = authenticated ? user.id : undefined;
+
+    // 1) Which credential would act on this project right now?
+    let gh: ReturnType<typeof githubForProject> | undefined;
+    let connectionError: string | undefined;
+    try {
+      gh = githubForProject(req, p);
+    } catch (err) {
+      connectionError = String((err as Error)?.message ?? err).slice(0, 300);
+    }
+    const storedToken = userId ? describeUserGitHubToken(container.kv, userId) : undefined;
+    let viewer: { login?: string; scopes?: string[] } = {};
+    if (gh) {
+      try {
+        const v = await gh.getViewer();
+        viewer = { login: v.login, scopes: v.scopes };
+      } catch {
+        /* an unreadable identity is itself part of the diagnosis (reported below) */
+      }
+    }
+    const connection = {
+      kind: gh?.kind ?? "unavailable",
+      source: gh?.kind === "mock" ? "mock" : userId && storedToken ? "user-oauth" : "server-token",
+      login: viewer.login,
+      scopes: viewer.scopes ?? [],
+      tokenStored: !!storedToken,
+      error: connectionError,
+      hint: connectionError
+        ? "Re-connect GitHub for this project (Settings → GitHub, then reopen the project)."
+        : gh?.kind === "mock"
+          ? "This project is running against the simulated (mock) GitHub — no real repository is read. Log in with GitHub and re-link the repository to work on real code."
+          : viewer.scopes && viewer.scopes.length && !viewer.scopes.some((x) => x === "repo" || x === "public_repo")
+            ? "The connected GitHub token has no repository scope — sign out and in again with the 'repo' scope to read private repositories."
+            : undefined,
+    };
+
+    // 2) Per-repository facts (bounded: one listing per linked repository).
+    const repositories: Array<Record<string, unknown>> = [];
+    for (const link of p.repositories ?? []) {
+      const ref = parseRepoFullName(link.repo);
+      const row: Record<string, unknown> = {
+        repo: link.repo,
+        branch: link.branch || p.branch || "main",
+        role: link.role,
+        isConfigRepo: !!link.isConfigRepo,
+        readable: false,
+        exists: undefined as boolean | undefined,
+        branchExists: undefined as boolean | undefined,
+        defaultBranch: undefined as string | undefined,
+        headSha: undefined as string | undefined,
+        files: 0,
+        readme: false,
+        ciWorkflows: [] as string[],
+        error: undefined as string | undefined,
+        hint: undefined as string | undefined,
+      };
+      if (!ref || !gh) {
+        row.error = ref ? "No usable GitHub connection for this project." : `Not a valid owner/name: "${link.repo}"`;
+        row.hint = ref
+          ? "Re-connect GitHub (Settings → GitHub)."
+          : "Fix the repository name in the project's Repositories tab (expected owner/name).";
+        repositories.push(row);
+        continue;
+      }
+      const branch = String(row.branch);
+      try {
+        const meta = await gh.getRepository?.(ref);
+        row.exists = meta ? true : undefined;
+        row.defaultBranch = meta?.defaultBranch;
+      } catch {
+        /* getRepository is optional/advisory — the listing below is authoritative */
+      }
+      try {
+        const branches = await gh.listBranches(ref);
+        row.exists = true;
+        row.branchExists = branches.some((b) => b.name === branch);
+        row.headSha = branches.find((b) => b.name === branch)?.sha;
+        if (!row.defaultBranch) row.defaultBranch = branches.find((b) => b.name === "main")?.name ?? branches[0]?.name;
+        if (row.branchExists === false) {
+          row.error = `Branch "${branch}" does not exist in ${link.repo}.`;
+          row.hint = `Set the project branch to "${row.defaultBranch ?? "main"}" (Project → Settings → Repository), or push the branch "${branch}".`;
+          row.availableBranches = branches.slice(0, 20).map((b) => b.name);
+          repositories.push(row);
+          continue;
+        }
+      } catch (err) {
+        const status = (err as { status?: number })?.status;
+        row.exists = status === 404 ? false : undefined;
+        row.error = String((err as Error)?.message ?? err).slice(0, 300);
+        row.hint =
+          status === 404
+            ? `GitHub answered 404 for ${link.repo}: the repository does not exist under the connected account (${viewer.login ?? "unknown"}), or it is private and this credential cannot see it. Open https://github.com/${link.repo} as that account, then sign out and in again so a fresh repository token is stored.`
+            : status === 401 || status === 403
+              ? `GitHub rejected the credential (${status}). Re-connect GitHub and make sure the login granted the 'repo' scope.`
+              : "GitHub could not be reached. Check outbound HTTPS to api.github.com and retry.";
+        repositories.push(row);
+        continue;
+      }
+      try {
+        const entries = await gh.listFiles(ref, branch);
+        const blobs = entries.filter((e) => e.type === "blob").map((e) => e.path);
+        row.readable = true;
+        row.files = blobs.length;
+        // The chat brief ignores the platform's own `CodeVia/` folder, so report
+        // both numbers — otherwise the banner and the brief disagree.
+        row.codeFiles = blobs.filter((x) => !x.startsWith("CodeVia/")).length;
+        row.readme = blobs.some((x) => /^readme(\.md)?$/i.test(x));
+        row.ciWorkflows = blobs.filter((x) => x.startsWith(".github/workflows/")).slice(0, 10);
+        if (!blobs.length) {
+          row.hint = `The branch "${branch}" of ${link.repo} has no files. Push the code, or point the project at the branch that has it.`;
+        } else if (!(row.ciWorkflows as string[]).length) {
+          row.hint =
+            "This repository has no GitHub Actions workflow. Agents verify their work through GitHub check runs — without CI, QA can only report 'unverified'. Add a build/test workflow (docs/AGENT_EXECUTION.md → real build/test).";
+        }
+      } catch (err) {
+        row.error = String((err as Error)?.message ?? err).slice(0, 300);
+        row.hint =
+          "The repository is reachable but its file listing failed. Retry; for very large repositories ask about a specific folder.";
+      }
+      repositories.push(row);
+    }
+
+    // 3) Exactly what the chat prompt gets (cached; ?refresh=1 forces a re-read).
+    const brief = gh
+      ? repoContextFor(await readRepoBrief({ github: gh, project: p, cacheScope: userId, refresh, timeoutMs: 15000 }))
+      : undefined;
+
+    return {
+      project: { id: p.id, name: p.name, configRepo: p.configRepo, branch: p.branch || "main" },
+      connection,
+      repositories,
+      brief,
+      healthy: !connectionError && repositories.length > 0 && repositories.every((r) => r.readable === true),
+      checkedAt: new Date().toISOString(),
+    };
   });
 
   // Link a repository (picked from the connected GitHub account) to a project.

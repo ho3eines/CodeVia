@@ -110,6 +110,13 @@ export interface IGitHubService {
   listRepositories(opts?: ListRepositoriesOptions): Promise<GithubRepository[]>;
   createRepository(opts: CreateRepositoryOptions): Promise<GithubRepository>;
   listFiles(repo: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]>;
+  /**
+   * Repository metadata (existence, default branch, visibility). Optional:
+   * adapters that cannot answer it simply omit it and callers fall back to
+   * `listBranches()` for the same diagnosis. Used by the project repository
+   * health check (`GET /projects/:id/repo-status`).
+   */
+  getRepository?(repo: GithubRepoRef): Promise<GithubRepository | undefined>;
   getViewer(): Promise<GithubViewer>;
   listBranches(repo: GithubRepoRef): Promise<GithubBranch[]>;
   listCommits(repo: GithubRepoRef, branch?: string): Promise<GithubCommit[]>;

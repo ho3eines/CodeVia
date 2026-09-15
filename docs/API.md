@@ -40,6 +40,7 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | PUT | `/projects/:id/rules` | Replace the **manual** rules (`rules: string[]`); discovered rules are kept unless `keepDiscovered:false` |
 | POST | `/projects/:id/dry-run` | **Simulation / Dry Run** — preview what an agent would do (`title`, `description`, `agentType?`): chosen agent + model, step plan, repository writes, approvals needed, context size, budget. Creates **no** task/run |
 | GET | `/projects/:id/export` | Project export (config + agents + prompts + skills + workflows + rules; no secrets) |
+| GET | `/projects/:id/repo-status` | **Repository health** — the measured answer to "why can't the AI see my code?": acting credential (`source`, `login`, `scopes`), per repository `readable` / `exists` / `branchExists` / `defaultBranch` / `headSha` / `files` / `readme` / `ciWorkflows`, an actionable `error` + `hint` per problem, and the exact `brief` the chat prompt receives (`status`, `reason`, `hint`, `files`, `configuredBranch`, `source`, `elapsedMs`). `?refresh=1` bypasses the brief cache |
 | GET | `/projects/:id/repositories` | Linked repositories (`repo`, `branch`, `role`, `isConfigRepo`, `private`, `htmlUrl`) |
 | POST | `/projects/:id/repositories` | Link a repository (`repo`, `branch?`, `role?`, `isConfigRepo?`) — idempotent per repo |
 | PATCH | `/projects/:id/repositories/:owner/:name` | Change `branch` / `role` / make it the config repo |
