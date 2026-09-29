@@ -39,7 +39,8 @@ import { extractSessionToken, verifySession } from "../auth/github-oauth.js";
 import type { User } from "../domain/entities.js";
 import { registerProjectStateHook } from "./project-state-hook.js";
 import { getUserGitHubToken } from "../auth/github-tokens.js";
-import { runWithGitHubRequestActor } from "../github/request-actor.js";
+import { pendingGitHubAuthorization, runWithGitHubRequestContext } from "../github/request-actor.js";
+import { GitHubAuthorizationRequiredError } from "../github/authorization.js";
 import { correlationId, runWithCorrelation } from "../correlation.js";
 import { getEnv } from "../config/env.js";
 
@@ -74,6 +75,15 @@ export async function buildServer(container: Container): Promise<BuildServerResu
   });
 
   await app.register(cors, { origin: true });
+  // A route that lets "GitHub authorization required" escape answers 403 with
+  // the structured notice; every other error keeps Fastify's default handling.
+  app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof GitHubAuthorizationRequiredError) {
+      reply.code(403).send(error.toJSON());
+      return;
+    }
+    throw error;
+  });
   // The server is created with `logger: false`, so an unhandled 500 used to
   // leave no trace anywhere but the client's error toast — the browser showed
   // "Cannot read properties of undefined (reading 'map')" and the operator had
@@ -447,21 +457,46 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     await authMiddleware({ container })(request, reply);
   });
 
-  // Bind the signed-in user's GitHub OAuth token for the rest of this request
-  // so projectFiles / readProject / chat persist use it even when they call
-  // githubForProject(project) without a requestUserId. GITHUB_TOKEN is login
-  // only — never the identity that writes the owner's repositories.
+  // Bind the signed-in user's GitHub identity for the rest of this request so
+  // projectFiles / readProject / chat persist use their OAuth token even when
+  // they call githubForProject(project) without a requestUserId. GITHUB_TOKEN
+  // is login only — never the identity that writes the owner's repositories.
+  // A signed-in user WITHOUT a stored token is bound too (signedInUserId), so
+  // the resolver asks them to authorize instead of falling back to the site
+  // token.
   app.addHook("onRequest", (request, _reply, done) => {
     try {
       const { user, authenticated } = resolveRequestUser(request, container);
-      if (authenticated && getUserGitHubToken(container.kv, user.id)) {
-        runWithGitHubRequestActor(user.id, done);
+      if (authenticated) {
+        const hasToken = !!getUserGitHubToken(container.kv, user.id);
+        runWithGitHubRequestContext({ userId: hasToken ? user.id : undefined, signedInUserId: user.id }, done);
         return;
       }
     } catch {
       /* never block a request over actor bookkeeping */
     }
-    done();
+    runWithGitHubRequestContext({}, done);
+  });
+
+  // When GitHub (write) authorization was required while serving this request,
+  // attach it to the error response — even if the route caught the original
+  // error and answered with its own message — so the SPA can start the GitHub
+  // consent flow automatically.
+  app.addHook("onSend", async (_request, reply, payload) => {
+    if (reply.statusCode < 400) return payload;
+    const notice = pendingGitHubAuthorization();
+    if (!notice || typeof payload !== "string") return payload;
+    if (!String(reply.getHeader("content-type") ?? "").includes("application/json")) return payload;
+    try {
+      const body = JSON.parse(payload) as unknown;
+      if (!body || typeof body !== "object" || Array.isArray(body)) return payload;
+      const obj = body as Record<string, unknown>;
+      if (!obj.githubAuthorization) obj.githubAuthorization = notice;
+      if (!obj.code) obj.code = notice.code;
+      return JSON.stringify(obj);
+    } catch {
+      return payload;
+    }
   });
 
   registerProjectStateHook(app, container);

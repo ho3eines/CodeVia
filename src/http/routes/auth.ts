@@ -18,6 +18,12 @@ import { getEnv } from "../../config/env.js";
 import { logger } from "../../logger.js";
 import { deleteUserGitHubToken, describeUserGitHubToken, storeUserGitHubToken } from "../../auth/github-tokens.js";
 import { adoptStrandedProjects } from "../../github/registry.js";
+import {
+  buildWriteAuthorizeUrl,
+  GITHUB_WRITE_SCOPE,
+  hasGitHubWriteScope,
+  mergeOAuthScopes,
+} from "../../github/authorization.js";
 
 /**
  * GitHub OAuth login + session routes.
@@ -77,15 +83,21 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
     const q = (req.query ?? {}) as Record<string, unknown>;
     // Optional in-app destination after login (hash routes only — see sanitizeNextLocation).
     const state = createOAuthState(undefined, { next: sanitizeNextLocation(q.next) });
+    // `?scope=write` (sent automatically by the SPA when a project action needs
+    // it) asks GitHub for repository write access on top of the configured
+    // login scope, so CodeVia can commit with the USER's token instead of the
+    // site token. Only this fixed upgrade is accepted — never arbitrary scopes.
+    const wantsWrite = String(q.scope ?? "") === "write";
+    const scope = wantsWrite ? mergeOAuthScopes(cfg.scope, [GITHUB_WRITE_SCOPE]) : cfg.scope;
     const url = buildAuthorizeUrl({
       clientId: cfg.clientId,
       redirectUri: cfg.redirectUri,
-      scope: cfg.scope,
+      scope,
       state,
     });
     const wantsJson =
       String(q.format ?? "") === "json" || String(req.headers.accept ?? "").includes("application/json");
-    if (wantsJson) return { url, state };
+    if (wantsJson) return { url, state, scope };
     reply.redirect(url, 302);
     return reply;
   });
@@ -197,6 +209,11 @@ export function registerAuthRoutes(app: FastifyInstance, container: Container): 
         stored: gh.stored,
         scopes: gh.scopes,
         canReadPrivateRepos: gh.canReadPrivateRepos,
+        /** Whether CodeVia can apply changes (commit / open PRs) as this user. */
+        canWrite: gh.stored && hasGitHubWriteScope(gh.scopes),
+        requiredWriteScopes: [GITHUB_WRITE_SCOPE],
+        /** Starts the GitHub consent flow requesting write access. */
+        writeAuthorizeUrl: buildWriteAuthorizeUrl(),
         login: gh.login,
       },
       // Login config + strict mode (env REQUIRE_AUTH, overridden by the Admin

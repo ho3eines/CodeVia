@@ -26,9 +26,101 @@
       const err = new Error(msg);
       err.status = res.status;
       err.body = body;
+      const ghAuth = githubAuthorizationFrom(body);
+      if (ghAuth) {
+        err.githubAuthorization = ghAuth;
+        requestGitHubWriteAccess(ghAuth);
+      }
       throw err;
     }
     return res.status === 204 ? null : res.json();
+  }
+
+  /* ---------- GitHub write authorization ----------
+     CodeVia applies changes to a project with the signed-in user's own GitHub
+     token (never the site token). When the server answers that the user has
+     not granted GitHub access yet — or granted it read-only — it attaches a
+     `githubAuthorization` block. We then ask the user, automatically, to grant
+     repository write access on GitHub and bring them back to the same page. */
+  const GH_WRITE_AUTH_URL = "/auth/github/login?scope=write";
+  function githubAuthorizationFrom(body) {
+    if (!body || typeof body !== "object") return null;
+    const info = body.githubAuthorization;
+    if (info && typeof info === "object") return info;
+    if (body.code === "github_authorization_required") {
+      return { reason: "no-token", message: body.error || body.message || "", authorizeUrl: GH_WRITE_AUTH_URL };
+    }
+    return null;
+  }
+  // Only in-app hash routes may be used as the post-login destination (the
+  // server enforces the same rule); drop stale ?login=… flags.
+  function githubAuthNextHash() {
+    const raw = String(location.hash || "#/chat");
+    const [path, query = ""] = raw.split("?");
+    const q = new URLSearchParams(query);
+    q.delete("login");
+    q.delete("reason");
+    const qs = q.toString();
+    const next = qs ? path + "?" + qs : path;
+    return /^#\/[A-Za-z0-9_\-/.%?=&]*$/.test(next) && next.length <= 200 ? next : "#/chat";
+  }
+  function githubWriteAuthorizeHref(info) {
+    const base = (info && typeof info.authorizeUrl === "string" && info.authorizeUrl.startsWith("/auth/github/login"))
+      ? info.authorizeUrl : GH_WRITE_AUTH_URL;
+    const url = new URL(base, location.origin);
+    url.searchParams.set("scope", "write");
+    url.searchParams.set("next", githubAuthNextHash());
+    return url.pathname + url.search;
+  }
+  let ghAuthTimer = null;
+  function requestGitHubWriteAccess(info, opts = {}) {
+    // One prompt at a time — many parallel calls can fail for the same reason.
+    if (document.getElementById("gh-write-auth") && !$("#modal-backdrop").hidden) return;
+    try { sessionStorage.setItem("cv-gh-write-prompted", "1"); } catch (_) { /* ignore */ }
+    const href = githubWriteAuthorizeHref(info);
+    const reason = (info && info.reason) || "no-token";
+    const lead = reason === "missing-scope"
+      ? "Your GitHub authorization is read-only, so CodeVia cannot apply changes to this project."
+      : reason === "token-rejected"
+        ? "GitHub rejected your stored authorization (revoked or expired)."
+        : "CodeVia has no GitHub authorization from your account yet.";
+    const seconds = opts.autoRedirect === false ? 0 : Math.max(0, Number(opts.seconds ?? 8));
+    openModal("🔐 GitHub write access required", `
+      <div id="gh-write-auth" class="gh-write-auth" dir="auto">
+        <p>${esc(lead)}</p>
+        <p>Changes are committed with <strong>your own</strong> GitHub account — the site token is never used to write your repositories. Grant CodeVia repository write access (scope <code>repo</code>) on GitHub; you will come right back to this page.</p>
+        <p dir="rtl" lang="fa" style="color:var(--text-muted)">برای اعمال تغییرات روی پروژه، CodeVia باید با حساب GitHub خودِ شما و با دسترسی نوشتن (write) کار کند. روی دکمه بزنید تا GitHub اجازه را از شما بگیرد.</p>
+        ${seconds ? `<p class="gh-write-auth-countdown" style="color:var(--text-muted);font-size:12px">Redirecting to GitHub in <span id="gh-write-auth-seconds">${seconds}</span>s…</p>` : ""}
+        <div class="flex mt" style="gap:8px;justify-content:flex-end">
+          <button class="btn btn-ghost" id="gh-write-auth-later" type="button">Later</button>
+          <a class="btn btn-primary" id="gh-write-auth-go" href="${esc(href)}">Grant write access on GitHub</a>
+        </div>
+      </div>`);
+    if (ghAuthTimer) { clearInterval(ghAuthTimer); ghAuthTimer = null; }
+    const stop = () => { if (ghAuthTimer) { clearInterval(ghAuthTimer); ghAuthTimer = null; } };
+    const later = document.getElementById("gh-write-auth-later");
+    if (later) later.onclick = () => { stop(); closeModal(); };
+    if (!seconds) return;
+    let left = seconds;
+    ghAuthTimer = setInterval(() => {
+      const box = document.getElementById("gh-write-auth");
+      if (!box || $("#modal-backdrop").hidden) return stop();
+      left -= 1;
+      const el = document.getElementById("gh-write-auth-seconds");
+      if (el) el.textContent = String(Math.max(left, 0));
+      if (left <= 0) { stop(); location.assign(href); }
+    }, 1000);
+  }
+  window.requestGitHubWriteAccess = requestGitHubWriteAccess;
+  /** Ask once per browser session when the signed-in user's token cannot write. */
+  function maybePromptGitHubWriteAccess() {
+    const gh = authState.githubToken;
+    if (!authState.authenticated || !authState.loginConfigured || !gh || gh.canWrite !== false) return;
+    try { if (sessionStorage.getItem("cv-gh-write-prompted")) return; } catch (_) { return; }
+    requestGitHubWriteAccess({
+      reason: gh.stored ? "missing-scope" : "no-token",
+      authorizeUrl: gh.writeAuthorizeUrl || GH_WRITE_AUTH_URL,
+    }, { autoRedirect: false });
   }
   /* ---------- auth/session state ---------- */
   // Cached session introspection. /auth/me is a PUBLIC endpoint that always
@@ -79,6 +171,10 @@
     });
     let body = null;
     try { body = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      const ghAuth = githubAuthorizationFrom(body);
+      if (ghAuth) requestGitHubWriteAccess(ghAuth);
+    }
     return { ok: res.ok, status: res.status, body, headers: res.headers };
   }
 
@@ -725,6 +821,7 @@
     // Keep the top-bar login/user slot in sync with the refreshed state.
     renderUserSlot();
     refreshBell();
+    maybePromptGitHubWriteAccess();
   }
   async function refreshBell() {
     const btn = $("#bell-btn"), count = $("#bell-count");

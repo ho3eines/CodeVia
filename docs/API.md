@@ -127,9 +127,9 @@ Plans are bounded to 12 tasks / 5 files per task and validated as an acyclic gra
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/auth/github/status` | Is OAuth configured? + current user (public) |
-| GET | `/auth/github/login` | 302 redirect to `github.com` authorize (or `?format=json` → `{url, state}`) |
+| GET | `/auth/github/login` | 302 redirect to `github.com` authorize (or `?format=json` → `{url, state, scope}`). `?scope=write` adds the `repo` scope (repository write) on top of the configured login scope — the SPA sends it automatically when a change needs write access |
 | GET | `/auth/github/callback?code&state` | Code exchange → session cookie → redirect to `#/github?login=success` |
-| GET | `/auth/me` | Current user (`{authenticated, user, githubToken:{stored, scopes, canReadPrivateRepos, login}}` — demo user when logged out) |
+| GET | `/auth/me` | Current user (`{authenticated, user, githubToken:{stored, scopes, canReadPrivateRepos, canWrite, requiredWriteScopes, writeAuthorizeUrl, login}}` — demo user when logged out) |
 | POST | `/auth/logout` | Clear session cookie and delete the stored (encrypted) GitHub token |
 
 Sessions travel via the HttpOnly `cv_session` cookie or `Authorization: Bearer <token>`.
@@ -235,3 +235,30 @@ Pending requests are also pushed to Telegram (project chat + paired per-user bot
 ## Real-time (Socket.io)
 
 Channels emitted by the server: `run.updated`, `step.updated`, `task.updated`, `notification`. The client receives **only** status/step/result — never chain-of-thought.
+
+### GitHub write authorization (`github_authorization_required`)
+
+Changes to a project are committed with the **signed-in user's own GitHub
+token** — never the site-wide `GITHUB_TOKEN`. When the user has no stored token,
+or their token is read-only (no `repo` scope) and GitHub rejects a write, the
+failing response carries:
+
+```json
+{
+  "error": "…",
+  "code": "github_authorization_required",
+  "githubAuthorization": {
+    "reason": "no-token | missing-scope | token-rejected",
+    "requiredScopes": ["repo"],
+    "grantedScopes": ["public_repo"],
+    "authorizeUrl": "/auth/github/login?scope=write"
+  }
+}
+```
+
+Routes that let the error escape answer `403`; routes that catch it keep their
+own status but the `githubAuthorization` block is still attached (onSend hook).
+The SPA opens a consent prompt and redirects to `authorizeUrl` (with `next` =
+the current page). Background work without a request user keeps using the
+connection stored on the project.
+

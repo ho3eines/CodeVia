@@ -12,6 +12,7 @@ import {
 } from "../../domain/project-options.js";
 import { parseRepoFullName } from "../../github/types.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
+import { githubAuthorizationRequired } from "../../github/authorization.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken, getUserGitHubToken } from "../../auth/github-tokens.js";
 import {
@@ -118,6 +119,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       authenticated,
       fallback: container.github,
     });
+    // A signed-in user creates (and later writes) the project with their own
+    // GitHub token — never the site token. Ask them to authorize first.
+    if (authenticated && resolved.source === "server-token") {
+      const err = githubAuthorizationRequired({ reason: "no-token" });
+      reply.code(403);
+      return err.toJSON();
+    }
     const tokenInfo = resolved.source === "user-oauth" ? describeUserGitHubToken(container.kv, user.id) : undefined;
     const githubConnection: ProjectGithubConnection = {
       kind: resolved.source,
@@ -423,6 +431,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       });
       return container.githubForProject(p, requestUserId);
     }
+    // A signed-in user without a token is resolved as themselves too: the
+    // resolver then asks them to authorize GitHub (write access) instead of
+    // silently committing with the site-wide GITHUB_TOKEN.
+    if (requestUserId) return container.githubForProject(p, requestUserId);
     if (p.githubConnection) return container.githubForProject(p);
     return resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github })
       .service;
