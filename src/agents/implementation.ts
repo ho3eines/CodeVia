@@ -27,6 +27,8 @@ const WRITERS = IMPLEMENTERS;
 export const MAX_SUBTASKS = 12;
 export const isWriter = (type: AgentType): boolean => WRITERS.includes(type);
 export const MAX_FILE_CHARS = 200_000;
+/** Binary/garbled model output marker; generated source must never contain a NUL byte. */
+const NUL = String.fromCharCode(0);
 
 export interface BreakdownItem {
   /** Stable identifier within this plan, used by dependsOn (not a database id). */
@@ -298,7 +300,7 @@ export async function prepareImplementation(
         existing !== undefined
           ? applyFileEdits(existing, raw)
           : raw.replace(/^\s*```[^\n]*\n/, "").replace(/\n```\s*$/, "");
-      if (!content.trim() || content.includes("") || content.includes("\uFFFD") || content.length > MAX_FILE_CHARS)
+      if (!content.trim() || content.includes(NUL) || content.length > MAX_FILE_CHARS)
         throw new Error(`Invalid or oversized generated content for ${target}`);
     } else if (target.startsWith("docs/tasks/")) {
       content = changeNote(agent.name, child, item.description, opts.brief, opts.fixContext);
