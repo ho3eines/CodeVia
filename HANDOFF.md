@@ -1,6 +1,18 @@
 # CodeVia Project Handoff
-> آخرین بروزرسانی: 2026-09-29 — گیت ادغام (تست قبل از اعمال) + پیش‌بررسی دسترسی push در همهٔ مسیرهای نوشتن. قبلی: 2026-09-15 — آینهٔ محلی **فقط‌خواندنی** ریپازیتوری (bare clone + git plumbing) شواهد چت و ابزار `search` را از دیسک می‌خواند؛ بدون اجرای کد مخزن و با fallback کامل به API
+> آخرین بروزرسانی: 2026-09-29 — **ویرایش مقاوم فایل (گام ۱، PR #64)**: نردبان تطبیق exact ← EOL/BOM ← whitespace انتهای خط ← anchor + unified diff + بازنویسی زیر ۸KB + حداکثر ۲ patch اصلاحی با ناحیهٔ نزدیک و شماره خط. قبلی: همان روز — گیت ادغام (تست قبل از اعمال) + پیش‌بررسی دسترسی push در همهٔ مسیرهای نوشتن. قبلی: 2026-09-15 — آینهٔ محلی **فقط‌خواندنی** ریپازیتوری (bare clone + git plumbing) شواهد چت و ابزار `search` را از دیسک می‌خواند؛ بدون اجرای کد مخزن و با fallback کامل به API
 > این فایل برای جلوگیری از خواندن کل کد در هر جلسه است. همیشه قبل از شروع کار این فایل را بخوانید.
+
+## ویرایش مقاوم فایل — نردبان match، فرمت‌های patch و حلقهٔ اصلاحی (2026-09-29، گام ۱)
+
+- **گزارش:** PR #64 (Draft) فقط بخش CRLF سازگار را بسته بود؛ تطبیق همچنان بایتیِ تک‌بار بود و هر mismatch بلافاصله کل اجرا را می‌شکست (OPERATIONAL_PLAN: OP-01).
+- **ماژول جدید `src/agents/file-patch.ts`:**
+  - `applyFileEdits(existing, response, options?)` حالا سه فرمت را به‌ترتیب می‌پذیرد: **unified diff** (با context دقیق و پشتیبانی `\ No newline at end of file`) ← **JSON `{"edits":[…]}`** ← **بازنویسی کامل** فقط زیر `PATCH_FULL_REWRITE_MAX_BYTES` (پیش‌فرض ۸KB، در `src/config/env.ts`) با `{"content":"…"}` صریح یا متن خامِ دارای هم‌پوشانی خط با فایل (پاسخ نثریِ بدون هم‌پوشانی رد می‌شود).
+  - **نردبان تطبیق oldText:** exact ← نرمال‌سازی EOL/BOM ← نرمال‌سازی whitespace انتهای خط ← anchor (اولین/آخرین خط معنادار، فاصله ±۲ خط)؛ هر سطح فقط با دقیقاً یک match پذیرفته می‌شود. تطبیق در فضای نرمال‌شده با نگاشت اندیس انجام می‌شود ⇒ خطوط دست‌نخورده byte-identical، و EOL غالب + BOM همیشه حفظ می‌شوند (mixed-EOL هم کار می‌کند).
+  - **`PatchApplyError`** با `kind` (no-match/ambiguous/invalid/diff-mismatch/too-large)، شمارهٔ خط فایل، `positions` همهٔ matchها و `nearest` (نزدیک‌ترین ناحیه با excerpt شماره‌دار). `patchCorrectionContext` متن CORRECTION NEEDED را می‌سازد؛ `too-large` غیرقابل‌اصلاح است.
+- **`src/agents/implementation.ts`:** پرامپت فایل موجود حالا سه فرمت را توضیح می‌دهد و حلقهٔ `MAX_PATCH_CORRECTIONS = 2` قبل از commit، حداکثر ۲ درخواست اصلاحی به مدل می‌فرستد (خطا فقط بعد از اتمام آن‌ها بالا می‌رود). `applyFileEdits`/`MAX_FILE_CHARS`/`PatchApplyError` از همین‌جا re-export می‌شوند؛ موتور به `file-patch.ts` منتقل شد.
+- **Tests:** `src/tests/apply-file-edits-eol.test.ts` بازنویسی شد (**۲۶ تست**: CRLF، BOM، mixed-EOL یکتا/ابهام، تکراری، trailing space/tab، ناهمخوانی tab/space با ناحیهٔ نزدیک، anchor یکتا/ابهام در فایل TS، فایل C#، diff روی LF/CRLF/مغایرت/no-newline، بازنویسی خام/فنس/`{content}`/آستانه/هم‌پوشانی/NUL/سقف ۲۰۰K، شکل‌های نامعتبر JSON) + `src/tests/patch-correction.test.ts` (**۲ تست یکپارچه**: retry موفق با ناحیهٔ شماره‌دار در CORRECTION و شاخهٔ بدون commit در retry ناموفق؛ ۳ فراخوانی موفق = طرح+اولیه+۱ اصلاح، ۴ فراخوانی ناموفق = طرح+اولیه+۲ اصلاح). `agent-implementation.test.ts`: بازنویسی کوچک اکنون مجاز و بالای آستانه همچنان `/JSON/` خطا.
+- **env:** `PATCH_FULL_REWRITE_MAX_BYTES` (پیش‌فرض 8192) در `src/config/env.ts`، `.env.example` و `docs/ENVIRONMENT.md`؛ قرارداد در `docs/AGENT_EXECUTION.md` بخش «ویرایش امن فایل موجود».
+- **تعداد تست:** 819 → 847 (66 → 68 فایل).
 
 ## ممیزی «همهٔ بخش‌ها تغییر/مدیریت/تست قبل از اعمال» (2026-09-29)
 - **درخواست کاربر:** بررسی اینکه همهٔ بخش‌ها بتوانند روی پروژه تغییر بدهند، پروژه را مدیریت کنند و قبل از اعمال تست کنند.

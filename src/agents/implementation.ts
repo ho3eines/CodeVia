@@ -13,6 +13,15 @@ import {
 } from "./context.js";
 import { changeNote, entityFor, notePathFor, scaffoldFor, slugify } from "./scaffold.js";
 import { skillInstructions, skillSlugs } from "../skills/assignment.js";
+import {
+  applyFileEdits,
+  fullRewriteMaxBytes,
+  MAX_PATCH_CORRECTIONS,
+  patchCorrectionContext,
+  MAX_FILE_CHARS,
+} from "./file-patch.js";
+
+export { applyFileEdits, MAX_FILE_CHARS, PatchApplyError, MAX_PATCH_CORRECTIONS } from "./file-patch.js";
 
 export const IMPLEMENTERS: AgentType[] = [
   "backend-developer",
@@ -26,7 +35,6 @@ export const IMPLEMENTERS: AgentType[] = [
 const WRITERS = IMPLEMENTERS;
 export const MAX_SUBTASKS = 12;
 export const isWriter = (type: AgentType): boolean => WRITERS.includes(type);
-export const MAX_FILE_CHARS = 200_000;
 /** Binary/garbled model output marker; generated source must never contain a NUL byte. */
 const NUL = String.fromCharCode(0);
 
@@ -80,35 +88,9 @@ export function cleanRepoPath(value: unknown): string {
   return path;
 }
 
-/** Exact edits preserve all bytes outside the requested replacements. No whole-file regeneration for existing code. */
-export function applyFileEdits(existing: string, response: string): string {
-  const parsed = extractJson(response) as { edits?: unknown } | undefined;
-  if (!Array.isArray(parsed?.edits) || parsed.edits.length === 0 || parsed.edits.length > 30) {
-    throw new Error("Existing files require a JSON {edits:[{oldText,newText}]} patch, not a rewritten file");
-  }
-  // Windows/.NET sources are usually CRLF (often with a UTF-8 BOM) while model patches are LF. A consistently
-  // CRLF file is matched on LF text and its own BOM/line endings are restored, so untouched lines stay identical.
-  // Mixed line endings keep the strict byte-exact behaviour.
-  const bom = existing.startsWith("\uFEFF") ? "\uFEFF" : "";
-  const body = existing.slice(bom.length);
-  const crlf = body.includes("\r\n") && !/(^|[^\r])\n/.test(body);
-  const norm = (text: string): string => (crlf ? text.replace(/\r\n/g, "\n") : text);
-  let result = norm(body);
-  for (const value of parsed.edits) {
-    const edit = value as { oldText?: unknown; newText?: unknown } | null;
-    if (!edit || typeof edit.oldText !== "string" || !edit.oldText || typeof edit.newText !== "string")
-      throw new Error("Invalid file edit");
-    const oldText = norm(edit.oldText);
-    const at = result.indexOf(oldText);
-    if (at < 0 || result.indexOf(oldText, at + 1) !== -1)
-      throw new Error("Patch oldText must match exactly once; no ambiguous or missing replacements");
-    result = result.slice(0, at) + norm(edit.newText) + result.slice(at + oldText.length);
-  }
-  if (crlf) result = result.replace(/\n/g, "\r\n");
-  result = bom + result;
-  if (result.length > MAX_FILE_CHARS) throw new Error("Generated file exceeds the safe size limit");
-  return result;
-}
+/** The patch engine lives in ./file-patch.ts (re-exported above): exact-match
+ * ladder with EOL/BOM/whitespace/anchor levels, unified diff, bounded full
+ * rewrite, and corrective feedback via PatchApplyError. */
 
 export function assertWriter(agent: Agent): void {
   const write = agent.permissions.includes("github.write") || agent.permissions.includes("repository.write");
@@ -275,31 +257,48 @@ export async function prepareImplementation(
     let content: string;
     if (ctx.chat) {
       const previous = generated.map((f) => `--- Proposed ${f.path} ---\n${f.content}`).join("\n");
-      const request = [
-        `Subtask: ${item.title}\n${item.description}`,
-        `Research brief:\n${opts.brief}`,
-        item.acceptanceCriteria?.length
-          ? `Acceptance criteria:\n${item.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`
-          : "",
-        opts.fixContext ? `QA failures to fix:\n${opts.fixContext}` : "",
-        renderPromptContext(pack, target),
-        opts.handoff ? `Dependency deliverables (match these contracts exactly):\n${opts.handoff}` : "",
-        previous ? `Earlier files in this SAME atomic change (use their exact exports/contracts):\n${previous}` : "",
-        existing !== undefined
-          ? `The file "${target}" ALREADY EXISTS. Its COMPLETE current content follows:\n--- START CURRENT FILE ---\n${existing}\n--- END CURRENT FILE ---\nEXTEND it. Reply ONLY with JSON {"edits":[{"oldText":"exact unique existing text","newText":"replacement"}]}. Preserve all other code. No whole-file rewrite. Include sufficient surrounding text to make each oldText unique.`
-          : `The file "${target}" does not exist yet. Write the complete content of "${target}" using the repository's existing architecture and conventions. Output ONLY file content, no fences or explanations.`,
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-      const raw = await ctx.chat.chat(
-        `You are implementing the ${agent.name} subtask. Follow the configured project rules and preserve existing behavior.`,
-        request,
-        8000,
-      );
-      content =
-        existing !== undefined
-          ? applyFileEdits(existing, raw)
-          : raw.replace(/^\s*```[^\n]*\n/, "").replace(/\n```\s*$/, "");
+      // A failed patch goes back to the model with the nearest file region and
+      // line numbers instead of failing the task immediately — at most
+      // MAX_PATCH_CORRECTIONS corrective rounds per file.
+      let corrective = "";
+      let applied: string | undefined;
+      for (let correction = 0; correction <= MAX_PATCH_CORRECTIONS; correction++) {
+        const request = [
+          `Subtask: ${item.title}\n${item.description}`,
+          `Research brief:\n${opts.brief}`,
+          item.acceptanceCriteria?.length
+            ? `Acceptance criteria:\n${item.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`
+            : "",
+          opts.fixContext ? `QA failures to fix:\n${opts.fixContext}` : "",
+          renderPromptContext(pack, target),
+          opts.handoff ? `Dependency deliverables (match these contracts exactly):\n${opts.handoff}` : "",
+          previous ? `Earlier files in this SAME atomic change (use their exact exports/contracts):\n${previous}` : "",
+          existing !== undefined
+            ? `The file "${target}" ALREADY EXISTS (${existing.length} characters). Its COMPLETE current content follows:\n--- START CURRENT FILE ---\n${existing}\n--- END CURRENT FILE ---\nEXTEND it. Reply with exactly ONE of these patch formats:\n(a) JSON {"edits":[{"oldText":"exact unique existing text","newText":"replacement"}]} — each oldText must appear EXACTLY ONCE in the file; include sufficient surrounding lines to make it unique;\n(b) a unified diff (--- a/<path>, +++ b/<path>, @@ hunks) whose context matches the file exactly;\n(c) JSON {"content":"<complete rewritten file>"} — only for files under ${fullRewriteMaxBytes()} bytes and only when the rewrite is intentional.\nPreserve all other code byte-for-byte, including line endings (CRLF/LF), BOM and encoding.${corrective ? `\n\nCORRECTION NEEDED:\n${corrective}` : ""}`
+            : `The file "${target}" does not exist yet. Write the complete content of "${target}" using the repository's existing architecture and conventions. Output ONLY file content, no fences or explanations.`,
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+        const raw = await ctx.chat.chat(
+          `You are implementing the ${agent.name} subtask. Follow the configured project rules and preserve existing behavior.`,
+          request,
+          8000,
+        );
+        if (existing === undefined) {
+          applied = raw.replace(/^\s*```[^\n]*\n/, "").replace(/\n```\s*$/, "");
+          break;
+        }
+        try {
+          applied = applyFileEdits(existing, raw);
+          break;
+        } catch (err) {
+          const fix = patchCorrectionContext(err, target);
+          if (!fix || correction >= MAX_PATCH_CORRECTIONS) throw err;
+          corrective = fix;
+        }
+      }
+      if (applied === undefined) throw new Error(`No patch produced for ${target}`);
+      content = applied;
       if (!content.trim() || content.includes(NUL) || content.length > MAX_FILE_CHARS)
         throw new Error(`Invalid or oversized generated content for ${target}`);
     } else if (target.startsWith("docs/tasks/")) {

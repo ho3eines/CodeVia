@@ -131,6 +131,10 @@ const EnvSchema = z.object({
   ENABLE_SIMULATION_MODE: envBoolean(true),
   MOCK_AI_DEFAULT: envBoolean(true),
 
+  // File patching — existing files at or below this many bytes may be replaced
+  // by a full model rewrite instead of an {"edits":[…]} patch (step-1 ladder).
+  PATCH_FULL_REWRITE_MAX_BYTES: envNumber(8192, 0),
+
   // Model routing — how requests are spread over the registered models.
   //   adaptive            (default) benchmark quality + fair share, discounted
   //                                 by live load and models that keep failing

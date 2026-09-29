@@ -94,6 +94,7 @@ Which model answers *now* — see [MODEL_ROUTING.md](MODEL_ROUTING.md) for the a
 | `MODEL_ROUTING_COOLDOWN_MS` | `60000` | How long a demoted model stays last (doubles per trip, capped at 8×); it is never removed from the pool |
 | `MODEL_ROUTING_SESSION_STICKY_MS` | `0` | How long one conversation keeps its model. `0` = rotate every message (best spread); raise it for one-voice-per-thread |
 | `MODEL_ROUTING_RUN_STICKY_MS` | `900000` | How long one agent run keeps its model, so a run never changes style mid-task while different runs still spread |
+| `PATCH_FULL_REWRITE_MAX_BYTES` | `8192` | Existing files at or below this many bytes may be replaced by a full model rewrite instead of an `{"edits":[…]}` patch (or a unified diff). Larger files require a patch. `0` disables full rewrites |
 
 ---
 
