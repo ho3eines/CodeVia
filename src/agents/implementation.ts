@@ -84,16 +84,26 @@ export function applyFileEdits(existing: string, response: string): string {
   if (!Array.isArray(parsed?.edits) || parsed.edits.length === 0 || parsed.edits.length > 30) {
     throw new Error("Existing files require a JSON {edits:[{oldText,newText}]} patch, not a rewritten file");
   }
-  let result = existing;
+  // Windows/.NET sources are usually CRLF (often with a UTF-8 BOM) while model patches are LF. A consistently
+  // CRLF file is matched on LF text and its own BOM/line endings are restored, so untouched lines stay identical.
+  // Mixed line endings keep the strict byte-exact behaviour.
+  const bom = existing.startsWith("\uFEFF") ? "\uFEFF" : "";
+  const body = existing.slice(bom.length);
+  const crlf = body.includes("\r\n") && !/(^|[^\r])\n/.test(body);
+  const norm = (text: string): string => (crlf ? text.replace(/\r\n/g, "\n") : text);
+  let result = norm(body);
   for (const value of parsed.edits) {
     const edit = value as { oldText?: unknown; newText?: unknown } | null;
     if (!edit || typeof edit.oldText !== "string" || !edit.oldText || typeof edit.newText !== "string")
       throw new Error("Invalid file edit");
-    const at = result.indexOf(edit.oldText);
-    if (at < 0 || result.indexOf(edit.oldText, at + 1) !== -1)
+    const oldText = norm(edit.oldText);
+    const at = result.indexOf(oldText);
+    if (at < 0 || result.indexOf(oldText, at + 1) !== -1)
       throw new Error("Patch oldText must match exactly once; no ambiguous or missing replacements");
-    result = result.slice(0, at) + edit.newText + result.slice(at + edit.oldText.length);
+    result = result.slice(0, at) + norm(edit.newText) + result.slice(at + oldText.length);
   }
+  if (crlf) result = result.replace(/\n/g, "\r\n");
+  result = bom + result;
   if (result.length > MAX_FILE_CHARS) throw new Error("Generated file exceeds the safe size limit");
   return result;
 }
@@ -288,7 +298,7 @@ export async function prepareImplementation(
         existing !== undefined
           ? applyFileEdits(existing, raw)
           : raw.replace(/^\s*```[^\n]*\n/, "").replace(/\n```\s*$/, "");
-      if (!content.trim() || content.includes("\u0000") || content.length > MAX_FILE_CHARS)
+      if (!content.trim() || content.includes("") || content.includes("\uFFFD") || content.length > MAX_FILE_CHARS)
         throw new Error(`Invalid or oversized generated content for ${target}`);
     } else if (target.startsWith("docs/tasks/")) {
       content = changeNote(agent.name, child, item.description, opts.brief, opts.fixContext);
