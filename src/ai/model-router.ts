@@ -113,20 +113,23 @@ export class ModelRouter {
     // 0) Build a perf-score lookup.
     const perf = new Map<string, ModelPerformanceStats>();
     for (const s of perfStats) perf.set(s.modelId, s);
-    for (const m of available) {
+    // Work on copies: routing must not mutate the caller's candidate objects
+    // (they are reused across calls with different telemetry snapshots).
+    available = available.map((m) => {
       const s = perf.get(m.id);
-      m.perfScore = s ? s.score : 0.5;
-    }
+      return { ...m, perfScore: s ? s.score : 0.5 };
+    });
 
     // 1) Apply allowed-models allow-list (per-agent restriction).
     let pool_base = available;
     if (agentModels.allowedModels && agentModels.allowedModels.length > 0) {
       const allowed = new Set(agentModels.allowedModels);
       pool_base = available.filter((m) => allowed.has(m.id));
-      // If the allow-list filtered *everything* out (e.g. all those models
-      // became inactive), fall back to the full list but log it so it shows
-      // up in the UI rather than silently stalling.
-      if (pool_base.length === 0) pool_base = available;
+      // The allow-list is a hard restriction chosen by the user. If every
+      // allowed model is gone (deleted/inactive), fail closed with no
+      // candidates — callers surface "no model available" — instead of
+      // silently routing the agent to models it was explicitly denied.
+      if (pool_base.length === 0) return [];
     }
 
     // 2) Build ordered pool from agent config.
@@ -187,6 +190,20 @@ export class ModelRouter {
     });
     candidates = [...candidates, ...remaining];
 
+    // Latency budget: models whose benchmarked latency is far (>1.5x) above the
+    // requested budget are demoted behind every model that fits (stable order;
+    // never removed, so a slow model still serves as a last resort). Models
+    // without telemetry are kept in place.
+    const maxLatencyMs = preference.maxLatencyMs;
+    if (maxLatencyMs && maxLatencyMs > 0) {
+      const tooSlow = (m: CandidateModel) => {
+        const s = perf.get(m.id);
+        const lat = s ? s.p95LatencyMs || s.avgLatencyMs : 0;
+        return lat > maxLatencyMs * 1.5;
+      };
+      candidates = [...candidates.filter((m) => !tooSlow(m)), ...candidates.filter(tooSlow)];
+    }
+
     // 5) Load distribution across every eligible model — or, for a router built
     // without a balancer, the plain user-preference pin (step 6 below).
     const balance = preference.balance;
@@ -217,14 +234,11 @@ export class ModelRouter {
     if (pref.requireStructuredOutput && !caps.structuredOutput) return false;
     if (pref.requireReasoning && !caps.reasoning) return false;
     if (pref.maxTokens && m.contextWindow < pref.maxTokens) return false;
-    if (pref.maxCostUsd && m.inputCostPer1k > pref.maxCostUsd * 2000) return false;
-    // Latency budget: if user said "max 5s" and our benchmark shows this model
-    // averages > 1.5x that, skip it.
-    if (pref.maxLatencyMs && typeof m.perfScore === "number") {
-      // We use the fallback list for latency filtering; a missing perfScore
-      // means "no data yet" so we keep the model (avoid over-filtering fresh
-      // installs).
-    }
+    // Cost ceiling: estimated input cost of this request (maxTokens, or a 1k
+    // token baseline when the size is unknown) must fit the budget.
+    if (pref.maxCostUsd && (m.inputCostPer1k * (pref.maxTokens ?? 1000)) / 1000 > pref.maxCostUsd) return false;
+    // Latency budgets demote (see route()) rather than filter, so fresh
+    // installs without telemetry are never over-filtered.
     const required = CATEGORY_CAPABILITY[category] ?? "tools";
     if (required === "code" && !caps.code) return false;
     if (required === "vision" && !caps.vision) return false;

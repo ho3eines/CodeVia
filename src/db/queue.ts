@@ -132,6 +132,34 @@ export class JobQueue {
     return rows.map((row) => this.mapJob(row)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
+  /**
+   * Renew the lease of jobs this process is still executing. The lease is the
+   * claim timestamp (`started_at`); without renewal a legitimately long run
+   * (multi-agent workflow, or a budget with no duration cap) would be treated
+   * as abandoned after LEASE_TTL_MS and executed a second time by `claim()`.
+   */
+  heartbeat(ids: string[]): void {
+    if (!ids.length) return;
+    const now = nowIso();
+    this.db.tx(() => {
+      for (const id of ids)
+        this.db.run(`UPDATE jobs SET started_at = :now, updated_at = :now WHERE id = :id AND status = 'running'`, {
+          id,
+          now,
+        });
+    });
+  }
+
+  /** Atomically record a failed attempt and re-schedule the job for a later retry. */
+  scheduleRetry(id: string, attempts: number, error: string, scheduledAt: string): Job | undefined {
+    this.db.run(
+      `UPDATE jobs SET status = 'pending', attempts = :attempts, error = :error, scheduled_at = :scheduled_at,
+         updated_at = :now WHERE id = :id`,
+      { id, attempts, error, scheduled_at: scheduledAt, now: nowIso() },
+    );
+    return this.getById(id);
+  }
+
   /** A cancelled execution may still be unwinding; do not overwrite its cancellation by retrying early. */
   hasRunningTask(taskId: string): boolean {
     const cutoff = new Date(Date.now() - JobQueue.LEASE_TTL_MS).toISOString();

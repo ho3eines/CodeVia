@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { getEnv } from "../config/env.js";
 
 /* ------------------------------------------------------------------ *
@@ -114,10 +114,13 @@ function verifySignedPayload(token: string, secret: string): Record<string, unkn
   if (parts.length !== 2) return undefined;
   const [payloadB64, sig] = parts;
   const expected = signPayload(payloadB64, secret);
-  if (sig.length !== expected.length) return undefined;
+  const got = Buffer.from(sig);
+  const want = Buffer.from(expected);
+  if (got.length !== want.length) return undefined;
+  // Constant-time comparison: session/state signatures must not leak through timing.
   let equal: boolean;
   try {
-    equal = Buffer.from(sig).equals(Buffer.from(expected));
+    equal = timingSafeEqual(got, want);
   } catch {
     return undefined;
   }
