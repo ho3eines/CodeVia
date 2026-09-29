@@ -310,6 +310,10 @@
         let ev;
         try { ev = JSON.parse(line.slice(5).trim()); } catch (_) { continue; }
         if (!ev || typeof ev.type !== "string") continue;
+        // A dispatch blocked for missing GitHub write access asks for it right away.
+        if (ev.type === "message" && ev.message && ev.message.metadata && ev.message.metadata.githubAuthorization) {
+          requestGitHubWriteAccess(ev.message.metadata.githubAuthorization);
+        }
         const name = "on" + ev.type.charAt(0).toUpperCase() + ev.type.slice(1);
         if (typeof handlers[name] === "function") {
           try { handlers[name](ev); } catch (_) { /* a broken handler must not kill the stream */ }

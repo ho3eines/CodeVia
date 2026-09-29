@@ -9,6 +9,7 @@ import type { Logger } from "../logger.js";
 import type { Job, Project } from "../domain/entities.js";
 import type { ApprovalRepository, ApprovalRequest } from "../approvals/service.js";
 import { randomUUID } from "node:crypto";
+import { verifyPullRequestBeforeMerge } from "../github/merge-gate.js";
 
 export interface WorkerDeps {
   queue: JobQueue;
@@ -224,8 +225,19 @@ export class Worker {
         // project's own GitHub connection, never an unscoped platform default.
         this.requireApprovedMergeApproval(p, project, repo, Number(p.number));
         const ghForMerge = project && this.deps.githubForProject ? this.deps.githubForProject(project) : gh;
+        // Test before applying: the PR head must have green CI (and still be
+        // the commit the approval was bound to) — the merge is pinned to it.
+        const gate = await verifyPullRequestBeforeMerge({
+          github: ghForMerge,
+          repo,
+          number: Number(p.number),
+          project,
+          expectedSha: pickSha(p.commitSha) ?? pickSha(p.sha),
+        });
+        if (!gate.ok) throw new Error(`merge_pr #${p.number} blocked: ${gate.message}`);
         const res = await ghForMerge.mergePullRequest(repo, Number(p.number), {
           method: (p.method as "merge" | "squash" | "rebase") ?? "squash",
+          ...(gate.headSha ? { sha: gate.headSha } : {}),
         });
         if (!res.merged) throw new Error(`merge_pr #${p.number} failed: ${res.message ?? "unknown"}`);
         break;

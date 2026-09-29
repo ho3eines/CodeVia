@@ -567,11 +567,15 @@ export class RealGitHubService implements IGitHubService {
   async mergePullRequest(
     repo: GithubRepoRef,
     number: number,
-    opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string } = {},
+    opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string; sha?: string } = {},
   ): Promise<{ merged: boolean; sha?: string; message?: string }> {
     const res = await this.request(`/repos/${repo.owner}/${repo.name}/pulls/${number}/merge`, {
       method: "PUT",
-      body: JSON.stringify({ merge_method: opts.method ?? "squash", commit_title: opts.commitTitle }),
+      body: JSON.stringify({
+        merge_method: opts.method ?? "squash",
+        commit_title: opts.commitTitle,
+        ...(opts.sha ? { sha: opts.sha } : {}),
+      }),
     });
     const body = (await res.json().catch(() => ({}))) as { merged?: boolean; sha?: string; message?: string };
     return { merged: Boolean(body.merged), sha: body.sha, message: body.message };

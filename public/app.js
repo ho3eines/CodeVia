@@ -33,7 +33,23 @@
       }
       throw err;
     }
-    return res.status === 204 ? null : res.json();
+    if (res.status === 204) return null;
+    const data = await res.json();
+    // Chat dispatch answers 200 with an assistant message; when that message
+    // says GitHub write access is missing, ask for it right away.
+    const ghAuth = freshMessageAuthorization(data);
+    if (ghAuth) requestGitHubWriteAccess(ghAuth);
+    return data;
+  }
+  function freshMessageAuthorization(data) {
+    try {
+      const msgs = data && (Array.isArray(data.messages) ? data.messages : data.conversation && data.conversation.messages);
+      const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
+      const info = last && last.metadata && last.metadata.githubAuthorization;
+      if (!info) return null;
+      const age = Date.now() - new Date(last.createdAt || 0).getTime();
+      return age >= 0 && age < 60000 ? info : null;
+    } catch (_) { return null; }
   }
 
   /* ---------- GitHub write authorization ----------
@@ -2744,11 +2760,37 @@
     };
   };
   window.projectPRMerge = async (id, repo, number) => {
-    openModal(`Merge PR #${number}`, `<p class="sub">Merge <span class="mono">${esc(repo)}</span> PR #${number} into its base branch. This brings the agent's code onto the base branch.</p><div class="field"><label>Method</label><select class="input" id="pmg-method"><option value="squash">squash</option><option value="merge">merge</option><option value="rebase">rebase</option></select></div><div class="flex"><button class="btn btn-primary" id="pmg-go">Merge</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
-    $("#pmg-go").onclick = async () => {
-      try { const res = await api(`/projects/${id}/pull-requests/${number}/merge`, { method: "POST", body: { repo, method: $("#pmg-method").value } }); closeModal(); toast("PR merged", `#${res.number} → ${res.sha ? res.sha.slice(0, 7) : "done"}`, "ok"); refreshCurrent(); }
-      catch (e) { toast("Merge failed", e.message, "err"); }
+    // Test before applying: the merge is only offered once GitHub CI for the
+    // PR's current head commit is green (the server enforces the same gate).
+    openModal(`Merge PR #${number}`, `<p class="sub">Merge <span class="mono">${esc(repo)}</span> PR #${number} into its base branch. This brings the agent's code onto the base branch.</p>
+      <div id="pmg-gate" class="merge-gate">⏳ Verifying CI for the PR head…</div>
+      <div class="field"><label>Method</label><select class="input" id="pmg-method"><option value="squash">squash</option><option value="merge">merge</option><option value="rebase">rebase</option></select></div>
+      <div class="flex"><button class="btn btn-primary" id="pmg-go" disabled>Merge</button><button class="btn" id="pmg-recheck">↻ Re-check</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    let gate = null;
+    const icon = (st) => st === "success" ? "🟢" : st === "failure" ? "🔴" : st === "pending" ? "🟡" : "⚪";
+    const verify = async () => {
+      const box = $("#pmg-gate"); const go = $("#pmg-go");
+      if (!box || !go) return;
+      box.innerHTML = `⏳ Verifying CI for the PR head…`;
+      go.disabled = true;
+      try {
+        gate = await api(`/projects/${id}/pull-requests/${number}/checks?repo=${encodeURIComponent(repo)}`);
+        const label = { passed: "✅ Tested — CI passed", simulated: "🧪 Simulation (no real tests)", failed: "❌ CI failed", pending: "⏳ CI still running", "no-ci": "⚠️ Not tested — no CI", unavailable: "⚠️ Cannot verify" }[gate.verification] || gate.verification;
+        box.innerHTML = `<div><strong>${esc(label)}</strong>${gate.headSha ? ` · <span class="mono">${esc(gate.headSha.slice(0, 7))}</span>` : ""}</div>
+          <div class="sub" style="margin:4px 0">${esc(gate.message)}</div>
+          ${(gate.checks || []).length ? `<ul class="merge-gate-checks" style="margin:4px 0 8px;padding-left:18px">${gate.checks.map((c) => `<li>${icon(c.status)} ${esc(c.name)} — ${esc(c.status)}${c.url ? ` · <a href="${esc(c.url)}" target="_blank" rel="noopener">details</a>` : ""}</li>`).join("")}</ul>` : ""}`;
+        go.disabled = !gate.ok;
+      } catch (e) {
+        box.innerHTML = `<strong>⚠️ Cannot verify</strong><div class="sub">${esc(e.message)}</div>`;
+      }
     };
+    $("#pmg-recheck").onclick = verify;
+    $("#pmg-go").onclick = async () => {
+      if (!gate || !gate.ok) { toast("Not merged", "CI must pass before the change is applied.", "err"); return; }
+      try { const res = await api(`/projects/${id}/pull-requests/${number}/merge`, { method: "POST", body: { repo, method: $("#pmg-method").value, expectedSha: gate.headSha } }); closeModal(); toast("PR merged", `#${res.number} → ${res.sha ? res.sha.slice(0, 7) : "done"}`, "ok"); refreshCurrent(); }
+      catch (e) { toast("Merge blocked", e.message, "err"); if (e.status === 409) verify(); }
+    };
+    await verify();
   };
   window.projectConversationNew = async (id) => {
     openModal("New Conversation", `<div class="field"><label>Title</label><input class="input" id="pcn-title" placeholder="e.g. Login debugging session"/></div><div class="flex"><button class="btn btn-primary" id="pcn-go">Start</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
@@ -5819,6 +5861,10 @@
         let ev;
         try { ev = JSON.parse(line.slice(5).trim()); } catch (_) { continue; }
         if (!ev || typeof ev.type !== "string") continue;
+        // A dispatch blocked for missing GitHub write access asks for it right away.
+        if (ev.type === "message" && ev.message && ev.message.metadata && ev.message.metadata.githubAuthorization) {
+          requestGitHubWriteAccess(ev.message.metadata.githubAuthorization);
+        }
         const name = "on" + ev.type.charAt(0).toUpperCase() + ev.type.slice(1);
         if (typeof handlers[name] === "function") {
           try { handlers[name](ev); } catch (_) { /* a broken handler must not kill the stream */ }

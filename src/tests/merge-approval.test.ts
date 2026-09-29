@@ -25,8 +25,23 @@ let cleanup: (() => void) | undefined;
 let container: Container;
 let merges: MergeCall[] = [];
 
+let checksFor: "success" | "failure" | "pending" | "none" = "success";
+
+/** Real-like adapter: open PR at head `deadbee…`, CI result controlled by `checksFor`. */
 function fakeGithub(recorder: MergeCall[], viaProjectConnection: boolean): IGitHubService {
   return {
+    kind: "real",
+    getPullRequest: async (_repo: unknown, number: number) => ({
+      number,
+      title: "PR",
+      state: "open",
+      head: "feature",
+      base: "main",
+      htmlUrl: "",
+      createdAt: "",
+      headSha: "deadbee0000000000000000000000000000000000",
+    }),
+    getChecks: async () => (checksFor === "none" ? [] : [{ name: "ci/test", status: checksFor }]),
     mergePullRequest: async (repo: { owner: string; name: string }, number: number) => {
       recorder.push({ repo: `${repo.owner}/${repo.name}`, number, viaProjectConnection });
       return { merged: true, sha: "abc123", message: "ok" };
@@ -36,6 +51,7 @@ function fakeGithub(recorder: MergeCall[], viaProjectConnection: boolean): IGitH
 
 function buildWorker(opts: { withProjectConnection?: boolean } = {}): Worker {
   merges = [];
+  checksFor = "success";
   return new Worker({
     queue: container.queue,
     agentManager: container.agentManager,
@@ -436,5 +452,52 @@ describe("worker merge_pr — approval-backed merges only (A04)", () => {
     expect(status).toBe("succeeded");
     expect(merges).toHaveLength(1);
     expect(merges[0]).toMatchObject({ repo: "acme/boundok", number: 9 });
+  });
+
+  describe("test before applying: CI gate on the PR head", () => {
+    async function attempt(name: string, checks: typeof checksFor, metadata?: Record<string, unknown>) {
+      const worker = buildWorker();
+      checksFor = checks;
+      const project = await container.agentManager.createProject({
+        name,
+        description: "x",
+        configRepo: `acme/${name.toLowerCase()}`,
+      });
+      if (metadata) {
+        const stored = container.projectRepo.findById(project.id)!.data;
+        container.projectRepo.update({ ...stored, settings: { ...stored.settings, metadata } });
+      }
+      const approval = makeApproval(project.id, {
+        tool: "merge_pull_request",
+        number: 4,
+        repo: `acme/${name.toLowerCase()}`,
+      });
+      return runMergeJob(worker, {
+        op: "merge_pr",
+        projectId: project.id,
+        repo: `acme/${name.toLowerCase()}`,
+        number: 4,
+        approvalId: approval.id,
+      });
+    }
+
+    it("refuses an approved merge while CI is failing", async () => {
+      const status = await attempt("CiFail", "failure");
+      expect(status).not.toBe("succeeded");
+      expect(merges).toHaveLength(0);
+    });
+
+    it("refuses an approved merge while CI is still pending", async () => {
+      const status = await attempt("CiPending", "pending");
+      expect(status).not.toBe("succeeded");
+      expect(merges).toHaveLength(0);
+    });
+
+    it("refuses an untested PR (no CI) unless the project opted in", async () => {
+      expect(await attempt("CiNone", "none")).not.toBe("succeeded");
+      expect(merges).toHaveLength(0);
+      expect(await attempt("CiOptIn", "none", { allowMergeWithoutCi: true })).toBe("succeeded");
+      expect(merges).toHaveLength(1);
+    });
   });
 });

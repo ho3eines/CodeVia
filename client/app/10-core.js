@@ -29,7 +29,23 @@
       }
       throw err;
     }
-    return res.status === 204 ? null : res.json();
+    if (res.status === 204) return null;
+    const data = await res.json();
+    // Chat dispatch answers 200 with an assistant message; when that message
+    // says GitHub write access is missing, ask for it right away.
+    const ghAuth = freshMessageAuthorization(data);
+    if (ghAuth) requestGitHubWriteAccess(ghAuth);
+    return data;
+  }
+  function freshMessageAuthorization(data) {
+    try {
+      const msgs = data && (Array.isArray(data.messages) ? data.messages : data.conversation && data.conversation.messages);
+      const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
+      const info = last && last.metadata && last.metadata.githubAuthorization;
+      if (!info) return null;
+      const age = Date.now() - new Date(last.createdAt || 0).getTime();
+      return age >= 0 && age < 60000 ? info : null;
+    } catch (_) { return null; }
   }
 
   /* ---------- GitHub write authorization ----------

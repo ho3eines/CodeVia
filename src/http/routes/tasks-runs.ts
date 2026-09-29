@@ -1,3 +1,4 @@
+import { preflightProjectWrite } from "./project-ask-shared.js";
 import type { FastifyInstance } from "fastify";
 import { live } from "../../realtime/live.js";
 import { executionTask } from "../../agents/execution.js";
@@ -137,6 +138,23 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     // token when resolving the project's GitHub connection (GITHUB_TOKEN is
     // login-only and cannot write to the user's repositories).
     const { user: reqUser, authenticated: reqAuth } = resolveRequestUser(req, container);
+    // Ask for GitHub write access BEFORE queueing work that will commit.
+    const taskInput = (task.input as Record<string, unknown> | undefined) ?? {};
+    const blocked = await preflightProjectWrite(container, task.projectId, {
+      title: task.title,
+      description: task.description ?? task.title,
+      executionMode:
+        taskInput.executionMode === "simulation"
+          ? "simulation"
+          : task.workflowId
+            ? "workflow"
+            : taskInput.executionMode === "autonomous" || !task.agentType
+              ? "autonomous"
+              : "agent",
+      agentType: task.agentType,
+      requestUserId: reqAuth ? reqUser.id : undefined,
+    });
+    if (blocked) return reply.code(blocked.status).send({ error: blocked.error, ...(blocked.extra ?? {}) });
     const inputWithUser = reqAuth
       ? { ...((task.input as Record<string, unknown> | undefined) ?? {}), requestUserId: reqUser.id }
       : task.input;

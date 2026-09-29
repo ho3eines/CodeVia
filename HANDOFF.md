@@ -1,6 +1,14 @@
 # CodeVia Project Handoff
-> آخرین بروزرسانی: 2026-09-15 — آینهٔ محلی **فقط‌خواندنی** ریپازیتوری (bare clone + git plumbing) شواهد چت و ابزار `search` را از دیسک می‌خواند؛ بدون اجرای کد مخزن و با fallback کامل به API
+> آخرین بروزرسانی: 2026-09-29 — گیت ادغام (تست قبل از اعمال) + پیش‌بررسی دسترسی push در همهٔ مسیرهای نوشتن. قبلی: 2026-09-15 — آینهٔ محلی **فقط‌خواندنی** ریپازیتوری (bare clone + git plumbing) شواهد چت و ابزار `search` را از دیسک می‌خواند؛ بدون اجرای کد مخزن و با fallback کامل به API
 > این فایل برای جلوگیری از خواندن کل کد در هر جلسه است. همیشه قبل از شروع کار این فایل را بخوانید.
+
+## ممیزی «همهٔ بخش‌ها تغییر/مدیریت/تست قبل از اعمال» (2026-09-29)
+- **درخواست کاربر:** بررسی اینکه همهٔ بخش‌ها بتوانند روی پروژه تغییر بدهند، پروژه را مدیریت کنند و قبل از اعمال تست کنند.
+- **گیت ادغام (`src/github/merge-gate.ts`, جدید):** `verifyPullRequestBeforeMerge` — ادغام فقط وقتی CI روی head فعلی PR سبز است (حداقل یک چک موفق، بدون failing/pending، همهٔ `requiredChecks`/`requiredChecksByRepo` موفق، و head برابر `expectedSha`). ادغام به همان SHA پین می‌شود. ریپوی بدون CI فقط با `settings.metadata.allowMergeWithoutCi = true`. در مسیرهای: دکمهٔ Merge (`POST .../merge` → `409 {error, gate}`)، ابزار `merge_pull_request` در `core-tools.ts` و جاب `merge_pr` در `worker.ts`. روت جدید `GET /projects/:id/pull-requests/:number/checks`.
+- **پیش‌بررسی دسترسی push (`src/github/write-access.ts`, جدید):** قبل از `/ask`، ارسال کار از چت (`conversations.ts`)، `/tasks/:id/run` و اجرای خودکار orchestrator؛ کاربر بدون push → `403 {writeAccess}` یا `github_authorization_required`. خطای شبکه مسدود نمی‌کند. کش با `clearWriteAccessCache`.
+- **رجیستری:** کار پس‌زمینه برای مالک واقعی (غیر demo) وقتی OAuth پیکربندی شده، هرگز به `GITHUB_TOKEN` سایت برنمی‌گردد (خطای `no-token`)؛ آینه به clone ناشناس.
+- **UI:** مودال Merge وضعیت چک‌ها را نشان می‌دهد و `expectedSha` می‌فرستد؛ پاسخ‌های `writeAccess` به مودال دسترسی وصل‌اند.
+- **Tests:** `src/tests/fake-github-rest.ts` (فیک REST گیت‌هاب با ثبت توکن هر درخواست) + `src/tests/all-parts-apply-changes.test.ts` (۵ تست: چرخهٔ کامل مدیریت/تغییر/PR/ادغام فقط با توکن کاربر و فقط بعد از CI سبز؛ توکن read-only؛ بدون push؛ بدون توکن؛ پس‌زمینه). `merge-approval.test.ts` به‌روزرسانی و ۳ تست گیت CI اضافه شد. کل: 816/816.
 
 ## اعمال تغییرات با توکن کاربر + درخواست خودکار دسترسی write (2026-09-29)
 - **گزارش کاربر:** «نمی‌شود تغییرات را روی پروژهٔ جاری اعمال کرد؛ از توکن سایت استفاده می‌کند. باید از API کاربر استفاده کند و به‌صورت خودکار قابلیت write را از کاربر درخواست کند.»

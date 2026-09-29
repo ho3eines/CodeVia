@@ -1,4 +1,5 @@
 import type { ToolContext, ToolDefinition } from "./types.js";
+import { verifyPullRequestBeforeMerge } from "../github/merge-gate.js";
 import type { MemoryRecord } from "../memory/store.js";
 import { verifyGithubChecks } from "./github-checks.js";
 import { cleanRepoPath } from "../agents/implementation.js";
@@ -362,9 +363,25 @@ export const mergePullRequestTool: ToolDefinition = {
     if (!Number.isFinite(number) || number <= 0) return { ok: false, output: "merge_pull_request: number is required" };
     const method = (["merge", "squash", "rebase"].includes(str(input.method)) ? str(input.method) : "squash") as
       "merge" | "squash" | "rebase";
+    // Test before applying: never merge a PR whose head commit has no green CI.
+    const gate = await verifyPullRequestBeforeMerge({
+      github: ctx.github,
+      repo,
+      number,
+      project: ctx.project,
+      expectedSha: str(input.expectedSha) || undefined,
+    });
+    if (!gate.ok) {
+      return {
+        ok: false,
+        output: `PR #${number} not merged: ${gate.message}`,
+        data: { number, merged: false, verification: gate.verification, headSha: gate.headSha, checks: gate.checks },
+      };
+    }
     const res = await ctx.github.mergePullRequest(repo, number, {
       method,
       commitTitle: `[${ctx.agent.name}] merge PR #${number}`,
+      ...(gate.headSha ? { sha: gate.headSha } : {}),
     });
     ctx.logger.info("PR merge attempted", {
       number,

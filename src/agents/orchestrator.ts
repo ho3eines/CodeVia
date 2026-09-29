@@ -1,4 +1,6 @@
 import type { Agent, AgentType, Project, ProjectRepositoryLink, Run, Task } from "../domain/entities.js";
+import { checkProjectWriteAccess } from "../github/write-access.js";
+import { isGitHubAuthorizationRequired } from "../github/authorization.js";
 import type { ProjectRepository, TaskRepository, MemoryRepository } from "../domain/repos.js";
 import type { AgentRepository } from "./agent-repo.js";
 import type { AgentRunner, PreparePlan, RunRequest } from "./runner.js";
@@ -290,6 +292,22 @@ export class AutonomousOrchestrator {
       available = [hint as AgentType];
     }
     if (!available.length) throw new Error("Autonomous preflight failed: no enabled implementer");
+    // Can the acting account actually apply changes? Fail fast — before any
+    // model budget is spent — with an actionable reason (grant write access /
+    // ask for push permission) instead of a rejected commit at the very end.
+    // Transient API/network problems don't block here; the run reports them.
+    {
+      const access = await checkProjectWriteAccess({
+        github,
+        project,
+        cacheScope: this.requestUserId ?? project.githubConnection?.userId ?? project.ownerId,
+      }).catch((err: unknown) => {
+        if (isGitHubAuthorizationRequired(err)) throw err;
+        logger.warn("write-access preflight skipped", { projectId: project!.id, err: String(err).slice(0, 200) });
+        return undefined;
+      });
+      if (access && !access.ok) throw new Error(`Autonomous preflight failed: ${access.problem}`);
+    }
 
     // --- (F1) Context cache hydrate: pull the persisted project context file
     // into memory BEFORE scanning so research sees a warm registry on repeat

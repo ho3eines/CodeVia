@@ -142,6 +142,8 @@ export function resolveGitHubTokenForProject(opts: {
   // rather than through the site-wide GITHUB_TOKEN.
   const signedIn = opts.requestUserId ?? githubRequestSignedInUserId();
   if (signedIn && signedIn !== DEMO_USER_ID) return undefined;
+  // A real owner's repositories are never read with the site token once login exists.
+  if (identity && identity !== DEMO_USER_ID && getEffectiveOAuthConfig(opts.kv)) return undefined;
   if (!connection && isServerGitHubEnabled()) return process.env.GITHUB_TOKEN || undefined;
   if (connection?.kind === "server-token" && isServerGitHubEnabled()) return process.env.GITHUB_TOKEN || undefined;
   return undefined;
@@ -255,7 +257,28 @@ function resolveStoredProjectGitHub(
 ): { service: IGitHubService; source: ProjectGitHubSource } {
   const fallbackSource: ProjectGitHubSource = opts.fallback.kind === "real" ? "server" : "mock";
   const connection = opts.project.githubConnection;
-  if (!connection) return { service: opts.fallback, source: fallbackSource }; // legacy installations
+  // Background work (no request user) for a project owned by a real account:
+  // once GitHub login is configured, its repositories are written with the
+  // OWNER's token only — never the site-wide GITHUB_TOKEN. The owner is asked
+  // to authorize (the SPA prompts them automatically on their next visit).
+  const ownerIdentity = connection?.userId || opts.project.ownerId;
+  const ownerMustAuthorize = () =>
+    !!ownerIdentity && ownerIdentity !== DEMO_USER_ID && !!getEffectiveOAuthConfig(opts.kv);
+  const serverOrOwner = (service: IGitHubService): { service: IGitHubService; source: ProjectGitHubSource } => {
+    if (ownerMustAuthorize()) {
+      throw githubAuthorizationRequired({
+        reason: "no-token",
+        detail: `project ${opts.project.name}: its owner must authorize GitHub; the site token is not used for their repositories`,
+      });
+    }
+    return { service, source: "server" };
+  };
+  if (!connection) {
+    // legacy installations
+    return fallbackSource === "server"
+      ? serverOrOwner(opts.fallback)
+      : { service: opts.fallback, source: fallbackSource };
+  }
   if (connection.kind === "user-oauth") {
     const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
     if (!userId) {
@@ -271,8 +294,8 @@ function resolveStoredProjectGitHub(
     // user repos the PAT cannot see.
     const ownerUserId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
     if (ownerUserId) return { service: userGitHubService(opts.kv, ownerUserId), source: "user" };
-    if (opts.fallback.kind === "real") return { service: opts.fallback, source: "server" };
-    if (isServerGitHubEnabled()) return { service: new RealGitHubService(), source: "server" };
+    if (opts.fallback.kind === "real") return serverOrOwner(opts.fallback);
+    if (isServerGitHubEnabled()) return serverOrOwner(new RealGitHubService());
     throw new Error(
       `Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`,
     );
