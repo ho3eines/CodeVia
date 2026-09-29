@@ -1661,6 +1661,7 @@
     };
     window._projectChatCleanup = cleanup;
     window._projectChatProject = projectId;
+    window._activeConvId = convId;
     let activeTaskIds = new Set();
     let lastMsgCount = 0;
     const paintConv = (conv) => {
@@ -5599,6 +5600,7 @@
       setTimeout(() => { const box = $("#cv-messages"); if (box) box.scrollTop = box.scrollHeight; }, 30);
       // Show whether the assistant can actually read this project's repository
       // (and why not) instead of letting the model guess a reason mid-answer.
+      window._activeConvId = c.projectId ? c.id : null;
       if (c.projectId) void loadRepoContext(c.projectId);
       const input = $("#cv-input");
       const sendBtn = $("#cv-send");
@@ -5952,10 +5954,35 @@
         <div dir="${dir}" style="white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.55">${esc(m.content)}</div>
         ${atts}
         ${metaRow}
+        ${!isUser && meta.applyOffer && meta.applyOffer.request ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-primary" style="padding:3px 10px;font-size:12px" data-apply-request="${esc(meta.applyOffer.request)}" onclick="chatApplyChange(this)" title="Research → implement → commit to a new branch → Draft PR → GitHub CI">🚀 اعمال در پروژه (Autonomous)</button><span style="font-size:11px;opacity:.65;align-self:center">روی شاخهٔ جدا + Draft PR؛ بدون تأیید شما merge نمی‌شود</span></div>` : ""}
       </div>
       ${isUser ? `<span style="font-size:22px;line-height:1;align-self:flex-end">${icon}</span>` : ""}
     </div>`;
   }
+
+  /**
+   * "🚀 Apply" under a chat reply: resend the user's request to the same
+   * conversation in Autonomous mode, so it becomes a real task (branch →
+   * commit → Draft PR → CI) instead of copy-paste advice.
+   */
+  window.chatApplyChange = async (btn) => {
+    const request = btn && btn.dataset ? btn.dataset.applyRequest : "";
+    const convId = window._activeConvId;
+    if (!request || !convId) { toast("Cannot apply", "Open the project chat and try again.", "err"); return; }
+    if (!confirm("این درخواست به‌صورت Autonomous اجرا شود؟\nتغییرات روی یک شاخهٔ جدا commit و به‌صورت Draft PR باز می‌شوند.")) return;
+    btn.disabled = true; btn.textContent = "⏳ در حال ارسال…";
+    try {
+      const updated = await api(`/conversations/${encodeURIComponent(convId)}/messages`, { method: "POST", body: { role: "user", content: request, executionMode: "autonomous" } });
+      const last = asArray(updated && updated.messages).slice(-1)[0];
+      if (last && last.metadata && last.metadata.githubAuthorization) requestGitHubWriteAccess(last.metadata.githubAuthorization);
+      toast("Task queued", "Autonomous run started — see Runs for progress.", "ok");
+      if (typeof window._projectChatRefresh === "function") await window._projectChatRefresh();
+      else refreshCurrent();
+    } catch (e) {
+      toast("Apply failed", e.message, "err");
+      btn.disabled = false; btn.textContent = "🚀 اعمال در پروژه (Autonomous)";
+    }
+  };
 
   window.conversationDelete = async (convId, goBack) => {
     if (!confirm("Delete this conversation? This cannot be undone.")) return;

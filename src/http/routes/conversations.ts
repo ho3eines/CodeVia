@@ -32,6 +32,30 @@ export const PLATFORM_CAPABILITIES_PROMPT = `Platform capabilities (facts — ne
 - If the user asks "can you change / apply / fix / implement / push …" (in any language, e.g. «میتونی تغییر اعمال کنی؟»), answer YES and tell them exactly how: switch Mode to "🚀 Autonomous" (or "▶ Agent" and pick the agent) and send the request again — or ask them to confirm and they can resend it in that mode. You may still show the proposed diff here.
 - Never say you "cannot push", "have no execution", or "can only read files". If GitHub write access is missing, the platform itself will prompt the user to grant it.`;
 
+/**
+ * Does this chat message ask for a change to the repository (not just a
+ * question)? English + Persian verbs. Deliberately conservative: a false
+ * positive only shows an optional "apply" button, it never writes anything.
+ */
+export function looksLikeChangeRequest(text: string): boolean {
+  const t = (text || "").toLowerCase();
+  if (t.trim().length < 6) return false;
+  return (
+    /\b(add|implement|fix|refactor|change|update|rename|remove|delete|create|apply|push|commit|migrate|upgrade|replace|write)\b/.test(
+      t,
+    ) ||
+    /(اضافه کن|پیاده|پیاده‌سازی|درست کن|رفع کن|اصلاح کن|تغییر بده|تغییر دهید|اعمال کن|اعمال کنی|اعمال کنید|بنویس|حذف کن|بساز|جایگزین کن|ریفکتور|آپدیت کن|به‌روز کن|بروز کن|کامیت|پوش)/.test(
+      t,
+    )
+  );
+}
+
+/** Metadata that makes the UI offer "🚀 Apply with Autonomous" under a chat reply. */
+function applyOffer(project: Project | undefined, content: string): Record<string, unknown> {
+  if (!project || !looksLikeChangeRequest(content)) return {};
+  return { applyOffer: { request: content.slice(0, 4000), mode: "autonomous" } };
+}
+
 const SUMMARY_SYSTEM_PROMPT =
   "You compress a chat between a user and an AI engineering assistant into a concise memory summary. " +
   "Keep: goals, decisions, constraints, open questions, file/branch/PR names, and unresolved bugs. " +
@@ -562,7 +586,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
             role: "assistant",
             content: res.content.trim(),
             createdAt: new Date().toISOString(),
-            metadata: { modelId: res.modelId, executionMode: "chat" },
+            metadata: { modelId: res.modelId, executionMode: "chat", ...applyOffer(safeProject, content) },
           };
           updated = container.conversationRepo.addMessage(id, assistantMsg);
         }
@@ -845,7 +869,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           role: "assistant",
           content: full.trim(),
           createdAt: new Date().toISOString(),
-          metadata: { modelId: usedModel?.id, executionMode: "chat" },
+          metadata: { modelId: usedModel?.id, executionMode: "chat", ...applyOffer(safeProject, content) },
         };
         const updated = container.conversationRepo.addMessage(id, assistantMsg) ?? afterUser;
         // Best-effort cost attribution (token counts estimated from length).

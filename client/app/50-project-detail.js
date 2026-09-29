@@ -130,6 +130,7 @@
     };
     window._projectChatCleanup = cleanup;
     window._projectChatProject = projectId;
+    window._activeConvId = convId;
     let activeTaskIds = new Set();
     let lastMsgCount = 0;
     const paintConv = (conv) => {
