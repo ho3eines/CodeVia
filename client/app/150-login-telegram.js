@@ -3,6 +3,12 @@
      so on success we use the now-valid cookie via the refreshed authState. */
   function handleLoginResultParams() {
     const q = new URLSearchParams((location.hash.split("?")[1] || ""));
+    if (q.get("login") === "success") {
+      // A fresh authorization just came back from GitHub (possibly with the
+      // repo scope this prompt asked for) — let the write-access prompt
+      // re-evaluate this session instead of staying muted by its own flag.
+      try { sessionStorage.removeItem("cv-gh-write-prompted"); } catch (_) { /* ignore */ }
+    }
     if (q.get("login") === "success" && !sessionStorage.getItem("cv-welcomed")) {
       sessionStorage.setItem("cv-welcomed", "1");
       // route() refreshes authState immediately after this function returns

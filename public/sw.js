@@ -1,5 +1,7 @@
 // Service worker for CodeVia PWA — app shell cache + offline fallback for navigation.
-const CACHE = "codevia-shell-v2";
+// v3: the OAuth handshake (/auth/…) is never answered by this worker — see the
+// fetch handler below for why that used to swallow the GitHub redirect.
+const CACHE = "codevia-shell-v3";
 const SHELL = [
   "/",
   "/index.html",
@@ -30,6 +32,16 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+
+  // NEVER answer the OAuth handshake with respondWith(fetch(req)).
+  // /auth/github/login 302-redirects to github.com and /auth/github/callback
+  // 302s back; a service worker that answers a *navigation* by following that
+  // redirect chain returns a cross-origin-redirected response, which the
+  // browser rejects as a network error. The page then silently stays where it
+  // is — exactly the "Redirecting to GitHub in 0s…" that never leaves the app.
+  // Returning WITHOUT respondWith() hands the request back to the browser, so
+  // the login/consent/callback navigations run natively, cookies included.
+  if (url.pathname.startsWith("/auth/")) return;
 
   // Network-first for navigation (so users always get fresh HTML when online)
   if (req.mode === "navigate") {
