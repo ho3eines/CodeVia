@@ -36,85 +36,85 @@
       "file": "50-project-detail.js",
       "module": "project detail tabs · chat · workspace overview",
       "from": 1532,
-      "to": 2592
+      "to": 2593
     },
     {
       "file": "60-project-actions.js",
       "module": "project sub-resource actions (tasks/workflows/agents/memory/skills/issues/PRs/conversations)",
-      "from": 2593,
-      "to": 2841
+      "from": 2594,
+      "to": 2842
     },
     {
       "file": "70-agents.js",
       "module": "agents list + agent detail",
-      "from": 2842,
-      "to": 3004
+      "from": 2843,
+      "to": 3005
     },
     {
       "file": "80-models.js",
       "module": "models list · tabs · pager · search",
-      "from": 3005,
-      "to": 3231
+      "from": 3006,
+      "to": 3232
     },
     {
       "file": "90-model-benchmark.js",
       "module": "smart-routing benchmark panel · model edit · multi-select bulk",
-      "from": 3232,
-      "to": 4062
+      "from": 3233,
+      "to": 4063
     },
     {
       "file": "100-model-tools.js",
       "module": "unresponsive cleanup list · groups · add model · streaming chat modal",
-      "from": 4063,
-      "to": 4669
+      "from": 4064,
+      "to": 4670
     },
     {
       "file": "110-providers.js",
       "module": "providers dashboard · filters · bulk actions",
-      "from": 4670,
-      "to": 5280
+      "from": 4671,
+      "to": 5281
     },
     {
       "file": "120-skills-workflows.js",
       "module": "skills · workflow list + builder",
-      "from": 5281,
-      "to": 5449
+      "from": 5282,
+      "to": 5450
     },
     {
       "file": "130-runs-tasks.js",
       "module": "tasks · runs · approvals · logs rows",
-      "from": 5450,
-      "to": 5551
+      "from": 5451,
+      "to": 5552
     },
     {
       "file": "140-conversations-memory-github.js",
       "module": "conversations · conversation detail · memory · github repos",
-      "from": 5552,
-      "to": 6021
+      "from": 5553,
+      "to": 6048
     },
     {
       "file": "150-login-telegram.js",
       "module": "login-result toasts · create repo · telegram",
-      "from": 6022,
-      "to": 6364
+      "from": 6049,
+      "to": 6391
     },
     {
       "file": "160-settings.js",
       "module": "settings hub",
-      "from": 6365,
-      "to": 6471
+      "from": 6392,
+      "to": 6498
     },
     {
       "file": "170-admin.js",
       "module": "admin console",
-      "from": 6472,
-      "to": 6872
+      "from": 6499,
+      "to": 6899
     },
     {
       "file": "180-search-boot.js",
       "module": "search · boot",
-      "from": 6873,
-      "to": 6894
+      "from": 6900,
+      "to": 6921
     }
   ]
 }
