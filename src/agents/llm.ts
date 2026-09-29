@@ -103,7 +103,10 @@ export function realChatFor(deps: ChatDeps): RealChat | undefined {
   }
   if (!available.length) return undefined;
   const benchRepo: ModelBenchmarkRepository = getModelBenchmarkRepo();
-  const perfStats = benchRepo.computeStats();
+  // Only live candidates take part in speed normalisation, so telemetry of a
+  // deleted/deactivated (or another account's) model cannot skew the scores.
+  const liveIds = new Set(available.map((m) => m.id));
+  const perfStats = benchRepo.computeStats().filter((st) => liveIds.has(st.modelId));
   ModelBenchmarkRepository.addSpeedNormalisation(perfStats);
   const initial = deps.modelRouter.route(
     candidatesFor(available, (id) => deps.providerRepo.findById(id)?.data),

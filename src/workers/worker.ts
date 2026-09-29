@@ -64,12 +64,7 @@ export class Worker {
         // Exponential backoff: schedule retry.
         const delay = Math.min(60000, 1000 * 2 ** attempts);
         const scheduledAt = new Date(Date.now() + delay).toISOString();
-        this.deps.queue.update(id, { status: "retrying", attempts, error: message });
-        // Re-enqueue for retry by updating scheduled_at.
-        (this.deps.queue as unknown as { db: { run: (s: string, p: Record<string, unknown>) => void } }).db.run(
-          `UPDATE jobs SET scheduled_at = :scheduled_at, status = 'pending', updated_at = :now WHERE id = :id`,
-          { scheduled_at: scheduledAt, now: new Date().toISOString(), id },
-        );
+        this.deps.queue.scheduleRetry(id, attempts, message, scheduledAt);
       }
     }
   }
@@ -93,6 +88,9 @@ export class Worker {
     // call could cause an unbounded number of concurrent executions.
     const tick = () => {
       try {
+        // Renew the lease of in-flight jobs so a long run is never reclaimed
+        // (and executed twice) as if its worker had died.
+        this.deps.queue.heartbeat([...this.active]);
         const capacity = Math.max(0, 3 - this.active.size);
         if (!capacity) return;
         const jobs = this.deps.queue.claim(capacity);
