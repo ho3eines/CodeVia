@@ -330,6 +330,24 @@ export class MockGitHubService implements IGitHubService {
     return [...r.branches.entries()].map(([name, sha]) => ({ name, sha }));
   }
 
+  /** Same lenient semantics as the rest of the mock: an unseen repo is auto-provisioned. */
+  async getRepository(ref: GithubRepoRef): Promise<GithubRepository> {
+    const r = this.repo(ref);
+    return {
+      owner: r.ref.owner,
+      name: r.ref.name,
+      fullName: `${r.ref.owner}/${r.ref.name}`,
+      private: r.private,
+      defaultBranch: r.defaultBranch,
+      description: r.description,
+      htmlUrl: `https://github.com/${r.ref.owner}/${r.ref.name}`,
+      language: r.language,
+      updatedAt: r.commits[0]?.date,
+      archived: false,
+      permissions: { admin: true, push: true, pull: true },
+    };
+  }
+
   async listCommits(ref: GithubRepoRef): Promise<GithubCommit[]> {
     return this.repo(ref).commits;
   }

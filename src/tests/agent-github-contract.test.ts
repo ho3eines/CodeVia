@@ -25,14 +25,85 @@ const repo = { owner: "acme", name: "app" };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 
 describe("real GitHub adapter contract", () => {
+  it("lists a whole repository through ONE Git Trees API request", async () => {
+    const fetcher = vi.fn(async (url: unknown) =>
+      String(url).includes("/git/trees/")
+        ? json({
+            sha: "tree-sha",
+            truncated: false,
+            tree: [
+              { path: "README.md", type: "blob", size: 12 },
+              { path: "src", type: "tree" },
+              { path: "src/app.ts", type: "blob", size: 30 },
+            ],
+          })
+        : json([], 404),
+    );
+    const gh = new RealGitHubService({ token: "test-only", fetchImpl: fetcher as typeof fetch });
+    expect(await gh.listFiles(repo, "main")).toEqual([
+      { path: "README.md", type: "blob", size: 12 },
+      { path: "src", type: "tree", size: undefined },
+      { path: "src/app.ts", type: "blob", size: 30 },
+    ]);
+    // The point of the fix: 1 request instead of one per directory (a 900-file
+    // repository used to cost ~99 sequential calls and blew every time budget).
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("filters a tree listing by sub-path and keeps directory entries", async () => {
+    const fetcher = vi.fn(async (url: unknown) =>
+      String(url).includes("/git/trees/")
+        ? json({
+            truncated: false,
+            tree: [
+              { path: "README.md", type: "blob" },
+              { path: "CodeVia", type: "tree" },
+              { path: "CodeVia/project.md", type: "blob", size: 8 },
+              { path: "CodeVia/agents", type: "tree" },
+              { path: "CodeVia/agents/research.md", type: "blob", size: 9 },
+            ],
+          })
+        : json([], 404),
+    );
+    const gh = new RealGitHubService({ token: "test-only", fetchImpl: fetcher as typeof fetch });
+    expect(await gh.listFiles(repo, "deadbeef", "CodeVia")).toEqual([
+      { path: "CodeVia", type: "tree", size: undefined },
+      { path: "CodeVia/project.md", type: "blob", size: 8 },
+      { path: "CodeVia/agents", type: "tree", size: undefined },
+      { path: "CodeVia/agents/research.md", type: "blob", size: 9 },
+    ]);
+  });
+
+  it("falls back to the Contents walk when the Trees API cannot answer (truncated / 404 / wrong shape)", async () => {
+    // truncated → an incomplete listing is never returned as if it were complete
+    const truncated = new RealGitHubService({
+      token: "test-only",
+      fetchImpl: (async (url: unknown) =>
+        String(url).includes("/git/trees/")
+          ? json({ truncated: true, tree: [{ path: "a.ts", type: "blob" }] })
+          : json([{ type: "file", path: "README.md" }])) as typeof fetch,
+    });
+    expect(await truncated.listFiles(repo, "main")).toEqual([{ path: "README.md", type: "blob", size: undefined }]);
+
+    // A payload that is not a tree object (older fakes answer with an array)
+    // must not be guessed at either.
+    const wrongShape = new RealGitHubService({
+      token: "test-only",
+      fetchImpl: (async () => json([{ type: "file", path: "README.md" }])) as typeof fetch,
+    });
+    expect(await wrongShape.listFiles(repo, "main")).toEqual([{ path: "README.md", type: "blob", size: undefined }]);
+  });
+
   it("recurses Contents API directories (type=dir) and preserves file/directory types", async () => {
     const fetcher = vi.fn(async (url: unknown) =>
-      String(url).includes("/contents/src?")
-        ? json([{ type: "file", path: "src/app.ts", size: 30 }])
-        : json([
-            { type: "file", path: "README.md" },
-            { type: "dir", path: "src" },
-          ]),
+      String(url).includes("/git/trees/")
+        ? json({ message: "Not Found" }, 404)
+        : String(url).includes("/contents/src?")
+          ? json([{ type: "file", path: "src/app.ts", size: 30 }])
+          : json([
+              { type: "file", path: "README.md" },
+              { type: "dir", path: "src" },
+            ]),
     );
     const gh = new RealGitHubService({ token: "test-only", fetchImpl: fetcher as typeof fetch });
     expect(await gh.listFiles(repo, "main")).toEqual([
@@ -40,7 +111,15 @@ describe("real GitHub adapter contract", () => {
       { path: "src", type: "tree", size: undefined },
       { path: "src/app.ts", type: "blob", size: 30 },
     ]);
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(3); // 1 tree probe (404) + 2 directory reads
+  });
+
+  it("names the repository and ref when a listing 404s (instead of a bare API URL)", async () => {
+    const gh = new RealGitHubService({
+      token: "test-only",
+      fetchImpl: (async () => json({ message: "Not Found" }, 404)) as typeof fetch,
+    });
+    await expect(gh.listFiles(repo, "release-9")).rejects.toThrow(/acme\/app@release-9/);
   });
 
   it("only treats 404 as missing; server errors cannot trigger blind creation", async () => {

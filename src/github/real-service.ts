@@ -43,6 +43,14 @@ export class GitHubAuthError extends Error {
 
 const MAX_PAGE = 100;
 
+/** 401/403 (bad or scope-less credential, rate limit) — the diagnosis worth keeping. */
+function isCredentialError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof GitHubAuthError) return true;
+  const status = Number((err as { status?: number }).status ?? 0);
+  return status === 401 || status === 403;
+}
+
 /**
  * GitHub REST API adapter. Requires a GitHub token (server `GITHUB_TOKEN` via the
  * secret manager, or a user OAuth token). All operations are performed through
@@ -157,8 +165,74 @@ export class RealGitHubService implements IGitHubService {
     return toRepository(raw);
   }
 
-  /** Recursively list repository files under `path` (default root) via the contents API. */
+  /**
+   * List repository files under `path` (default root).
+   *
+   * Fast path: the **Git Trees API** answers the whole repository in ONE
+   * request (`/git/trees/{ref}?recursive=1`). The previous implementation
+   * walked the Contents API directory by directory — one request per folder —
+   * so a real 900-file repository cost ~99 sequential requests (~12 s). Every
+   * caller with a time budget (the project chat gives repository context 8 s)
+   * silently dropped the listing, and the model then answered "I cannot see
+   * your repository" for a repository that was perfectly readable.
+   *
+   * The Contents walk is kept as the fallback for the cases the Trees API
+   * cannot serve: no explicit ref, an unknown/404 ref, an empty (unborn-HEAD)
+   * repository, or a `truncated` answer (GitHub caps a recursive tree at
+   * 100 000 entries / 7 MB) — an incomplete listing is never returned as if it
+   * were complete.
+   */
   async listFiles(repo: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]> {
+    const ref = (branch ?? "").trim();
+    let treeError: unknown;
+    if (ref) {
+      try {
+        const viaTrees = await this.listViaTrees(repo, ref, path);
+        if (viaTrees) return viaTrees;
+      } catch (err) {
+        // Any failure of the fast path (unknown ref, empty repository, a proxy
+        // or GitHub Enterprise that blocks /git/trees, a rate limit) degrades to
+        // the Contents walk instead of failing the read outright.
+        treeError = err;
+      }
+    }
+    try {
+      return await this.listViaContents(repo, branch, path);
+    } catch (err) {
+      // Report the more specific diagnosis: a credential rejection seen by the
+      // tree probe is the real story, not the walk's generic 404.
+      if (isCredentialError(treeError) && !isCredentialError(err)) throw treeError;
+      throw err;
+    }
+  }
+
+  /** One-request recursive listing; `undefined` when the answer is unusable/incomplete. */
+  private async listViaTrees(repo: GithubRepoRef, ref: string, path?: string): Promise<GithubTreeEntry[] | undefined> {
+    const res = await this.request(
+      `/repos/${repo.owner}/${repo.name}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+    );
+    const body = (await res.json()) as {
+      tree?: Array<{ path?: string; type?: string; size?: number }>;
+      truncated?: boolean;
+    };
+    // A test double (or an unexpected payload shape) that answers with an array
+    // is simply "no tree here" — fall back instead of guessing.
+    if (!body || typeof body !== "object" || !Array.isArray(body.tree)) return undefined;
+    if (body.truncated) return undefined;
+    const base = (path ?? "").replace(/^\/+|\/+$/g, "");
+    const prefix = base ? `${base}/` : "";
+    const out: GithubTreeEntry[] = [];
+    for (const entry of body.tree) {
+      const p = typeof entry?.path === "string" ? entry.path : "";
+      if (!p || p.startsWith(".git/")) continue;
+      if (prefix && p !== base && !p.startsWith(prefix)) continue;
+      out.push({ path: p, type: entry.type === "tree" ? "tree" : "blob", size: entry.size });
+    }
+    return out;
+  }
+
+  /** Recursively list repository files under `path` (default root) via the contents API. */
+  private async listViaContents(repo: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]> {
     const out: GithubTreeEntry[] = [];
     const seen = new Set<string>();
     const q = branch ? `?ref=${encodeURIComponent(branch)}` : "";
@@ -180,9 +254,36 @@ export class RealGitHubService implements IGitHubService {
         if (out.length >= 8000) return;
       }
     };
-    await walk(path ?? "");
+    try {
+      await walk(path ?? "");
+    } catch (err) {
+      if ((err as { status?: number }).status === 404) {
+        // A bare "GitHub 404 https://api.github.com/repos/…" is what made the
+        // chat assistant tell users their (perfectly reachable) repository does
+        // not exist. Name the repo, the ref and the two real causes instead.
+        throw Object.assign(
+          new Error(
+            `GitHub 404 for ${repo.owner}/${repo.name}${branch ? `@${branch}` : ""}` +
+              `${path ? ` path ${path}` : ""} — the repository, this ref/path, or the connected credential's access to it does not exist (GitHub answers 404 for private repositories the token cannot see)`,
+          ),
+          { status: 404, cause: err },
+        );
+      }
+      throw err;
+    }
     if (out.length >= 8000) throw new Error("GitHub tree limit reached; refusing a truncated listing");
     return out;
+  }
+
+  /** Repository metadata (existence, default branch) — used by the project health check. */
+  async getRepository(repo: GithubRepoRef): Promise<GithubRepository | undefined> {
+    try {
+      const raw = await this.json<RawRepo>(`/repos/${repo.owner}/${repo.name}`);
+      return toRepository(raw);
+    } catch (err) {
+      if ((err as { status?: number }).status === 404) return undefined;
+      throw err;
+    }
   }
 
   async listBranches(repo: GithubRepoRef): Promise<GithubBranch[]> {

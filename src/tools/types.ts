@@ -28,6 +28,17 @@ export interface ToolContext {
   approved?: boolean;
   /** Memory store for the project (search / append). */
   memory?: import("../memory/store.js").IMemoryStore;
+  /**
+   * Read-only local mirror of the project's repository: bare clone read through
+   * git *plumbing* (`ls-tree`, `cat-file`, `grep`). It gives tools a whole-tree
+   * listing and content search without any GitHub API call — and without ever
+   * executing repository code. Optional: tools must fall back to `github`.
+   */
+  mirror?: import("../github/repo-mirror.js").RepoMirrorService;
+  /** Mirror isolation scope — the acting account id. Mirrors are never shared across accounts. */
+  mirrorScope?: string;
+  /** Bearer token for mirroring a private repository (git HTTP header only; never logged). */
+  mirrorToken?: string;
 }
 
 export interface ToolResult {

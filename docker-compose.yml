@@ -32,6 +32,11 @@ services:
       TELEGRAM_MODE: ${TELEGRAM_MODE:-auto}
       TELEGRAM_POLL_TIMEOUT: ${TELEGRAM_POLL_TIMEOUT:-25}
       PUBLIC_WEB_BASE_URL: ${PUBLIC_WEB_BASE_URL:-}
+      # Read-only local repository mirror (bare clones under REPO_MIRROR_DIR,
+      # read with git plumbing only — repository code is never executed).
+      REPO_MIRROR_ENABLED: ${REPO_MIRROR_ENABLED:-true}
+      REPO_MIRROR_DIR: ${REPO_MIRROR_DIR:-/app/data/mirrors}
+      REPO_MIRROR_REFRESH_MS: ${REPO_MIRROR_REFRESH_MS:-300000}
       # Platform
       ENABLE_SIMULATION_MODE: ${ENABLE_SIMULATION_MODE:-true}
     ports:

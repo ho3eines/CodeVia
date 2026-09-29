@@ -39,6 +39,63 @@ The platform runs in **Mock AI** mode. Providers, models and skills are seeded; 
 - Set `GITHUB_TOKEN` (or App/OAuth credentials) and `GITHUB_ENABLED=true` to hit real repos.
 - The context/memory engine degrades gracefully when a repo is missing — a missing repo won't crash agent runs.
 
+## The project chat says "I cannot see your repository / it returns 404"
+
+The assistant only knows what the platform handed it. Open the project's **Chat**
+tab and read the banner above the thread — it is generated from
+`GET /projects/:id/repo-status`, i.e. from measurements, not from the model's
+imagination:
+
+| Banner says | What it means | Fix |
+|---|---|---|
+| `Repository context: available — N file(s)` | The chat prompt really contains the file tree, README and manifests | nothing to fix; ask about specific files |
+| `CI ✗` / "No GitHub Actions workflow" | The repo is readable, but agents verify work through GitHub **check runs** — without CI, QA can only report `unverified` | add a build/test workflow ([AGENT_EXECUTION.md](AGENT_EXECUTION.md) → real build/test) |
+| `Branch "X" does not exist — read from "Y" instead` | The project's stored branch is wrong; the brief self-healed onto the default branch for reading | set the project branch to `Y` (Project → Settings → Repositories) so agents also **write** there |
+| `not readable` + `GitHub answered 404 …` | GitHub hides private repositories behind 404: either the name/branch is wrong, or the acting credential cannot see it | open `https://github.com/<owner>/<repo>` as the connected account, then sign out and in again (a fresh token with the `repo` scope is stored) and press **↻ Re-check** |
+| `not readable` + `credential (401/403)` | The stored token is expired/revoked, or the login granted no repository scope | re-connect GitHub; the OAuth scope must include `repo` |
+| `not readable` + `did not answer in time` | GitHub was slow or unreachable for that read | press **↻ Re-check**; successful reads are cached (`REPO_BRIEF_TTL_MS`) |
+| `running on the simulated (mock) GitHub` | No real connection: the platform is in demo mode, so there is no real code to read | log in with GitHub and link the real repository |
+| `📚 local read-only mirror ready …` | Repository evidence is read from a local bare clone (git `ls-tree` / `cat-file` / `grep`) instead of the GitHub API — faster, and content search becomes possible | nothing to fix; press **↻ Re-check** to force a `git fetch` |
+| `📚 local mirror unavailable: git is not installed …` | The host/container has no `git`, so every read goes through the GitHub API (correct, just slower and without content grep) | install `git` (the official image already ships it) or leave it — nothing breaks |
+| `📚 local mirror unavailable (too-large / clone-failed …)` | The mirror refused this repository: bigger than `REPO_MIRROR_MAX_MB`, a failed clone/fetch, or a credential that cannot read it | evidence still comes from the API; raise the cap, fix the credential, or `DELETE /projects/:id/repo-mirror` to drop the stale copy |
+
+### The local read-only mirror (repository evidence from disk)
+
+`GET /projects/:id/repo-status` reports a `mirror` block: `enabled`, `gitAvailable`,
+`ready`, `sizeMb`, `ageMs`, `blocker`, `error`. The mirror is a **bare, read-only
+clone per acting account** (`<REPO_MIRROR_DIR>/<acct-…>/<owner>/<name>.git`) read
+only through git plumbing — `ls-tree` for the whole tree, `cat-file` for a file,
+`grep` for content search. It is re-fetched at most every `REPO_MIRROR_REFRESH_MS`
+and is an optimisation only: no `git`, no clone, too large, or a failed fetch all
+degrade to the GitHub API path, and the banner says which one produced the
+evidence (`brief.via: "mirror" | "api"`).
+
+**Nothing in the repository is ever executed.** There is no checkout, no
+`npm install`, no build and no test run on the CodeVia host; writes still go
+through the GitHub API and verification still reads GitHub check runs
+([AGENT_EXECUTION.md](AGENT_EXECUTION.md) → read-only mirror). The credential is
+passed as a git HTTP header for the duration of the clone/fetch only — never in
+argv, never written into the mirror's config, never logged.
+
+Useful calls (project-owner only):
+
+```bash
+curl -s  "$BASE/projects/$ID/repo-status"        | jq '.mirror, .brief.via'
+curl -sX POST "$BASE/projects/$ID/repo-mirror/refresh" | jq '{ready, sizeMb, headSha, blocker, error}'
+curl -sX DELETE "$BASE/projects/$ID/repo-mirror"       | jq   # drop the local copy (GitHub is untouched)
+du -sh data/mirrors/*                             # disk used by mirrors
+```
+
+Historical note (fixed 2026-09-14): repository listings walked the GitHub
+Contents API **one directory at a time**. A real 906-file repository cost ~99
+sequential requests (~12 s) against the chat's 8 s context budget, so the brief
+was dropped *silently* on every message and the model answered "your repository
+returns 404" for a repository that was perfectly reachable. Listings now use the
+Git Trees API (one request; the same repository reads in ~0.6 s), the result is
+cached per account+repository+branch, a wrong branch falls back to the default
+branch, and an unreadable repository is reported to the model *and* to the UI
+with its real reason instead of an empty string.
+
 ## Blank page / `GET /app.js 401 (Unauthorized)` / "Authentication required (GitHub login)"
 
 Strict login mode (`REQUIRE_AUTH`) is on, but no GitHub session exists.

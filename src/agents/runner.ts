@@ -9,6 +9,7 @@ import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { ModelRouter, TaskCategory } from "../ai/model-router.js";
 import type { ModelLoadBalancer } from "../ai/load-balancer.js";
 import type { IGitHubService } from "../github/types.js";
+import type { RepoMirrorService } from "../github/repo-mirror.js";
 import { eventBus, generateCorrelationId } from "../events/bus.js";
 import { live } from "../realtime/live.js";
 import { logger } from "../logger.js";
@@ -43,6 +44,10 @@ export interface AgentRunnerDeps {
   memoryFor?: (project: Project) => IMemoryStore;
   memoryRepo?: MemoryRepository;
   projectFiles?: ProjectFilesService;
+  /** Read-only local mirror used for repository evidence inside tools (never executes repo code). */
+  repoMirror?: RepoMirrorService;
+  /** Credential for mirroring a private repository, resolved from the acting account. */
+  mirrorTokenForProject?: (project: Project, requestUserId?: string) => string | undefined;
   refresh?: (projectId: string) => Promise<{ project: Project; agents: Agent[] }>;
   isCancelled?: (taskId: string) => boolean;
   /** Checks the complete ancestry, not just the current subtask. */
@@ -276,6 +281,9 @@ export class AgentRunner {
               correlationId,
               approved,
               memory,
+              mirror: this.deps.repoMirror,
+              mirrorScope: req.requestUserId ?? project.ownerId,
+              mirrorToken: this.deps.mirrorTokenForProject?.(project, req.requestUserId),
               workspaceRoot: req.workspaceRoot,
               baseBranch: repository?.defaultBranch ?? project.branch,
               checkActive,

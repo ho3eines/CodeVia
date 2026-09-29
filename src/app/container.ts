@@ -17,7 +17,8 @@ import { ModelRouter } from "../ai/model-router.js";
 import { ModelLoadBalancer, routingConfigFromEnv } from "../ai/load-balancer.js";
 import { contextEngine, ContextEngine } from "../ai/context-engine.js";
 import { toolRegistry, ToolRegistry } from "../tools/registry.js";
-import { resolveGitHubService, resolveGitHubForProject } from "../github/registry.js";
+import { resolveGitHubService, resolveGitHubForProject, resolveGitHubTokenForProject } from "../github/registry.js";
+import { getRepoMirror, type RepoMirrorService } from "../github/repo-mirror.js";
 import { resolveTelegramService } from "../integrations/telegram.js";
 import { TelegramBot } from "../integrations/telegram-bot.js";
 import { TelegramRuntime, type TelegramRuntimeStatus } from "../integrations/telegram-runtime.js";
@@ -98,6 +99,23 @@ export class Container {
   readonly github: IGitHubService = resolveGitHubService();
   readonly githubForProject = (project: Project, requestUserId?: string): IGitHubService =>
     resolveGitHubForProject({ project, kv: this.kv, fallback: this.github, requestUserId });
+  /**
+   * The credential a *local, read-only* operation may use for a project (same
+   * precedence as `githubForProject`). Used by the repository mirror to clone a
+   * private repository; passed as a git HTTP header only — never stored, never
+   * logged, and never another account's token.
+   */
+  readonly githubTokenForProject = (project: Project, requestUserId?: string): string | undefined =>
+    resolveGitHubTokenForProject({ project, kv: this.kv, requestUserId });
+  /**
+   * Read-only local mirror of connected repositories: bare clones read through
+   * git *plumbing* (`ls-tree`, `cat-file`, `grep`). It speeds up repository
+   * evidence enormously and never executes repository code. Resolved lazily so
+   * tests can inject a mirror.
+   */
+  get repoMirror(): RepoMirrorService {
+    return getRepoMirror();
+  }
   /** Project folder (CodeVia/*) sync between the database and the project repo. Shares the platform github instance. */
   readonly projectFiles: ProjectFilesService = new ProjectFilesService({
     github: this.github,
@@ -171,6 +189,10 @@ export class Container {
       requestApproval: (a, d) => this.approvalChannel(a, d),
       memoryRepo: this.memoryRepo,
       projectFiles: this.projectFiles,
+      // Repository evidence inside tools may be read from a local read-only
+      // mirror (git plumbing only). Writes still go through the GitHub API.
+      repoMirror: this.repoMirror,
+      mirrorTokenForProject: this.githubTokenForProject,
       refresh: async (id) => ({
         project: await this.agentManager.refreshProject(id),
         agents: this.agentRepo.byProject(id),
