@@ -4,6 +4,8 @@
 
 A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled** AI engineering platform under active development. CodeVia provides agent definitions and execution paths for research, architecture, backend/frontend development, UI/UX, database, DevOps, QA, security, code review, documentation, debugging, refactoring, performance, and release; not all roles have a complete autonomous implementation.
 
+> **📖 [راهنمای کامل راه‌اندازی (فارسی)](docs/SETUP_GUIDE.md)** — از نصب محلی تا اتصال OpenAI، GitHub OAuth، Telegram، استقرار Railway/Docker و اجرای اولین Task خودکار.
+
 > **Readiness note (2026-09-12):** the [historical completeness audit](docs/PIPELINE_AUDIT.md) reproduced 18 targeted gaps before the repository-first work; all 18 are closed. **Per-account isolation** covers GitHub credentials, projects, models/providers, and every by-id entity route (`/tasks/:id`, `/runs/:id`, `/conversations/:id`, `/approvals/:id`) is now gated directly at the handler, not just indirectly through a global hook — see [docs/MULTI_USER_ISOLATION.md](docs/MULTI_USER_ISOLATION.md). Operator-level admin feeds and settings stay account-independent **by design**. Review the [remaining gaps table](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here) before a sensitive multi-user deployment.
 
 > **Repository-backed project knowledge.** The platform stores full skills, agents/prompts and prompt history, rules, memory, workflows, tasks, runs and conversations under **`CodeVia/`**. The [repository-state audit](docs/REPOSITORY_STATE_AUDIT.md) previously reproduced 8 gaps (context consumption, terminal history, deletion/copy, legacy migration, error handling); **all 8 are now closed** and `scripts/audit-repository-state.mjs` exits `0`. Credentials, accounts and live queue state remain local by design; keep a database backup, particularly before migrating legacy projects. See the [format and usage guide](docs/REPOSITORY_STATE.md).
@@ -55,6 +57,8 @@ open http://localhost:8080
 ```
 
 The platform seeds built-in **skills**, **providers** and **mock models** on boot. Create a project and it first reads `CodeVia/` from its connected repository. Existing material is reused; only missing definitions are authored. Real repositories need an active model to generate missing material; offline Mock scaffolds are labelled simulation. In mock/demo mode the system is self-healing: a project that references a repository the simulation never created (restored database, lost mock snapshot) gets that repository auto-provisioned — with the project's branch — and its missing `CodeVia/` state initialized once, so no page or project option ever fails with "Mock repo not found" (see [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)).
+
+> **📖 For a complete walkthrough (from local dev to your first autonomous task on a real repo), see the [راهنمای راه‌اندازی (Persian Setup Guide)](docs/SETUP_GUIDE.md).**
 
 ### Seed a demo project (optional)
 
@@ -157,7 +161,8 @@ Features: responsive, dark/light mode, **RTL/Persian-friendly**, command palette
 ## 📚 Documentation
 
 | Doc | Purpose |
-|-----|---------|
+|-----|---------|  
+| [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) | **🇲🇩 راهنمای کامل راه‌اندازی (فارسی)** — from install to first autonomous task |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full architecture, domain model, DB model, security & deployment model |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker + Railway deployment guide |
 | [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) | Environment variables / secret references guide |
@@ -203,20 +208,3 @@ Project detection → GitHub changes → Agent Router → Context Engine
 ## ⚖️ License
 
 MIT — see [LICENSE](LICENSE).
-
-### Direct JSON chat providers (Ptero / MLP)
-
-For an API accepting `{ "model": "…", "messages": […] }` and returning
-`{ "text": "…" }`, select **Custom HTTP**, with API format **custom**.
-The Base URL is the **complete POST endpoint**, not an OpenAI base URL:
-
-- Base URL: `https://ptero.pro/wp-json/mlp/v1/chat`
-- Auth: `bearer`; enter the key in the provider form or use Secret Ref `MLP_API_KEY`.
-- Add model IDs manually, for example `codestral:free`, then run the model chat test.
-
-This format does not append `/v1` or `/chat/completions`, query a model catalog,
-request streaming, or send temperature/max-token parameters. The chat UI receives
-one complete reply. Native tool calls are unsupported and rejected. No connection
-is verified until a model chat test is run. Usage is unknown when omitted by the API.
-Existing custom providers that implement OpenAI's contract should use API format
-**openai** instead. Ptero has not been live-tested with credentials by this change.
