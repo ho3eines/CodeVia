@@ -173,7 +173,11 @@ export interface IGitHubService {
   mergePullRequest(
     repo: GithubRepoRef,
     number: number,
-    opts?: { method?: "merge" | "squash" | "rebase"; commitTitle?: string },
+    opts?: {
+      method?: "merge" | "squash" | "rebase";
+      commitTitle?: string;
+      /** Only merge if the PR head is still this commit. */ sha?: string;
+    },
   ): Promise<{ merged: boolean; sha?: string; message?: string }>;
 }
 

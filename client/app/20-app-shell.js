@@ -259,6 +259,7 @@
     // Keep the top-bar login/user slot in sync with the refreshed state.
     renderUserSlot();
     refreshBell();
+    maybePromptGitHubWriteAccess();
   }
   async function refreshBell() {
     const btn = $("#bell-btn"), count = $("#bell-count");

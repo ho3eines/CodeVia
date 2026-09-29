@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Conversation, ConversationMessage, Model, ModelProvider, Project } from "../../domain/entities.js";
 import { accessibleProjectIds } from "../project-access.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
-import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
+import { dispatchProjectAskChecked, isAskError } from "./project-ask-shared.js";
 import { hydrateProject } from "../../domain/project-options.js";
 import {
   readRepoBrief,
@@ -467,7 +467,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
       };
       updated = container.conversationRepo.addMessage(id, errMsg);
     } else if (role === "user" && safeProject && mode !== "chat") {
-      const result = dispatchProjectAsk(container, safeProject.id, {
+      const result = await dispatchProjectAskChecked(container, safeProject.id, {
         title: content.slice(0, 80),
         description: content,
         executionMode: mode === "autonomous" || mode === "agent" || mode === "simulation" ? mode : "autonomous",
@@ -483,7 +483,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
           role: "assistant",
           content: `❌ ${result.error}`,
           createdAt: new Date().toISOString(),
-          metadata: { executionMode: mode, error: true },
+          metadata: { executionMode: mode, error: true, ...askErrorMetadata(result) },
         };
         updated = container.conversationRepo.addMessage(id, errMsg);
       } else {
@@ -679,7 +679,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
         return reply;
       }
       if (role === "user" && mode !== "chat" && safeProject) {
-        const result = dispatchProjectAsk(container, safeProject.id, {
+        const result = await dispatchProjectAskChecked(container, safeProject.id, {
           title: content.slice(0, 80),
           description: content,
           executionMode: mode === "autonomous" || mode === "agent" || mode === "simulation" ? mode : "autonomous",
@@ -696,7 +696,7 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
             role: "assistant",
             content: `❌ ${result.error}`,
             createdAt: new Date().toISOString(),
-            metadata: { executionMode: mode, error: true },
+            metadata: { executionMode: mode, error: true, ...askErrorMetadata(result) },
           };
         } else {
           const taskId = (result.task as { id?: string } | undefined)?.id;
@@ -909,4 +909,13 @@ export function registerConversationRoutes(app: FastifyInstance, container: Cont
     container.conversationRepo.deleteById(id);
     return { ok: true };
   });
+}
+
+/** Carry the GitHub authorization / write-access details of a blocked dispatch to the chat UI. */
+function askErrorMetadata(result: { extra?: Record<string, unknown> }): Record<string, unknown> {
+  const extra = result.extra ?? {};
+  return {
+    ...(extra.githubAuthorization ? { githubAuthorization: extra.githubAuthorization } : {}),
+    ...(extra.writeAccess ? { writeAccess: extra.writeAccess } : {}),
+  };
 }

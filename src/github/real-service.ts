@@ -28,6 +28,19 @@ export interface RealGitHubServiceOptions {
   label?: string;
   /** Injectable fetch (tests / proxies). Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
+  /**
+   * Translate a failed response into a more specific error (e.g. "the user
+   * must grant write access"). Return undefined to keep the default error.
+   */
+  mapError?: (failure: GitHubFailure) => Error | undefined;
+}
+
+/** A failed GitHub REST response, as seen by `mapError`. */
+export interface GitHubFailure {
+  status: number;
+  method: string;
+  url: string;
+  text: string;
 }
 
 /** Thrown when GitHub rejects the credential (401/403) — callers map this to actionable UI hints. */
@@ -64,6 +77,7 @@ export class RealGitHubService implements IGitHubService {
   private readonly tokenSource: () => string | undefined;
   private readonly label: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly mapError?: (failure: GitHubFailure) => Error | undefined;
 
   constructor(opts: RealGitHubServiceOptions = {}) {
     this.base = (opts.baseUrl ?? process.env.GITHUB_API_BASE_URL ?? "https://api.github.com").replace(/\/$/, "");
@@ -73,6 +87,7 @@ export class RealGitHubService implements IGitHubService {
     this.tokenSource = typeof t === "function" ? t : t ? () => t : () => process.env.GITHUB_TOKEN;
     this.label = opts.label ?? "GITHUB_TOKEN";
     this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init));
+    this.mapError = opts.mapError;
   }
 
   private getToken(): string {
@@ -99,6 +114,8 @@ export class RealGitHubService implements IGitHubService {
     });
     if (!res.ok) {
       const text = (await res.text().catch(() => "")).slice(0, 200);
+      const mapped = this.mapError?.({ status: res.status, method: (init?.method ?? "GET").toUpperCase(), url, text });
+      if (mapped) throw mapped;
       if (res.status === 401 || res.status === 403) {
         throw new GitHubAuthError(`GitHub ${res.status} (${this.label}) ${url}: ${text}`, res.status);
       }
@@ -550,11 +567,15 @@ export class RealGitHubService implements IGitHubService {
   async mergePullRequest(
     repo: GithubRepoRef,
     number: number,
-    opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string } = {},
+    opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string; sha?: string } = {},
   ): Promise<{ merged: boolean; sha?: string; message?: string }> {
     const res = await this.request(`/repos/${repo.owner}/${repo.name}/pulls/${number}/merge`, {
       method: "PUT",
-      body: JSON.stringify({ merge_method: opts.method ?? "squash", commit_title: opts.commitTitle }),
+      body: JSON.stringify({
+        merge_method: opts.method ?? "squash",
+        commit_title: opts.commitTitle,
+        ...(opts.sha ? { sha: opts.sha } : {}),
+      }),
     });
     const body = (await res.json().catch(() => ({}))) as { merged?: boolean; sha?: string; message?: string };
     return { merged: Boolean(body.merged), sha: body.sha, message: body.message };

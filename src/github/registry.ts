@@ -7,7 +7,8 @@ import type { KvStore } from "../db/kv.js";
 import { getUserGitHubToken, hasRepoScope, GITHUB_TOKEN_KV_PREFIX } from "../auth/github-tokens.js";
 import { getEffectiveOAuthConfig } from "../auth/admin-settings.js";
 import { DEMO_USER_ID } from "../auth/identity.js";
-import { githubRequestActorId } from "./request-actor.js";
+import { githubRequestActorId, githubRequestSignedInUserId } from "./request-actor.js";
+import { githubAuthorizationRequired, hasGitHubWriteScope } from "./authorization.js";
 
 /** A configured GitHub connection bound to a project. */
 export interface GithubConnection {
@@ -86,14 +87,10 @@ export function resolveGitHubForUser(opts: {
   if (opts.authenticated && opts.userId) {
     const stored = getUserGitHubToken(opts.kv, opts.userId);
     if (stored) {
-      const service = new RealGitHubService({
-        token: stored.token,
-        label: "user GitHub session",
-        fetchImpl: userGitHubFetch,
-      });
+      const service = userGitHubService(opts.kv, opts.userId);
       const hint = hasRepoScope(stored.scopes)
         ? undefined
-        : "Your GitHub login only granted public access (scope 'public_repo'/none). Private repositories are hidden — an admin can set the OAuth scope to 'repo read:user user:email' and you can log in again to see them.";
+        : "Your GitHub authorization is read-only (no 'repo' scope): private repositories are hidden and CodeVia cannot apply changes. Grant write access — CodeVia asks for it automatically when a change needs it (or open /auth/github/login?scope=write).";
       return { service, source: "user-oauth", scopes: stored.scopes, hint };
     }
   }
@@ -141,6 +138,12 @@ export function resolveGitHubTokenForProject(opts: {
     const stored = getUserGitHubToken(opts.kv, identity);
     if (stored) return stored.token;
   }
+  // A signed-in user without their own token reads anonymously (public repos)
+  // rather than through the site-wide GITHUB_TOKEN.
+  const signedIn = opts.requestUserId ?? githubRequestSignedInUserId();
+  if (signedIn && signedIn !== DEMO_USER_ID) return undefined;
+  // A real owner's repositories are never read with the site token once login exists.
+  if (identity && identity !== DEMO_USER_ID && getEffectiveOAuthConfig(opts.kv)) return undefined;
   if (!connection && isServerGitHubEnabled()) return process.env.GITHUB_TOKEN || undefined;
   if (connection?.kind === "server-token" && isServerGitHubEnabled()) return process.env.GITHUB_TOKEN || undefined;
   return undefined;
@@ -177,6 +180,38 @@ export function resolveProjectUserIdWithGitHubToken(
   return undefined;
 }
 
+/**
+ * A per-user GitHub adapter. Failures that mean "this user must (re-)authorize
+ * CodeVia with write access" are raised as `GitHubAuthorizationRequiredError`
+ * so the SPA can start the GitHub consent flow automatically.
+ */
+function userGitHubService(kv: KvStore, userId: string): RealGitHubService {
+  return new RealGitHubService({
+    token: () => getUserGitHubToken(kv, userId)?.token,
+    label: "GitHub OAuth connection",
+    fetchImpl: userGitHubFetch,
+    mapError: ({ status, method, text }) => {
+      const stored = getUserGitHubToken(kv, userId);
+      const scopes = stored?.scopes ?? [];
+      const login = stored?.login;
+      if (status === 401)
+        return githubAuthorizationRequired({ reason: "token-rejected", grantedScopes: scopes, login });
+      if (hasGitHubWriteScope(scopes)) return undefined;
+      const write = method !== "GET" && method !== "HEAD";
+      const rateLimited = /rate limit/i.test(text);
+      // Without `repo`, GitHub answers writes with 403 — or 404 for private
+      // repositories it hides from the token. Both are fixed by granting write.
+      if (write && (status === 403 || status === 404))
+        return githubAuthorizationRequired({ reason: "missing-scope", grantedScopes: scopes, login });
+      if (status === 403 && !rateLimited)
+        return githubAuthorizationRequired({ reason: "missing-scope", grantedScopes: scopes, login });
+      return undefined;
+    },
+  });
+}
+
+type ProjectGitHubSource = "user" | "server" | "mock";
+
 /** Resolve the connection saved on a project for background work, without borrowing another user's token. */
 export function resolveGitHubForProject(opts: {
   project: import("../domain/entities.js").Project;
@@ -204,25 +239,53 @@ export function resolveGitHubForProject(opts: {
   // which have no request object to thread through.
   const requestUserId = opts.requestUserId ?? githubRequestActorId();
   if (requestUserId && getUserGitHubToken(opts.kv, requestUserId)) {
-    const userId = requestUserId;
-    return new RealGitHubService({
-      token: () => getUserGitHubToken(opts.kv, userId)?.token,
-      label: "GitHub OAuth connection",
-      fetchImpl: userGitHubFetch,
-    });
+    return userGitHubService(opts.kv, requestUserId);
   }
+  // A real, signed-in user who has not granted CodeVia a GitHub token must be
+  // asked to authorize — the site-wide GITHUB_TOKEN is never used to write a
+  // user's repositories on their behalf.
+  const signedInUserId = opts.requestUserId ?? githubRequestSignedInUserId();
+  const actingUser = signedInUserId && signedInUserId !== DEMO_USER_ID ? signedInUserId : undefined;
+  const { service, source } = resolveStoredProjectGitHub(opts, actingUser);
+  if (actingUser && source === "server") throw githubAuthorizationRequired({ reason: "no-token" });
+  return service;
+}
+
+function resolveStoredProjectGitHub(
+  opts: { project: import("../domain/entities.js").Project; kv: KvStore; fallback: IGitHubService },
+  actingUser: string | undefined,
+): { service: IGitHubService; source: ProjectGitHubSource } {
+  const fallbackSource: ProjectGitHubSource = opts.fallback.kind === "real" ? "server" : "mock";
   const connection = opts.project.githubConnection;
-  if (!connection) return opts.fallback; // legacy installations
+  // Background work (no request user) for a project owned by a real account:
+  // once GitHub login is configured, its repositories are written with the
+  // OWNER's token only — never the site-wide GITHUB_TOKEN. The owner is asked
+  // to authorize (the SPA prompts them automatically on their next visit).
+  const ownerIdentity = connection?.userId || opts.project.ownerId;
+  const ownerMustAuthorize = () =>
+    !!ownerIdentity && ownerIdentity !== DEMO_USER_ID && !!getEffectiveOAuthConfig(opts.kv);
+  const serverOrOwner = (service: IGitHubService): { service: IGitHubService; source: ProjectGitHubSource } => {
+    if (ownerMustAuthorize()) {
+      throw githubAuthorizationRequired({
+        reason: "no-token",
+        detail: `project ${opts.project.name}: its owner must authorize GitHub; the site token is not used for their repositories`,
+      });
+    }
+    return { service, source: "server" };
+  };
+  if (!connection) {
+    // legacy installations
+    return fallbackSource === "server"
+      ? serverOrOwner(opts.fallback)
+      : { service: opts.fallback, source: fallbackSource };
+  }
   if (connection.kind === "user-oauth") {
     const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
     if (!userId) {
+      if (actingUser) throw githubAuthorizationRequired({ reason: "no-token" });
       throw new Error(`GitHub connection for project ${opts.project.name} needs to be reconnected by its owner`);
     }
-    return new RealGitHubService({
-      token: () => getUserGitHubToken(opts.kv, userId)?.token,
-      label: "GitHub OAuth connection",
-      fetchImpl: userGitHubFetch,
-    });
+    return { service: userGitHubService(opts.kv, userId), source: "user" };
   }
   if (connection.kind === "server-token") {
     // GITHUB_TOKEN / OAuth-app credentials are for login, not repository
@@ -230,15 +293,9 @@ export function resolveGitHubForProject(opts: {
     // has a user OAuth token, use that — the server PAT 404s on private
     // user repos the PAT cannot see.
     const ownerUserId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project, false);
-    if (ownerUserId) {
-      return new RealGitHubService({
-        token: () => getUserGitHubToken(opts.kv, ownerUserId)?.token,
-        label: "GitHub OAuth connection",
-        fetchImpl: userGitHubFetch,
-      });
-    }
-    if (opts.fallback.kind === "real") return opts.fallback;
-    if (isServerGitHubEnabled()) return new RealGitHubService();
+    if (ownerUserId) return { service: userGitHubService(opts.kv, ownerUserId), source: "user" };
+    if (opts.fallback.kind === "real") return serverOrOwner(opts.fallback);
+    if (isServerGitHubEnabled()) return serverOrOwner(new RealGitHubService());
     throw new Error(
       `Server GitHub connection is unavailable for project ${opts.project.name}; refusing a mock fallback`,
     );
@@ -252,27 +309,22 @@ export function resolveGitHubForProject(opts: {
   // must not brick demo-mode usage of it.
   if (connection.kind === "mock") {
     const userId = resolveProjectUserIdWithGitHubToken(opts.kv, opts.project);
-    if (userId) {
-      return new RealGitHubService({
-        token: () => getUserGitHubToken(opts.kv, userId)?.token,
-        label: "GitHub OAuth connection",
-        fetchImpl: userGitHubFetch,
-      });
-    }
+    if (userId) return { service: userGitHubService(opts.kv, userId), source: "user" };
     const identity = opts.project.githubConnection?.userId || opts.project.ownerId;
     if (identity !== DEMO_USER_ID && getEffectiveOAuthConfig(opts.kv)) {
+      if (actingUser) throw githubAuthorizationRequired({ reason: "no-token" });
       throw new Error(
         `GitHub OAuth is configured, but no user token is stored for project ${opts.project.name}. Log in with GitHub once; then project actions use your repository access without GITHUB_TOKEN.`,
       );
     }
-    if (opts.fallback.kind === "mock") return opts.fallback;
+    if (opts.fallback.kind === "mock") return { service: opts.fallback, source: "mock" };
   }
   let mock = projectMocks.get(opts.fallback);
   if (!mock) {
     mock = new MockGitHubService();
     projectMocks.set(opts.fallback, mock);
   }
-  return mock;
+  return { service: mock, source: "mock" };
 }
 const projectMocks = new WeakMap<IGitHubService, MockGitHubService>();
 

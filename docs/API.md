@@ -43,6 +43,8 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | GET | `/projects/:id/repo-status` | **Repository health** — the measured answer to "why can't the AI see my code?": acting credential (`source`, `login`, `scopes`), per repository `readable` / `exists` / `branchExists` / `defaultBranch` / `headSha` / `files` / `readme` / `ciWorkflows`, an actionable `error` + `hint` per problem, and the exact `brief` the chat prompt receives (`status`, `reason`, `hint`, `files`, `configuredBranch`, `source`, `via`, `elapsedMs`). `?refresh=1` bypasses the brief cache **and** forces a mirror `git fetch`. Also returns a `mirror` block: `enabled`, `gitAvailable`/`gitVersion`, `root`, `ready`, `exists`, `headSha`, `defaultBranch`, `sizeMb`, `ageMs`, `refreshInMs`, `blocker`, `error` — the state of the local **read-only** bare clone the evidence is read from (`brief.via: "mirror" \| "api"` says which transport produced it) |
 | POST | `/projects/:id/repo-mirror/refresh` | Force a `git fetch` of the project's read-only local mirror and drop the cached brief; returns the mirror state (`ready`, `headSha`, `sizeMb`, `fetchMs`, `blocker`). `409` when the mirror is disabled or `git` is missing |
 | DELETE | `/projects/:id/repo-mirror` | Delete the local mirror copy (`{removed}`). GitHub and the project configuration are untouched; the next read recreates it (or falls back to the API) |
+| GET | `/projects/:id/pull-requests/:number/checks` | **Pre-merge verification** (`?repo=owner/name`, default config repo): `{ok, verification: passed\|failed\|pending\|no-ci\|simulated\|unavailable, headSha, checks[], missing[], message}` for the PR's **current** head commit |
+| POST | `/projects/:id/pull-requests/:number/merge` | Merge (`method` = `squash` default \| `merge` \| `rebase`, `repo?`, `expectedSha?`). **Test before applying:** refused with `409 {error, gate}` unless CI on the head is green, every required check (`settings.metadata.requiredChecks` / `requiredChecksByRepo`) passed and the head still equals `expectedSha`; the merge is pinned to the verified SHA. Repos without CI need `settings.metadata.allowMergeWithoutCi: true` |
 | GET | `/projects/:id/repositories` | Linked repositories (`repo`, `branch`, `role`, `isConfigRepo`, `private`, `htmlUrl`) |
 | POST | `/projects/:id/repositories` | Link a repository (`repo`, `branch?`, `role?`, `isConfigRepo?`) — idempotent per repo |
 | PATCH | `/projects/:id/repositories/:owner/:name` | Change `branch` / `role` / make it the config repo |
@@ -107,7 +109,7 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/POST | `/tasks`, `/tasks/:id` | Task queue |
-| POST | `/tasks/:id/run` | Queue a run |
+| POST | `/tasks/:id/run` | Queue a run. Write-capable runs first check the acting user can push to every linked repository: `403 {error, writeAccess}` (or `github_authorization_required`) instead of failing mid-run |
 | POST | `/tasks/:id/cancel` | Cancel — queued jobs are dropped, running plans stop between steps; final tasks return `alreadyFinal` |
 | GET | `/runs`, `/runs/:id` | Runs |
 | GET | `/runs/:id/console` | **AI Run Console**: observable steps, results, verification and `skills[]` snapshots (`slug`, `name`, `version`, `instructions`, task-local `guidance`, `source`) — never chain-of-thought |
@@ -127,9 +129,9 @@ Plans are bounded to 12 tasks / 5 files per task and validated as an acyclic gra
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/auth/github/status` | Is OAuth configured? + current user (public) |
-| GET | `/auth/github/login` | 302 redirect to `github.com` authorize (or `?format=json` → `{url, state}`) |
+| GET | `/auth/github/login` | 302 redirect to `github.com` authorize (or `?format=json` → `{url, state, scope}`). `?scope=write` adds the `repo` scope (repository write) on top of the configured login scope — the SPA sends it automatically when a change needs write access |
 | GET | `/auth/github/callback?code&state` | Code exchange → session cookie → redirect to `#/github?login=success` |
-| GET | `/auth/me` | Current user (`{authenticated, user, githubToken:{stored, scopes, canReadPrivateRepos, login}}` — demo user when logged out) |
+| GET | `/auth/me` | Current user (`{authenticated, user, githubToken:{stored, scopes, canReadPrivateRepos, canWrite, requiredWriteScopes, writeAuthorizeUrl, login}}` — demo user when logged out) |
 | POST | `/auth/logout` | Clear session cookie and delete the stored (encrypted) GitHub token |
 
 Sessions travel via the HttpOnly `cv_session` cookie or `Authorization: Bearer <token>`.
@@ -235,3 +237,45 @@ Pending requests are also pushed to Telegram (project chat + paired per-user bot
 ## Real-time (Socket.io)
 
 Channels emitted by the server: `run.updated`, `step.updated`, `task.updated`, `notification`. The client receives **only** status/step/result — never chain-of-thought.
+
+### GitHub write authorization (`github_authorization_required`)
+
+Changes to a project are committed with the **signed-in user's own GitHub
+token** — never the site-wide `GITHUB_TOKEN`. When the user has no stored token,
+or their token is read-only (no `repo` scope) and GitHub rejects a write, the
+failing response carries:
+
+```json
+{
+  "error": "…",
+  "code": "github_authorization_required",
+  "githubAuthorization": {
+    "reason": "no-token | missing-scope | token-rejected",
+    "requiredScopes": ["repo"],
+    "grantedScopes": ["public_repo"],
+    "authorizeUrl": "/auth/github/login?scope=write"
+  }
+}
+```
+
+Routes that let the error escape answer `403`; routes that catch it keep their
+own status but the `githubAuthorization` block is still attached (onSend hook).
+The SPA opens a consent prompt and redirects to `authorizeUrl` (with `next` =
+the current page). Background work without a request user uses the connection
+stored on the project; for a real (non-demo) owner it **never** falls back to
+the site `GITHUB_TOKEN` once GitHub OAuth is configured — it fails with
+`reason: "no-token"` so the owner re-authorizes (read-only mirror fetches go
+anonymous instead).
+
+**Write-access preflight.** `POST /projects/:id/ask`, chat messages that
+dispatch work, `POST /tasks/:id/run` and autonomous orchestrator runs check
+push permission on every linked repository *before* queuing anything. A user
+whose token can read but not push gets `403` with a `writeAccess` block
+(`{ok:false, problem, repos:[{repo, canPush, …}]}`); network errors never
+block.
+
+**Merge gate.** Every path that lands code on a base branch — the project
+Merge button, the approval-gated `merge_pull_request` agent tool and the
+worker's `merge_pr` job — runs the same verification (see
+`/pull-requests/:number/checks`). Failing or pending CI always blocks.
+

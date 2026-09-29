@@ -12,6 +12,8 @@ import {
 } from "../../domain/project-options.js";
 import { parseRepoFullName } from "../../github/types.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
+import { githubAuthorizationRequired } from "../../github/authorization.js";
+import { verifyPullRequestBeforeMerge } from "../../github/merge-gate.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken, getUserGitHubToken } from "../../auth/github-tokens.js";
 import {
@@ -22,7 +24,7 @@ import { logger } from "../../logger.js";
 import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
 import { isAgentType } from "../../agents/generator.js";
-import { dispatchProjectAsk, isAskError } from "./project-ask-shared.js";
+import { dispatchProjectAskChecked, isAskError } from "./project-ask-shared.js";
 import { invalidateRepoBrief, readRepoBrief, repoContextFor } from "../../agents/repo-brief.js";
 
 function fail(
@@ -118,6 +120,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       authenticated,
       fallback: container.github,
     });
+    // A signed-in user creates (and later writes) the project with their own
+    // GitHub token — never the site token. Ask them to authorize first.
+    if (authenticated && resolved.source === "server-token") {
+      const err = githubAuthorizationRequired({ reason: "no-token" });
+      reply.code(403);
+      return err.toJSON();
+    }
     const tokenInfo = resolved.source === "user-oauth" ? describeUserGitHubToken(container.kv, user.id) : undefined;
     const githubConnection: ProjectGithubConnection = {
       kind: resolved.source,
@@ -423,6 +432,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       });
       return container.githubForProject(p, requestUserId);
     }
+    // A signed-in user without a token is resolved as themselves too: the
+    // resolver then asks them to authorize GitHub (write access) instead of
+    // silently committing with the site-wide GITHUB_TOKEN.
+    if (requestUserId) return container.githubForProject(p, requestUserId);
     if (p.githubConnection) return container.githubForProject(p);
     return resolveGitHubForUser({ kv: container.kv, userId: user.id, authenticated, fallback: container.github })
       .service;
@@ -700,6 +713,31 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     }
   });
 
+  /** Pre-merge verification for a PR: is its current head tested (green CI)? */
+  app.get("/projects/:id/pull-requests/:number/checks", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id, number } = req.params as { id: string; number: string };
+    const q = (req.query ?? {}) as Record<string, unknown>;
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    const target =
+      typeof q.repo === "string" && q.repo
+        ? p.repositories.find((r) => r.repo.toLowerCase() === String(q.repo).toLowerCase())
+        : configRepoOf(p.repositories);
+    if (!target) return fail(reply, 404, "repository is not linked to this project");
+    const ref = parseRepoFullName(target.repo);
+    if (!ref) return fail(reply, 400, `Invalid repository "${target.repo}"`);
+    try {
+      return await verifyPullRequestBeforeMerge({
+        github: githubForProject(req, p),
+        repo: ref,
+        number: Number(number),
+        project: p,
+      });
+    } catch (err) {
+      return fail(reply, errStatus(err), err instanceof Error ? err.message : String(err));
+    }
+  });
+
   app.post("/projects/:id/pull-requests/:number/merge", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id, number } = req.params as { id: string; number: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -715,7 +753,37 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const method = body.method === "merge" || body.method === "rebase" ? body.method : "squash";
     try {
       const gh = githubForProject(req, p);
-      const res = await gh.mergePullRequest(ref, Number(number), { method });
+      // Test before applying: the PR's current head must have green CI (the
+      // same gate the agent tool and the approval worker use). The merge is
+      // then pinned to exactly that verified head commit.
+      const gate = await verifyPullRequestBeforeMerge({
+        github: gh,
+        repo: ref,
+        number: Number(number),
+        project: p,
+        expectedSha: typeof body.expectedSha === "string" && body.expectedSha ? body.expectedSha : undefined,
+      });
+      if (!gate.ok) {
+        container.auditRepo.record({
+          action: "github.pr.merge_blocked",
+          projectId: id,
+          result: "denied",
+          source: "web",
+          correlationId: `merge-${id}-${number}-${Date.now()}`,
+          metadata: {
+            repo: target.repo,
+            number: Number(number),
+            verification: gate.verification,
+            headSha: gate.headSha,
+          },
+        });
+        reply.code(409);
+        return { error: gate.message, gate };
+      }
+      const res = await gh.mergePullRequest(ref, Number(number), {
+        method,
+        ...(gate.headSha ? { sha: gate.headSha } : {}),
+      });
       container.auditRepo.record({
         action: "github.pr.merged",
         projectId: id,
@@ -777,7 +845,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const description = String(body.description ?? body.prompt ?? body.title ?? "").trim();
     const title = String(body.title ?? description.slice(0, 120)).trim() || description.slice(0, 120);
     if (body.agentType !== undefined && !isAgentType(body.agentType)) return fail(reply, 400, "Unknown agent type");
-    const result = dispatchProjectAsk(container, id, {
+    const result = await dispatchProjectAskChecked(container, id, {
       title,
       description,
       executionMode: body.executionMode as "autonomous" | "agent" | "simulation" | "workflow" | undefined,
@@ -788,7 +856,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
         ? resolveRequestUser(req, container).user.id
         : undefined,
     });
-    if (isAskError(result)) return fail(reply, result.status, result.error);
+    if (isAskError(result)) return fail(reply, result.status, result.error, result.extra);
     return result;
   });
 

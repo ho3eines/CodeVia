@@ -495,12 +495,14 @@ export class MockGitHubService implements IGitHubService {
   async mergePullRequest(
     ref: GithubRepoRef,
     number: number,
-    opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string } = {},
+    opts: { method?: "merge" | "squash" | "rebase"; commitTitle?: string; sha?: string } = {},
   ): Promise<{ merged: boolean; sha?: string; message?: string }> {
     const r = this.repo(ref);
     const pr = r.pulls.find((p) => p.number === number);
     if (!pr) return { merged: false, message: `PR #${number} not found` };
     if (pr.state !== "open") return { merged: false, message: `PR #${number} is ${pr.state}` };
+    if (opts.sha && r.branches.get(pr.head) !== opts.sha)
+      return { merged: false, message: `Head branch was modified. Review and try the merge again.` };
     const sha = this.sha(`merge-${number}-${Date.now()}`);
     // Merge = union of the head tree into the base tree (head wins).
     const base = this.tree(r, pr.base);

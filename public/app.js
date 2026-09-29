@@ -26,9 +26,117 @@
       const err = new Error(msg);
       err.status = res.status;
       err.body = body;
+      const ghAuth = githubAuthorizationFrom(body);
+      if (ghAuth) {
+        err.githubAuthorization = ghAuth;
+        requestGitHubWriteAccess(ghAuth);
+      }
       throw err;
     }
-    return res.status === 204 ? null : res.json();
+    if (res.status === 204) return null;
+    const data = await res.json();
+    // Chat dispatch answers 200 with an assistant message; when that message
+    // says GitHub write access is missing, ask for it right away.
+    const ghAuth = freshMessageAuthorization(data);
+    if (ghAuth) requestGitHubWriteAccess(ghAuth);
+    return data;
+  }
+  function freshMessageAuthorization(data) {
+    try {
+      const msgs = data && (Array.isArray(data.messages) ? data.messages : data.conversation && data.conversation.messages);
+      const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
+      const info = last && last.metadata && last.metadata.githubAuthorization;
+      if (!info) return null;
+      const age = Date.now() - new Date(last.createdAt || 0).getTime();
+      return age >= 0 && age < 60000 ? info : null;
+    } catch (_) { return null; }
+  }
+
+  /* ---------- GitHub write authorization ----------
+     CodeVia applies changes to a project with the signed-in user's own GitHub
+     token (never the site token). When the server answers that the user has
+     not granted GitHub access yet — or granted it read-only — it attaches a
+     `githubAuthorization` block. We then ask the user, automatically, to grant
+     repository write access on GitHub and bring them back to the same page. */
+  const GH_WRITE_AUTH_URL = "/auth/github/login?scope=write";
+  function githubAuthorizationFrom(body) {
+    if (!body || typeof body !== "object") return null;
+    const info = body.githubAuthorization;
+    if (info && typeof info === "object") return info;
+    if (body.code === "github_authorization_required") {
+      return { reason: "no-token", message: body.error || body.message || "", authorizeUrl: GH_WRITE_AUTH_URL };
+    }
+    return null;
+  }
+  // Only in-app hash routes may be used as the post-login destination (the
+  // server enforces the same rule); drop stale ?login=… flags.
+  function githubAuthNextHash() {
+    const raw = String(location.hash || "#/chat");
+    const [path, query = ""] = raw.split("?");
+    const q = new URLSearchParams(query);
+    q.delete("login");
+    q.delete("reason");
+    const qs = q.toString();
+    const next = qs ? path + "?" + qs : path;
+    return /^#\/[A-Za-z0-9_\-/.%?=&]*$/.test(next) && next.length <= 200 ? next : "#/chat";
+  }
+  function githubWriteAuthorizeHref(info) {
+    const base = (info && typeof info.authorizeUrl === "string" && info.authorizeUrl.startsWith("/auth/github/login"))
+      ? info.authorizeUrl : GH_WRITE_AUTH_URL;
+    const url = new URL(base, location.origin);
+    url.searchParams.set("scope", "write");
+    url.searchParams.set("next", githubAuthNextHash());
+    return url.pathname + url.search;
+  }
+  let ghAuthTimer = null;
+  function requestGitHubWriteAccess(info, opts = {}) {
+    // One prompt at a time — many parallel calls can fail for the same reason.
+    if (document.getElementById("gh-write-auth") && !$("#modal-backdrop").hidden) return;
+    try { sessionStorage.setItem("cv-gh-write-prompted", "1"); } catch (_) { /* ignore */ }
+    const href = githubWriteAuthorizeHref(info);
+    const reason = (info && info.reason) || "no-token";
+    const lead = reason === "missing-scope"
+      ? "Your GitHub authorization is read-only, so CodeVia cannot apply changes to this project."
+      : reason === "token-rejected"
+        ? "GitHub rejected your stored authorization (revoked or expired)."
+        : "CodeVia has no GitHub authorization from your account yet.";
+    const seconds = opts.autoRedirect === false ? 0 : Math.max(0, Number(opts.seconds ?? 8));
+    openModal("🔐 GitHub write access required", `
+      <div id="gh-write-auth" class="gh-write-auth" dir="auto">
+        <p>${esc(lead)}</p>
+        <p>Changes are committed with <strong>your own</strong> GitHub account — the site token is never used to write your repositories. Grant CodeVia repository write access (scope <code>repo</code>) on GitHub; you will come right back to this page.</p>
+        <p dir="rtl" lang="fa" style="color:var(--text-muted)">برای اعمال تغییرات روی پروژه، CodeVia باید با حساب GitHub خودِ شما و با دسترسی نوشتن (write) کار کند. روی دکمه بزنید تا GitHub اجازه را از شما بگیرد.</p>
+        ${seconds ? `<p class="gh-write-auth-countdown" style="color:var(--text-muted);font-size:12px">Redirecting to GitHub in <span id="gh-write-auth-seconds">${seconds}</span>s…</p>` : ""}
+        <div class="flex mt" style="gap:8px;justify-content:flex-end">
+          <button class="btn btn-ghost" id="gh-write-auth-later" type="button">Later</button>
+          <a class="btn btn-primary" id="gh-write-auth-go" href="${esc(href)}">Grant write access on GitHub</a>
+        </div>
+      </div>`);
+    if (ghAuthTimer) { clearInterval(ghAuthTimer); ghAuthTimer = null; }
+    const stop = () => { if (ghAuthTimer) { clearInterval(ghAuthTimer); ghAuthTimer = null; } };
+    const later = document.getElementById("gh-write-auth-later");
+    if (later) later.onclick = () => { stop(); closeModal(); };
+    if (!seconds) return;
+    let left = seconds;
+    ghAuthTimer = setInterval(() => {
+      const box = document.getElementById("gh-write-auth");
+      if (!box || $("#modal-backdrop").hidden) return stop();
+      left -= 1;
+      const el = document.getElementById("gh-write-auth-seconds");
+      if (el) el.textContent = String(Math.max(left, 0));
+      if (left <= 0) { stop(); location.assign(href); }
+    }, 1000);
+  }
+  window.requestGitHubWriteAccess = requestGitHubWriteAccess;
+  /** Ask once per browser session when the signed-in user's token cannot write. */
+  function maybePromptGitHubWriteAccess() {
+    const gh = authState.githubToken;
+    if (!authState.authenticated || !authState.loginConfigured || !gh || gh.canWrite !== false) return;
+    try { if (sessionStorage.getItem("cv-gh-write-prompted")) return; } catch (_) { return; }
+    requestGitHubWriteAccess({
+      reason: gh.stored ? "missing-scope" : "no-token",
+      authorizeUrl: gh.writeAuthorizeUrl || GH_WRITE_AUTH_URL,
+    }, { autoRedirect: false });
   }
   /* ---------- auth/session state ---------- */
   // Cached session introspection. /auth/me is a PUBLIC endpoint that always
@@ -79,6 +187,10 @@
     });
     let body = null;
     try { body = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      const ghAuth = githubAuthorizationFrom(body);
+      if (ghAuth) requestGitHubWriteAccess(ghAuth);
+    }
     return { ok: res.ok, status: res.status, body, headers: res.headers };
   }
 
@@ -725,6 +837,7 @@
     // Keep the top-bar login/user slot in sync with the refreshed state.
     renderUserSlot();
     refreshBell();
+    maybePromptGitHubWriteAccess();
   }
   async function refreshBell() {
     const btn = $("#bell-btn"), count = $("#bell-count");
@@ -2647,11 +2760,37 @@
     };
   };
   window.projectPRMerge = async (id, repo, number) => {
-    openModal(`Merge PR #${number}`, `<p class="sub">Merge <span class="mono">${esc(repo)}</span> PR #${number} into its base branch. This brings the agent's code onto the base branch.</p><div class="field"><label>Method</label><select class="input" id="pmg-method"><option value="squash">squash</option><option value="merge">merge</option><option value="rebase">rebase</option></select></div><div class="flex"><button class="btn btn-primary" id="pmg-go">Merge</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
-    $("#pmg-go").onclick = async () => {
-      try { const res = await api(`/projects/${id}/pull-requests/${number}/merge`, { method: "POST", body: { repo, method: $("#pmg-method").value } }); closeModal(); toast("PR merged", `#${res.number} → ${res.sha ? res.sha.slice(0, 7) : "done"}`, "ok"); refreshCurrent(); }
-      catch (e) { toast("Merge failed", e.message, "err"); }
+    // Test before applying: the merge is only offered once GitHub CI for the
+    // PR's current head commit is green (the server enforces the same gate).
+    openModal(`Merge PR #${number}`, `<p class="sub">Merge <span class="mono">${esc(repo)}</span> PR #${number} into its base branch. This brings the agent's code onto the base branch.</p>
+      <div id="pmg-gate" class="merge-gate">⏳ Verifying CI for the PR head…</div>
+      <div class="field"><label>Method</label><select class="input" id="pmg-method"><option value="squash">squash</option><option value="merge">merge</option><option value="rebase">rebase</option></select></div>
+      <div class="flex"><button class="btn btn-primary" id="pmg-go" disabled>Merge</button><button class="btn" id="pmg-recheck">↻ Re-check</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    let gate = null;
+    const icon = (st) => st === "success" ? "🟢" : st === "failure" ? "🔴" : st === "pending" ? "🟡" : "⚪";
+    const verify = async () => {
+      const box = $("#pmg-gate"); const go = $("#pmg-go");
+      if (!box || !go) return;
+      box.innerHTML = `⏳ Verifying CI for the PR head…`;
+      go.disabled = true;
+      try {
+        gate = await api(`/projects/${id}/pull-requests/${number}/checks?repo=${encodeURIComponent(repo)}`);
+        const label = { passed: "✅ Tested — CI passed", simulated: "🧪 Simulation (no real tests)", failed: "❌ CI failed", pending: "⏳ CI still running", "no-ci": "⚠️ Not tested — no CI", unavailable: "⚠️ Cannot verify" }[gate.verification] || gate.verification;
+        box.innerHTML = `<div><strong>${esc(label)}</strong>${gate.headSha ? ` · <span class="mono">${esc(gate.headSha.slice(0, 7))}</span>` : ""}</div>
+          <div class="sub" style="margin:4px 0">${esc(gate.message)}</div>
+          ${(gate.checks || []).length ? `<ul class="merge-gate-checks" style="margin:4px 0 8px;padding-left:18px">${gate.checks.map((c) => `<li>${icon(c.status)} ${esc(c.name)} — ${esc(c.status)}${c.url ? ` · <a href="${esc(c.url)}" target="_blank" rel="noopener">details</a>` : ""}</li>`).join("")}</ul>` : ""}`;
+        go.disabled = !gate.ok;
+      } catch (e) {
+        box.innerHTML = `<strong>⚠️ Cannot verify</strong><div class="sub">${esc(e.message)}</div>`;
+      }
     };
+    $("#pmg-recheck").onclick = verify;
+    $("#pmg-go").onclick = async () => {
+      if (!gate || !gate.ok) { toast("Not merged", "CI must pass before the change is applied.", "err"); return; }
+      try { const res = await api(`/projects/${id}/pull-requests/${number}/merge`, { method: "POST", body: { repo, method: $("#pmg-method").value, expectedSha: gate.headSha } }); closeModal(); toast("PR merged", `#${res.number} → ${res.sha ? res.sha.slice(0, 7) : "done"}`, "ok"); refreshCurrent(); }
+      catch (e) { toast("Merge blocked", e.message, "err"); if (e.status === 409) verify(); }
+    };
+    await verify();
   };
   window.projectConversationNew = async (id) => {
     openModal("New Conversation", `<div class="field"><label>Title</label><input class="input" id="pcn-title" placeholder="e.g. Login debugging session"/></div><div class="flex"><button class="btn btn-primary" id="pcn-go">Start</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
@@ -5722,6 +5861,10 @@
         let ev;
         try { ev = JSON.parse(line.slice(5).trim()); } catch (_) { continue; }
         if (!ev || typeof ev.type !== "string") continue;
+        // A dispatch blocked for missing GitHub write access asks for it right away.
+        if (ev.type === "message" && ev.message && ev.message.metadata && ev.message.metadata.githubAuthorization) {
+          requestGitHubWriteAccess(ev.message.metadata.githubAuthorization);
+        }
         const name = "on" + ev.type.charAt(0).toUpperCase() + ev.type.slice(1);
         if (typeof handlers[name] === "function") {
           try { handlers[name](ev); } catch (_) { /* a broken handler must not kill the stream */ }

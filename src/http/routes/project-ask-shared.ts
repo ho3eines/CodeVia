@@ -9,6 +9,9 @@ import type { Container } from "../../app/container.js";
 import type { AgentType } from "../../domain/entities.js";
 import { IMPLEMENTERS } from "../../agents/implementation.js";
 import { defaultPlanFor } from "../../agents/plan.js";
+import { hydrateProject } from "../../domain/project-options.js";
+import { checkProjectWriteAccess } from "../../github/write-access.js";
+import { isGitHubAuthorizationRequired } from "../../github/authorization.js";
 
 export type AskExecutionMode = "autonomous" | "agent" | "simulation" | "workflow";
 
@@ -38,6 +41,64 @@ export interface AskError {
   status: number;
   error: string;
   extra?: Record<string, unknown>;
+}
+
+/**
+ * "Can this request actually apply changes?" — checked before a task that may
+ * write (autonomous / implementer agent / workflow) is queued, so the user is
+ * asked for GitHub write access up front instead of after research and
+ * implementation already spent model budget. Simulation and read-only agents
+ * skip it. Network/API hiccups never block dispatch (the task reports them).
+ */
+export async function preflightProjectWrite(
+  container: Container,
+  projectId: string,
+  params: Omit<AskParams, "projectId">,
+): Promise<AskError | undefined> {
+  if (params.executionMode === "simulation") return undefined;
+  if (
+    params.executionMode === "agent" &&
+    params.agentType &&
+    !IMPLEMENTERS.includes(params.agentType as AgentType) &&
+    !["devops", "release", "documentation", "refactoring", "performance", "security"].includes(params.agentType)
+  )
+    return undefined;
+  const stored = container.projectRepo.findById(projectId)?.data;
+  if (!stored) return undefined;
+  const project = hydrateProject(stored);
+  try {
+    const github = container.githubForProject(project, params.requestUserId);
+    const access = await checkProjectWriteAccess({
+      github,
+      project,
+      cacheScope: params.requestUserId ?? project.githubConnection?.userId ?? project.ownerId,
+    });
+    if (!access.ok) {
+      return {
+        status: 403,
+        error: access.problem ?? "Your GitHub account cannot push to this project's repositories.",
+        extra: { writeAccess: access },
+      };
+    }
+    return undefined;
+  } catch (err) {
+    if (isGitHubAuthorizationRequired(err)) {
+      const json = (err as { toJSON?: () => Record<string, unknown> }).toJSON?.() ?? {};
+      return { status: 403, error: err instanceof Error ? err.message : String(err), extra: json };
+    }
+    return undefined;
+  }
+}
+
+/** Preflight write access, then dispatch. */
+export async function dispatchProjectAskChecked(
+  container: Container,
+  projectId: string,
+  params: Omit<AskParams, "projectId">,
+): Promise<AskResult | AskError> {
+  const blocked = await preflightProjectWrite(container, projectId, params);
+  if (blocked) return blocked;
+  return dispatchProjectAsk(container, projectId, params);
 }
 
 export function dispatchProjectAsk(

@@ -1,6 +1,27 @@
 # CodeVia Project Handoff
-> آخرین بروزرسانی: 2026-09-15 — آینهٔ محلی **فقط‌خواندنی** ریپازیتوری (bare clone + git plumbing) شواهد چت و ابزار `search` را از دیسک می‌خواند؛ بدون اجرای کد مخزن و با fallback کامل به API
+> آخرین بروزرسانی: 2026-09-29 — گیت ادغام (تست قبل از اعمال) + پیش‌بررسی دسترسی push در همهٔ مسیرهای نوشتن. قبلی: 2026-09-15 — آینهٔ محلی **فقط‌خواندنی** ریپازیتوری (bare clone + git plumbing) شواهد چت و ابزار `search` را از دیسک می‌خواند؛ بدون اجرای کد مخزن و با fallback کامل به API
 > این فایل برای جلوگیری از خواندن کل کد در هر جلسه است. همیشه قبل از شروع کار این فایل را بخوانید.
+
+## ممیزی «همهٔ بخش‌ها تغییر/مدیریت/تست قبل از اعمال» (2026-09-29)
+- **درخواست کاربر:** بررسی اینکه همهٔ بخش‌ها بتوانند روی پروژه تغییر بدهند، پروژه را مدیریت کنند و قبل از اعمال تست کنند.
+- **گیت ادغام (`src/github/merge-gate.ts`, جدید):** `verifyPullRequestBeforeMerge` — ادغام فقط وقتی CI روی head فعلی PR سبز است (حداقل یک چک موفق، بدون failing/pending، همهٔ `requiredChecks`/`requiredChecksByRepo` موفق، و head برابر `expectedSha`). ادغام به همان SHA پین می‌شود. ریپوی بدون CI فقط با `settings.metadata.allowMergeWithoutCi = true`. در مسیرهای: دکمهٔ Merge (`POST .../merge` → `409 {error, gate}`)، ابزار `merge_pull_request` در `core-tools.ts` و جاب `merge_pr` در `worker.ts`. روت جدید `GET /projects/:id/pull-requests/:number/checks`.
+- **پیش‌بررسی دسترسی push (`src/github/write-access.ts`, جدید):** قبل از `/ask`، ارسال کار از چت (`conversations.ts`)، `/tasks/:id/run` و اجرای خودکار orchestrator؛ کاربر بدون push → `403 {writeAccess}` یا `github_authorization_required`. خطای شبکه مسدود نمی‌کند. کش با `clearWriteAccessCache`.
+- **رجیستری:** کار پس‌زمینه برای مالک واقعی (غیر demo) وقتی OAuth پیکربندی شده، هرگز به `GITHUB_TOKEN` سایت برنمی‌گردد (خطای `no-token`)؛ آینه به clone ناشناس.
+- **UI:** مودال Merge وضعیت چک‌ها را نشان می‌دهد و `expectedSha` می‌فرستد؛ پاسخ‌های `writeAccess` به مودال دسترسی وصل‌اند.
+- **Tests:** `src/tests/fake-github-rest.ts` (فیک REST گیت‌هاب با ثبت توکن هر درخواست) + `src/tests/all-parts-apply-changes.test.ts` (۵ تست: چرخهٔ کامل مدیریت/تغییر/PR/ادغام فقط با توکن کاربر و فقط بعد از CI سبز؛ توکن read-only؛ بدون push؛ بدون توکن؛ پس‌زمینه). `merge-approval.test.ts` به‌روزرسانی و ۳ تست گیت CI اضافه شد. کل: 816/816.
+
+## اعمال تغییرات با توکن کاربر + درخواست خودکار دسترسی write (2026-09-29)
+- **گزارش کاربر:** «نمی‌شود تغییرات را روی پروژهٔ جاری اعمال کرد؛ از توکن سایت استفاده می‌کند. باید از API کاربر استفاده کند و به‌صورت خودکار قابلیت write را از کاربر درخواست کند.»
+- **ریشه:** کاربر لاگین‌کرده‌ای که توکن ذخیره‌شده نداشت (یا توکنش بدون اسکوپ `repo` بود) در ALS actor ثبت نمی‌شد، پس `resolveGitHubForProject` به اتصال ذخیره‌شدهٔ پروژه (`server-token` / بدون اتصال) و در نتیجه `GITHUB_TOKEN` سایت برمی‌گشت؛ ساخت پروژه هم `kind: "server-token"` ذخیره می‌کرد. توکن read-only هم روی نوشتن 403/404 مبهم می‌داد.
+- **Backend:**
+  - `src/github/authorization.ts` (جدید): `GitHubAuthorizationRequiredError` (`code: github_authorization_required`، `reason: no-token|missing-scope|token-rejected`، `authorizeUrl: /auth/github/login?scope=write`)، `hasGitHubWriteScope`, `mergeOAuthScopes`.
+  - `request-actor.ts`: کانتکست درخواست حالا `signedInUserId` (حتی بدون توکن) و اعلان `authorization` را هم نگه می‌دارد؛ `app.ts` برای هر درخواست احرازشده کانتکست می‌بندد.
+  - `resolveGitHubForProject`: اگر کاربرِ لاگین‌کرده (صریح یا از ALS) توکن ندارد و نتیجه به توکن سایت می‌رسید → خطای authorization (نه `GITHUB_TOKEN`). کارهای پس‌زمینه بدون کاربر درخواست، مثل قبل. `resolveGitHubTokenForProject` (آینه) برای چنین کاربری clone ناشناس می‌کند.
+  - سرویس per-user (`userGitHubService`) با `mapError` جدید `RealGitHubService`: 401 → `token-rejected`؛ نوشتن 403/404 با توکن بدون `repo` → `missing-scope`.
+  - `/auth/github/login?scope=write` اسکوپ `repo` را به اسکوپ لاگین اضافه می‌کند (فقط همین ارتقا، نه اسکوپ دلخواه). `/auth/me` → `githubToken.canWrite` + `writeAuthorizeUrl`.
+  - `setErrorHandler` خطای فرار کرده را 403 ساخت‌یافته می‌کند؛ هوک `onSend` بلوک `githubAuthorization` را به هر پاسخ خطای همان درخواست اضافه می‌کند (حتی وقتی روت خطا را catch کرده). `POST /projects` و نوشتن‌های صفحهٔ GitHub برای کاربر بدون توکن زودتر 403 می‌دهند.
+- **UI (`client/app/10-core.js`, `20-app-shell.js`):** `api()`/`apiRaw()` با دیدن `githubAuthorization` مودال «🔐 GitHub write access required» را با شمارش معکوس ۸ ثانیه‌ای و ریدایرکت خودکار به `/auth/github/login?scope=write&next=<صفحهٔ فعلی>` باز می‌کنند؛ اگر `/auth/me` بگوید `canWrite === false` یک‌بار در هر نشست (بدون ریدایرکت خودکار) پیشنهاد می‌شود.
+- **Tests:** `src/tests/github-write-authorization.test.ts` (۱۴) و `github-write-authorization-ui.test.ts` (۳، jsdom).
 
 ## رفع‌های منطقی (2026-09-29)
 - `ModelRouter`: allow-list (`allowedModels`) اکنون fail-closed است (قبلاً اگر همهٔ مدل‌های مجاز حذف می‌شدند، بی‌صدا به کل رجیستری برمی‌گشت)؛ سقف هزینه `maxCostUsd` هزینهٔ تخمینی درخواست را می‌سنجد (فرمول قبلی `*2000` عملاً هیچ‌وقت فیلتر نمی‌کرد)؛ `maxLatencyMs` که no-op بود، مدل‌های کندتر از ۱.۵× بودجه را به انتهای لیست می‌برد؛ route دیگر اشیای ورودی را mutate نمی‌کند.

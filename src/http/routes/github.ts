@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
 import { verifyGithubSignature, getWebhookSecret } from "../../github/webhook.js";
 import { GitHubAuthError } from "../../github/real-service.js";
+import { GitHubAuthorizationRequiredError, githubAuthorizationRequired } from "../../github/authorization.js";
 import { resolveGitHubForUser, isServerGitHubEnabled } from "../../github/registry.js";
 import type { ResolvedGitHub } from "../../github/registry.js";
 import { eventBus, generateCorrelationId } from "../../events/bus.js";
@@ -27,6 +28,14 @@ function githubError(
   resolved?: ResolvedGitHub,
 ): { error: string; source?: string; hint?: string } {
   const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof GitHubAuthorizationRequiredError) {
+    const rejected = err.notice.reason === "token-rejected";
+    reply.code(rejected ? 401 : 403);
+    const hint = rejected
+      ? "GitHub rejected your login token (revoked or expired). Log in with GitHub again — CodeVia asks for repository write access automatically."
+      : err.notice.message;
+    return { ...err.toJSON(), error: message, source: resolved?.source, hint };
+  }
   if (err instanceof GitHubAuthError) {
     reply.code(err.status === 403 ? 403 : 401);
     const hint =
@@ -37,6 +46,17 @@ function githubError(
   }
   reply.code(502);
   return { error: message, source: resolved?.source, hint: "GitHub API request failed — see server logs." };
+}
+
+/**
+ * Writes on the GitHub page (create repository / branch / PR) must run as the
+ * signed-in user. A user without their own token is asked to authorize GitHub
+ * (write access) instead of acting through the site-wide GITHUB_TOKEN.
+ */
+function requireUserWriteToken(resolved: ResolvedGitHub & { authenticated: boolean }): void {
+  if (resolved.authenticated && resolved.source === "server-token") {
+    throw githubAuthorizationRequired({ reason: "no-token" });
+  }
 }
 
 export function registerGithubRoutes(app: FastifyInstance, container: Container): void {
@@ -123,6 +143,7 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
       return fail(reply, 400, "Repository name is required and can only contain letters, digits, '.', '_', '-'");
     const resolved = resolveFor(req);
     try {
+      requireUserWriteToken(resolved);
       const repo = await resolved.service.createRepository({
         name,
         owner: typeof b.owner === "string" && b.owner.trim() ? b.owner.trim() : undefined,
@@ -176,6 +197,7 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
     const b = req.body as Record<string, unknown>;
     const resolved = resolveFor(req);
     try {
+      requireUserWriteToken(resolved);
       return await resolved.service.createBranch({ owner, name }, String(b.name), String(b.baseSha));
     } catch (err) {
       return githubError(reply, err, resolved);
@@ -187,6 +209,7 @@ export function registerGithubRoutes(app: FastifyInstance, container: Container)
     const b = req.body as Record<string, unknown>;
     const resolved = resolveFor(req);
     try {
+      requireUserWriteToken(resolved);
       return await resolved.service.createPullRequest(
         { owner, name },
         String(b.title),
