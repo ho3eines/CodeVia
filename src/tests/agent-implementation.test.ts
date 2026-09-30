@@ -438,9 +438,12 @@ describe("safe source edits", () => {
     });
     expect(simulated).toContain(existing);
   });
-  it("rejects ambiguous edits and whole-file rewrites", () => {
+  it("rejects ambiguous edits; small files may be rewritten, large files need a patch", () => {
     expect(() => applyFileEdits("x x", '{"edits":[{"oldText":"x","newText":"y"}]}')).toThrow(/exactly once/);
-    expect(() => applyFileEdits("x", "export const changed = 1;")).toThrow(/JSON/);
+    // Below the 8KB threshold a full rewrite is allowed (step-1 contract) …
+    expect(applyFileEdits("x", "export const changed = 1;")).toBe("export const changed = 1;");
+    // … above it the model must send a JSON patch or a unified diff.
+    expect(() => applyFileEdits("y".repeat(9000), "export const changed = 1;")).toThrow(/JSON/);
   });
   it.each(["../auth.ts", "/src/a.ts", "src/../a.ts", "src\\a.ts", ".git/config", "CodeVia/agents/backend.md"])(
     "rejects unsafe/managed path %s",
