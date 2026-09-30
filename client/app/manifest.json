@@ -90,31 +90,31 @@
       "file": "140-conversations-memory-github.js",
       "module": "conversations · conversation detail · memory · github repos",
       "from": 5565,
-      "to": 6060
+      "to": 6080
     },
     {
       "file": "150-login-telegram.js",
       "module": "login-result toasts · create repo · telegram",
-      "from": 6061,
-      "to": 6409
+      "from": 6081,
+      "to": 6429
     },
     {
       "file": "160-settings.js",
       "module": "settings hub",
-      "from": 6410,
-      "to": 6516
+      "from": 6430,
+      "to": 6536
     },
     {
       "file": "170-admin.js",
       "module": "admin console",
-      "from": 6517,
-      "to": 6917
+      "from": 6537,
+      "to": 6937
     },
     {
       "file": "180-search-boot.js",
       "module": "search · boot",
-      "from": 6918,
-      "to": 6939
+      "from": 6938,
+      "to": 6959
     }
   ]
 }

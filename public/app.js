@@ -5784,12 +5784,13 @@
         : "";
       const mirrorBit = mirrorBitHtml((status && status.mirror) || brief.mirror || null, brief.via);
       const noCi = repos.some((r) => r.readable && !asArray(r.ciWorkflows).length);
+      const canSetupCi = repos.some((r) => r.ciSetupAvailable);
       const tone = branchNote || noCi ? " warn" : "";
       return `<div class="notice${tone}"><div style="display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap">
         <div style="flex:1;min-width:240px">🔗 <strong>Repository context: available</strong> — the AI reads this before answering.
           ${rows}
           ${branchNote}
-          ${noCi ? `<div class="field-hint warn">No GitHub Actions workflow found: agents verify their work through CI check runs, so QA can only report “unverified”. Add a build/test workflow (docs/AGENT_EXECUTION.md → real build/test).</div>` : ""}
+          ${noCi ? `<div class="field-hint warn">No GitHub Actions workflow found: agents verify their work through CI check runs, so QA can only report “unverified”. ${canSetupCi ? `<button class="btn btn-ghost" id="cv-ci-setup" style="padding:2px 9px;font-size:11px;white-space:nowrap;margin-left:6px">⚡ ساخت CI</button>` : `Add a build/test workflow (docs/AGENT_EXECUTION.md → real build/test).`}</div>` : ""}
           <div class="field-hint">${connBit} · ${brief.source === "cache" ? `cached ${Math.round((brief.ageMs || 0) / 1000)}s ago` : `read in ${brief.elapsedMs || 0}ms`}</div>
           ${mirrorBit ? `<div class="field-hint">${mirrorBit}</div>` : ""}
         </div>${recheck}</div></div>`;
@@ -5822,6 +5823,25 @@
       btn.disabled = true;
       await loadRepoContext(projectId, { refresh: true });
       toast("Repository check done", "Re-read from GitHub", "ok");
+    };
+    wireCiSetup(projectId);
+  }
+
+  /** Wire the "[ساخت CI]" button: propose a CI workflow via a Draft PR. */
+  function wireCiSetup(projectId) {
+    const btn = document.getElementById("cv-ci-setup");
+    if (!btn || !projectId) return;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = "…در حال پیشنهاد CI";
+      try {
+        const res = await api(`/projects/${encodeURIComponent(projectId)}/ci-setup`, { method: "POST" });
+        const rows = asArray(res.results).map((r) => `${r.repo}: ${r.status}${r.prNumber ? ` (PR #${r.prNumber})` : ""}${r.detail ? ` — ${String(r.detail).slice(0, 120)}` : ""}`);
+        toast("CI proposed as a Draft PR", rows.join(" · ") || "done", "ok");
+      } catch (e) {
+        toast("CI setup failed", (e && e.message) || String(e), "err");
+      }
+      await loadRepoContext(projectId, { refresh: true });
     };
   }
 

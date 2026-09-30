@@ -12,8 +12,16 @@ import {
 } from "../../domain/project-options.js";
 import { parseRepoFullName } from "../../github/types.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
-import { githubAuthorizationRequired } from "../../github/authorization.js";
+import { githubAuthorizationRequired, isGitHubAuthorizationRequired } from "../../github/authorization.js";
 import { verifyPullRequestBeforeMerge } from "../../github/merge-gate.js";
+import { checkProjectWriteAccess } from "../../github/write-access.js";
+import {
+  CI_SETUP_BRANCH,
+  detectStacks,
+  proposeCiSetup,
+  requiredChecksForStacks,
+  requiredChecksPatch,
+} from "../../github/ci-template.js";
 import { canAccessProject, resolveRequestUser } from "../auth.js";
 import { describeUserGitHubToken, getUserGitHubToken } from "../../auth/github-tokens.js";
 import {
@@ -1093,6 +1101,42 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
         row.codeFiles = blobs.filter((x) => !x.startsWith("CodeVia/")).length;
         row.readme = blobs.some((x) => /^readme(\.md)?$/i.test(x));
         row.ciWorkflows = blobs.filter((x) => x.startsWith(".github/workflows/")).slice(0, 10);
+        // Step 2: report the detected stack so the UI can offer "[ساخت CI]",
+        // and — once our workflow has been merged into the base branch — record
+        // its real job names as requiredChecks automatically (idempotent; an
+        // explicit user configuration always wins).
+        const stacks = detectStacks(blobs);
+        row.ciStacks = stacks;
+        row.ciSetupAvailable = !(row.ciWorkflows as string[]).length && stacks.length > 0;
+        const ours = (row.ciWorkflows as string[]).some((w) => w.endsWith("codevia-ci.yml"));
+        if (ours && stacks.length) {
+          const patch = requiredChecksPatch(p.settings, link.repo, stacks, (p.repositories ?? []).length > 1);
+          if (patch) {
+            try {
+              const next = {
+                ...p,
+                settings: {
+                  ...p.settings,
+                  metadata: { ...(p.settings?.metadata ?? {}), ...patch },
+                },
+              };
+              await save(next);
+              Object.assign(p, next);
+              row.requiredChecksApplied = requiredChecksForStacks(stacks);
+              logger.info("recorded CI requiredChecks from codevia-ci.yml", {
+                projectId: p.id,
+                repo: link.repo,
+                checks: row.requiredChecksApplied,
+              });
+            } catch (err) {
+              logger.warn("requiredChecks auto-fill failed", {
+                projectId: p.id,
+                repo: link.repo,
+                err: String(err),
+              });
+            }
+          }
+        }
         if (!blobs.length) {
           row.hint = `The branch "${branch}" of ${link.repo} has no files. Push the code, or point the project at the branch that has it.`;
         } else if (!(row.ciWorkflows as string[]).length) {
@@ -1158,6 +1202,71 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
       healthy: !connectionError && repositories.length > 0 && repositories.every((r) => r.readable === true),
       checkedAt: new Date().toISOString(),
     };
+  });
+
+  /**
+   * Propose CI for the project's linked repositories (operational plan step 2):
+   * detect the stack, commit `.github/workflows/codevia-ci.yml` on a dedicated
+   * `codevia-ci-setup` branch and open a **Draft PR** for a human to review and
+   * merge — never a direct push to the base branch. Once the PR is merged, the
+   * next `repo-status` read records the workflow's job names as the project's
+   * requiredChecks automatically.
+   */
+  app.post("/projects/:id/ci-setup", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    const { user, authenticated } = resolveRequestUser(req, container);
+    const userId = authenticated ? user.id : undefined;
+    const gh = githubForProject(req, p);
+    // Preflight: proposing CI means committing a branch and opening a PR with
+    // the user's own token — the same gate as every other write path.
+    try {
+      const access = await checkProjectWriteAccess({
+        github: gh,
+        project: p,
+        cacheScope: userId ?? p.ownerId,
+      });
+      if (!access.ok)
+        return fail(reply, 403, access.problem ?? "Your GitHub account cannot push to this project's repositories.", {
+          writeAccess: access,
+        });
+    } catch (err) {
+      if (isGitHubAuthorizationRequired(err)) {
+        const json = (err as { toJSON?: () => Record<string, unknown> }).toJSON?.() ?? {};
+        return fail(reply, 403, err instanceof Error ? err.message : String(err), json);
+      }
+      throw err;
+    }
+    const links = (
+      p.repositories?.length ? p.repositories : [{ repo: p.configRepo, branch: p.branch }]
+    ) as ProjectRepositoryLink[];
+    const results: Array<Record<string, unknown>> = [];
+    for (const link of links) {
+      const ref = parseRepoFullName(link.repo);
+      if (!ref) {
+        results.push({ repo: link.repo, status: "invalid-repo", stacks: [], detail: "expected owner/name" });
+        continue;
+      }
+      try {
+        results.push({
+          ...(await proposeCiSetup({
+            github: gh,
+            repo: ref,
+            repoName: link.repo,
+            baseBranch: link.branch || p.branch || "main",
+          })),
+        });
+      } catch (err) {
+        results.push({
+          repo: link.repo,
+          status: "error",
+          stacks: [],
+          detail: String((err as Error)?.message ?? err).slice(0, 300),
+        });
+      }
+    }
+    return { results, branch: CI_SETUP_BRANCH };
   });
 
   /**
