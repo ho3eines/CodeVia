@@ -69,7 +69,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (744 tests)
+npm test            # unit + integration + end-to-end (869 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run typecheck   # strict TypeScript
 npm run build       # compile + copy static UI into dist/
