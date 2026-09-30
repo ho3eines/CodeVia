@@ -91,4 +91,35 @@ describe("GitHub write-access prompt", () => {
     (doc.getElementById("gh-write-auth-later") as HTMLButtonElement).click();
     expect((doc.getElementById("modal-backdrop") as HTMLElement).hidden).toBe(true);
   });
+
+  it("turns the frozen countdown into a retry link when the redirect does not leave the page", async () => {
+    const { win, doc } = await boot({
+      me: { ...readOnlyMe, githubToken: { ...readOnlyMe.githubToken, canWrite: true } },
+      hash: "#/projects",
+      failing: "/projects",
+    });
+    expect(doc.getElementById("gh-write-auth-seconds"), "countdown running").toBeTruthy();
+    // Close the 8s prompt the 403 opened, then re-open with a 1s countdown.
+    (doc.getElementById("gh-write-auth-later") as HTMLButtonElement).click();
+    win.requestGitHubWriteAccess(
+      { reason: "missing-scope", authorizeUrl: "/auth/github/login?scope=write" },
+      { seconds: 1 },
+    );
+    // 1s countdown + 2.5s "still here?" fallback + margin. (jsdom cannot
+    // navigate, which is exactly the "redirect was swallowed" case.)
+    await new Promise((r) => setTimeout(r, 4200));
+    const line = doc.getElementById("gh-write-auth-countdown");
+    expect(line, "countdown line still present").toBeTruthy();
+    const retry = line!.querySelector("a") as HTMLAnchorElement;
+    expect(retry, "retry link rendered").toBeTruthy();
+    const href = new URL(retry.getAttribute("href") ?? "", "http://codevia.test");
+    expect(href.pathname).toBe("/auth/github/login");
+    expect(href.searchParams.get("scope")).toBe("write");
+    expect(href.searchParams.get("next")).toBe("#/projects");
+    // The modal stays open and actionable — never a dead "0s…" screen.
+    expect((doc.getElementById("modal-backdrop") as HTMLElement).hidden).toBe(false);
+    expect((doc.getElementById("gh-write-auth-go") as HTMLAnchorElement).getAttribute("href")).toContain(
+      "/auth/github/login",
+    );
+  });
 });

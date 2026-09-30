@@ -102,7 +102,7 @@
         <p>${esc(lead)}</p>
         <p>Changes are committed with <strong>your own</strong> GitHub account — the site token is never used to write your repositories. Grant CodeVia repository write access (scope <code>repo</code>) on GitHub; you will come right back to this page.</p>
         <p dir="rtl" lang="fa" style="color:var(--text-muted)">برای اعمال تغییرات روی پروژه، CodeVia باید با حساب GitHub خودِ شما و با دسترسی نوشتن (write) کار کند. روی دکمه بزنید تا GitHub اجازه را از شما بگیرد.</p>
-        ${seconds ? `<p class="gh-write-auth-countdown" style="color:var(--text-muted);font-size:12px">Redirecting to GitHub in <span id="gh-write-auth-seconds">${seconds}</span>s…</p>` : ""}
+        ${seconds ? `<p class="gh-write-auth-countdown" id="gh-write-auth-countdown" style="color:var(--text-muted);font-size:12px">Redirecting to GitHub in <span id="gh-write-auth-seconds">${seconds}</span>s…</p>` : ""}
         <div class="flex mt" style="gap:8px;justify-content:flex-end">
           <button class="btn btn-ghost" id="gh-write-auth-later" type="button">Later</button>
           <a class="btn btn-primary" id="gh-write-auth-go" href="${esc(href)}">Grant write access on GitHub</a>
@@ -120,7 +120,19 @@
       left -= 1;
       const el = document.getElementById("gh-write-auth-seconds");
       if (el) el.textContent = String(Math.max(left, 0));
-      if (left <= 0) { stop(); location.assign(href); }
+      if (left <= 0) {
+        stop();
+        location.assign(href);
+        // If the browser is still on this page a moment later, the navigation
+        // was swallowed (an outdated service worker answering the OAuth route
+        // with a network error, an offline proxy, …). Turn the frozen "0s…"
+        // line into a retry link so the prompt stays actionable.
+        setTimeout(() => {
+          const line = document.getElementById("gh-write-auth-countdown");
+          if (!line || $("#modal-backdrop").hidden) return;
+          line.innerHTML = `GitHub did not open? <a href="${esc(href)}">Try again</a> — or reload the page once.`;
+        }, 2500);
+      }
     }, 1000);
   }
   window.requestGitHubWriteAccess = requestGitHubWriteAccess;
