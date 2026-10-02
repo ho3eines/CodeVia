@@ -135,6 +135,14 @@ const EnvSchema = z.object({
   // by a full model rewrite instead of an {"edits":[…]} patch (step-1 ladder).
   PATCH_FULL_REWRITE_MAX_BYTES: envNumber(8192, 0),
 
+  // State commits — CodeVia saves every project update (task/run status,
+  // memory, agents, conversations…) as a commit that only touches `CodeVia/**`.
+  // GitHub skips workflow runs whose head commit message carries a skip marker,
+  // so a project's (possibly red or expensive) gate no longer runs — and no
+  // "all jobs have failed" mail is sent — for every state save. Set to false
+  // when a project genuinely needs CI to run on state commits too.
+  STATE_COMMIT_SKIP_CI: envBoolean(true),
+
   // Model routing — how requests are spread over the registered models.
   //   adaptive            (default) benchmark quality + fair share, discounted
   //                                 by live load and models that keep failing

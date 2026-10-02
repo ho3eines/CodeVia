@@ -104,6 +104,7 @@ Which model answers *now* — see [MODEL_ROUTING.md](MODEL_ROUTING.md) for the a
 |----------|---------|-------------|
 | `ENABLE_SIMULATION_MODE` | `true` | When on, agents preview actions instead of making real changes where applicable |
 | `MOCK_AI_DEFAULT` | `true` | Prefer the offline mock provider by default |
+| `STATE_COMMIT_SKIP_CI` | `true` | CodeVia's project-state commits only touch `CodeVia/**` (never code) and carry GitHub's `[skip ci]` marker, so a project's CI does not run — and does not email "all jobs have failed" — for every task/run/chat save. Set `false` to run CI on state commits too |
 | `WEB_BASE_URL` | `http://localhost:8080` | Base URL for the web UI |
 | `PUBLIC_WEB_BASE_URL` | (empty) | Public URL (Railway) used for absolute links/notifications |
 
