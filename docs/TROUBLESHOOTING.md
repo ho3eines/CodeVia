@@ -236,6 +236,33 @@ with escaped text; a custom provider/tool that writes its own messages must do t
 - Use the **AI Run Console** (`GET /runs/:id/console`) to see the exact failing step + detail.
 - Common causes: model/fallback exhausted (configure models), repo not reachable (GitHub), or a tool denied permissions (check the agent's `permissions`).
 
+## Every "apply changes" sends GitHub mail: "All jobs have failed"
+
+CodeVia saves project state — task/run status, chat, memory, agents — as commits
+that touch only `CodeVia/**`, i.e. **no code**. Every such push used to start a
+full CI run of the target repository, so a red (or slow) project gate produced
+one failing run — and one GitHub *"All jobs have failed"* mail — per state save,
+for a commit the gate never needed to test.
+
+- Since `STATE_COMMIT_SKIP_CI` (default `true`) every state commit carries
+  GitHub's `[skip ci]` marker, so no run is created for it. Real code commits on
+  task branches and PRs stay unmarked, so the merge gate still sees their checks.
+  Set `STATE_COMMIT_SKIP_CI=false` to run CI on state commits as well.
+- Belt and braces on the target repository — make a `CodeVia/**`-only push skip
+  CI there too:
+
+  ```yaml
+  on:
+    push:
+      paths-ignore:
+        - "CodeVia/**"
+    pull_request:
+  ```
+
+- The mails stop for state saves, but a genuinely red gate stays red: merging is
+  still refused until CI on the PR's head commit is green (merge gate). Fix the
+  failing gate itself; this only removes the noise CodeVia generated.
+
 ## "Mock repo not found"
 
 `CodeVia repository state: read/validation failed (Error: Mock repo not found: owner/name)`

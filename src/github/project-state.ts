@@ -60,6 +60,7 @@ import {
 } from "./state-codec.js";
 
 import type { PromptVersion, PromptVersionRepository } from "../prompts/versions.js";
+import { getEnv } from "../config/env.js";
 import {
   PROMPT_HISTORY_DIR,
   PROMPT_HISTORY_INDEX,
@@ -73,6 +74,28 @@ import {
 interface StateWrite extends GithubFile {
   sourceSha?: string;
   runtime?: boolean;
+}
+
+/**
+ * Marker that makes GitHub skip push/pull_request workflow runs for a commit.
+ *
+ * Every write in this module only touches `CodeVia/**` (enforced in `commit`),
+ * i.e. it is project *state*, never source code. Without the marker each state
+ * save — task status, run status, chat save, memory update — starts a full CI
+ * run on the base branch and, when the project's gate is red or slow, mails
+ * everyone watching the repository "all jobs have failed" for something they
+ * did not change. Real code commits (task branches, PRs) stay unmarked so the
+ * merge gate keeps seeing their checks.
+ *
+ * Set `STATE_COMMIT_SKIP_CI=false` to run CI on state commits too.
+ */
+export const STATE_COMMIT_SKIP_CI_MARKER = "[skip ci]";
+const CI_SKIP_MARKERS = /\[(?:skip ci|ci skip|no ci|skip actions|actions skip)\]/i;
+
+/** Append the CI-skip marker to a state commit message (idempotent). */
+export function withStateCommitCiMarker(message: string, skip = getEnv().STATE_COMMIT_SKIP_CI): string {
+  if (!skip || CI_SKIP_MARKERS.test(message)) return message;
+  return `${message} ${STATE_COMMIT_SKIP_CI_MARKER}`;
 }
 
 export interface StateRepositories {
@@ -263,7 +286,13 @@ export class ProjectFilesService {
       }
       const paths = tree.filter((e) => e.type === "blob" && e.path.startsWith(`${CODEVIA_DIR}/`)).map((e) => e.path);
       if (paths.length)
-        await gh.deleteFiles(this.ref(p), p.branch, `[CodeVia] remove project state (${p.id})`, paths, sha);
+        await gh.deleteFiles(
+          this.ref(p),
+          p.branch,
+          withStateCommitCiMarker(`[CodeVia] remove project state (${p.id})`),
+          paths,
+          sha,
+        );
     } catch {
       // Project deletion already succeeded in the DB; repository cleanup is best-effort.
       this.snapshots.delete(this.cacheKey(p));
@@ -541,7 +570,7 @@ export class ProjectFilesService {
       const committed = await this.github(p).commit(
         this.ref(p),
         p.branch,
-        message,
+        withStateCommitCiMarker(message),
         changed.map(({ path, content }) => ({ path, content })),
         current.sha,
       );
