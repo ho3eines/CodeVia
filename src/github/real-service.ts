@@ -56,6 +56,15 @@ export class GitHubAuthError extends Error {
 
 const MAX_PAGE = 100;
 
+function decodeBase64Content(value: string): string | undefined {
+  const compact = value.replace(/\s/g, "");
+  if (!compact || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/.test(compact))
+    return undefined;
+  const bytes = Buffer.from(compact, "base64");
+  if (bytes.toString("base64").replace(/=+$/, "") !== compact.replace(/=+$/, "")) return undefined;
+  return bytes.toString("utf8");
+}
+
 /** 401/403 (bad or scope-less credential, rate limit) — the diagnosis worth keeping. */
 function isCredentialError(err: unknown): boolean {
   if (!err) return false;
@@ -398,10 +407,63 @@ export class RealGitHubService implements IGitHubService {
   async getFile(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFile | undefined> {
     try {
       const q = branch ? `?ref=${encodeURIComponent(branch)}` : "";
-      const res = await this.json<{ content: string; sha: string }>(
-        `/repos/${repo.owner}/${repo.name}/contents/${path.split("/").map(encodeURIComponent).join("/")}${q}`,
-      );
-      return { path, content: Buffer.from(res.content, "base64").toString("utf8"), sha: res.sha };
+      const url = `/repos/${repo.owner}/${repo.name}/contents/${path.split("/").map(encodeURIComponent).join("/")}${q}`;
+      // The default Contents API representation may omit `content` for files
+      // over 1 MiB. Ask for raw bytes first; older proxies/test doubles still
+      // return the JSON envelope, which is decoded below for compatibility.
+      const res = await this.request(url, { headers: { Accept: "application/vnd.github.raw+json" } });
+      const responseText = await res.text();
+      const contentType = res.headers.get("content-type") ?? "";
+      const rawMediaType = /(?:github\.raw|octet-stream)/i.test(contentType);
+      const mayBeJsonEnvelope =
+        !rawMediaType &&
+        (contentType.includes("json") || (responseText.length < 1024 * 1024 && /^\s*[{[]/.test(responseText)));
+      if (!mayBeJsonEnvelope) return { path, content: responseText };
+
+      let body: unknown;
+      try {
+        body = JSON.parse(responseText) as unknown;
+      } catch {
+        // GitHub Enterprise/proxies sometimes return raw text with a JSON-ish
+        // content type. Keep the original bytes rather than truncating them.
+        return { path, content: responseText };
+      }
+      if (!body || typeof body !== "object") return { path, content: responseText };
+      const file = body as {
+        content?: unknown;
+        encoding?: unknown;
+        sha?: unknown;
+        path?: unknown;
+        download_url?: unknown;
+      };
+      const looksLikeEnvelope =
+        typeof file.path === "string" &&
+        typeof file.sha === "string" &&
+        ("content" in file || "encoding" in file || typeof file.download_url === "string");
+      if (!looksLikeEnvelope) return { path, content: responseText };
+      if (typeof file.content === "string" && file.encoding === "base64") {
+        return {
+          path,
+          content: Buffer.from(file.content, "base64").toString("utf8"),
+          sha: String(file.sha ?? "") || undefined,
+        };
+      }
+      // GitHub normally includes `encoding`, but a few proxies strip it while
+      // preserving the standard base64-encoded `content` field.
+      if (typeof file.content === "string" && file.encoding === undefined) {
+        const decoded = decodeBase64Content(file.content);
+        if (decoded !== undefined) {
+          return { path, content: decoded, sha: String(file.sha ?? "") || undefined };
+        }
+      }
+      if (typeof file.content === "string" && file.content.length > 0) {
+        return { path, content: file.content, sha: String(file.sha ?? "") || undefined };
+      }
+      if (typeof file.download_url === "string") {
+        const download = await this.request(file.download_url, { headers: { Accept: "application/vnd.github.raw" } });
+        return { path, content: await download.text(), sha: String(file.sha ?? "") || undefined };
+      }
+      throw new Error(`GitHub returned an empty content field for ${path}`);
     } catch (err) {
       if ((err as { status?: number }).status === 404) return undefined;
       throw err;

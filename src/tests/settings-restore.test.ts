@@ -53,6 +53,8 @@ describe("settings backup/restore (ephemeral-DB fallback)", () => {
     const res = await srv.inject({ method: "GET", url: "/settings/backup" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
+    expect(body.type).toBe("codevia-settings-backup");
+    expect(body.scope).toBe("github-login-settings-only");
     expect(body.adminSettings).toMatchObject({ clientId: "Ov23liBACKUPTEST123", requireAuth: true });
     expect(body.secretsIncluded).toBe(false);
   });

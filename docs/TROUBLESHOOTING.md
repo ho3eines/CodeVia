@@ -176,9 +176,13 @@ Fixes (pick one):
    (and `REQUIRE_AUTH` if you use strict mode). Env values persist across
    deploys and take precedence over the admin panel — the Client ID field in
    `#/admin` then shows an `env` badge and is read-only.
-3. **Manual fallback:** `#/settings` → **⬇ System Backup** before the deploy,
-   then **⬆ Restore Backup** after it (restores the non-secret login
-   settings; secrets are always env-only).
+3. **Manual settings fallback:** `#/settings` → **⬇ Login settings only** before
+   the deploy, then **⬆ Restore backup file(s)** after it (this restores only the
+   non-secret GitHub login configuration, not projects or runtime history).
+4. **Full data recovery:** `#/admin` → **System Backup** → **Export full snapshot**
+   or **Run backup now** before the deploy. Afterward, use **List backups → Restore**
+   or upload the downloaded full snapshot from Settings. Keep the same `AUTH_SECRET`
+   to decrypt previously encrypted values.
 
 ## `WebSocket connection to 'wss://…/socket.io/…' failed: ERR_CONNECTION_RESET`
 

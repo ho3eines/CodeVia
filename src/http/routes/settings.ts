@@ -50,6 +50,9 @@ export function registerSettingsRoutes(app: FastifyInstance, container: Containe
   // System backup (config metadata only — no secrets).
   app.get("/settings/backup", { schema: { tags: ["settings"] } }, async () => {
     return {
+      type: "codevia-settings-backup",
+      version: 1,
+      scope: "github-login-settings-only",
       providers: container.providerRepo.findMany().map((r) => ({
         id: r.data.id,
         name: r.data.name,

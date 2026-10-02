@@ -102,19 +102,19 @@
       "file": "160-settings.js",
       "module": "settings hub",
       "from": 6430,
-      "to": 6536
+      "to": 6561
     },
     {
       "file": "170-admin.js",
       "module": "admin console",
-      "from": 6537,
-      "to": 6937
+      "from": 6562,
+      "to": 6964
     },
     {
       "file": "180-search-boot.js",
       "module": "search · boot",
-      "from": 6938,
-      "to": 6959
+      "from": 6965,
+      "to": 6986
     }
   ]
 }

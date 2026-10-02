@@ -38,12 +38,17 @@ after a restore to read them again.
 <backup-path>/
 ├── latest.json          # pointer to the most recent backup
 └── <ISO-timestamp>/
-    ├── manifest.json    # summary + counts
-    ├── records.json     # every row of the `records` table
-    ├── jobs.json        # worker queue rows
-    ├── kv.json          # kv settings
+    ├── manifest.json    # summary, counts, file hashes and part list
+    ├── records.json     # or records-0001.json, records-0002.json, …
+    ├── jobs.json        # or jobs-0001.json, …
+    ├── kv.json          # or kv-0001.json, …
     └── README.md        # human-readable summary
 ```
+
+Large tables are divided into JSON parts below GitHub's small-file limit. The
+manifest contains each part's row count and SHA-256 hash. Restore verifies all
+parts and manifest counts before opening the database transaction, so a missing,
+truncated, or modified file cannot silently produce a partial restore.
 
 Default path is `.codevia/backups`.
 
@@ -85,12 +90,21 @@ in-memory **mock** GitHub and only works locally/tests.
 
 On a fresh Railway deploy (or after data loss):
 
-1. Redeploy with the same `GITHUB_TOKEN` (and, if encrypted secrets were stored, the
-   same `AUTH_SECRET`).
+1. Redeploy with the same GitHub credential (and, if encrypted secrets were stored,
+   the same `AUTH_SECRET`).
 2. Open **Admin → System Backup → List backups**.
 3. Choose the snapshot (or click **Restore latest**).
-4. The API writes the full snapshot back into the runtime DB and re-syncs in-memory
-   provider caches.
+4. The API validates every table part, restores `records`, `jobs` and `kv` in one
+   transaction, then rebuilds provider/model caches and synchronizes Telegram
+   account pollers.
+
+You can also use **Export full snapshot** to download a standalone JSON file, then
+select it with **Settings → Restore backup file(s)**. If you downloaded the
+GitHub directory rather than the full JSON export, select every JSON file from
+that one snapshot together (including `manifest.json`). The restore endpoint
+accepts up to 128 MiB per upload. The older **Login settings only** export contains
+only non-secret GitHub login configuration and cannot restore projects, run
+history, users, or other runtime records.
 
 ## API
 
