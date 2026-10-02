@@ -10,6 +10,11 @@ import {
 } from "../../backup/settings.js";
 import { nextCronTime, isValidCron } from "../../backup/cron.js";
 import { getEnv } from "../../config/env.js";
+import { snapshotFromFiles } from "../../backup/snapshot.js";
+import type { BackupRestoreResult } from "../../backup/service.js";
+
+/** Large, but bounded: JSON snapshots can contain years of runs/conversations. */
+const RESTORE_BODY_LIMIT = 128 * 1024 * 1024;
 
 function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
   const allowed = ROLE_PERMISSIONS[req.user.role] ?? [];
@@ -131,53 +136,119 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
     return snapshot;
   });
 
-  app.post("/admin/backup/restore", { schema: { tags: ["admin"] } }, async (req, reply) => {
-    if (!requireAdmin(req, reply)) return { error: "Forbidden" };
-    const b = (req.body ?? {}) as {
-      snapshot?: string;
-      snapshotData?: unknown;
-      replace?: boolean;
-      repo?: string;
-      branch?: string;
-      path?: string;
-    };
-    let result;
-    if (b.snapshotData !== undefined) {
-      result = container.backupService.restoreSnapshotObject(b.snapshotData, {
-        replace: b.replace ?? true,
-      });
-    } else {
-      result = await container.backupService.restoreFromGitHub({
-        snapshot: b.snapshot,
-        replace: b.replace ?? true,
-        repo: b.repo,
-        branch: b.branch,
-        path: b.path,
-      });
-    }
-    if (result.ok) {
-      // Bring in-memory caches back in sync (built-in skills + default provider
-      // adapters). This only adds missing defaults; restored custom data wins.
-      await container.ensureSeed().catch(() => undefined);
-      await container.auditRepo.record({
-        userId: req.user.id,
-        action: "admin.backup.restore",
-        result: "success",
-        source: "web",
-        correlationId: `admin-restore-${Date.now()}`,
-        metadata: {
-          from: result.from,
-          repo: result.repo,
-          branch: result.branch,
-          snapshot: result.snapshot,
-          records: result.records,
-          jobs: result.jobs,
-          kv: result.kv,
-          replace: result.replace,
-        },
-      });
-    }
-    if (!result.ok) reply.code(400);
-    return result;
-  });
+  app.post(
+    "/admin/backup/restore",
+    { schema: { tags: ["admin"] }, bodyLimit: RESTORE_BODY_LIMIT },
+    async (req, reply) => {
+      if (!requireAdmin(req, reply)) return { error: "Forbidden" };
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const b = body as {
+        snapshot?: string;
+        snapshotData?: unknown;
+        snapshotFiles?: unknown;
+        replace?: boolean;
+        repo?: string;
+        branch?: string;
+        path?: string;
+      };
+      let result: BackupRestoreResult;
+      if (Array.isArray(b.snapshotFiles)) {
+        const files = b.snapshotFiles.map((rawFile, index) => {
+          const file = rawFile && typeof rawFile === "object" ? (rawFile as Record<string, unknown>) : {};
+          return {
+            path:
+              typeof file.path === "string"
+                ? file.path
+                : typeof file.name === "string"
+                  ? file.name
+                  : `upload-${index}.json`,
+            content: typeof file.content === "string" ? file.content : "",
+          };
+        });
+        try {
+          result = container.backupService.restoreSnapshotObject(snapshotFromFiles(files), {
+            replace: b.replace ?? true,
+          });
+        } catch (err) {
+          result = {
+            ok: false,
+            from: "snapshot",
+            records: 0,
+            jobs: 0,
+            kv: 0,
+            replace: b.replace ?? true,
+            error: err instanceof Error ? err.message : "Invalid backup files",
+          };
+        }
+      } else if (b.snapshotData !== undefined) {
+        let snapshotData: unknown = b.snapshotData;
+        if (typeof snapshotData === "string") {
+          try {
+            snapshotData = JSON.parse(snapshotData) as unknown;
+          } catch {
+            reply.code(400);
+            return { ok: false, error: "Uploaded snapshotData is not valid JSON" };
+          }
+        }
+        result = container.backupService.restoreSnapshotObject(snapshotData, {
+          replace: b.replace ?? true,
+        });
+      } else if (Array.isArray(body.records) && Array.isArray(body.jobs) && Array.isArray(body.kv)) {
+        // Also accept a raw full snapshot as the request body for API clients
+        // that upload the downloaded JSON file without wrapping it.
+        result = container.backupService.restoreSnapshotObject(body, {
+          replace: b.replace ?? true,
+        });
+      } else {
+        result = await container.backupService.restoreFromGitHub({
+          snapshot: b.snapshot,
+          replace: b.replace ?? true,
+          repo: b.repo,
+          branch: b.branch,
+          path: b.path,
+        });
+      }
+      if (result.ok) {
+        // Restore replaces durable rows, so rebuild process-level caches and
+        // start/stop per-user Telegram pollers to match the restored accounts.
+        const warnings: string[] = [];
+        try {
+          // No execution is alive for queue rows captured as `running` in the
+          // backup; recover idempotent agent/workflow jobs immediately instead
+          // of waiting for their old lease to expire.
+          container.queue.recoverInterruptedExecutions();
+          container.loadBalancer.reset();
+          await container.ensureSeed();
+        } catch (err) {
+          warnings.push(`Provider/model cache refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        try {
+          await container.telegramRuntime.syncAccountPollers();
+        } catch (err) {
+          warnings.push(`Telegram account runtime refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (warnings.length) result.warning = warnings.join("; ");
+        await container.auditRepo.record({
+          userId: req.user.id,
+          action: "admin.backup.restore",
+          result: "success",
+          source: "web",
+          correlationId: `admin-restore-${Date.now()}`,
+          metadata: {
+            from: result.from,
+            repo: result.repo,
+            branch: result.branch,
+            snapshot: result.snapshot,
+            records: result.records,
+            jobs: result.jobs,
+            kv: result.kv,
+            replace: result.replace,
+            warning: result.warning,
+          },
+        });
+      }
+      if (!result.ok) reply.code(400);
+      return result;
+    },
+  );
 }

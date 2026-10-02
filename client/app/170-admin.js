@@ -202,7 +202,7 @@
             if (!confirm(`Restore snapshot ${id}? This replaces the full runtime state.`)) return;
             try {
               const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, replace: true } });
-              if (res.ok) { toast("Backup restored", `${res.records} records restored`, "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
+              if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
               else toast("Restore failed", res.error || "", "err");
             } catch (e) { toast("Restore failed", e.message, "err"); }
           });
@@ -214,7 +214,9 @@
         try {
           const b = await api("/admin/backup/export");
           const blob = new Blob([JSON.stringify(b, null, 2)], { type: "application/json" });
-          const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "codevia-full-backup.json"; a.click();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a"); a.href = url; a.download = "codevia-full-backup.json"; a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch (e) { toast("Export failed", e.message, "err"); }
       };
       const bakRestore = document.getElementById("bak-restore");
@@ -223,7 +225,7 @@
         const btn = bakRestore; btn.disabled = true; btn.textContent = "Restoring…";
         try {
           const res = await api("/admin/backup/restore", { method: "POST", body: { replace: true } });
-          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
+          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
           else toast("Restore failed", res.error || "", "err");
         } catch (e) { toast("Restore failed", e.message, "err"); }
         finally { btn.disabled = false; btn.textContent = "↺ Restore latest"; }

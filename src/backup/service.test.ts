@@ -89,6 +89,36 @@ describe("BackupService", () => {
     expect(projectRepo.findById("p1")?.data.name).toBe("Demo");
   });
 
+  it("restores every part of a large GitHub snapshot instead of truncating the records table", async () => {
+    const largeRepo = new DocumentRepository<{ id: string; text: string }>("large-record");
+    largeRepo.upsert({ id: "large-1", text: "a".repeat(400 * 1024) });
+    largeRepo.upsert({ id: "large-2", text: "b".repeat(400 * 1024) });
+    saveBackupSettings(kv, {
+      repo: "acme/codevia-backups",
+      branch: "main",
+      path: ".codevia/backups",
+      schedule: "0 * * * *",
+    });
+
+    const run = await service.runNow();
+    expect(run.ok).toBe(true);
+    expect(run.files).toBeGreaterThan(6);
+    const paths = await github.listFiles({ owner: "acme", name: "codevia-backups" }, "main", ".codevia/backups");
+    expect(paths.some((file) => /records-0001\.json$/.test(file.path))).toBe(true);
+    expect(paths.some((file) => /records-0002\.json$/.test(file.path))).toBe(true);
+
+    fx.db.run("DELETE FROM records");
+    fx.db.run("DELETE FROM jobs");
+    fx.db.run("DELETE FROM kv");
+    saveBackupSettings(kv, { repo: "acme/codevia-backups", branch: "main", path: ".codevia/backups" });
+    const restored = await service.restoreFromGitHub({ replace: true });
+
+    expect(restored.ok).toBe(true);
+    expect(restored.records).toBe(2);
+    expect(largeRepo.findById("large-1")?.data.text).toHaveLength(400 * 1024);
+    expect(largeRepo.findById("large-2")?.data.text[0]).toBe("b");
+  });
+
   it("uses explicit repo/path overrides when restoring the latest GitHub snapshot", async () => {
     github.seedRepo("acme", "other-backups", { files: [{ path: "README.md", content: "# empty backup target\n" }] });
     projectRepo.upsert({

@@ -136,7 +136,14 @@ export function createFakeGitHub(opts: {
       const c = commitOf(url.searchParams.get("ref") ?? repo.defaultBranch);
       const path = decodeURIComponent(r2[1]).replace(/\/$/, "");
       if (!c) return notFound();
-      if (c.tree.has(path)) return json({ content: Buffer.from(c.tree.get(path)!).toString("base64"), sha: "blob" });
+      if (c.tree.has(path))
+        return json({
+          path,
+          type: "file",
+          encoding: "base64",
+          content: Buffer.from(c.tree.get(path)!).toString("base64"),
+          sha: "blob",
+        });
       const prefix = path ? `${path}/` : "";
       const names = new Map<string, "file" | "dir">();
       for (const k of c.tree.keys()) {

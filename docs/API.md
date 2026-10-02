@@ -182,7 +182,8 @@ The first GitHub user to log in becomes `owner`; later users become `developer`.
 | GET | `/settings` | Platform settings |
 | GET | `/settings/approval` | Approval policy: `autoApprove`, `timeoutMs`, `pending` |
 | POST | `/settings/approval` | Set the policy (`autoApprove:false` = dangerous steps wait for a human in web/Telegram; `timeoutMs` = how long before an unanswered request expires as rejected) |
-| GET | `/settings/backup` | System backup (config metadata only, no secrets) |
+| GET | `/settings/backup` | Legacy login-settings-only export (`type: codevia-settings-backup`); it is not a full database backup and includes no secrets |
+| POST | `/settings/restore` | Restore only validated, non-secret GitHub login settings from `{adminSettings}` |
 | POST | `/settings/import` | Import an export blob. Body extras: `dryRun` (preview plan + conflicts), `mode` = `create` (default, new project, ids remapped) \| `merge` (into `targetProjectId`), `conflict` = `skip` (default) \| `overwrite`. Imports agents, workflows, memory, skills |
 
 ## Approvals (human-in-the-loop)
@@ -230,7 +231,7 @@ Pending requests are also pushed to Telegram (project chat + paired per-user bot
 | POST | `/admin/backup/run` | Push a full runtime snapshot to the configured GitHub repo now (owner/admin only) |
 | GET | `/admin/backup/list` | List committed snapshots in the configured repository (`?limit=`) |
 | GET | `/admin/backup/export` | Download the current full runtime snapshot as JSON |
-| POST | `/admin/backup/restore` | Restore from GitHub (`{snapshot?, replace?}`) or from a full snapshot body (`{snapshotData, replace?}`). Replaces the runtime DB by default |
+| POST | `/admin/backup/restore` | Restore from GitHub (`{snapshot?, replace?}`), a full JSON snapshot (`{snapshotData, replace?}` or the raw snapshot body), or selected GitHub snapshot parts (`{snapshotFiles:[{path,content}],replace?}`). Validates counts and SHA-256 part hashes before replacing `records`, `jobs`, and `kv` atomically. Restore uploads are limited to 128 MiB |
 
 ---
 

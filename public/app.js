@@ -6470,8 +6470,9 @@
   on("/settings", async () => {
     const s = await api("/settings");
     const policy = await api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 900000, pending: 0 }));
+    const backupAdmin = await api("/admin/backup").catch(() => null);
     $("#content").innerHTML = `${settingsHubHtml()}
-      <div class="overview" style="margin-top:12px"><div><h1>Settings</h1><p>Import / Export / Backup — secrets are never exported</p></div></div>
+      <div class="overview" style="margin-top:12px"><div><h1>Settings</h1><p>Import / Export / Backup — secrets are never exported in the settings-only file</p></div></div>
       <div class="grid-2">
         <div class="card card-body"><div class="card-title">Platform</div>
           <div class="meter-row"><span class="lbl">Environment</span><span class="val">${esc(s.environment)}</span></div>
@@ -6485,10 +6486,10 @@
           <p style="color:var(--text-muted);font-size:12px">وقتی Auto-approve خاموش باشد، مرحله‌های خطرناک (Merge، Deploy، Migration…) متوقف می‌شوند و در وب و تلگرام دکمه Approve/Reject می‌گیرید.</p>
         </div>
         <div class="card card-body"><div class="card-title">Backup & Import/Export</div>
-          <div class="flex"><button class="btn" onclick="downloadBackup()">⬇ System Backup</button><button class="btn" id="restore-btn">⬆ Restore Backup</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
-          <input type="file" id="restore-file" accept="application/json,.json" style="display:none"/>
-          <p style="color:var(--text-muted);font-size:12px">دکمه Restore حالا هر دو نوع فایل را تشخیص می‌دهد: بکاپ سبک Settings و بکاپ کامل <span class="mono">codevia-runtime-backup</span>. برای گرفتن بکاپ کامل از <strong>Admin → System Backup → Export full snapshot</strong> یا Run backup now استفاده کن — کلیدها فقط رمزنگاری‌شده ذخیره می‌شوند (هرگز plaintext).</p>
-          <p style="color:var(--text-muted);font-size:11px">💡 در Railway، قبل از Redeploy از Admin یک بکاپ کامل بگیرید و بعد از دیپلی (که دیتابیس موقت پاک می‌شود) Restore کنید تا همه‌چیز برگردد — یا Volume را طبق راهنمای Admin متصل کنید.</p>
+          <div class="flex">${backupAdmin ? '<button class="btn btn-primary" onclick="downloadFullBackup()">⬇ Full system backup</button>' : ''}<button class="btn" onclick="downloadBackup()">⬇ Login settings only</button><button class="btn" id="restore-btn">⬆ Restore backup file(s)</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
+          <input type="file" id="restore-file" accept="application/json,.json" multiple style="display:none"/>
+          <p style="color:var(--text-muted);font-size:12px">ادمین می‌تواند از <strong>Full system backup</strong> یک فایل کامل بگیرد. ریستور از فایل کامل یا از همهٔ فایل‌های JSON یک پوشهٔ بکاپ (manifest، records، jobs و kv) پشتیبانی می‌کند؛ همهٔ فایل‌های یک snapshot را با هم انتخاب کنید. فایل «Login settings only» فقط تنظیمات ورود GitHub را دارد و بکاپ کامل داده‌های پروژه نیست.</p>
+          <p style="color:var(--text-muted);font-size:11px">💡 بعد از ریستور کامل، تمام جدول‌های runtime جایگزین می‌شوند. مقادیر رمزنگاری‌شده فقط با همان <span class="mono">AUTH_SECRET</span> قابل‌خواندن‌اند. در Railway می‌توانید به‌جای ریستور مداوم، Volume پایدار هم وصل کنید.</p>
         </div>
       </div>
       <div id="tg-settings"></div>`;
@@ -6502,26 +6503,36 @@
     if (restoreBtn && restoreFile) {
       restoreBtn.onclick = () => restoreFile.click();
       restoreFile.onchange = async () => {
-        const f = restoreFile.files?.[0];
+        const files = [...(restoreFile.files || [])].filter((f) => /\.json$/i.test(f.name));
         restoreFile.value = "";
-        if (!f) return;
+        if (!files.length) return;
         try {
-          const data = JSON.parse(await f.text());
-          if (data.type === "codevia-runtime-backup") {
-            const res = await api("/admin/backup/restore", { method: "POST", body: { snapshotData: data, replace: true } });
-            if (!res.ok) throw new Error(res.error || "Full restore failed");
-            toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok");
-            // The restore replaced the whole database — drop client caches and
-            // re-render in place so nothing stale lingers (no page reload).
-            setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700);
-            return;
+          let body;
+          if (files.length > 1 || /^(manifest|records(?:-\d+)?|jobs(?:-\d+)?|kv(?:-\d+)?)\.json$/i.test(files[0].name)) {
+            if (!confirm("ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند. قبل از ادامه مطمئن شوید همهٔ فایل‌های JSON همین snapshot را انتخاب کرده‌اید.")) return;
+            const snapshotFiles = await Promise.all(files.map(async (file) => ({ path: file.webkitRelativePath || file.name, content: await file.text() })));
+            body = { snapshotFiles, replace: true };
+          } else {
+            const data = JSON.parse(await files[0].text());
+            const fullSnapshot = data?.type === "codevia-runtime-backup" ||
+              (Array.isArray(data?.records) && Array.isArray(data?.jobs) && Array.isArray(data?.kv)) ||
+              (data?.snapshot && Array.isArray(data.snapshot.records));
+            if (!fullSnapshot && data?.adminSettings && typeof data.adminSettings === "object") {
+              if (!confirm("این فایل فقط تنظیمات ورود GitHub را جایگزین می‌کند و داده‌های پروژه را بازیابی نمی‌کند. ادامه می‌دهید؟")) return;
+              await api("/settings/restore", { method: "POST", body: { adminSettings: data.adminSettings } });
+              toast("Login settings restored", "این فایل تنظیمات ورود را برگرداند؛ داده‌های پروژه و تاریخچه در این نوع بکاپ وجود ندارد.", "ok");
+              refreshCurrent();
+              return;
+            }
+            if (!confirm("ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند. قبل از ادامه مطمئن شوید فایل بکاپ درست را انتخاب کرده‌اید.")) return;
+            body = { snapshotData: data, replace: true };
           }
-          if (!data.adminSettings || typeof data.adminSettings !== "object") {
-            throw new Error("این فایل بکاپ کامل CodeVia یا بکاپ Settings معتبر نیست. برای بکاپ کامل از Admin → Backup & restore → Export full snapshot استفاده کن.");
-          }
-          await api("/settings/restore", { method: "POST", body: { adminSettings: data.adminSettings } });
-          toast("Backup restored", "GitHub login settings were restored.", "ok");
-          refreshCurrent();
+          const res = await api("/admin/backup/restore", { method: "POST", body });
+          if (!res.ok) throw new Error(res.error || "Full restore failed");
+          toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok");
+          // The restore replaced the whole database — drop client caches and
+          // re-render in place so nothing stale lingers (no page reload).
+          setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700);
         } catch (e) {
           toast("Restore failed", e.message, "err");
         }
@@ -6531,7 +6542,21 @@
   window.downloadBackup = async () => {
     const b = await api("/settings/backup");
     const blob = new Blob([JSON.stringify(b, null, 2)], { type: "application/json" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "codevia-backup.json"; a.click();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "codevia-login-settings-backup.json"; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  window.downloadFullBackup = async () => {
+    try {
+      const snapshot = await api("/admin/backup/export");
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = "codevia-full-backup.json"; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast("Full system backup downloaded", `${snapshot.records?.length || 0} records, ${snapshot.jobs?.length || 0} jobs, ${snapshot.kv?.length || 0} kv`, "ok");
+    } catch (e) {
+      toast("Backup export failed", e.message, "err");
+    }
   };
 
   /* ADMIN */
@@ -6738,7 +6763,7 @@
             if (!confirm(`Restore snapshot ${id}? This replaces the full runtime state.`)) return;
             try {
               const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, replace: true } });
-              if (res.ok) { toast("Backup restored", `${res.records} records restored`, "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
+              if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
               else toast("Restore failed", res.error || "", "err");
             } catch (e) { toast("Restore failed", e.message, "err"); }
           });
@@ -6750,7 +6775,9 @@
         try {
           const b = await api("/admin/backup/export");
           const blob = new Blob([JSON.stringify(b, null, 2)], { type: "application/json" });
-          const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "codevia-full-backup.json"; a.click();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a"); a.href = url; a.download = "codevia-full-backup.json"; a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch (e) { toast("Export failed", e.message, "err"); }
       };
       const bakRestore = document.getElementById("bak-restore");
@@ -6759,7 +6786,7 @@
         const btn = bakRestore; btn.disabled = true; btn.textContent = "Restoring…";
         try {
           const res = await api("/admin/backup/restore", { method: "POST", body: { replace: true } });
-          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored`, "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
+          if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
           else toast("Restore failed", res.error || "", "err");
         } catch (e) { toast("Restore failed", e.message, "err"); }
         finally { btn.disabled = false; btn.textContent = "↺ Restore latest"; }

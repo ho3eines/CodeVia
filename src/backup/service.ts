@@ -11,7 +11,8 @@ import {
   restoreSnapshot,
   snapshotFromFiles,
   snapshotFilePaths,
-  assertBackupSnapshot,
+  snapshotPartPathsFromManifest,
+  normalizeBackupSnapshot,
   type BackupSnapshot,
 } from "./snapshot.js";
 import { getUserGitHubToken } from "../auth/github-tokens.js";
@@ -66,6 +67,7 @@ export interface BackupRestoreResult {
   jobs: number;
   kv: number;
   replace: boolean;
+  warning?: string;
   error?: string;
 }
 
@@ -322,8 +324,22 @@ export class BackupService {
     // code listed the globally configured repository here, so restoring with an
     // explicit repo/path could report success for the wrong snapshot or fail to
     // apply the backup the operator just selected.
-    const list = await this.listBackups({ repo: settings.repo, branch, path: base }, 1);
-    const latest = list[0];
+    let latest: BackupListEntry | undefined;
+    try {
+      latest = (await this.listBackups({ repo: settings.repo, branch, path: base }, 1))[0];
+    } catch (err) {
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input?.replace ?? true,
+        error: errorMessage(err),
+      };
+    }
     const target = requested && requested !== "latest" ? requested : latest?.id;
     if (!target) {
       return {
@@ -334,37 +350,138 @@ export class BackupService {
         records: 0,
         jobs: 0,
         kv: 0,
-        replace: true,
+        replace: input?.replace ?? true,
         error: "No backup found in the configured repository.",
       };
     }
-    const dir = `${base}/${target}`;
-    const files = [];
-    for (const name of ["manifest.json", "records.json", "jobs.json", "kv.json"]) {
-      const f = await this.githubFor(settings).getFile(ref, `${dir}/${name}`, branch);
-      if (!f) {
-        return {
-          ok: false,
-          from: "github",
-          repo: settings.repo,
-          branch,
-          snapshot: target,
-          records: 0,
-          jobs: 0,
-          kv: 0,
-          replace: true,
-          error: `Backup is incomplete: missing ${name}`,
-        };
-      }
-      files.push({ path: f.path, content: f.content });
+    // A snapshot id is one directory name, never a user-controlled path.
+    if (!/^[A-Za-z0-9._-]+$/.test(target) || target === "." || target === "..") {
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input?.replace ?? true,
+        error: "Invalid backup snapshot id.",
+      };
     }
-    return this.restoreSnapshotObject(snapshotFromFiles(files), {
-      repo: settings.repo,
-      branch,
-      snapshot: target,
-      replace: input?.replace ?? true,
-      source: "github",
-    });
+
+    const github = this.githubFor(settings);
+    const dir = `${base}/${target}`;
+    let manifest: GithubFile | undefined;
+    try {
+      manifest = await github.getFile(ref, `${dir}/manifest.json`, branch);
+    } catch (err) {
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input?.replace ?? true,
+        error: errorMessage(err),
+      };
+    }
+    if (!manifest) {
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input?.replace ?? true,
+        error: "Backup is incomplete: missing manifest.json",
+      };
+    }
+
+    let names: string[];
+    try {
+      names = snapshotPartPathsFromManifest(manifest.content);
+    } catch (err) {
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input?.replace ?? true,
+        error: errorMessage(err),
+      };
+    }
+
+    let loaded: Array<GithubFile | undefined>;
+    try {
+      loaded = await fetchBackupFiles(
+        github,
+        ref,
+        names.map((name) => `${dir}/${name}`),
+        branch,
+      );
+    } catch (err) {
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input?.replace ?? true,
+        error: errorMessage(err),
+      };
+    }
+    if (loaded.length !== names.length || loaded.some((file) => file === undefined)) {
+      const index = loaded.findIndex((file) => file === undefined);
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input?.replace ?? true,
+        error: `Backup is incomplete: missing ${names[index]}`,
+      };
+    }
+    const files = [manifest, ...loaded].map((file) => ({ path: file!.path, content: file!.content }));
+    try {
+      return this.restoreSnapshotObject(snapshotFromFiles(files), {
+        repo: settings.repo,
+        branch,
+        snapshot: target,
+        replace: input?.replace ?? true,
+        source: "github",
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        from: "github",
+        repo: settings.repo,
+        branch,
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input?.replace ?? true,
+        error: errorMessage(err),
+      };
+    }
   }
 
   /** Restore from an in-memory snapshot object (local import / test). */
@@ -373,9 +490,9 @@ export class BackupService {
     meta?: { repo?: string; branch?: string; snapshot?: string; replace?: boolean; source?: "github" | "snapshot" },
   ): BackupRestoreResult {
     try {
-      assertBackupSnapshot(snapshot);
+      const normalized = normalizeBackupSnapshot(snapshot);
       const replace = meta?.replace ?? true;
-      const result = restoreSnapshot(this.deps.db, snapshot, replace);
+      const result = restoreSnapshot(this.deps.db, normalized, replace);
       // Drop cached provider adapters so restored provider config is re-read.
       this.deps.providerRegistry.all().forEach((p) => this.deps.providerRegistry.invalidate(p.id));
       updateBackupStatus(this.deps.kv, {
@@ -402,11 +519,30 @@ export class BackupService {
         records: 0,
         jobs: 0,
         kv: 0,
-        replace: true,
+        replace: meta?.replace ?? true,
         error: errorMessage(err),
       };
     }
   }
+}
+
+async function fetchBackupFiles(
+  github: IGitHubService,
+  ref: GithubRepoRef,
+  paths: string[],
+  branch: string,
+  concurrency = 8,
+): Promise<Array<GithubFile | undefined>> {
+  const out = new Array<GithubFile | undefined>(paths.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < paths.length) {
+      const index = cursor++;
+      out[index] = await github.getFile(ref, paths[index], branch);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, paths.length) }, () => worker()));
+  return out;
 }
 
 function groupCounts(records: BackupSnapshot["records"]): Record<string, number> {
