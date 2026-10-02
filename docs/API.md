@@ -226,12 +226,17 @@ Pending requests are also pushed to Telegram (project chat + paired per-user bot
 | PUT | `/admin/settings/github` | Update GitHub login settings: `clientId`, `callbackUrl`, `scope`, `requireAuth` — empty string clears back to env/default (owner/admin only) |
 | GET | `/admin/users` | List login users (owner/admin only) |
 | PATCH | `/admin/users/:id/role` | Change a user's role; refuses to demote the last owner (owner/admin only) |
-| GET | `/admin/backup` | Admin System Backup config + status + GitHub/storage readiness (owner/admin only) |
-| PUT | `/admin/backup` | Save backup config: `enabled`, `repo` (`owner/name`), `branch`, `path`, `schedule` (cron), `retain` (owner/admin only) |
-| POST | `/admin/backup/run` | Push a full runtime snapshot to the configured GitHub repo now (owner/admin only) |
-| GET | `/admin/backup/list` | List committed snapshots in the configured repository (`?limit=`) |
-| GET | `/admin/backup/export` | Download the current full runtime snapshot as JSON |
-| POST | `/admin/backup/restore` | Restore from GitHub (`{snapshot?, replace?}`), a full JSON snapshot (`{snapshotData, replace?}` or the raw snapshot body), or selected GitHub snapshot parts (`{snapshotFiles:[{path,content}],replace?}`). Validates counts and SHA-256 part hashes before replacing `records`, `jobs`, and `kv` atomically. Restore uploads are limited to 128 MiB |
+| GET | `/admin/backup` | Admin System Backup config + status + GitHub/storage readiness + what the next snapshot will carry (`secrets`, `local`) (owner/admin only) |
+| PUT | `/admin/backup` | Save backup config: `enabled`, `repo` (`owner/name`), `branch`, `path`, `schedule` (cron), `retain`, `includeEnv`, `includeSecrets`, `localCopy`, `localDir` (owner/admin only) |
+| POST | `/admin/backup/run` | Take a full snapshot now — pushes to the configured GitHub repo and/or writes the local copy next to the database (owner/admin only) |
+| GET | `/admin/backup/list` | List snapshots from both destinations (`?source=github\|local`, `?limit=`), newest first |
+| GET | `/admin/backup/export` | The current full snapshot (runtime rows + environment + credentials) as inline JSON |
+| GET | `/admin/backup/download` | The same snapshot as an **attachment**: `codevia-full-backup-<ISO>.json`, `Cache-Control: no-store`. This is the file that rebuilds the whole installation elsewhere |
+| GET | `/admin/backup/local/:id/download` | Download one snapshot stored on this machine's volume |
+| POST | `/admin/backup/restore` | Restore from GitHub (`{snapshot?, replace?}`), from a local snapshot (`{source:"local", snapshot?}`), a full JSON snapshot (`{snapshotData, replace?}` or the raw snapshot body), or selected snapshot parts (`{snapshotFiles:[{path,content}],replace?}`); optional `passphrase` (for `secrets.enc.json`) and `overwriteEnv`. Validates counts and SHA-256 part hashes before replacing `records`, `jobs` and `kv` atomically, then re-encrypts every credential with this server's `AUTH_SECRET`, applies the restored environment and writes `<dirname(DATABASE_PATH)>/.env`. Uploads are limited to 128 MiB |
+
+See [SYSTEM_BACKUP.md](SYSTEM_BACKUP.md) for what a snapshot contains and how to
+bring the platform up on a new server (UI, API or `npm run backup:restore`).
 
 ---
 

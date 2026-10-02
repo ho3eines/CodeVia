@@ -110,9 +110,48 @@ Which model answers *now* — see [MODEL_ROUTING.md](MODEL_ROUTING.md) for the a
 
 ---
 
+## Full system backup
+
+A backup captures the environment above **and** the credentials, so one file can
+rebuild the installation on another server. See [SYSTEM_BACKUP.md](SYSTEM_BACKUP.md).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BACKUP_INCLUDE_ENV` | `true` | Capture every variable of this contract that is set (plus each provider's `secretRef` name) into the snapshot |
+| `BACKUP_INCLUDE_SECRETS` | `true` | Capture credentials in plaintext — API keys, `GITHUB_TOKEN`, `TELEGRAM_BOT_TOKEN`, `AUTH_SECRET`, per-user GitHub OAuth tokens, provider keys. A restore re-encrypts them with the target server's `AUTH_SECRET`. `false` = database rows only (the pre-2026-10 behaviour) |
+| `BACKUP_LOCAL_COPY` | `true` | Also write each snapshot to `<dirname(DATABASE_PATH)>/backups/<ts>/` (the mounted volume), so a backup exists with no GitHub configured |
+| `BACKUP_LOCAL_DIR` | `<dirname(DATABASE_PATH)>/backups` | Where local copies go |
+| `BACKUP_LOCAL_RETAIN` | `30` | Local snapshots kept; older ones are pruned after each run |
+| `BACKUP_PASSPHRASE` | (empty) | Encrypt the **stored** bundle (scrypt + AES-256-GCM) as `secrets.enc.json`; a restore then needs the same passphrase. Never stored in the database and never captured into a backup |
+| `BACKUP_EXTRA_ENV` | (empty) | Comma-separated extra variable names to capture (e.g. a corporate proxy key) |
+
+`BACKUP_INCLUDE_ENV`, `BACKUP_INCLUDE_SECRETS`, `BACKUP_LOCAL_COPY` and
+`BACKUP_LOCAL_DIR` are also switches in Admin → System Backup; the panel value
+wins over the environment.
+
+### `.env` is read at boot
+
+The server loads `<dirname(DATABASE_PATH)>/.env` and then `./.env` before parsing
+this contract — that is how the environment a restore recovered survives a
+restart. **Already-set process variables always win**, so Railway/Docker variables
+keep their precedence and the file only fills the gaps. Machine-local variables
+(`PATH`, `HOME`, `npm_*`, `NODE_*`, …) are never read from or written to a `.env`
+file.
+
+---
+
 ## Secret hygiene rules
 
 1. Only **secret references** are stored in project/repo config and exports.
-2. Never commit `.env`, `*.db`, or any API key.
+2. Never commit `.env`, `*.db`, a backup snapshot, or any API key. `data/`
+   (which holds the database, the local backups and the restored `.env`) is
+   git-ignored — keep it that way.
 3. Use Railway Secrets (or your secret manager) for production.
 4. Rotate keys; the platform reads them fresh from the environment at runtime.
+5. **The one deliberate exception** is the full system backup, which carries
+   credentials so a restore works on any server. Control it with
+   `BACKUP_INCLUDE_SECRETS`, protect stored copies with `BACKUP_PASSPHRASE`, keep
+   the backup repository private, and treat a downloaded snapshot like a key ring:
+   transfer it over an encrypted channel and delete it when the restore is done.
+6. Rotating `AUTH_SECRET` invalidates every credential stored before the
+   rotation — restore a backup (which re-wraps them) or re-enter the keys.

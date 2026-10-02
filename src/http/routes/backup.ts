@@ -11,6 +11,9 @@ import {
 import { nextCronTime, isValidCron } from "../../backup/cron.js";
 import { getEnv } from "../../config/env.js";
 import { snapshotFromFiles } from "../../backup/snapshot.js";
+import { readLocalSnapshotFiles } from "../../backup/local.js";
+import { describeEnvironmentBundle } from "../../backup/secrets.js";
+import { resolveLocalBackupDir } from "../../backup/local.js";
 import type { BackupRestoreResult } from "../../backup/service.js";
 
 /** Large, but bounded: JSON snapshots can contain years of runs/conversations. */
@@ -28,13 +31,17 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
 /**
  * Admin-only System Backup endpoints.
  *
- *  - GET  /admin/backup            current config + github/storage readiness
- *  - PUT  /admin/backup            save admin config (repo, branch, path, cron, retain)
- *  - POST /admin/backup/run        push a snapshot to the configured repo now
- *  - GET  /admin/backup/list       list committed snapshots
- *  - GET  /admin/backup/export     download the current full snapshot as JSON
- *  - POST /admin/backup/restore    restore from GitHub (latest or snapshot id) or a
- *                                  snapshotData object passed in the request body
+ *  - GET  /admin/backup                   current config + github/storage/secrets readiness
+ *  - PUT  /admin/backup                   save admin config (repo, branch, path, cron, retain,
+ *                                          includeEnv, includeSecrets, localCopy, localDir)
+ *  - POST /admin/backup/run               take a snapshot now (GitHub + local copy)
+ *  - GET  /admin/backup/list              list snapshots (GitHub and local)
+ *  - GET  /admin/backup/export            the current full snapshot as JSON (inline)
+ *  - GET  /admin/backup/download          the same, as an attachment — the "download my
+ *                                         whole installation, API keys included" button
+ *  - GET  /admin/backup/local/:id/download  download one stored local snapshot
+ *  - POST /admin/backup/restore           restore from GitHub, from a local snapshot, or from
+ *                                         a snapshotData / snapshotFiles body
  */
 export function registerBackupRoutes(app: FastifyInstance, container: Container): void {
   app.get("/admin/backup", { schema: { tags: ["admin"] } }, async (req, reply) => {
@@ -42,6 +49,8 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
     const settings = getBackupSettings(container.kv);
     const effective = getEffectiveBackupSettings(container.kv);
     const validCron = isValidCron(effective.schedule);
+    const env = getEnv();
+    const passphraseSet = !!env.BACKUP_PASSPHRASE;
     return {
       settings,
       effective,
@@ -61,7 +70,26 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
         nextRunAt: validCron ? nextCronTime(effective.schedule)?.toISOString() : undefined,
       },
       storage: await getStorageInfo(),
-      environment: getEnv().NODE_ENV,
+      environment: env.NODE_ENV,
+      // What a snapshot will carry, and how it is protected. The UI shows this
+      // next to the download button so nobody is surprised by a file that can
+      // rebuild every integration — including its API keys.
+      secrets: {
+        includeEnv: effective.includeEnv,
+        includeSecrets: effective.includeSecrets,
+        storedEncrypted: passphraseSet,
+        passphraseConfigured: passphraseSet,
+        hint: effective.includeSecrets
+          ? passphraseSet
+            ? "Copies stored in the repository/volume are encrypted with BACKUP_PASSPHRASE; the file you download is plaintext."
+            : "Backups contain live API keys and tokens in plaintext. Keep the backup repository private, or set BACKUP_PASSPHRASE to encrypt the stored copies."
+          : "Credentials are NOT captured: a restore on a server with a different AUTH_SECRET brings the data back but not the API keys.",
+      },
+      local: {
+        enabled: effective.localCopy,
+        dir: resolveLocalBackupDir(container.db, effective.localDir),
+        retain: effective.retain,
+      },
     };
   });
 
@@ -91,6 +119,9 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
           path: stored.path ?? null,
           schedule: stored.schedule ?? null,
           retain: stored.retain ?? null,
+          includeEnv: stored.includeEnv ?? null,
+          includeSecrets: stored.includeSecrets ?? null,
+          localCopy: stored.localCopy ?? null,
         },
       });
       return { ok: true, stored, effective: getEffectiveBackupSettings(container.kv) };
@@ -120,20 +151,96 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
 
   app.get("/admin/backup/list", { schema: { tags: ["admin"] } }, async (req, reply) => {
     if (!requireAdmin(req, reply)) return { error: "Forbidden" };
-    const q = req.query as { limit?: string };
+    const q = req.query as { limit?: string; source?: string };
     const limit = Math.min(200, Math.max(1, Number(q.limit) || 50));
     const settings = getEffectiveBackupSettings(container.kv);
-    const backups = await container.backupService.listBackups(
-      { repo: settings.repo, branch: settings.branch, path: settings.path },
-      limit,
-    );
-    return { backups, configured: !!settings.repo, githubKind: container.github.kind };
+    // `source=github|local` narrows the list; the default shows every snapshot
+    // this installation could be restored from, newest first.
+    const backups =
+      q.source === "github"
+        ? await container.backupService.listBackups(
+            { repo: settings.repo, branch: settings.branch, path: settings.path },
+            limit,
+          )
+        : q.source === "local"
+          ? await container.backupService.listLocal(limit)
+          : await container.backupService.listAll(limit);
+    return {
+      backups,
+      configured: !!settings.repo,
+      githubKind: container.github.kind,
+      local: { enabled: settings.localCopy, dir: resolveLocalBackupDir(container.db, settings.localDir) },
+    };
   });
 
   app.get("/admin/backup/export", { schema: { tags: ["admin"] } }, async (req, reply) => {
     if (!requireAdmin(req, reply)) return { error: "Forbidden" };
     const snapshot = await container.backupService.exportSnapshot();
     return snapshot;
+  });
+
+  /**
+   * The "download my whole installation" endpoint: one self-contained JSON file
+   * with every runtime row AND the environment/credentials, so a new server can
+   * be brought up by uploading it again. Plaintext by design — the admin asked
+   * for the file; treat it like a key.
+   */
+  app.get("/admin/backup/download", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    if (!requireAdmin(req, reply)) return { error: "Forbidden" };
+    const snapshot = await container.backupService.exportSnapshot();
+    const stamp = snapshot.createdAt.replace(/[:.]/g, "-");
+    const summary = describeEnvironmentBundle(snapshot.environment);
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    reply.header("Content-Disposition", `attachment; filename="codevia-full-backup-${stamp}.json"`);
+    // Never cached or written to a shared log/CDN: this body holds credentials.
+    reply.header("Cache-Control", "no-store");
+    reply.header("X-CodeVia-Backup-Records", String(snapshot.records.length));
+    reply.header("X-CodeVia-Backup-Credentials", String(summary?.dbSecrets ?? 0));
+    await container.auditRepo.record({
+      userId: req.user.id,
+      action: "admin.backup.download",
+      result: "success",
+      source: "web",
+      correlationId: `admin-backup-download-${Date.now()}`,
+      metadata: {
+        records: snapshot.records.length,
+        jobs: snapshot.jobs.length,
+        kv: snapshot.kv.length,
+        credentials: summary?.dbSecrets ?? 0,
+        environmentKeys: summary?.envKeys ?? 0,
+      },
+    });
+    return reply.send(JSON.stringify(snapshot, null, 2));
+  });
+
+  /** Download one snapshot that was stored on this machine's volume. */
+  app.get("/admin/backup/local/:id/download", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    if (!requireAdmin(req, reply)) return { error: "Forbidden" };
+    const id = (req.params as { id?: string }).id ?? "";
+    if (!/^[A-Za-z0-9._-]+$/.test(id) || id === "." || id === "..") {
+      reply.code(400);
+      return { error: "Invalid backup snapshot id" };
+    }
+    const settings = getEffectiveBackupSettings(container.kv);
+    const files = await readLocalSnapshotFiles(resolveLocalBackupDir(container.db, settings.localDir), id);
+    if (!files.length) {
+      reply.code(404);
+      return { error: `No local snapshot "${id}"` };
+    }
+    // Rebuild the single-file snapshot from the stored parts (integrity-checked).
+    // A passphrase-protected bundle needs the same passphrase used at creation.
+    const passphrase = (req.query as { passphrase?: string }).passphrase;
+    let snapshot;
+    try {
+      snapshot = snapshotFromFiles(files, { passphrase });
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : "Snapshot could not be read" };
+    }
+    reply.header("Content-Type", "application/json; charset=utf-8");
+    reply.header("Content-Disposition", `attachment; filename="codevia-backup-${id}.json"`);
+    reply.header("Cache-Control", "no-store");
+    return reply.send(JSON.stringify(snapshot, null, 2));
   });
 
   app.post(
@@ -150,9 +257,21 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
         repo?: string;
         branch?: string;
         path?: string;
+        /** "local" restores a snapshot stored on this machine's volume. */
+        source?: string;
+        /** Unlocks a bundle stored encrypted (BACKUP_PASSPHRASE). */
+        passphrase?: string;
+        /** Let backup values replace variables this server already has. */
+        overwriteEnv?: boolean;
       };
       let result: BackupRestoreResult;
-      if (Array.isArray(b.snapshotFiles)) {
+      if (b.source === "local") {
+        result = await container.backupService.restoreFromLocal({
+          snapshot: b.snapshot,
+          replace: b.replace ?? true,
+          passphrase: b.passphrase,
+        });
+      } else if (Array.isArray(b.snapshotFiles)) {
         const files = b.snapshotFiles.map((rawFile, index) => {
           const file = rawFile && typeof rawFile === "object" ? (rawFile as Record<string, unknown>) : {};
           return {
@@ -166,9 +285,14 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
           };
         });
         try {
-          result = container.backupService.restoreSnapshotObject(snapshotFromFiles(files), {
-            replace: b.replace ?? true,
-          });
+          result = container.backupService.restoreSnapshotObject(
+            snapshotFromFiles(files, { passphrase: b.passphrase }),
+            {
+              replace: b.replace ?? true,
+              passphrase: b.passphrase,
+              overwriteEnv: b.overwriteEnv,
+            },
+          );
         } catch (err) {
           result = {
             ok: false,
@@ -192,12 +316,16 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
         }
         result = container.backupService.restoreSnapshotObject(snapshotData, {
           replace: b.replace ?? true,
+          passphrase: b.passphrase,
+          overwriteEnv: b.overwriteEnv,
         });
       } else if (Array.isArray(body.records) && Array.isArray(body.jobs) && Array.isArray(body.kv)) {
         // Also accept a raw full snapshot as the request body for API clients
         // that upload the downloaded JSON file without wrapping it.
         result = container.backupService.restoreSnapshotObject(body, {
           replace: b.replace ?? true,
+          passphrase: b.passphrase,
+          overwriteEnv: b.overwriteEnv,
         });
       } else {
         result = await container.backupService.restoreFromGitHub({
@@ -206,6 +334,7 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
           repo: b.repo,
           branch: b.branch,
           path: b.path,
+          passphrase: b.passphrase,
         });
       }
       if (result.ok) {
@@ -227,6 +356,14 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
         } catch (err) {
           warnings.push(`Telegram account runtime refresh failed: ${err instanceof Error ? err.message : String(err)}`);
         }
+        if (result.environment?.envApplied.length) {
+          warnings.push(
+            `Restored ${result.environment.envApplied.length} environment value(s)` +
+              ` and re-encrypted ${result.environment.providers + result.environment.telegramAccounts + result.environment.githubTokens} credential(s)` +
+              (result.environment.envFile?.ok ? ` · wrote ${result.environment.envFile.path}` : "") +
+              ". The server is usable immediately; no restart needed.",
+          );
+        }
         if (warnings.length) result.warning = warnings.join("; ");
         await container.auditRepo.record({
           userId: req.user.id,
@@ -244,6 +381,17 @@ export function registerBackupRoutes(app: FastifyInstance, container: Container)
             kv: result.kv,
             replace: result.replace,
             warning: result.warning,
+            // How much of the installation came back with it — never the values.
+            environment: result.environment
+              ? {
+                  envApplied: result.environment.envApplied.length,
+                  envKept: result.environment.envKept.length,
+                  providers: result.environment.providers,
+                  telegramAccounts: result.environment.telegramAccounts,
+                  githubTokens: result.environment.githubTokens,
+                  envFile: result.environment.envFile?.path,
+                }
+              : undefined,
           },
         });
       }

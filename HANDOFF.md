@@ -23,7 +23,7 @@
   - `POST /projects/:id/ci-setup`: ابتدا پیش‌بررسی write-access مانند بقیهٔ مسیرهای نوشتن (`403 {error, writeAccess}` یا `github_authorization_required`)، بعد برای هر ریپوی پروژه `proposeCiSetup`؛ پاسخ `{results, branch}`.
 - **UI (`client/app/140-conversations-memory-github.js`):** در بنرِ ریپوی بدون CI وقتی `ciSetupAvailable` باشد دکمهٔ `⚡ ساخت CI` نمایش داده می‌شود؛ کلیک → POST → toast «CI proposed as a Draft PR» → تازه‌سازی بنر؛ شکست با toast همان خطای پاسخ. `public/app.js` و `client/app/manifest.json` (دامنهٔ خطوط fragmentها) از نو ساخته شدند.
 - **Tests:** `src/tests/ci-setup.test.ts` (**۱۵ تست**): تشخیص stackها و گزینه‌های قالب؛ تریگرها + نام همهٔ jobها برای ۵ قالب؛ سازگاری با قفل/نبود تست (dotnet/python)؛ `requiredChecksPatch` (خالی/پر/چندریپو/idempotent)؛ HTTP روی mock: ساخت Draft PR با حفظ base ← فراخوانی دوم `pr-exists` ← workflow موجود `already-has-ci` ← 404؛ repo-status: پیشنهاد `[ساخت CI]` و بعد از ادغام ثبت خودکار `requiredChecks` (با اثبات idempotent)؛ و از طریق adapter واقعی + `fake-github-rest.ts`: PR فقط با توکن کاربر (توکن سایت هرگز نمی‌نویسد) و برای حساب بدون push همان `403 {writeAccess}` بدون هیچ نوشتنی روی گیت‌هاب.
-- **تعداد تست:** 854 → 869 (69 → 70 فایل). `npm run check` ✓ · `npm test` 869/869 ✓ · `npm run smoke` 33/33 ✓.
+- **تعداد تست:** 854 → 869 → 909 (69 → 70 → 76 فایل). `npm run check` ✓ · `npm test` 909/909 ✓ · `npm run smoke` 33/33 ✓.
 
 ## ویرایش مقاوم فایل — نردبان match، فرمت‌های patch و حلقهٔ اصلاحی (2026-09-29، گام ۱)
 

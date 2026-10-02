@@ -43,7 +43,7 @@
     const policy = await api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 900000, pending: 0 }));
     const backupAdmin = await api("/admin/backup").catch(() => null);
     $("#content").innerHTML = `${settingsHubHtml()}
-      <div class="overview" style="margin-top:12px"><div><h1>Settings</h1><p>Import / Export / Backup — secrets are never exported in the settings-only file</p></div></div>
+      <div class="overview" style="margin-top:12px"><div><h1>Settings</h1><p>Import / Export / Backup — یک فایل کامل از کل سیستم، همراه با کلیدهای API</p></div></div>
       <div class="grid-2">
         <div class="card card-body"><div class="card-title">Platform</div>
           <div class="meter-row"><span class="lbl">Environment</span><span class="val">${esc(s.environment)}</span></div>
@@ -57,10 +57,12 @@
           <p style="color:var(--text-muted);font-size:12px">وقتی Auto-approve خاموش باشد، مرحله‌های خطرناک (Merge، Deploy، Migration…) متوقف می‌شوند و در وب و تلگرام دکمه Approve/Reject می‌گیرید.</p>
         </div>
         <div class="card card-body"><div class="card-title">Backup & Import/Export</div>
-          <div class="flex">${backupAdmin ? '<button class="btn btn-primary" onclick="downloadFullBackup()">⬇ Full system backup</button>' : ''}<button class="btn" onclick="downloadBackup()">⬇ Login settings only</button><button class="btn" id="restore-btn">⬆ Restore backup file(s)</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
+          <div class="flex">${backupAdmin ? '<button class="btn btn-primary" onclick="downloadFullBackup()">⬇ Full system backup (JSON)</button>' : ''}<button class="btn" onclick="downloadBackup()">⬇ Login settings only</button><button class="btn" id="restore-btn">⬆ Restore backup file(s)</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
           <input type="file" id="restore-file" accept="application/json,.json" multiple style="display:none"/>
-          <p style="color:var(--text-muted);font-size:12px">ادمین می‌تواند از <strong>Full system backup</strong> یک فایل کامل بگیرد. ریستور از فایل کامل یا از همهٔ فایل‌های JSON یک پوشهٔ بکاپ (manifest، records، jobs و kv) پشتیبانی می‌کند؛ همهٔ فایل‌های یک snapshot را با هم انتخاب کنید. فایل «Login settings only» فقط تنظیمات ورود GitHub را دارد و بکاپ کامل داده‌های پروژه نیست.</p>
-          <p style="color:var(--text-muted);font-size:11px">💡 بعد از ریستور کامل، تمام جدول‌های runtime جایگزین می‌شوند. مقادیر رمزنگاری‌شده فقط با همان <span class="mono">AUTH_SECRET</span> قابل‌خواندن‌اند. در Railway می‌توانید به‌جای ریستور مداوم، Volume پایدار هم وصل کنید.</p>
+          ${backupAdmin?.secrets ? `<div class="field-hint ${backupAdmin.secrets.includeSecrets ? (backupAdmin.secrets.storedEncrypted ? "ok" : "warn") : ""}" style="margin-top:8px">🔑 ${esc(backupAdmin.secrets.hint || "")}</div>` : ""}
+          ${backupAdmin?.local?.enabled ? `<div class="meter-row"><span class="lbl">Local copies</span><span class="val mono">${esc(backupAdmin.local.dir || "")}</span></div>` : ""}
+          <p style="color:var(--text-muted);font-size:12px"><strong>Full system backup</strong> یک فایل JSON می‌سازد و دانلود می‌کند که <em>همه‌چیز</em> در آن است: پروژه‌ها، ایجنت‌ها، مدل‌ها و پرووایدرها، ورک‌فلوها، تسک/ران‌ها، کانورسیشن‌ها، مموری، کاربران، تلگرام، لاگ‌ها و تمام تنظیمات — به‌علاوهٔ <strong>کلیدهای API و توکن‌ها</strong> و کل متغیرهای محیطی. همان فایل را روی سرور دیگر با <strong>Restore backup file(s)</strong> آپلود کنید تا سیستم بدون هیچ تنظیم دستی بالا بیاید.</p>
+          <p style="color:var(--text-muted);font-size:11px">💡 موقع ریستور، کلیدها با <span class="mono">AUTH_SECRET</span> همان سرور دوباره رمز می‌شوند و متغیرهای محیطی در <span class="mono">&lt;مسیر دیتابیس&gt;/.env</span> نوشته می‌شوند، پس بعد از restart هم باقی می‌مانند. ریستور از همهٔ فایل‌های JSON یک پوشهٔ بکاپ (manifest، records، jobs، kv و secrets) هم پشتیبانی می‌کند — همه را با هم انتخاب کنید. فایل «Login settings only» فقط تنظیمات ورود GitHub را دارد.</p>
         </div>
       </div>
       <div id="tg-settings"></div>`;
@@ -80,9 +82,14 @@
         try {
           let body;
           if (files.length > 1 || /^(manifest|records(?:-\d+)?|jobs(?:-\d+)?|kv(?:-\d+)?)\.json$/i.test(files[0].name)) {
-            if (!confirm("ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند. قبل از ادامه مطمئن شوید همهٔ فایل‌های JSON همین snapshot را انتخاب کرده‌اید.")) return;
+            if (!confirm("ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند. قبل از ادامه مطمئن شوید همهٔ فایل‌های JSON همین snapshot (از جمله secrets.json) را انتخاب کرده‌اید.")) return;
             const snapshotFiles = await Promise.all(files.map(async (file) => ({ path: file.webkitRelativePath || file.name, content: await file.text() })));
             body = { snapshotFiles, replace: true };
+            if (snapshotFiles.some((file) => /secrets\.enc\.json$/i.test(file.path))) {
+              const passphrase = prompt("این بکاپ کلیدها را رمزنگاری‌شده نگه می‌دارد. BACKUP_PASSPHRASE زمان ساخت را وارد کنید:");
+              if (!passphrase) return;
+              body.passphrase = passphrase;
+            }
           } else {
             const data = JSON.parse(await files[0].text());
             const fullSnapshot = data?.type === "codevia-runtime-backup" ||
@@ -95,12 +102,21 @@
               refreshCurrent();
               return;
             }
-            if (!confirm("ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند. قبل از ادامه مطمئن شوید فایل بکاپ درست را انتخاب کرده‌اید.")) return;
+            const carriesKeys = !!(data?.environment?.dbSecrets?.length || Object.keys(data?.environment?.env || {}).length || data?.environmentEnc);
+            if (!confirm(`ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند${carriesKeys ? " و کلیدهای API/توکن‌های داخل فایل را روی این سرور فعال می‌کند" : ""}. ادامه می‌دهید؟`)) return;
             body = { snapshotData: data, replace: true };
+            if (data?.environmentEnc) {
+              const passphrase = prompt("این بکاپ کلیدها را رمزنگاری‌شده نگه می‌دارد. BACKUP_PASSPHRASE زمان ساخت را وارد کنید:");
+              if (!passphrase) return;
+              body.passphrase = passphrase;
+            }
           }
           const res = await api("/admin/backup/restore", { method: "POST", body });
           if (!res.ok) throw new Error(res.error || "Full restore failed");
-          toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok");
+          const envNote = res.environment
+            ? ` · 🔑 ${(res.environment.providers || 0) + (res.environment.telegramAccounts || 0) + (res.environment.githubTokens || 0)} credential(s), ${(res.environment.envApplied || []).length} env value(s) restored`
+            : "";
+          toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${envNote}${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok");
           // The restore replaced the whole database — drop client caches and
           // re-render in place so nothing stale lingers (no page reload).
           setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700);
@@ -117,16 +133,48 @@
     const a = document.createElement("a"); a.href = url; a.download = "codevia-login-settings-backup.json"; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  window.downloadFullBackup = async () => {
+  /**
+   * Download the complete installation as one JSON file — every runtime row plus
+   * the environment and credentials, so the same file brings the platform up on
+   * another server. `btn`/`label` are optional (the admin console passes them so
+   * the button can show progress).
+   */
+  window.downloadFullBackup = async (btn, label) => {
+    if (btn) { btn.disabled = true; btn.textContent = "Preparing…"; }
     try {
-      const snapshot = await api("/admin/backup/export");
-      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = "codevia-full-backup.json"; a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      toast("Full system backup downloaded", `${snapshot.records?.length || 0} records, ${snapshot.jobs?.length || 0} jobs, ${snapshot.kv?.length || 0} kv`, "ok");
+      const snapshot = await api("/admin/backup/download");
+      const stamp = String(snapshot.createdAt || new Date().toISOString()).replace(/[:.]/g, "-");
+      saveJsonBlob(snapshot, `codevia-full-backup-${stamp}.json`);
+      const env = snapshot.environment || {};
+      const keys = (env.dbSecrets || []).length;
+      const envKeys = Object.keys(env.env || {}).length;
+      toast(
+        "Full system backup downloaded",
+        `${snapshot.records?.length || 0} records, ${snapshot.jobs?.length || 0} jobs, ${snapshot.kv?.length || 0} kv` +
+          (keys || envKeys ? ` · 🔑 ${keys} credential(s), ${envKeys} env value(s)` : " · no credentials included"),
+        keys || envKeys ? "warn" : "ok",
+      );
     } catch (e) {
       toast("Backup export failed", e.message, "err");
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = label || "⬇ Download"; }
     }
   };
+  /** Download one snapshot that is stored on this server's volume. */
+  window.downloadBackupSnapshot = async (id) => {
+    try {
+      const snapshot = await api(`/admin/backup/local/${encodeURIComponent(id)}/download`);
+      saveJsonBlob(snapshot, `codevia-backup-${id}.json`);
+      toast("Snapshot downloaded", id, "ok");
+    } catch (e) {
+      toast("Download failed", e.message, "err");
+    }
+  };
+  /** Trigger a browser download for one JSON document. */
+  function saveJsonBlob(document_, filename) {
+    const blob = new Blob([JSON.stringify(document_, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 

@@ -1,20 +1,26 @@
 import { z } from "zod";
 import type { KvStore } from "../db/kv.js";
+import { getEnv } from "../config/env.js";
 import { parseRepoFullName } from "../github/types.js";
 import { isValidCron } from "./cron.js";
 
 /* ------------------------------------------------------------------ *
  * Admin-only System Backup settings.
  *
- * The admin configures a dedicated GitHub repository + branch the platform
- * pushes a full snapshot of everything stored in the runtime DB (projects,
- * agents, models, providers, skills, workflows, tasks/runs, conversations,
- * memory, users, Telegram accounts, audit/cost/notifications, kv settings)
- * into. Scheduling uses a five-field cron so the operator can pick the exact
- * minute/hour/day-of-month. All values are non-secret config stored in kv;
- * the actual snapshots are JSON files in the configured repo. Encrypted
- * secret material inside records is included only in its already-encrypted
- * form (never plaintext).
+ * The admin configures where a **full** snapshot of the installation goes: a
+ * dedicated GitHub repository + branch, and (by default) a copy on disk next to
+ * the database. The snapshot contains everything stored in the runtime DB
+ * (projects, agents, models, providers, skills, workflows, tasks/runs,
+ * conversations, memory, users, Telegram accounts, audit/cost/notifications, kv
+ * settings) PLUS the environment and credentials that produced it — API keys,
+ * GitHub/Telegram tokens, per-user GitHub OAuth tokens and AUTH_SECRET — so one
+ * file can bring the same installation up on a different server. Scheduling uses
+ * a five-field cron so the operator can pick the exact minute/hour/day-of-month.
+ *
+ * Because a backup can hold live credentials, `includeSecrets` is an explicit,
+ * visible switch (default on — that is what makes a cross-server restore work),
+ * and `BACKUP_PASSPHRASE` encrypts the copies that are stored rather than
+ * downloaded. See docs/SYSTEM_BACKUP.md.
  * ------------------------------------------------------------------ */
 
 export const BACKUP_SETTINGS_KEY = "admin.settings.backup";
@@ -31,6 +37,23 @@ const BackupSettingsSchema = z.object({
   path: z.string().trim().max(256).optional(),
   /** Five-field cron: minute hour day-of-month month day-of-week. */
   schedule: z.string().trim().max(64).optional(),
+  /**
+   * Capture the platform environment (every variable in `.env.example` plus
+   * provider `secretRef` names) into the backup, so a new server comes up with
+   * the same configuration instead of an empty one.
+   */
+  includeEnv: z.boolean().optional(),
+  /**
+   * Capture credentials in plaintext: API keys, GitHub/Telegram tokens, per-user
+   * GitHub OAuth tokens and AUTH_SECRET. This is what makes a restore work on a
+   * server with a *different* AUTH_SECRET. Turn it off to store database rows
+   * only (secrets then stay in their encrypted, AUTH_SECRET-bound form).
+   */
+  includeSecrets: z.boolean().optional(),
+  /** Also write every snapshot to disk next to the database (the mounted volume). */
+  localCopy: z.boolean().optional(),
+  /** Override for BACKUP_LOCAL_DIR (default `<database dir>/backups`). */
+  localDir: z.string().trim().max(512).optional(),
   /**
    * The connected account whose GitHub token should push/restore the backup.
    * Backups run unattended, so there is no request to borrow a token from: the
@@ -63,6 +86,10 @@ export type SaveBackupSettingsInput = Partial<{
   schedule: string;
   retain: number;
   githubUserId: string;
+  includeEnv: boolean;
+  includeSecrets: boolean;
+  localCopy: boolean;
+  localDir: string;
 }>;
 
 const BRANCH_RE = /^[A-Za-z0-9._-]+$/;
@@ -126,6 +153,10 @@ export function saveBackupSettings(kv: KvStore, input: SaveBackupSettingsInput, 
   if (retain !== undefined && (Number.isNaN(retain) || retain < 1 || retain > 500)) {
     throw Object.assign(new Error("retain must be between 1 and 500"), { statusCode: 400 });
   }
+  const localDir = clean(input.localDir);
+  if (input.localDir !== undefined && localDir && localDir.includes("\0")) {
+    throw Object.assign(new Error("Local backup directory is not a valid path"), { statusCode: 400 });
+  }
 
   const prev = getBackupSettings(kv);
   const next: BackupSettings = {
@@ -137,6 +168,10 @@ export function saveBackupSettings(kv: KvStore, input: SaveBackupSettingsInput, 
     ...(schedule !== undefined ? { schedule } : {}),
     ...(retain !== undefined ? { retain } : {}),
     ...(input.githubUserId !== undefined ? { githubUserId: clean(input.githubUserId) } : {}),
+    ...(input.includeEnv !== undefined ? { includeEnv: input.includeEnv } : {}),
+    ...(input.includeSecrets !== undefined ? { includeSecrets: input.includeSecrets } : {}),
+    ...(input.localCopy !== undefined ? { localCopy: input.localCopy } : {}),
+    ...(input.localDir !== undefined ? { localDir } : {}),
     updatedAt: new Date().toISOString(),
     ...(updatedBy ? { updatedBy } : {}),
   };
@@ -144,6 +179,7 @@ export function saveBackupSettings(kv: KvStore, input: SaveBackupSettingsInput, 
   if (input.branch !== undefined && branch === undefined) delete next.branch;
   if (input.path !== undefined && path === undefined) delete next.path;
   if (input.schedule !== undefined && schedule === undefined) delete next.schedule;
+  if (input.localDir !== undefined && localDir === undefined) delete next.localDir;
 
   const parsed = BackupSettingsSchema.parse(next);
   kv.set(BACKUP_SETTINGS_KEY, parsed);
@@ -179,14 +215,25 @@ export function updateBackupStatus(
 /** Effective settings with defaults filled in, for service + UI display. */
 export function getEffectiveBackupSettings(
   kv: KvStore,
-): Required<Pick<BackupSettings, "enabled" | "branch" | "path" | "schedule" | "retain">> & BackupSettings {
+): Required<
+  Pick<
+    BackupSettings,
+    "enabled" | "branch" | "path" | "schedule" | "retain" | "includeEnv" | "includeSecrets" | "localCopy"
+  >
+> &
+  BackupSettings {
   const s = getBackupSettings(kv);
+  const env = getEnv();
   return {
     enabled: s.enabled ?? false,
     branch: s.branch ?? "main",
     path: s.path ?? DEFAULT_BACKUP_PATH,
     schedule: s.schedule ?? DEFAULT_BACKUP_SCHEDULE,
     retain: s.retain ?? 30,
+    // The admin panel wins; the environment provides the installation default.
+    includeEnv: s.includeEnv ?? env.BACKUP_INCLUDE_ENV,
+    includeSecrets: s.includeSecrets ?? env.BACKUP_INCLUDE_SECRETS,
+    localCopy: s.localCopy ?? env.BACKUP_LOCAL_COPY,
     ...s,
   };
 }

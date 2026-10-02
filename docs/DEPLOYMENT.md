@@ -104,7 +104,42 @@ The Docker `HEALTHCHECK` uses `/health`.
 
 ---
 
-## 5. Scaling notes
+## 5. Moving to another server (or rebuilding one)
+
+A full backup is a single self-contained file: every runtime row plus the
+environment and the credentials. See [SYSTEM_BACKUP.md](SYSTEM_BACKUP.md) for what
+it contains and every way to take one.
+
+```bash
+# 1. On the old server — Settings → ⬇ Full system backup (JSON)
+#    (or without the UI: npm run backup:export -- --out /secure/backup.json)
+
+# 2. On the new server
+git clone <your fork> && cd CodeVia
+npm ci && npm run build
+npm run backup:restore -- /secure/backup.json   # writes the DB + <db dir>/.env
+DATABASE_PATH=/app/data/codevia.db npm start    # or: docker compose up -d
+```
+
+The restore re-encrypts every credential with the **new** server's `AUTH_SECRET`,
+fills in the environment variables that are not already set, and persists them to
+`<dirname(DATABASE_PATH)>/.env`, which the server reads at boot — so the keys are
+still there after the first restart. Variables the platform injects (`PORT`,
+`DATABASE_PATH`, Railway variables…) always win over the backup.
+
+In Docker, mount the volume that holds the database — the local backup copies and
+the restored `.env` live next to it:
+
+```bash
+docker run -d --name codevia-web --env-file .env \
+  -v codevia-data:/app/data -p 8080:8080 codevia-platform:latest
+```
+
+If the new server must come up *before* anyone can sign in (`REQUIRE_AUTH=true` on
+an empty database answers 401 to everyone), the CLI restore above is the way in —
+it needs no session.
+
+## 6. Scaling notes
 
 - The runtime store (SQLite) and queue are the shared state. For scale-out, swap `Db` for Postgres (the repository abstraction isolates the change) and the in-process queue for Redis. The domain, agents, providers, and tools layers are unchanged.
 - Agent workers, the model gateway, GitHub service, Telegram service, and execution workers are designed to be separately scalable (module boundaries in `agents/`, `ai/`, `github/`, `integrations/`, `workers/`).

@@ -8,7 +8,7 @@ A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled
 
 > **Readiness note (2026-09-12):** the [historical completeness audit](docs/PIPELINE_AUDIT.md) reproduced 18 targeted gaps before the repository-first work; all 18 are closed. **Per-account isolation** covers GitHub credentials, projects, models/providers, and every by-id entity route (`/tasks/:id`, `/runs/:id`, `/conversations/:id`, `/approvals/:id`) is now gated directly at the handler, not just indirectly through a global hook — see [docs/MULTI_USER_ISOLATION.md](docs/MULTI_USER_ISOLATION.md). Operator-level admin feeds and settings stay account-independent **by design**. Review the [remaining gaps table](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here) before a sensitive multi-user deployment.
 
-> **Repository-backed project knowledge.** The platform stores full skills, agents/prompts and prompt history, rules, memory, workflows, tasks, runs and conversations under **`CodeVia/`**. The [repository-state audit](docs/REPOSITORY_STATE_AUDIT.md) previously reproduced 8 gaps (context consumption, terminal history, deletion/copy, legacy migration, error handling); **all 8 are now closed** and `scripts/audit-repository-state.mjs` exits `0`. Credentials, accounts and live queue state remain local by design; keep a database backup, particularly before migrating legacy projects. See the [format and usage guide](docs/REPOSITORY_STATE.md).
+> **Repository-backed project knowledge.** The platform stores full skills, agents/prompts and prompt history, rules, memory, workflows, tasks, runs and conversations under **`CodeVia/`**. The [repository-state audit](docs/REPOSITORY_STATE_AUDIT.md) previously reproduced 8 gaps (context consumption, terminal history, deletion/copy, legacy migration, error handling); **all 8 are now closed** and `scripts/audit-repository-state.mjs` exits `0`. Credentials, accounts and live queue state remain local by design and are **not** pushed into a project repository — they are covered by the [full system backup](docs/SYSTEM_BACKUP.md) instead. Take one before migrating legacy projects. See the [format and usage guide](docs/REPOSITORY_STATE.md).
 
 ### Gap status at a glance (2026-09-12)
 
@@ -39,6 +39,7 @@ A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled
 - 📚 **Read-only local mirror** — evidence is read from a per-account bare clone with git *plumbing* (`ls-tree` / `cat-file` / `grep`), so large repositories answer from disk and agents get real content search; every failure falls back to the Git Trees API path. **No repository code is ever executed** — writes still go through the GitHub API and verification still reads CI check runs.
 - 📊 **Observability** — AI Run Console (observable steps, never chain-of-thought), cost tracking, agent dashboards, audit log, notifications, system health.
 - 🔐 **Security building blocks** — secret references, OAuth login, per-account GitHub tokens (every project action runs with *your* token, not a server PAT), role definitions, webhook signature validation, approval controls and audit events. Some global admin feeds are still shared; see the [remaining gaps](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here).
+- 💾 **Full portable backup** — one JSON file holds *everything*: every runtime row **plus the environment and the API keys/tokens** that made it work. Download it from `Settings`, restore it on any other server (UI upload or `npm run backup:restore`), and the platform comes back complete — credentials are re-encrypted with the new server's `AUTH_SECRET` and the environment is written to `<db dir>/.env` so it survives a restart. Snapshots also go to a GitHub repo and/or the mounted volume on a cron schedule, with SHA-256-verified parts and optional `BACKUP_PASSPHRASE` protection. See [docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md).
 - 🐳 **Dockerized + Railway-ready** — multi-stage Dockerfile, health/readiness/liveness endpoints, `railway.json`, `docker-compose.yml`, `.env.example`.
 
 ---
@@ -69,8 +70,9 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (869 tests)
+npm test            # unit + integration + end-to-end (909 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
+npm run backup      # full portable backup (every row + API keys + env) → data/codevia-backup.json
 npm run typecheck   # strict TypeScript
 npm run build       # compile + copy static UI into dist/
 npm start           # run the production build
@@ -173,7 +175,7 @@ Features: responsive, dark/light mode, **RTL/Persian-friendly**, command palette
 | [docs/API.md](docs/API.md) | REST API reference (OpenAPI at `/docs`) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Implementation roadmap (Phases 1–15) |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues & fixes |
-| [docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md) | Full runtime backup to GitHub, scheduling, restore |
+| [docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md) | Full portable backup — every row **plus API keys & environment** — to GitHub/volume/one JSON file, scheduling, and restoring on a new server |
 
 > Documentation is intentionally bilingual: user-facing guides and audits are written in Persian (فارسی), engineering/architecture references in English. Treat both languages as equally authoritative.
 

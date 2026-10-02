@@ -1,3 +1,7 @@
+// MUST stay the first import: it reads `.env` (including the one a backup
+// restore wrote next to the database) before any other module caches the
+// environment contract — see src/config/env-bootstrap.ts.
+import { loadedEnv } from "./config/env-bootstrap.js";
 import { getContainer } from "./app/container.js";
 import { buildServer } from "./http/app.js";
 import { getEnv } from "./config/env.js";
@@ -7,6 +11,14 @@ import { getLocalhostCallbackWarning } from "./auth/github-oauth.js";
 import { logger } from "./logger.js";
 
 async function main() {
+  // A full system backup restore writes `<database dir>/.env` with every API key
+  // it recovered, so a machine rebuilt from a backup starts complete instead of
+  // half-configured. Variables the platform injects always win — the file only
+  // fills the gaps (see src/config/env-file.ts).
+  if (loadedEnv.keys.length) {
+    logger.info(`loaded ${loadedEnv.keys.length} variable(s) from ${loadedEnv.files.join(", ")}`);
+  }
+
   const env = getEnv();
 
   // Fail fast — and loudly — when the runtime store path is unusable. Opening
