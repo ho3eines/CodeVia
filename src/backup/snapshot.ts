@@ -2,27 +2,59 @@ import { createHash } from "node:crypto";
 import type { Db } from "../db/client.js";
 import { getEnv } from "../config/env.js";
 import { getStorageInfo } from "../app/storage.js";
+import {
+  collectEnvironmentBundle,
+  describeEnvironmentBundle,
+  isSecretEnvKey,
+  decryptEnvironmentBundle,
+  encryptEnvironmentBundle,
+  isEncryptedBundle,
+  normalizeEnvironmentBundle,
+  type CollectOptions,
+  type EncryptedBundle,
+  type EnvironmentBundle,
+} from "./secrets.js";
 
 /* ------------------------------------------------------------------ *
  * Full runtime snapshot.
  *
  * The SQLite DB at DATABASE_PATH is the only real persisted state on Railway
  * (container storage is ephemeral). This captures the complete contents of
- * `records`, `jobs` and `kv` so the platform can be fully rebuilt after a
- * deploy / corruption / disaster.
+ * `records`, `jobs` and `kv` — plus, since version 2, the **environment and
+ * credentials** that produced them — so the platform can be fully rebuilt after
+ * a deploy / corruption / disaster, *on a different server*.
  *
- * Secret material is stored in the same encrypted form the runtime keeps
- * (provider secretValueEnc, Telegram tokenEnc, per-user GitHub token records).
- * The snapshot never decrypts those values.
+ * Secret material inside the tables is stored in the same encrypted form the
+ * runtime keeps (provider secretValueEnc, Telegram tokenEnc, per-user GitHub
+ * token records). The `environment` bundle additionally carries those values
+ * decrypted (plus every API key that only existed as an environment variable)
+ * so a restore can re-encrypt them with the new server's AUTH_SECRET; see
+ * `./secrets.ts`. Set BACKUP_INCLUDE_SECRETS=false for the old, secret-free
+ * behaviour.
  * ------------------------------------------------------------------ */
 
-export const BACKUP_SNAPSHOT_VERSION = 1;
+/**
+ * 1 — records/jobs/kv only.
+ * 2 — adds the portable environment + credential bundle.
+ */
+export const BACKUP_SNAPSHOT_VERSION = 2;
 export const BACKUP_SNAPSHOT_TYPE = "codevia-runtime-backup";
 
 /** Keep GitHub Contents API files comfortably below its 1 MiB small-file boundary. */
 const BACKUP_PART_MAX_BYTES = 700 * 1024;
 const TABLE_NAMES = ["records", "jobs", "kv"] as const;
 type SnapshotTableName = (typeof TABLE_NAMES)[number];
+/**
+ * Names of the optional bundle part file. A bundle that carries credentials is
+ * called `secrets.json` so nobody mistakes it for harmless configuration; one
+ * that only carries non-secret environment values is `environment.json`. Both
+ * have a passphrase-protected `.enc` twin.
+ */
+const SECRETS_FILE = "secrets.json";
+const SECRETS_ENC_FILE = "secrets.enc.json";
+const ENV_FILE = "environment.json";
+const ENV_ENC_FILE = "environment.enc.json";
+const BUNDLE_FILE_NAMES = [SECRETS_ENC_FILE, SECRETS_FILE, ENV_ENC_FILE, ENV_FILE];
 
 interface SnapshotRecordRow {
   id: string;
@@ -90,6 +122,13 @@ export interface SnapshotKvItem {
   updatedAt: string;
 }
 
+/**
+ * What a snapshot is allowed to carry (defaults come from the environment).
+ * Passphrase protection is applied when the snapshot is *stored* — see
+ * `snapshotFilePaths` / `bundleForStorage`.
+ */
+export type CreateSnapshotOptions = CollectOptions;
+
 export interface BackupSnapshot {
   version: number;
   type: string;
@@ -105,6 +144,13 @@ export interface BackupSnapshot {
   records: SnapshotRecord[];
   jobs: SnapshotJob[];
   kv: SnapshotKvItem[];
+  /**
+   * Portable environment + credentials (version 2). Present only when the
+   * backup was allowed to capture them; a v1 snapshot simply has neither field.
+   */
+  environment?: EnvironmentBundle;
+  /** Passphrase-protected form of `environment` (BACKUP_PASSPHRASE set). */
+  environmentEnc?: EncryptedBundle;
 }
 
 interface SnapshotManifestPart {
@@ -121,7 +167,11 @@ interface SnapshotManifest {
   platform?: unknown;
   summary?: unknown;
   counts?: unknown;
-  files?: Partial<Record<SnapshotTableName, Array<string | SnapshotManifestPart>>>;
+  files?: Partial<Record<SnapshotTableName, Array<string | SnapshotManifestPart>>> & {
+    environment?: Array<string | SnapshotManifestPart>;
+  };
+  /** Non-secret description of the captured credentials. */
+  environment?: unknown;
 }
 
 function invalidBackup(message: string): never {
@@ -224,7 +274,7 @@ function sha256(content: string): string {
 }
 
 /** Take a complete, transaction-consistent point-in-time snapshot from SQLite. */
-export async function createSnapshot(db: Db): Promise<BackupSnapshot> {
+export async function createSnapshot(db: Db, options: CreateSnapshotOptions = {}): Promise<BackupSnapshot> {
   // A read transaction makes records/jobs/kv describe the same DB state even
   // when workers or API requests write while a large backup is being created.
   const { recordsRows, jobsRows, kvRows } = db.tx(() => ({
@@ -268,14 +318,19 @@ export async function createSnapshot(db: Db): Promise<BackupSnapshot> {
   for (const record of records) assertJsonValue(record.data, `record ${record.id}.data`);
   for (const job of jobs) assertJsonValue(job.payload, `job ${job.id}.payload`);
   for (const item of kv) assertJsonValue(item.value, `kv ${item.key}.value`);
-  const serializedPayload = JSON.stringify(payload);
+  const storage = await getStorageInfo();
+  // The environment/credential bundle is what turns a database dump into a
+  // backup that can bring the *same installation* up on another server.
+  const environment = collectEnvironmentBundle(db, { ...options, platform: storage.platform });
+  const serializedPayload = JSON.stringify({ ...payload, environment });
   if (serializedPayload === undefined) invalidBackup("the database snapshot cannot be serialized as JSON");
+  assertJsonValue(environment, "environment");
   return {
     version: BACKUP_SNAPSHOT_VERSION,
     type: BACKUP_SNAPSHOT_TYPE,
     createdAt: new Date().toISOString(),
     databasePath: getEnv().DATABASE_PATH,
-    platform: (await getStorageInfo()).platform,
+    platform: storage.platform,
     summary: {
       records: records.length,
       jobs: jobs.length,
@@ -283,6 +338,7 @@ export async function createSnapshot(db: Db): Promise<BackupSnapshot> {
       bytes: Buffer.byteLength(serializedPayload, "utf8"),
     },
     ...payload,
+    environment,
   };
 }
 
@@ -358,6 +414,20 @@ export function assertBackupSnapshot(snapshot: unknown): asserts snapshot is Bac
         invalidBackup(`manifest expects ${String(expected)} ${key}, but the backup contains ${count}`);
       }
     }
+  }
+
+  // The credential bundle is optional (v1 snapshots never had one), but when it
+  // is there it must be a real bundle: a malformed one would silently restore a
+  // server without its API keys.
+  if (s.environment !== undefined) {
+    assertJsonValue(s.environment, "environment");
+    if (!isObject(s.environment)) invalidBackup("environment must be an object");
+    if (!isObject(s.environment.env) && !Array.isArray(s.environment.dbSecrets)) {
+      invalidBackup("environment carries neither env nor dbSecrets");
+    }
+  }
+  if (s.environmentEnc !== undefined && !isEncryptedBundle(s.environmentEnc)) {
+    invalidBackup("environmentEnc is not a valid encrypted credential bundle");
   }
 }
 
@@ -448,6 +518,11 @@ export function normalizeBackupSnapshot(input: unknown): BackupSnapshot {
   const summaryRaw = isObject(source.summary) ? source.summary : {};
   const payload = { records, jobs, kv };
   const version = source.version === undefined ? BACKUP_SNAPSHOT_VERSION : Number(source.version);
+  // Portable environment + credentials (v2). Both shapes are accepted: the
+  // plaintext bundle an admin downloaded, and the passphrase-protected one a
+  // stored copy carries.
+  const environment = normalizeEnvironmentBundle(source.environment);
+  const environmentEnc = isEncryptedBundle(source.environmentEnc) ? source.environmentEnc : undefined;
   const snapshot: BackupSnapshot = {
     version,
     type: BACKUP_SNAPSHOT_TYPE,
@@ -466,9 +541,42 @@ export function normalizeBackupSnapshot(input: unknown): BackupSnapshot {
         : Buffer.byteLength(JSON.stringify(payload), "utf8"),
     },
     ...payload,
+    ...(environment ? { environment } : {}),
+    ...(environmentEnc ? { environmentEnc } : {}),
   };
   assertBackupSnapshot(snapshot);
   return snapshot;
+}
+
+/**
+ * The credential bundle a restore should apply, resolving the encrypted form
+ * with the given passphrase. Throws a readable error when a protected bundle
+ * cannot be unlocked, so a restore never silently drops every API key.
+ */
+export function resolveSnapshotBundle(snapshot: BackupSnapshot, passphrase?: string): EnvironmentBundle | undefined {
+  if (snapshot.environment) return normalizeEnvironmentBundle(snapshot.environment);
+  if (!snapshot.environmentEnc) return undefined;
+  const decrypted = decryptEnvironmentBundle(snapshot.environmentEnc, passphrase ?? getEnv().BACKUP_PASSPHRASE);
+  if (!decrypted) {
+    invalidBackup(
+      "this backup stores its API keys encrypted — provide the passphrase it was created with (BACKUP_PASSPHRASE)",
+    );
+  }
+  return decrypted;
+}
+
+/**
+ * Replace the plaintext bundle with its passphrase-protected form, for copies
+ * that are written to disk or pushed to a repository. The object an admin
+ * downloads is left untouched (plaintext by design — they asked for the file).
+ */
+export function bundleForStorage(snapshot: BackupSnapshot, passphrase?: string): BackupSnapshot {
+  if (!passphrase || !snapshot.environment) return snapshot;
+  const { environment: _plaintext, ...rest } = snapshot;
+  return {
+    ...rest,
+    environmentEnc: encryptEnvironmentBundle(_plaintext, passphrase),
+  };
 }
 
 /**
@@ -539,8 +647,18 @@ export function restoreSnapshot(db: Db, snapshot: BackupSnapshot, replace = true
   };
 }
 
+/** How the credential bundle should be written into a stored snapshot. */
+export interface SnapshotFileOptions {
+  /** When set, the bundle is stored encrypted instead of plaintext. */
+  passphrase?: string;
+}
+
 /** Build the file payload committed to GitHub (manifest + bounded JSON parts). */
-export function snapshotFilePaths(base: string, snapshot: BackupSnapshot): Array<{ path: string; content: string }> {
+export function snapshotFilePaths(
+  base: string,
+  snapshot: BackupSnapshot,
+  options: SnapshotFileOptions = {},
+): Array<{ path: string; content: string }> {
   assertBackupSnapshot(snapshot);
   const dir = base.replace(/\/+$/, "");
   const tableItems: Record<SnapshotTableName, unknown[]> = {
@@ -566,6 +684,22 @@ export function snapshotFilePaths(base: string, snapshot: BackupSnapshot): Array
     });
   }
 
+  // The credential/environment bundle: one extra part file, hashed like the
+  // tables so a truncated copy can never restore a half-configured server.
+  const passphrase = options.passphrase ?? (snapshot.environment ? getEnv().BACKUP_PASSPHRASE : undefined);
+  const bundle = snapshot.environment;
+  const bundleSummary = describeEnvironmentBundle(bundle);
+  let environmentFiles: SnapshotManifestPart[] | undefined;
+  const hasBundleContent = !!bundle && (Object.keys(bundle.env).length > 0 || bundle.dbSecrets.length > 0);
+  if (bundle && hasBundleContent) {
+    const encrypted = passphrase ? encryptEnvironmentBundle(bundle, passphrase) : undefined;
+    const credentials = bundleCarriesCredentials(bundle);
+    const name = encrypted ? (credentials ? SECRETS_ENC_FILE : ENV_ENC_FILE) : credentials ? SECRETS_FILE : ENV_FILE;
+    const content = `${JSON.stringify(encrypted ?? bundle, null, 2)}\n`;
+    output.push({ path: `${dir}/${name}`, content });
+    environmentFiles = [{ path: name, sha256: sha256(content) }];
+  }
+
   const manifest = {
     version: snapshot.version,
     type: snapshot.type,
@@ -578,31 +712,70 @@ export function snapshotFilePaths(base: string, snapshot: BackupSnapshot): Array
       byType: groupCounts(snapshot.records),
       jobs: snapshot.jobs.length,
       kv: snapshot.kv.length,
+      ...(bundleSummary
+        ? {
+            environment: bundleSummary.envKeys,
+            credentials: bundleSummary.dbSecrets,
+          }
+        : {}),
     },
+    // Non-secret description of what the bundle carries, so an operator can see
+    // in the repo whether this snapshot can bring the API keys back.
+    ...(bundleSummary ? { environment: bundleSummary } : {}),
     // Per-part hashes/counts make a damaged or hand-copied partial backup fail
     // before any existing data is deleted.
-    files: fileManifest,
+    files: environmentFiles ? { ...fileManifest, environment: environmentFiles } : fileManifest,
   };
   output.unshift({ path: `${dir}/manifest.json`, content: `${JSON.stringify(manifest, null, 2)}\n` });
+  const bundleName = environmentFiles?.[0]?.path ?? SECRETS_FILE;
+  const credentials = bundle ? bundleCarriesCredentials(bundle) : false;
+  const secretsLines = !bundleSummary
+    ? [`No environment or credential bundle is included in this snapshot.`]
+    : passphrase
+      ? [
+          `- **Credentials:** ${bundleSummary.dbSecrets} database secret(s) and ${bundleSummary.envKeys} environment variable(s), encrypted in \`${bundleName}\``,
+          `- **Passphrase:** required to restore (set \`BACKUP_PASSPHRASE\` on the target server)`,
+        ]
+      : credentials
+        ? [
+            `- **Credentials:** ${bundleSummary.dbSecrets} database secret(s) and ${bundleSummary.envKeys} environment variable(s) in \`${bundleName}\``,
+            ``,
+            `> ⚠️ **\`${bundleName}\` contains live API keys and tokens in plaintext.**`,
+            `> Keep this repository private, and set \`BACKUP_PASSPHRASE\` to store them encrypted instead.`,
+          ]
+        : [
+            `- **Environment:** ${bundleSummary.envKeys} non-secret variable(s) in \`${bundleName}\``,
+            `- **Credentials:** not captured (BACKUP_INCLUDE_SECRETS is off) — a restore on a server with a different AUTH_SECRET will not bring the API keys back.`,
+          ];
   output.push({
     path: `${dir}/README.md`,
     content: [
-      `# CodeVia runtime backup`,
+      `# CodeVia full system backup`,
       ``,
       `- **Created at:** ${snapshot.createdAt}`,
       `- **Platform:** ${snapshot.platform}`,
+      `- **Source host:** ${bundle?.source?.hostname ?? "unknown"}`,
       `- **Database path:** ${snapshot.databasePath}`,
       `- **Records:** ${snapshot.records.length}`,
       `- **Jobs:** ${snapshot.jobs.length}`,
       `- **KV entries:** ${snapshot.kv.length}`,
+      ...secretsLines,
       ``,
       `This snapshot is generated by the admin-configured system backup.`,
-      `It contains every row of the runtime database in JSON form.`,
-      `Encrypted secret material stays encrypted (never plaintext).`,
+      `It contains every row of the runtime database in JSON form, plus the`,
+      `environment and credentials needed to bring the same installation up on`,
+      `another server: restore re-encrypts every secret with the target server's`,
+      `\`AUTH_SECRET\` and writes the restored variables to \`<database dir>/.env\`.`,
+      ``,
       `Copy every JSON file in this directory together when restoring from files.`,
     ].join("\n"),
   });
   return output;
+}
+
+/** True when a bundle carries credentials rather than plain configuration. */
+export function bundleCarriesCredentials(bundle: EnvironmentBundle): boolean {
+  return bundle.dbSecrets.length > 0 || Object.keys(bundle.env).some((key) => isSecretEnvKey(key));
 }
 
 function splitIntoJsonParts(items: unknown[]): unknown[][] {
@@ -634,8 +807,9 @@ export function groupCounts(records: SnapshotRecord[]): Record<string, number> {
 }
 
 /**
- * Names of all required table-part JSON files in a manifest. Older snapshots
- * predate part lists and used one records.json/jobs.json/kv.json each.
+ * Names of all required part JSON files in a manifest. Older snapshots predate
+ * part lists and used one records.json/jobs.json/kv.json each; the credential
+ * bundle (v2) is listed when the snapshot carried one.
  */
 export function snapshotPartPathsFromManifest(manifestContent: string): string[] {
   let manifest: SnapshotManifest;
@@ -644,11 +818,23 @@ export function snapshotPartPathsFromManifest(manifestContent: string): string[]
   } catch {
     invalidBackup("manifest.json is not valid JSON");
   }
-  return TABLE_NAMES.flatMap((table) => partDescriptors(manifest!, table).map((part) => part.path));
+  return [
+    ...TABLE_NAMES.flatMap((table) => partDescriptors(manifest!, table).map((part) => part.path)),
+    ...environmentPartDescriptors(manifest!).map((part) => part.path),
+  ];
+}
+
+/** Restore options for a snapshot that was read back from files. */
+export interface SnapshotReadOptions {
+  /** Unlocks a bundle stored as `secrets.enc.json` (defaults to BACKUP_PASSPHRASE). */
+  passphrase?: string;
 }
 
 /** Rebuild and validate a complete snapshot from a GitHub directory or selected JSON files. */
-export function snapshotFromFiles(files: { path: string; content: string }[]): BackupSnapshot {
+export function snapshotFromFiles(
+  files: { path: string; content: string }[],
+  options: SnapshotReadOptions = {},
+): BackupSnapshot {
   const manifestFile = findFile(files, "manifest.json");
   let manifest: SnapshotManifest = {};
   if (manifestFile) {
@@ -662,6 +848,7 @@ export function snapshotFromFiles(files: { path: string; content: string }[]): B
   const records = readTableParts(files, manifest, "records");
   const jobs = readTableParts(files, manifest, "jobs");
   const kv = readTableParts(files, manifest, "kv");
+  const bundle = readEnvironmentPart(files, manifest, options);
   const summary = isObject(manifest.summary) ? manifest.summary : {};
   const snapshot: BackupSnapshot = {
     version: manifest.version === undefined ? BACKUP_SNAPSHOT_VERSION : Number(manifest.version),
@@ -681,11 +868,74 @@ export function snapshotFromFiles(files: { path: string; content: string }[]): B
     records: records as SnapshotRecord[],
     jobs: jobs as SnapshotJob[],
     kv: kv as SnapshotKvItem[],
+    ...(bundle.environment ? { environment: bundle.environment } : {}),
+    ...(bundle.environmentEnc ? { environmentEnc: bundle.environmentEnc } : {}),
   };
   assertManifestCount(manifest.summary, "records", records.length);
   assertManifestCount(manifest.summary, "jobs", jobs.length);
   assertManifestCount(manifest.summary, "kv", kv.length);
   return normalizeBackupSnapshot(snapshot);
+}
+
+function environmentPartDescriptors(manifest: SnapshotManifest): SnapshotManifestPart[] {
+  const declared = manifest.files?.environment;
+  if (declared === undefined) return [];
+  if (!Array.isArray(declared)) invalidBackup("manifest.files.environment is invalid");
+  return declared.map((part, i) => {
+    const path = typeof part === "string" ? part : part?.path;
+    if (typeof path !== "string" || !path.trim()) invalidBackup(`manifest.files.environment[${i}].path is missing`);
+    const normalized = path.replace(/\\/g, "/");
+    if (normalized.startsWith("/") || normalized.split("/").some((segment) => segment === ".." || segment === ".")) {
+      invalidBackup(`manifest.files.environment[${i}].path is unsafe`);
+    }
+    return {
+      path: normalized,
+      sha256: typeof part === "string" ? undefined : part.sha256,
+    };
+  });
+}
+
+/**
+ * Read the credential bundle back. An encrypted bundle is kept in its encrypted
+ * form here; `resolveSnapshotBundle` unlocks it during the restore so a missing
+ * passphrase is reported as one clear error instead of a half-restored server.
+ */
+function readEnvironmentPart(
+  files: { path: string; content: string }[],
+  manifest: SnapshotManifest,
+  options: SnapshotReadOptions,
+): { environment?: EnvironmentBundle; environmentEnc?: EncryptedBundle } {
+  const declared = environmentPartDescriptors(manifest);
+  const candidates = declared.length
+    ? declared.map((descriptor) => {
+        const file = findFile(files, descriptor.path);
+        if (!file) invalidBackup(`backup is incomplete: missing ${descriptor.path}`);
+        if (descriptor.sha256 && sha256(file.content) !== descriptor.sha256) {
+          invalidBackup(`${descriptor.path} failed its SHA-256 integrity check`);
+        }
+        return file;
+      })
+    : // No manifest entry (hand-copied directory, or a manifest from v1): still
+      // pick the bundle up when the operator selected it.
+      BUNDLE_FILE_NAMES.map((name) => findFile(files, name)).filter(
+        (file): file is { path: string; content: string } => !!file,
+      );
+
+  for (const file of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(file.content) as unknown;
+    } catch {
+      invalidBackup(`${file.path} is not valid JSON`);
+    }
+    if (isEncryptedBundle(parsed)) {
+      const decrypted = decryptEnvironmentBundle(parsed, options.passphrase ?? getEnv().BACKUP_PASSPHRASE);
+      return { environmentEnc: parsed, ...(decrypted ? { environment: decrypted } : {}) };
+    }
+    const bundle = normalizeEnvironmentBundle(parsed);
+    if (bundle) return { environment: bundle };
+  }
+  return {};
 }
 
 function readTableParts(

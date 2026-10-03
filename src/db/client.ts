@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { getEnv } from "../config/env.js";
 import { SCHEMA } from "./schema.js";
 import { logger } from "../logger.js";
@@ -34,8 +34,12 @@ function sanitize(params: SqlParams): Record<string, string | number | null> {
 export class Db {
   private db: SqliteDatabase;
 
+  /** Absolute path of the SQLite file this instance opened. */
+  readonly path: string;
+
   constructor(path?: string) {
     const dbPath = path ?? getEnv().DATABASE_PATH;
+    this.path = resolve(dbPath);
     mkdirSync(dirname(dbPath), { recursive: true });
     const { DatabaseSync } = loadSqlite();
     this.db = new DatabaseSync(dbPath);

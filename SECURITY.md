@@ -66,8 +66,20 @@ The following are treated as security issues and are prioritized:
   is validated for project, PR, repository, commit SHA, actor and expiry before
   the worker acts (A04, `src/workers/worker.ts`).
 - **Secrets** — credentials, sessions and queue lease state are intentionally
-  kept out of the `CodeVia/` repository state; the repository is never a
-  credential store.
+  kept out of the `CodeVia/` repository state; a *project* repository is never a
+  credential store. At rest in the runtime database they are AES-256-GCM
+  encrypted with a key derived from `AUTH_SECRET`, and API responses only ever
+  carry a mask.
+- **Full system backup** — the deliberate exception, and an admin-only one. A
+  backup snapshot carries every credential in plaintext so it can rebuild the
+  installation on a server with a different `AUTH_SECRET`
+  ([docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md)). The exposure is bounded on
+  purpose: every endpoint is owner/admin gated, the download is `no-store` and
+  audited, logs/audit rows/API status carry only counts, variable *names* and
+  masks, local files are `0600`, `BACKUP_PASSPHRASE` encrypts the copies stored
+  in a repository or on a volume, and `BACKUP_INCLUDE_SECRETS=false` turns the
+  whole thing off. Treat a downloaded snapshot as a key ring: private backup
+  repository, encrypted transfer, delete after the restore, rotate if it leaks.
 
 ## Known advisories (transitive, runtime)
 

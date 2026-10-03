@@ -26,6 +26,10 @@
     "format:check": "prettier --check .",
     "check": "npm run typecheck && npm run lint && npm run check:app",
     "seed": "tsx src/db/seed.ts",
+    "backup": "tsx src/backup/cli.ts export --out data/codevia-backup.json",
+    "backup:export": "tsx src/backup/cli.ts export",
+    "backup:restore": "tsx src/backup/cli.ts restore",
+    "backup:list": "tsx src/backup/cli.ts list",
     "mock:telegram": "node scripts/mock-telegram-api.mjs",
     "prepare": "husky || true"
   },

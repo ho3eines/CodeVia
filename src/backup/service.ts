@@ -5,9 +5,12 @@ import { parseRepoFullName } from "../github/types.js";
 import type { NotificationRepository, AuditRepository } from "../observability/repos.js";
 import type { ProviderRegistry } from "../ai/provider-registry.js";
 import type { Logger } from "../logger.js";
+import { getEnv } from "../config/env.js";
 import { getEffectiveBackupSettings, getBackupSettings, updateBackupStatus, type BackupSettings } from "./settings.js";
 import {
+  bundleForStorage,
   createSnapshot,
+  resolveSnapshotBundle,
   restoreSnapshot,
   snapshotFromFiles,
   snapshotFilePaths,
@@ -15,6 +18,15 @@ import {
   normalizeBackupSnapshot,
   type BackupSnapshot,
 } from "./snapshot.js";
+import { applyEnvironmentBundle, describeEnvironmentBundle, type ApplyResult, type BundleSummary } from "./secrets.js";
+import {
+  listLocalBackups,
+  pruneLocalBackups,
+  readLocalSnapshotFiles,
+  resolveLocalBackupDir,
+  writeLocalBackup,
+  type LocalWriteResult,
+} from "./local.js";
 import { getUserGitHubToken } from "../auth/github-tokens.js";
 import { RealGitHubService } from "../github/real-service.js";
 
@@ -43,6 +55,12 @@ export interface BackupRunResult {
   files?: number;
   bytes?: number;
   counts?: Record<string, number | Record<string, number>>;
+  /** What the snapshot can bring back on another server (never plaintext). */
+  secrets?: BundleSummary;
+  /** Result of the on-disk copy next to the database. */
+  local?: LocalWriteResult;
+  /** Local snapshot directories removed by the retention policy. */
+  pruned?: string[];
   warning?: string;
   error?: string;
 }
@@ -54,12 +72,35 @@ export interface BackupListEntry {
   records: number;
   jobs: number;
   kv: number;
+  /** Where this snapshot lives — a GitHub restore and a local one differ. */
+  source: "github" | "local";
+  /** True when the snapshot carries the environment/credential bundle. */
+  secrets?: boolean;
+  secretsEncrypted?: boolean;
+  bytes?: number;
   latest?: boolean;
+}
+
+/** Non-secret report of what a restore brought back from the bundle. */
+export interface EnvironmentRestoreSummary {
+  /** Variable names restored from the backup (names only — never values). */
+  envApplied: string[];
+  /** Names this server already had, so the backup value was not applied. */
+  envKept: string[];
+  /** Deployment-local names recorded in `.env` but never injected here. */
+  hostBound: string[];
+  authSecretApplied: boolean;
+  providers: number;
+  telegramAccounts: number;
+  githubTokens: number;
+  secretsSkipped: number;
+  envFile?: { ok: boolean; path: string; error?: string };
+  warnings: string[];
 }
 
 export interface BackupRestoreResult {
   ok: boolean;
-  from?: "github" | "snapshot";
+  from?: "github" | "local" | "snapshot";
   repo?: string;
   branch?: string;
   snapshot?: string;
@@ -67,8 +108,29 @@ export interface BackupRestoreResult {
   jobs: number;
   kv: number;
   replace: boolean;
+  /** Present when the backup carried the environment/credential bundle. */
+  environment?: EnvironmentRestoreSummary;
   warning?: string;
   error?: string;
+}
+
+function summarizeEnvironment(result: ApplyResult): EnvironmentRestoreSummary {
+  return {
+    envApplied: result.envApplied,
+    envKept: result.envKept,
+    hostBound: result.hostBound,
+    authSecretApplied: result.authSecretApplied,
+    providers: result.secretsReEncrypted.providers,
+    telegramAccounts: result.secretsReEncrypted.telegramAccounts,
+    githubTokens: result.secretsReEncrypted.githubTokens,
+    secretsSkipped: result.secretsSkipped,
+    envFile: result.envFile,
+    warnings: result.warnings,
+  };
+}
+
+function isObjectLike(value: unknown): boolean {
+  return !!value && typeof value === "object";
 }
 
 function normalizeBasePath(path?: string): string {
@@ -135,37 +197,101 @@ export class BackupService {
     return createSnapshot(this.deps.db);
   }
 
-  /** Push a full snapshot to the configured GitHub repository. */
+  /**
+   * Create a full snapshot and store it in every configured destination:
+   *   1. on disk next to the database (the mounted volume) — always, unless
+   *      `localCopy` is off, so a backup exists even with no GitHub configured;
+   *   2. in the configured GitHub repository — the off-machine copy.
+   */
   async runNow(input?: Partial<Pick<BackupSettings, "repo" | "branch" | "path">>): Promise<BackupRunResult> {
     if (this.running) {
       return { ok: false, configured: true, githubKind: this.deps.github.kind, error: "A backup is already running" };
     }
     const settings: BackupSettings = mergeSettings(getEffectiveBackupSettings(this.deps.kv), input ?? {});
     const ref = repoRef(settings);
-    if (!settings.repo || !ref) {
-      return {
-        ok: false,
-        configured: false,
-        githubKind: this.deps.github.kind,
-        warning: "Backup repository is not configured. Set owner/name in Admin → System Backup.",
-      };
-    }
     const branch = settings.branch ?? "main";
     const base = normalizeBasePath(settings.path);
-    const github = this.githubFor(settings);
+    const started = new Date();
 
     this.running = true;
-    const started = new Date();
     updateBackupStatus(this.deps.kv, {
       lastRunStatus: "running",
       lastRunAt: started.toISOString(),
       lastRunError: undefined,
     });
     try {
-      const snapshot = await createSnapshot(this.deps.db);
+      const snapshot = await createSnapshot(this.deps.db, {
+        includeEnv: settings.includeEnv,
+        includeSecrets: settings.includeSecrets,
+      });
       const dir = safeDirName(started);
       const snapshotPath = `${base}/${dir}`;
-      const files = snapshotFilePaths(snapshotPath, snapshot);
+      // A passphrase protects the copies that live in the repo / on the volume;
+      // the file an admin downloads stays plaintext (see `exportSnapshot`).
+      const passphrase = getEnv().BACKUP_PASSPHRASE;
+      const files = snapshotFilePaths(snapshotPath, snapshot, { passphrase });
+      const secrets = describeEnvironmentBundle(snapshot.environment);
+      const counts = {
+        records: snapshot.records.length,
+        jobs: snapshot.jobs.length,
+        kv: snapshot.kv.length,
+        ...(secrets ? { environment: secrets.envKeys, credentials: secrets.dbSecrets } : {}),
+        byType: Object.entries(groupCounts(snapshot.records)).reduce<Record<string, number>>((acc, [k, v]) => {
+          acc[k] = v;
+          return acc;
+        }, {}),
+      };
+
+      // ---- 1. local copy (works with no GitHub at all) ----
+      let local: LocalWriteResult | undefined;
+      let pruned: string[] | undefined;
+      if (settings.localCopy) {
+        const localDir = resolveLocalBackupDir(this.deps.db, settings.localDir);
+        local = await writeLocalBackup(localDir, dir, files, bundleForStorage(snapshot, passphrase));
+        if (local.ok) {
+          pruned = await pruneLocalBackups(localDir, settings.retain ?? getEnv().BACKUP_LOCAL_RETAIN);
+        } else {
+          this.deps.logger.warn("local backup copy failed", { error: local.error, dir: localDir });
+        }
+      }
+
+      // ---- 2. GitHub copy ----
+      if (!settings.repo || !ref) {
+        const warning = local?.ok
+          ? "No GitHub repository configured — the snapshot was written to disk only (Admin → System Backup to push it off-machine)."
+          : "Backup repository is not configured. Set owner/name in Admin → System Backup.";
+        updateBackupStatus(this.deps.kv, {
+          lastRunStatus: local?.ok ? "success" : "failed",
+          lastRunError: local?.ok ? undefined : warning,
+          lastRunAt: started.toISOString(),
+          lastRunFiles: local?.files,
+          lastRunBytes: local?.bytes,
+          lastRunCounts: local?.ok
+            ? {
+                records: snapshot.records.length,
+                jobs: snapshot.jobs.length,
+                kv: snapshot.kv.length,
+                files: local.files ?? 0,
+              }
+            : undefined,
+        });
+        return {
+          ok: !!local?.ok,
+          configured: false,
+          githubKind: this.deps.github.kind,
+          path: base,
+          snapshotPath: local?.ok ? dir : undefined,
+          files: local?.files,
+          bytes: local?.bytes,
+          counts: local?.ok ? counts : undefined,
+          secrets,
+          local,
+          pruned,
+          warning,
+        };
+      }
+
+      const github = this.githubFor(settings);
       const filesPayload: GithubFile[] = files.map((f) => ({ path: f.path, content: f.content }));
       const latestPointer = {
         latest: snapshotPath,
@@ -174,6 +300,18 @@ export class BackupService {
         createdAt: new Date().toISOString(),
         summary: snapshot.summary,
         counts: { records: snapshot.records.length, jobs: snapshot.jobs.length, kv: snapshot.kv.length },
+        // Says, without revealing anything, whether this snapshot can restore
+        // the API keys too — the first question after a disaster.
+        ...(secrets
+          ? {
+              environment: {
+                envKeys: secrets.envKeys,
+                credentials: secrets.dbSecrets,
+                secretKeys: secrets.secretKeys,
+                encrypted: !!passphrase,
+              },
+            }
+          : {}),
       };
       filesPayload.push({
         path: `${base}/latest.json`,
@@ -194,15 +332,10 @@ export class BackupService {
         snapshotPath,
         files: filesPayload.length,
         bytes,
-        counts: {
-          records: snapshot.records.length,
-          jobs: snapshot.jobs.length,
-          kv: snapshot.kv.length,
-          byType: Object.entries(groupCounts(snapshot.records)).reduce<Record<string, number>>((acc, [k, v]) => {
-            acc[k] = v;
-            return acc;
-          }, {}),
-        },
+        counts,
+        secrets,
+        local,
+        pruned,
         warning:
           github.kind === "mock"
             ? "GitHub is in mock mode — the backup was written to the in-memory mock repository only. Configure GITHUB_TOKEN + GITHUB_ENABLED=true for a real repository."
@@ -227,7 +360,19 @@ export class BackupService {
         result: "success",
         source: "system",
         correlationId: `backup-${started.getTime()}`,
-        metadata: { repo: settings.repo, branch, path: snapshotPath, commit: commit.sha, files: filesPayload.length },
+        metadata: {
+          repo: settings.repo,
+          branch,
+          path: snapshotPath,
+          commit: commit.sha,
+          files: filesPayload.length,
+          // Never the values themselves — only how much credential material
+          // travelled, so the audit log answers "did that backup include keys?".
+          credentials: secrets?.dbSecrets ?? 0,
+          environmentKeys: secrets?.envKeys ?? 0,
+          secretsEncrypted: !!passphrase,
+          localCopy: local?.ok ?? false,
+        },
       });
       return result;
     } catch (err) {
@@ -244,8 +389,8 @@ export class BackupService {
       this.deps.logger.warn("system backup failed", { error: message, repo: settings.repo });
       return {
         ok: false,
-        configured: true,
-        githubKind: github.kind,
+        configured: !!settings.repo,
+        githubKind: this.deps.github.kind,
         repo: settings.repo,
         branch,
         path: base,
@@ -282,6 +427,8 @@ export class BackupService {
         const manifest = JSON.parse(f.content) as {
           createdAt?: string;
           summary?: { records?: number; jobs?: number; kv?: number };
+          environment?: unknown;
+          counts?: { environment?: unknown };
         };
         out.push({
           id,
@@ -290,6 +437,8 @@ export class BackupService {
           records: Number(manifest.summary?.records ?? 0),
           jobs: Number(manifest.summary?.jobs ?? 0),
           kv: Number(manifest.summary?.kv ?? 0),
+          source: "github",
+          secrets: isObjectLike(manifest.environment) || isObjectLike(manifest.counts?.environment),
         });
       } catch {
         // Corrupt manifest entries are skipped.
@@ -300,9 +449,120 @@ export class BackupService {
     return out;
   }
 
+  /** Snapshots written to disk next to the database (no GitHub needed). */
+  async listLocal(limit = 50): Promise<BackupListEntry[]> {
+    const settings = getEffectiveBackupSettings(this.deps.kv);
+    const dir = resolveLocalBackupDir(this.deps.db, settings.localDir);
+    const entries = await listLocalBackups(dir, limit);
+    return entries.map((entry) => ({
+      id: entry.id,
+      path: entry.path,
+      createdAt: entry.createdAt,
+      records: entry.records,
+      jobs: entry.jobs,
+      kv: entry.kv,
+      source: "local" as const,
+      secrets: entry.secrets,
+      secretsEncrypted: entry.secretsEncrypted,
+      bytes: entry.bytes,
+      latest: entry.latest,
+    }));
+  }
+
+  /** Every snapshot this installation can restore from, newest first. */
+  async listAll(limit = 50): Promise<BackupListEntry[]> {
+    const [github, local] = await Promise.all([
+      this.listBackups(undefined, limit).catch((err) => {
+        this.deps.logger.warn("could not list GitHub backups", { error: errorMessage(err) });
+        return [] as BackupListEntry[];
+      }),
+      this.listLocal(limit),
+    ]);
+    const merged = [...github, ...local].sort((a, b) =>
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+    );
+    merged.forEach((entry, index) => {
+      entry.latest = index === 0;
+    });
+    return merged.slice(0, limit);
+  }
+
+  /**
+   * Restore from a snapshot stored on this machine's volume. This is the path a
+   * brand-new server takes when it was handed the backup directory (or when
+   * GitHub is unreachable): the same complete snapshot, no network required.
+   */
+  async restoreFromLocal(input: {
+    snapshot?: string;
+    replace?: boolean;
+    passphrase?: string;
+  }): Promise<BackupRestoreResult> {
+    const settings = getEffectiveBackupSettings(this.deps.kv);
+    const dir = resolveLocalBackupDir(this.deps.db, settings.localDir);
+    let target = input.snapshot && input.snapshot !== "latest" ? input.snapshot : undefined;
+    if (!target) target = (await listLocalBackups(dir, 1))[0]?.id;
+    if (!target) {
+      return {
+        ok: false,
+        from: "local",
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input.replace ?? true,
+        error: `No local backup found in ${dir}.`,
+      };
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(target) || target === "." || target === "..") {
+      return {
+        ok: false,
+        from: "local",
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input.replace ?? true,
+        error: "Invalid backup snapshot id.",
+      };
+    }
+    const files = await readLocalSnapshotFiles(dir, target);
+    if (!files.length) {
+      return {
+        ok: false,
+        from: "local",
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input.replace ?? true,
+        error: `Backup is incomplete: ${target} holds no snapshot files.`,
+      };
+    }
+    try {
+      return this.restoreSnapshotObject(snapshotFromFiles(files, { passphrase: input.passphrase }), {
+        snapshot: target,
+        replace: input.replace ?? true,
+        source: "local",
+        passphrase: input.passphrase,
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        from: "local",
+        snapshot: target,
+        records: 0,
+        jobs: 0,
+        kv: 0,
+        replace: input.replace ?? true,
+        error: errorMessage(err),
+      };
+    }
+  }
+
   /** Restore from a snapshot directory already committed to the configured repo. */
   async restoreFromGitHub(
-    input?: Partial<Pick<BackupSettings, "repo" | "branch" | "path"> & { snapshot?: string; replace?: boolean }>,
+    input?: Partial<
+      Pick<BackupSettings, "repo" | "branch" | "path"> & { snapshot?: string; replace?: boolean; passphrase?: string }
+    >,
   ): Promise<BackupRestoreResult> {
     const settings: BackupSettings = mergeSettings(getEffectiveBackupSettings(this.deps.kv), input ?? {});
     const ref = repoRef(settings);
@@ -461,12 +721,13 @@ export class BackupService {
     }
     const files = [manifest, ...loaded].map((file) => ({ path: file!.path, content: file!.content }));
     try {
-      return this.restoreSnapshotObject(snapshotFromFiles(files), {
+      return this.restoreSnapshotObject(snapshotFromFiles(files, { passphrase: input?.passphrase }), {
         repo: settings.repo,
         branch,
         snapshot: target,
         replace: input?.replace ?? true,
         source: "github",
+        passphrase: input?.passphrase,
       });
     } catch (err) {
       return {
@@ -484,15 +745,43 @@ export class BackupService {
     }
   }
 
-  /** Restore from an in-memory snapshot object (local import / test). */
+  /**
+   * Restore from an in-memory snapshot object (uploaded file / local import / test).
+   *
+   * Beyond the database rows this applies the snapshot's environment bundle: the
+   * API keys that only ever lived in the environment are put back (and written to
+   * `<database dir>/.env`), and every credential stored in a table is
+   * re-encrypted with THIS server's AUTH_SECRET. That is what makes the same
+   * file work on a different machine instead of restoring dead integrations.
+   */
   restoreSnapshotObject(
     snapshot: unknown,
-    meta?: { repo?: string; branch?: string; snapshot?: string; replace?: boolean; source?: "github" | "snapshot" },
+    meta?: {
+      repo?: string;
+      branch?: string;
+      snapshot?: string;
+      replace?: boolean;
+      source?: "github" | "local" | "snapshot";
+      passphrase?: string;
+      overwriteEnv?: boolean;
+      skipEnvFile?: boolean;
+    },
   ): BackupRestoreResult {
     try {
       const normalized = normalizeBackupSnapshot(snapshot);
       const replace = meta?.replace ?? true;
+      // Unlocking happens before any row is written: a bundle that cannot be
+      // decrypted must fail the whole restore, not silently skip the keys.
+      const bundle = resolveSnapshotBundle(normalized, meta?.passphrase);
       const result = restoreSnapshot(this.deps.db, normalized, replace);
+      const environment = bundle
+        ? summarizeEnvironment(
+            applyEnvironmentBundle(this.deps.db, bundle, {
+              overwriteEnv: meta?.overwriteEnv,
+              skipEnvFile: meta?.skipEnvFile,
+            }),
+          )
+        : undefined;
       // Drop cached provider adapters so restored provider config is re-read.
       this.deps.providerRegistry.all().forEach((p) => this.deps.providerRegistry.invalidate(p.id));
       updateBackupStatus(this.deps.kv, {
@@ -501,6 +790,8 @@ export class BackupService {
         lastRunAt: new Date().toISOString(),
         lastRunCounts: { records: result.records, jobs: result.jobs, kv: result.kv },
       });
+      const warnings = [...(environment?.warnings ?? [])];
+      if (environment?.envFile && !environment.envFile.ok) warnings.push(environment.envFile.error ?? "");
       return {
         ok: true,
         from: meta?.source ?? "snapshot",
@@ -511,6 +802,8 @@ export class BackupService {
         jobs: result.jobs,
         kv: result.kv,
         replace,
+        environment,
+        warning: warnings.filter(Boolean).join("; ") || undefined,
       };
     } catch (err) {
       return {

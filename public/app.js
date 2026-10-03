@@ -6472,7 +6472,7 @@
     const policy = await api("/settings/approval").catch(() => ({ autoApprove: true, timeoutMs: 900000, pending: 0 }));
     const backupAdmin = await api("/admin/backup").catch(() => null);
     $("#content").innerHTML = `${settingsHubHtml()}
-      <div class="overview" style="margin-top:12px"><div><h1>Settings</h1><p>Import / Export / Backup — secrets are never exported in the settings-only file</p></div></div>
+      <div class="overview" style="margin-top:12px"><div><h1>Settings</h1><p>Import / Export / Backup — یک فایل کامل از کل سیستم، همراه با کلیدهای API</p></div></div>
       <div class="grid-2">
         <div class="card card-body"><div class="card-title">Platform</div>
           <div class="meter-row"><span class="lbl">Environment</span><span class="val">${esc(s.environment)}</span></div>
@@ -6486,10 +6486,12 @@
           <p style="color:var(--text-muted);font-size:12px">وقتی Auto-approve خاموش باشد، مرحله‌های خطرناک (Merge، Deploy، Migration…) متوقف می‌شوند و در وب و تلگرام دکمه Approve/Reject می‌گیرید.</p>
         </div>
         <div class="card card-body"><div class="card-title">Backup & Import/Export</div>
-          <div class="flex">${backupAdmin ? '<button class="btn btn-primary" onclick="downloadFullBackup()">⬇ Full system backup</button>' : ''}<button class="btn" onclick="downloadBackup()">⬇ Login settings only</button><button class="btn" id="restore-btn">⬆ Restore backup file(s)</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
+          <div class="flex">${backupAdmin ? '<button class="btn btn-primary" onclick="downloadFullBackup()">⬇ Full system backup (JSON)</button>' : ''}<button class="btn" onclick="downloadBackup()">⬇ Login settings only</button><button class="btn" id="restore-btn">⬆ Restore backup file(s)</button><button class="btn" onclick="refreshCurrent()">Refresh</button><button class="btn btn-primary" onclick="location.hash='#/admin'">🛡️ Admin → System Backup</button></div>
           <input type="file" id="restore-file" accept="application/json,.json" multiple style="display:none"/>
-          <p style="color:var(--text-muted);font-size:12px">ادمین می‌تواند از <strong>Full system backup</strong> یک فایل کامل بگیرد. ریستور از فایل کامل یا از همهٔ فایل‌های JSON یک پوشهٔ بکاپ (manifest، records، jobs و kv) پشتیبانی می‌کند؛ همهٔ فایل‌های یک snapshot را با هم انتخاب کنید. فایل «Login settings only» فقط تنظیمات ورود GitHub را دارد و بکاپ کامل داده‌های پروژه نیست.</p>
-          <p style="color:var(--text-muted);font-size:11px">💡 بعد از ریستور کامل، تمام جدول‌های runtime جایگزین می‌شوند. مقادیر رمزنگاری‌شده فقط با همان <span class="mono">AUTH_SECRET</span> قابل‌خواندن‌اند. در Railway می‌توانید به‌جای ریستور مداوم، Volume پایدار هم وصل کنید.</p>
+          ${backupAdmin?.secrets ? `<div class="field-hint ${backupAdmin.secrets.includeSecrets ? (backupAdmin.secrets.storedEncrypted ? "ok" : "warn") : ""}" style="margin-top:8px">🔑 ${esc(backupAdmin.secrets.hint || "")}</div>` : ""}
+          ${backupAdmin?.local?.enabled ? `<div class="meter-row"><span class="lbl">Local copies</span><span class="val mono">${esc(backupAdmin.local.dir || "")}</span></div>` : ""}
+          <p style="color:var(--text-muted);font-size:12px"><strong>Full system backup</strong> یک فایل JSON می‌سازد و دانلود می‌کند که <em>همه‌چیز</em> در آن است: پروژه‌ها، ایجنت‌ها، مدل‌ها و پرووایدرها، ورک‌فلوها، تسک/ران‌ها، کانورسیشن‌ها، مموری، کاربران، تلگرام، لاگ‌ها و تمام تنظیمات — به‌علاوهٔ <strong>کلیدهای API و توکن‌ها</strong> و کل متغیرهای محیطی. همان فایل را روی سرور دیگر با <strong>Restore backup file(s)</strong> آپلود کنید تا سیستم بدون هیچ تنظیم دستی بالا بیاید.</p>
+          <p style="color:var(--text-muted);font-size:11px">💡 موقع ریستور، کلیدها با <span class="mono">AUTH_SECRET</span> همان سرور دوباره رمز می‌شوند و متغیرهای محیطی در <span class="mono">&lt;مسیر دیتابیس&gt;/.env</span> نوشته می‌شوند، پس بعد از restart هم باقی می‌مانند. ریستور از همهٔ فایل‌های JSON یک پوشهٔ بکاپ (manifest، records، jobs، kv و secrets) هم پشتیبانی می‌کند — همه را با هم انتخاب کنید. فایل «Login settings only» فقط تنظیمات ورود GitHub را دارد.</p>
         </div>
       </div>
       <div id="tg-settings"></div>`;
@@ -6509,9 +6511,14 @@
         try {
           let body;
           if (files.length > 1 || /^(manifest|records(?:-\d+)?|jobs(?:-\d+)?|kv(?:-\d+)?)\.json$/i.test(files[0].name)) {
-            if (!confirm("ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند. قبل از ادامه مطمئن شوید همهٔ فایل‌های JSON همین snapshot را انتخاب کرده‌اید.")) return;
+            if (!confirm("ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند. قبل از ادامه مطمئن شوید همهٔ فایل‌های JSON همین snapshot (از جمله secrets.json) را انتخاب کرده‌اید.")) return;
             const snapshotFiles = await Promise.all(files.map(async (file) => ({ path: file.webkitRelativePath || file.name, content: await file.text() })));
             body = { snapshotFiles, replace: true };
+            if (snapshotFiles.some((file) => /secrets\.enc\.json$/i.test(file.path))) {
+              const passphrase = prompt("این بکاپ کلیدها را رمزنگاری‌شده نگه می‌دارد. BACKUP_PASSPHRASE زمان ساخت را وارد کنید:");
+              if (!passphrase) return;
+              body.passphrase = passphrase;
+            }
           } else {
             const data = JSON.parse(await files[0].text());
             const fullSnapshot = data?.type === "codevia-runtime-backup" ||
@@ -6524,12 +6531,21 @@
               refreshCurrent();
               return;
             }
-            if (!confirm("ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند. قبل از ادامه مطمئن شوید فایل بکاپ درست را انتخاب کرده‌اید.")) return;
+            const carriesKeys = !!(data?.environment?.dbSecrets?.length || Object.keys(data?.environment?.env || {}).length || data?.environmentEnc);
+            if (!confirm(`ریستور کامل، داده‌های فعلی runtime را جایگزین می‌کند${carriesKeys ? " و کلیدهای API/توکن‌های داخل فایل را روی این سرور فعال می‌کند" : ""}. ادامه می‌دهید؟`)) return;
             body = { snapshotData: data, replace: true };
+            if (data?.environmentEnc) {
+              const passphrase = prompt("این بکاپ کلیدها را رمزنگاری‌شده نگه می‌دارد. BACKUP_PASSPHRASE زمان ساخت را وارد کنید:");
+              if (!passphrase) return;
+              body.passphrase = passphrase;
+            }
           }
           const res = await api("/admin/backup/restore", { method: "POST", body });
           if (!res.ok) throw new Error(res.error || "Full restore failed");
-          toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok");
+          const envNote = res.environment
+            ? ` · 🔑 ${(res.environment.providers || 0) + (res.environment.telegramAccounts || 0) + (res.environment.githubTokens || 0)} credential(s), ${(res.environment.envApplied || []).length} env value(s) restored`
+            : "";
+          toast("Full backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${envNote}${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok");
           // The restore replaced the whole database — drop client caches and
           // re-render in place so nothing stale lingers (no page reload).
           setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700);
@@ -6546,18 +6562,50 @@
     const a = document.createElement("a"); a.href = url; a.download = "codevia-login-settings-backup.json"; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  window.downloadFullBackup = async () => {
+  /**
+   * Download the complete installation as one JSON file — every runtime row plus
+   * the environment and credentials, so the same file brings the platform up on
+   * another server. `btn`/`label` are optional (the admin console passes them so
+   * the button can show progress).
+   */
+  window.downloadFullBackup = async (btn, label) => {
+    if (btn) { btn.disabled = true; btn.textContent = "Preparing…"; }
     try {
-      const snapshot = await api("/admin/backup/export");
-      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = "codevia-full-backup.json"; a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      toast("Full system backup downloaded", `${snapshot.records?.length || 0} records, ${snapshot.jobs?.length || 0} jobs, ${snapshot.kv?.length || 0} kv`, "ok");
+      const snapshot = await api("/admin/backup/download");
+      const stamp = String(snapshot.createdAt || new Date().toISOString()).replace(/[:.]/g, "-");
+      saveJsonBlob(snapshot, `codevia-full-backup-${stamp}.json`);
+      const env = snapshot.environment || {};
+      const keys = (env.dbSecrets || []).length;
+      const envKeys = Object.keys(env.env || {}).length;
+      toast(
+        "Full system backup downloaded",
+        `${snapshot.records?.length || 0} records, ${snapshot.jobs?.length || 0} jobs, ${snapshot.kv?.length || 0} kv` +
+          (keys || envKeys ? ` · 🔑 ${keys} credential(s), ${envKeys} env value(s)` : " · no credentials included"),
+        keys || envKeys ? "warn" : "ok",
+      );
     } catch (e) {
       toast("Backup export failed", e.message, "err");
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = label || "⬇ Download"; }
     }
   };
+  /** Download one snapshot that is stored on this server's volume. */
+  window.downloadBackupSnapshot = async (id) => {
+    try {
+      const snapshot = await api(`/admin/backup/local/${encodeURIComponent(id)}/download`);
+      saveJsonBlob(snapshot, `codevia-backup-${id}.json`);
+      toast("Snapshot downloaded", id, "ok");
+    } catch (e) {
+      toast("Download failed", e.message, "err");
+    }
+  };
+  /** Trigger a browser download for one JSON document. */
+  function saveJsonBlob(document_, filename) {
+    const blob = new Blob([JSON.stringify(document_, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 
   /* ADMIN */
   on("/admin", async () => {
@@ -6585,9 +6633,13 @@
       : bakS.lastRunStatus === "success" ? '<span class="badge badge-ok">success</span>'
       : bakS.lastRunStatus === "failed" ? '<span class="badge badge-err">failed</span>'
       : '<span class="badge badge-warn">running</span>';
+    const bakSec = bak?.secrets || {};
+    const bakLocal = bak?.local || {};
     const bakCard = bak ? `<div class="card card-body mt" id="bak-config">
-        <div class="card-title">🛡️ System Backup <span class="sub">ادمین فقط — پشتیبان کامل Railway به GitHub</span></div>
-        <p style="font-size:11px;color:var(--text-muted);margin:6px 0">هر دور، کل دیتابیس (پروژه‌ها، مدل‌ها، پرووایدرها، ایجنت‌ها، اسکیل‌ها، ورک‌فلوها، تسک‌ها/ران‌ها، کانورسیشن‌ها، مموری، کاربران، تلگرام، تنظیمات و…) را به‌صورت فایل JSON داخل ریپازیتوری GitHub دلخواه push می‌کند. کلیدهای رمزنگاری‌شده مثل قبل stored می‌مانند و هرگز plaintext نمی‌شوند.</p>
+        <div class="card-title">🛡️ System Backup <span class="sub">ادمین فقط — پشتیبان کامل سیستم + کلیدها، قابل بازگردانی روی سرور دیگر</span></div>
+        <p style="font-size:11px;color:var(--text-muted);margin:6px 0">هر دور، <strong>کل</strong> دیتابیس (پروژه‌ها، مدل‌ها، پرووایدرها، ایجنت‌ها، اسکیل‌ها، ورک‌فلوها، تسک‌ها/ران‌ها، کانورسیشن‌ها، مموری، کاربران، تلگرام، لاگ‌ها و همهٔ تنظیمات) به‌همراه <strong>محیط اجرایی و کلیدهای API</strong> ذخیره می‌شود: هم داخل ریپازیتوری GitHub و هم روی دیسک کنار دیتابیس. با یک دکمه فایل JSON کامل را دانلود کنید و روی هر سرور دیگری با Restore همان فایل، سیستم را دقیقاً همان‌طور بالا بیاورید — کلیدها هم با <span class="mono">AUTH_SECRET</span> سرور جدید دوباره رمز می‌شوند.</p>
+        <div class="field-hint ${bakSec.includeSecrets ? (bakSec.storedEncrypted ? "ok" : "warn") : ""}">🔑 ${esc(bakSec.hint || "")}</div>
+        <div class="meter-row"><span class="lbl">Local copies</span><span class="val mono">${bakLocal.enabled ? esc(bakLocal.dir || "") : "off"}</span></div>
         ${bak.github?.kind !== "real" ? `<div class="field-hint warn">⚠ ${esc(bak.github?.hint || "GitHub is not connected — backups will not reach a real repository.")}</div>` : ""}
         <div class="grid-2">
           <div>
@@ -6595,6 +6647,10 @@
             <div class="field"><label>GitHub repository (owner/name)</label><input class="input mono" id="bak-repo" placeholder="your-org/codevia-backups" value="${esc(bakS.repo || "")}"/></div>
             <div class="field"><label>Branch</label><input class="input mono" id="bak-branch" value="${esc(bakS.branch || "main")}"/></div>
             <div class="field"><label>Path in repo</label><input class="input mono" id="bak-path" value="${esc(bakS.path || ".codevia/backups")}"/></div>
+            <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="bak-include-env" ${(bakEff.includeEnv !== false) ? "checked" : ""}/> Include environment (.env) in the backup</label></div>
+            <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="bak-include-secrets" ${(bakEff.includeSecrets !== false) ? "checked" : ""}/> Include API keys &amp; tokens (plaintext)</label><div class="field-hint">بدون این گزینه، کلیدها فقط به شکل رمزنگاری‌شدهٔ وابسته به <span class="mono">AUTH_SECRET</span> همان سرور می‌مانند و روی سرور جدید قابل استفاده نیستند.</div></div>
+            <div class="field"><label class="flex" style="align-items:center;gap:8px"><input type="checkbox" id="bak-local-copy" ${(bakEff.localCopy !== false) ? "checked" : ""}/> Also keep a copy on this server's volume</label></div>
+            <div class="field"><label>Local directory (optional)</label><input class="input mono" id="bak-local-dir" placeholder="${esc(bakLocal.dir || "")}" value="${esc(bakS.localDir || "")}"/></div>
           </div>
           <div>
             <div class="field"><label>Schedule preset</label><select class="select" id="bak-preset">
@@ -6617,10 +6673,10 @@
           <button class="btn btn-primary" id="bak-save">Save settings</button>
           <button class="btn" id="bak-run">▶ Run backup now</button>
           <button class="btn" id="bak-list">📋 List backups</button>
-          <button class="btn" id="bak-export">⬇ Export JSON</button>
+          <button class="btn btn-primary" id="bak-export">⬇ Download full backup (JSON)</button>
           <button class="btn btn-danger" id="bak-restore">↺ Restore latest</button>
         </div>
-        <p style="font-size:11px;color:var(--text-muted);margin-top:8px">💡 برای بازیابی بعد از هر دیپلی Railway: یک سرویس تازه با همان <span class="mono">GITHUB_TOKEN</span> وصل کنید، در همین صفحه Save و Restore کنید. تنظیمات فقط توسط Owner/Admin دیده و تغییر می‌کند.</p>
+        <p style="font-size:11px;color:var(--text-muted);margin-top:8px">💡 <strong>روی سرور جدید:</strong> کد را بالا بیاورید، وارد شوید و یا فایل JSON را در Settings → Restore آپلود کنید، یا همین‌جا Restore latest را بزنید. کلیدهای API، توکن GitHub هر کاربر، توکن ربات تلگرام و بقیهٔ متغیرهای محیطی خودش برگردانده و در <span class="mono">&lt;مسیر دیتابیس&gt;/.env</span> هم نوشته می‌شود تا بعد از restart هم بماند. اگر <span class="mono">BACKUP_PASSPHRASE</span> ست شده باشد، فایل‌های ذخیره‌شده رمز هستند و موقع ریستور همان passphrase لازم است.</p>
         <div id="bak-result" style="margin-top:10px"></div>
       </div>` : `<div class="card card-body mt"><div class="card-title">System Backup</div><p style="color:var(--text-muted);font-size:12px">Admin backup settings are unavailable — the API returned no config.</p></div>`;
     const stepsHtml = adm.github?.setupSteps ? `<ol style="font-size:12px;color:var(--text-muted);margin:8px 0 0 18px;text-align:left">${adm.github.setupSteps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>` : "";
@@ -6726,6 +6782,10 @@
             path: document.getElementById("bak-path").value.trim(),
             schedule: document.getElementById("bak-schedule").value.trim(),
             retain: Number(document.getElementById("bak-retain").value) || 30,
+            includeEnv: document.getElementById("bak-include-env").checked,
+            includeSecrets: document.getElementById("bak-include-secrets").checked,
+            localCopy: document.getElementById("bak-local-copy").checked,
+            localDir: document.getElementById("bak-local-dir").value.trim(),
           }});
           toast("Backup settings saved", r.effective?.repo ? "Scheduled and ready." : "Backup repository not set yet.", "ok");
           bakResult(`<div class="field-hint ok">✓ ${esc(r.effective?.repo || "Configured")} · branch ${esc(r.effective?.branch || "")} · cron ${esc(r.effective?.schedule || "")}</div>`);
@@ -6742,8 +6802,10 @@
         try {
           const r = await api("/admin/backup/run", { method: "POST", body: {} });
           if (r.ok) {
-            bakResult(`<div class="field-hint ok">✓ Backup pushed · commit ${esc(r.commit || "")} · ${esc(r.files || 0)} files · ${esc(String(r.bytes || 0))} bytes\n${r.warning ? esc(r.warning) : ""}</div>`);
-            toast("Backup complete", r.commit || "", "ok");
+            const sec = r.secrets ? ` · 🔑 ${r.secrets.dbSecrets} credential(s), ${r.secrets.envKeys} env value(s)` : "";
+            const where = r.commit ? `commit ${esc(r.commit)}` : (r.local?.ok ? `local ${esc(r.local.dir || "")}` : "written");
+            bakResult(`<div class="field-hint ok">✓ Backup complete · ${where} · ${esc(r.files || 0)} files · ${esc(String(r.bytes || 0))} bytes${sec}${r.local?.ok ? `\n📁 local copy: ${esc(r.local.snapshotFile || r.local.dir || "")}` : ""}${r.warning ? `\n${esc(r.warning)}` : ""}</div>`);
+            toast("Backup complete", r.commit || r.local?.dir || "", "ok");
           } else {
             bakResult(`<div class="field-hint err">${esc(r.error || r.warning || "Backup failed")}</div>`);
             toast("Backup failed", r.error || r.warning || "", "err");
@@ -6756,14 +6818,18 @@
         const btn = bakList; btn.disabled = true; btn.textContent = "Loading…";
         try {
           const r = await api("/admin/backup/list");
-          const rows = (r.backups || []).map((b) => `<tr><td>${b.latest ? '<span class="badge badge-ok">latest</span>' : ""} <span class="mono">${esc(b.id)}</span></td><td class="mono">${esc(b.createdAt)}</td><td>${b.records}</td><td>${b.jobs}</td><td>${b.kv}</td><td><button class="btn btn-ghost" data-backup-snapshot="${esc(b.id)}">Restore</button></td></tr>`).join("");
-          bakResult(rows ? `<div class="table-wrap"><table><thead><tr><th>Snapshot</th><th>Created</th><th>Records</th><th>Jobs</th><th>KV</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="field-hint">No backups found in ${esc(r.configured ? "the configured repository" : "a configured repository")}.</div>`);
+          const rows = (r.backups || []).map((b) => `<tr><td>${b.latest ? '<span class="badge badge-ok">latest</span>' : ""} <span class="mono">${esc(b.id)}</span> <span class="badge ${b.source === "local" ? "badge-muted" : ""}">${esc(b.source || "github")}</span></td><td class="mono">${esc(b.createdAt)}</td><td>${b.records}</td><td>${b.jobs}</td><td>${b.kv}</td><td>${b.secrets ? (b.secretsEncrypted ? '<span class="badge badge-ok">🔑 enc</span>' : '<span class="badge badge-warn">🔑 keys</span>') : '<span class="badge badge-muted">no keys</span>'}</td><td><button class="btn btn-ghost" data-backup-snapshot="${esc(b.id)}" data-backup-source="${esc(b.source || "github")}">Restore</button>${b.source === "local" ? ` <button class="btn btn-ghost" data-backup-download="${esc(b.id)}">⬇</button>` : ""}</td></tr>`).join("");
+          bakResult(rows ? `<div class="table-wrap"><table><thead><tr><th>Snapshot</th><th>Created</th><th>Records</th><th>Jobs</th><th>KV</th><th>Secrets</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="field-hint">No backups found${esc(r.configured ? " in the configured repository or on this server" : "")}.</div>`);
+          document.querySelectorAll("[data-backup-download]").forEach((b) => b.onclick = () => {
+            downloadBackupSnapshot(b.dataset.backupDownload);
+          });
           document.querySelectorAll("[data-backup-snapshot]").forEach((b) => b.onclick = async () => {
             const id = b.dataset.backupSnapshot;
-            if (!confirm(`Restore snapshot ${id}? This replaces the full runtime state.`)) return;
+            const source = b.dataset.backupSource || "github";
+            if (!confirm(`Restore snapshot ${id} (${source})? This replaces the full runtime state — including API keys and tokens.`)) return;
             try {
-              const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, replace: true } });
-              if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
+              const res = await api("/admin/backup/restore", { method: "POST", body: { snapshot: id, source, replace: true } });
+              if (res.ok) { toast("Backup restored", `${res.records} records, ${res.jobs} jobs, ${res.kv} kv restored${res.environment ? ` · 🔑 ${res.environment.providers + res.environment.telegramAccounts + res.environment.githubTokens} credential(s), ${(res.environment.envApplied || []).length} env value(s)` : ""}${res.warning ? ` · ${res.warning}` : ""}`, res.warning ? "warn" : "ok"); setTimeout(() => { resetClientCaches(); refreshCurrent(); }, 700); }
               else toast("Restore failed", res.error || "", "err");
             } catch (e) { toast("Restore failed", e.message, "err"); }
           });
@@ -6771,18 +6837,10 @@
         finally { btn.disabled = false; btn.textContent = "📋 List backups"; }
       };
       const bakExport = document.getElementById("bak-export");
-      if (bakExport) bakExport.onclick = async () => {
-        try {
-          const b = await api("/admin/backup/export");
-          const blob = new Blob([JSON.stringify(b, null, 2)], { type: "application/json" });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a"); a.href = url; a.download = "codevia-full-backup.json"; a.click();
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-        } catch (e) { toast("Export failed", e.message, "err"); }
-      };
+      if (bakExport) bakExport.onclick = () => downloadFullBackup(bakExport, "⬇ Download full backup (JSON)");
       const bakRestore = document.getElementById("bak-restore");
       if (bakRestore) bakRestore.onclick = async () => {
-        if (!confirm("Restore the latest backup from GitHub? This replaces the full runtime database.")) return;
+        if (!confirm("Restore the latest backup? This replaces the full runtime database and re-applies every backed-up API key and token.")) return;
         const btn = bakRestore; btn.disabled = true; btn.textContent = "Restoring…";
         try {
           const res = await api("/admin/backup/restore", { method: "POST", body: { replace: true } });

@@ -62,8 +62,12 @@ describe("BackupService", () => {
     const run = await service.runNow();
     expect(run.ok).toBe(true);
     expect(run.commit).toBeTruthy();
-    expect(run.files).toBe(6);
+    // manifest + records + jobs + kv + secrets bundle + README + latest.json
+    expect(run.files).toBe(7);
     expect(run.counts).toMatchObject({ records: 1, jobs: 0, kv: 1 });
+    // Every run also leaves a copy on the volume, so a backup exists even when
+    // the GitHub target disappears.
+    expect(run.local?.ok).toBe(true);
 
     const list = await service.listBackups();
     expect(list.length).toBe(1);

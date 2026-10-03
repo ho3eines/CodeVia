@@ -172,9 +172,47 @@ const EnvSchema = z.object({
   // Web UI
   WEB_BASE_URL: z.string().default("http://localhost:8080"),
   PUBLIC_WEB_BASE_URL: z.string().optional(),
+
+  // ---- Full system backup (Admin → System Backup) ----
+  // A backup is a *complete* point-in-time copy of the installation: every
+  // runtime row AND the environment that produced it, so a brand-new server can
+  // be brought up from one file. That includes credentials — see BACKUP_INCLUDE_SECRETS.
+  /** Capture the platform's environment variables into every backup. */
+  BACKUP_INCLUDE_ENV: envBoolean(true),
+  /**
+   * Capture credentials in the backup: API keys, GitHub/Telegram tokens, the
+   * per-user GitHub OAuth tokens and AUTH_SECRET — as plaintext, so a restore on
+   * a server with a different AUTH_SECRET still brings every integration back.
+   * Set false to keep the old behaviour (database rows only, secrets left in
+   * their AUTH_SECRET-bound encrypted form and never exported).
+   */
+  BACKUP_INCLUDE_SECRETS: envBoolean(true),
+  /** Also write every backup to disk next to the database (survives without GitHub). */
+  BACKUP_LOCAL_COPY: envBoolean(true),
+  /** Where local copies go. Default: `<dirname(DATABASE_PATH)>/backups`. */
+  BACKUP_LOCAL_DIR: z.string().optional(),
+  /** How many local snapshot directories to keep (oldest pruned after each run). */
+  BACKUP_LOCAL_RETAIN: envNumber(30, 1),
+  /**
+   * Optional passphrase protecting the *stored* secret bundle (GitHub repo +
+   * local copy). When set, `secrets.enc.json` (scrypt + AES-256-GCM) is written
+   * instead of plaintext `secrets.json`, and a restore needs the same
+   * passphrase. The file an admin explicitly downloads stays plaintext.
+   * Never itself captured into a backup.
+   */
+  BACKUP_PASSPHRASE: z.string().optional(),
+  /** Extra environment variable names to capture (comma-separated). */
+  BACKUP_EXTRA_ENV: z.string().optional(),
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;
+
+/**
+ * Every environment variable the platform's contract knows about. The full
+ * system backup captures these (plus provider `secretRef` names and
+ * BACKUP_EXTRA_ENV) so a restored server behaves exactly like the source one.
+ */
+export const ENV_CONTRACT_KEYS: string[] = Object.keys(EnvSchema.shape);
 
 let cached: EnvConfig | null = null;
 
