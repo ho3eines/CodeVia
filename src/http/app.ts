@@ -34,7 +34,7 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerBackupRoutes } from "./routes/backup.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerAuthRoutes } from "./routes/auth.js";
-import { authMiddleware, canAccessProject, DEMO_USER, resolveRequestUser } from "./auth.js";
+import { authMiddleware, canAccessProject, DEMO_USER, demoFallbackUser, resolveRequestUser } from "./auth.js";
 import { extractSessionToken, verifySession } from "../auth/github-oauth.js";
 import type { User } from "../domain/entities.js";
 import { registerProjectStateHook } from "./project-state-hook.js";
@@ -219,7 +219,7 @@ export async function buildServer(container: Container): Promise<BuildServerResu
       if ((await effectiveRequireAuth()) && (await loginConfigured())) {
         return next(new Error("Authentication required (GitHub login)"));
       }
-      socket.data.user = DEMO_USER;
+      socket.data.user = demoFallbackUser();
       socket.data.authenticated = false;
       return next();
     } catch {

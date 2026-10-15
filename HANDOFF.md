@@ -254,6 +254,7 @@ npm run typecheck # بررسی تایپ‌ها
 ✅ allowedModels per agent: می‌توانید هر ایجنت را محدود به چند مدل خاص کنید
 ✅ UI: جدول امتیاز مدل‌ها + دکمه Run benchmark + چک‌باکس allowed models در Agent Builder
 ✅ API endpoints برای بنچمارک فعال هستند
+✅ **PR 1 `fix/security-auth-admin` delivered (A01/A02/A03)**: fail-closed prod auth (503 + setup token + bootstrap window), `requireAdminRead` admin guards, `demoFallbackUser()` read-only demo, new tests (`auth-admin-hardening.test.ts`), `docs/decisions/0001-auth-fail-closed.md`. SPA graceful degradation in `170-admin.js`. Baseline 8 pre-existing failures unchanged — no new failures from PR 1.
 
 ---
 

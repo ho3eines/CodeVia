@@ -4,6 +4,7 @@ import type { UserRole, Permission } from "../types.js";
 import type { Container } from "../app/container.js";
 import { extractSessionToken, verifySession } from "../auth/github-oauth.js";
 import { getEnv } from "../config/env.js";
+import { isBootstrapAdminRequest, isLoginConfigured, isProduction } from "../auth/setup-token.js";
 
 export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   owner: [
@@ -99,6 +100,20 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
 export { DEMO_USER, DEMO_USER_ID } from "../auth/identity.js";
 import { DEMO_USER, DEMO_USER_ID } from "../auth/identity.js";
 
+/**
+ * In production there is no such thing as an unauthenticated owner. The
+ * fallback identity is downgraded to a read-only role so it can never hold an
+ * `admin.*` or `*.write` permission — production must be configured (GitHub
+ * login) before it can be driven. Dev/test keeps the full demo owner so local
+ * single-user usage works out of the box.
+ */
+const DEMO_USER_READ_ONLY: User = { ...DEMO_USER, role: "viewer" };
+
+/** The identity an unauthenticated request falls back to. */
+export function demoFallbackUser(): User {
+  return isProduction() ? DEMO_USER_READ_ONLY : DEMO_USER;
+}
+
 declare module "fastify" {
   interface FastifyRequest {
     user: User;
@@ -132,9 +147,9 @@ export function resolveRequestUser(req: FastifyRequest, container?: Container): 
       return { user: { ...DEMO_USER, id: payload.sub }, authenticated: true };
     }
   } catch {
-    // Invalid/expired session -> fall through to demo user.
+    // Invalid/expired session -> fall through to the fallback identity.
   }
-  return { user: DEMO_USER, authenticated: false };
+  return { user: demoFallbackUser(), authenticated: false };
 }
 
 /**
@@ -167,15 +182,15 @@ export function authMiddleware(opts: { container: Container; can?: Permission })
     const { user, authenticated } = resolveRequestUser(req, opts.container);
     req.user = user;
     req.authenticated = authenticated;
-    if (opts.can) {
-      const allowed = ROLE_PERMISSIONS[user.role];
-      if (allowed && !allowed.includes(opts.can)) {
-        throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
-      }
-    }
+
+    // Narrow production bootstrap: keep Admin → GitHub Login reachable while
+    // login is unconfigured so the operator can finish onboarding (see
+    // src/auth/setup-token.ts).
+    const bootstrap = isBootstrapAdminRequest(req, opts.container, authenticated);
+
     // Optional strict mode: the Admin panel toggle overrides REQUIRE_AUTH env.
     // When on, API callers must present a valid GitHub-login session instead
-    // of silently using the demo user.
+    // of silently using the fallback identity.
     let requireAuth = getEnv().REQUIRE_AUTH;
     try {
       const { getEffectiveRequireAuth } = await import("../auth/admin-settings.js");
@@ -183,23 +198,41 @@ export function authMiddleware(opts: { container: Container; can?: Permission })
     } catch {
       // kv unavailable (tests) — fall back to the env flag.
     }
-    if (requireAuth && !authenticated) {
-      // Strict mode must never lock everyone out: while GitHub login is not
-      // configured there is no way to obtain a session, so enforcing 401 here
-      // would brick the whole UI (including the Admin page needed to fix it).
-      // Log loudly and fall back to demo mode until OAuth is set up.
-      let loginConfigured = true;
-      try {
-        const { getEffectiveOAuthConfig } = await import("../auth/admin-settings.js");
-        loginConfigured = !!getEffectiveOAuthConfig(opts.container.kv);
-      } catch {
-        // kv unavailable — assume configured so the env flag still applies.
-      }
-      if (loginConfigured) {
+
+    if (requireAuth && !authenticated && !bootstrap) {
+      if (isLoginConfigured(opts.container)) {
         reply.code(401);
         throw Object.assign(new Error("Authentication required (GitHub login)"), { statusCode: 401 });
       }
+      if (isProduction()) {
+        // Fail closed. Strict auth with no way to log in is a misconfiguration;
+        // production must never downgrade to an unauthenticated owner. 503 (not
+        // 401) because the caller cannot fix this by logging in — the server is
+        // not configured yet.
+        reply.code(503).send({
+          statusCode: 503,
+          error: "Service Unavailable",
+          code: "auth_not_configured",
+          message:
+            "Strict authentication is enabled but GitHub login is not configured. " +
+            "Refusing to fall back to an unauthenticated owner in production.",
+          hint:
+            "Configure GitHub login (Admin → GitHub Login, or GITHUB_CLIENT_ID + GITHUB_CLIENT_SECRET) and AUTH_SECRET, then redeploy. " +
+            "On the server, Admin → GitHub Login is temporarily reachable from loopback or with the one-time setup token printed in the startup logs.",
+        });
+        return reply;
+      }
+      // Non-production only: there is no way to obtain a session, so enforcing
+      // 401 would brick the whole UI (including the Admin page needed to fix
+      // it). Log loudly and fall back to demo mode until OAuth is set up.
       warnStrictModeWithoutLogin();
+    }
+
+    if (opts.can) {
+      const allowed = ROLE_PERMISSIONS[user.role];
+      if (allowed && !allowed.includes(opts.can)) {
+        throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
+      }
     }
   };
 }

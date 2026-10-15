@@ -56,6 +56,14 @@ The following are treated as security issues and are prioritized:
   session (`Authorization: Bearer <session>` / `cv_session` cookie). A caller
   header such as `x-user-id` is never accepted as identity (regression-tested,
   `src/tests/security-regressions.test.ts` A01).
+- **Production is fail-closed** — with `REQUIRE_AUTH=true` and no GitHub OAuth
+  configured, production answers **503** (not 401, not 200 with a demo owner) so
+  a misconfigured server never hands out unauthenticated owner permissions.
+  A narrow **bootstrap window** keeps `GET /admin/settings` and
+  `PUT /admin/settings/github` reachable from loopback or with the one-time
+  setup token printed at boot — the window closes the moment OAuth is configured.
+  The demo fallback identity is downgraded to `viewer` (read-only; no `admin.*`,
+  no `*.write`) in production; dev/test keeps the full demo owner.
 - **Ownership** — projects, models and providers are owner-scoped; foreign rows
   read as `404` (no existence leak). Shared/legacy rows are adopted on first
   write, never published to everyone.
