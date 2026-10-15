@@ -1,10 +1,19 @@
   /* ADMIN */
   on("/admin", async () => {
-    const h = await api("/admin/health");
-    const usage = await api("/admin/usage");
+    // Each endpoint is optional. A non-admin (viewer/developer) — or a
+    // bootstrap-only operator while GitHub login is unconfigured — gets a
+    // 403/503 on the full health/usage surface; that must degrade to a clear
+    // "admin access required" notice, never a broken page.
+    const [hRaw, usageRaw] = await Promise.all([
+      api("/admin/health").catch(() => null),
+      api("/admin/usage").catch(() => null),
+    ]);
     const adm = await api("/admin/settings").catch((e) => ({ _forbidden: e.message }));
     const users = await api("/admin/users").catch(() => null);
     const bak = await api("/admin/backup").catch(() => null);
+    const restricted = !hRaw || !usageRaw;
+    const h = hRaw || { api: { status: "unknown" }, database: { status: "unknown", path: "" }, queue: { status: "unavailable" }, github: { status: "unknown" }, telegram: { status: "unknown" }, providers: [], storage: {} };
+    const usage = usageRaw || { projects: 0, agents: 0, models: 0, skills: 0, tasks: 0, runs: 0, costs: { calls: 0, tokens: 0, costUsd: 0 } };
     const diag = adm.github?.diagnostics || {};
     // Ephemeral-storage warning: when the DB is on container-local storage the
     // admin GitHub settings (and users/data) are wiped on every deploy — the
@@ -265,6 +274,11 @@
           <button class="btn btn-primary" onclick="adminOpen('backup')">🛡️ Backup &amp; restore</button>
         </div>
       </div>
+
+      ${restricted ? `<div class="notice warn">
+        <h4>⚠️ Admin access required</h4>
+        <p>Your account doesn't have owner/admin access, so system health, usage and backups are hidden.${adm && !adm._forbidden ? " You can still configure GitHub login from the <strong>GitHub login</strong> tile below." : ""}</p>
+      </div>` : ""}
 
       <div class="admin-hero">
         <div class="card card-body">

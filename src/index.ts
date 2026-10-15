@@ -7,6 +7,7 @@ import { buildServer } from "./http/app.js";
 import { getEnv } from "./config/env.js";
 import { checkStoragePath, StoragePreflightError } from "./app/storage-preflight.js";
 import { getEffectiveGitHubLoginSettings } from "./auth/admin-settings.js";
+import { announceSetupToken } from "./auth/setup-token.js";
 import { getLocalhostCallbackWarning } from "./auth/github-oauth.js";
 import { logger } from "./logger.js";
 
@@ -32,6 +33,11 @@ async function main() {
 
   const container = getContainer();
   await container.ensureSeed();
+
+  // Production fail-closed onboarding: when GitHub login is not configured,
+  // print the one-time setup token so the operator can reach Admin → GitHub
+  // Login (the only admin surface still open during bootstrap). No-op otherwise.
+  announceSetupToken(container);
 
   // Bring up the Telegram receive path: register the webhook when a public
   // HTTPS URL exists, otherwise long-poll `getUpdates` so a token-only setup

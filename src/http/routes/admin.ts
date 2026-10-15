@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Container } from "../../app/container.js";
 import { getEnv } from "../../config/env.js";
 import { ROLE_PERMISSIONS } from "../auth.js";
-import type { UserRole } from "../../types.js";
+import type { Permission, UserRole } from "../../types.js";
+import { isBootstrapAdminRequest } from "../../auth/setup-token.js";
 import {
   getEffectiveGitHubLoginSettings,
   getGitHubAdminSettings,
@@ -12,21 +13,32 @@ import { getStorageInfo } from "../../app/storage.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
 import { resolveRequestUser } from "../auth.js";
 
-/** Only owner/admin roles may read or change admin settings. */
-function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
+/** Role-based permission gate for admin routes. */
+function requirePermission(req: FastifyRequest, reply: FastifyReply, permission: Permission): boolean {
   const allowed = ROLE_PERMISSIONS[req.user.role] ?? [];
-  if (!allowed.includes("admin.write")) {
+  if (!allowed.includes(permission)) {
     reply.code(403);
     return false;
   }
   return true;
 }
 
+/** Only owner/admin roles may change admin settings. */
+function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
+  return requirePermission(req, reply, "admin.write");
+}
+
+/** Read-only admin surface (health, usage, roles, providers): admin.read. */
+function requireAdminRead(req: FastifyRequest, reply: FastifyReply): boolean {
+  return requirePermission(req, reply, "admin.read");
+}
+
 const ASSIGNABLE_ROLES: UserRole[] = ["owner", "admin", "developer", "reviewer", "viewer"];
 
 export function registerAdminRoutes(app: FastifyInstance, container: Container): void {
   // System health dashboard
-  app.get("/admin/health", { schema: { tags: ["admin"] } }, async (req) => {
+  app.get("/admin/health", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    if (!requireAdminRead(req, reply)) return { error: "Forbidden" };
     const dbOk = await container.db.raw().prepare("SELECT 1 AS ok").get();
     const queueStats = container.queue.stats();
     const providerHealth = container.providerRegistry.all().map((p) => ({ id: p.id, kind: p.type }));
@@ -48,11 +60,13 @@ export function registerAdminRoutes(app: FastifyInstance, container: Container):
     };
   });
 
-  app.get("/admin/roles", { schema: { tags: ["admin"] } }, async () => {
+  app.get("/admin/roles", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    if (!requireAdminRead(req, reply)) return { error: "Forbidden" };
     return ROLE_PERMISSIONS;
   });
 
-  app.get("/admin/usage", { schema: { tags: ["admin"] } }, async () => {
+  app.get("/admin/usage", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    if (!requireAdminRead(req, reply)) return { error: "Forbidden" };
     const costs = container.costRepo.findMany().map((r) => r.data);
     const runs = container.runRepo.findMany().map((r) => r.data);
     return {
@@ -70,7 +84,8 @@ export function registerAdminRoutes(app: FastifyInstance, container: Container):
     };
   });
 
-  app.get("/admin/provider-health", { schema: { tags: ["admin"] } }, async () => {
+  app.get("/admin/provider-health", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    if (!requireAdminRead(req, reply)) return { error: "Forbidden" };
     return container.providerRegistry.all().map((p) => ({ id: p.id, type: p.type }));
   });
 
@@ -84,7 +99,11 @@ export function registerAdminRoutes(app: FastifyInstance, container: Container):
 
   // ---- Admin → GitHub Login settings (non-secret values; secrets stay env-only) ----
   app.get("/admin/settings", { schema: { tags: ["admin"] } }, async (req, reply) => {
-    if (!requireAdmin(req, reply)) return { error: "Forbidden" };
+    // Bootstrap exception: while login is unconfigured in production, the
+    // operator may read the login config (loopback / one-time setup token) even
+    // without an admin session — otherwise the Admin page they need is a 503.
+    const bootstrap = isBootstrapAdminRequest(req, container, req.authenticated === true);
+    if (!bootstrap && !requireAdmin(req, reply)) return { error: "Forbidden" };
     const github = getEffectiveGitHubLoginSettings(container.kv);
     const users = container.userRepo.findMany().map((r) => r.data);
     return {
@@ -104,7 +123,8 @@ export function registerAdminRoutes(app: FastifyInstance, container: Container):
   });
 
   app.put("/admin/settings/github", { schema: { tags: ["admin"] } }, async (req, reply) => {
-    if (!requireAdmin(req, reply)) return { error: "Forbidden" };
+    const bootstrap = isBootstrapAdminRequest(req, container, req.authenticated === true);
+    if (!bootstrap && !requireAdmin(req, reply)) return { error: "Forbidden" };
     const b = (req.body ?? {}) as {
       clientId?: string;
       callbackUrl?: string;
