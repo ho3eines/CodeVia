@@ -589,6 +589,14 @@ export class ProjectFilesService {
     } catch (error) {
       this.snapshots.delete(this.cacheKey(p));
       if ((error as { status?: number })?.status === 404) {
+        // Local Git CLI mode: a 404 means the repository folder is not on disk
+        // under LOCAL_REPOS_DIR — GitHub re-linking advice would be misleading.
+        if ((error as { provider?: string }).provider === "local-git") {
+          throw stateError(
+            `commit failed: local repository not found for ${this.ref(p).owner}/${this.ref(p).name}. Check LOCAL_REPOS_DIR (and that the repository exists on disk with a .git folder); state was not acknowledged as saved`,
+            error,
+          );
+        }
         // GitHub returns 404 for repos that don't exist AND for repos the
         // acting token cannot access (to avoid leaking repo existence). When a
         // repo "exists and you have access", this means the credential that is

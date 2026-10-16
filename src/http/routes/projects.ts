@@ -15,6 +15,7 @@ import { resolveGitHubForUser } from "../../github/registry.js";
 import { githubAuthorizationRequired, isGitHubAuthorizationRequired } from "../../github/authorization.js";
 import { verifyPullRequestBeforeMerge } from "../../github/merge-gate.js";
 import { checkProjectWriteAccess } from "../../github/write-access.js";
+import { isLocalGitMode } from "../../github/local-git-service.js";
 import {
   CI_SETUP_BRANCH,
   detectStacks,
@@ -1109,7 +1110,10 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
         row.ciStacks = stacks;
         row.ciSetupAvailable = !(row.ciWorkflows as string[]).length && stacks.length > 0;
         const ours = (row.ciWorkflows as string[]).some((w) => w.endsWith("codevia-ci.yml"));
-        if (ours && stacks.length) {
+        // Local Git CLI mode: GitHub Actions never run for local repositories,
+        // so recording its job names as required checks would permanently block
+        // the merge gate. Real verification happens via LOCAL_GIT_VERIFY_CMD.
+        if (ours && stacks.length && !isLocalGitMode()) {
           const patch = requiredChecksPatch(p.settings, link.repo, stacks, (p.repositories ?? []).length > 1);
           if (patch) {
             try {
