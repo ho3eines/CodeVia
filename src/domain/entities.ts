@@ -209,6 +209,62 @@ export interface ProjectCapabilities {
   agentTypes: AgentType[];
 }
 
+/** Git facts about a scanned folder. Credentials in remotes are always redacted. */
+export interface ProjectAnalysisGit {
+  branch?: string;
+  remote?: string;
+  lastCommit?: string;
+}
+
+/** Heuristic defaults the UI can prefill from a folder scan. */
+export interface ProjectAnalysisSuggestions {
+  name?: string;
+  description?: string;
+  type?: string;
+  language?: string;
+  framework?: string;
+  packageManager?: string;
+  buildCommand?: string;
+  startCommand?: string;
+  testCommand?: string;
+  devCommand?: string;
+  tags?: string[];
+}
+
+/**
+ * Structured result of scanning a project folder on the server filesystem
+ * (`ProjectAnalyzerService.scan`). Stored verbatim on the Project document
+ * (`analysis`) for `sourceType: "local"` projects. File contents are never
+ * embedded — only names, metadata and parsed manifest facts.
+ */
+export interface ProjectAnalysis {
+  rootPath: string;
+  name?: string;
+  description?: string;
+  languages: string[];
+  frameworks: string[];
+  packageManager?: string;
+  scripts: Record<string, string>;
+  dependencies?: string[];
+  devDependencies?: string[];
+  isMonorepo?: boolean;
+  workspaces?: string[];
+  entryPoints?: string[];
+  configFiles?: string[];
+  /** Environment file NAMES only — values are never read. */
+  envFiles?: string[];
+  license?: string;
+  git?: ProjectAnalysisGit;
+  docker: boolean;
+  ci: string[];
+  tests: string[];
+  warnings: string[];
+  suggestions: ProjectAnalysisSuggestions;
+  scannedAt: string;
+  fileCount: number;
+  truncated: boolean;
+}
+
 export interface Project {
   /** Cache-only optimistic read stamp; never exported to the repository. */
   repositoryRevision?: string;
@@ -229,6 +285,17 @@ export interface Project {
   repositories: ProjectRepositoryLink[];
   capabilities: ProjectCapabilities;
   githubConnection?: ProjectGithubConnection;
+  /**
+   * Where this project came from. Absent (legacy rows) means "github" — a
+   * repository-backed project created through the GitHub / local-git flow.
+   * "local" projects were created from a server folder scan; they carry no
+   * repository until one is linked explicitly.
+   */
+  sourceType?: "github" | "local";
+  /** Absolute server folder for `sourceType: "local"` projects. */
+  localPath?: string;
+  /** Folder analysis snapshot captured when a local project was created. */
+  analysis?: ProjectAnalysis;
   /** @deprecated derived from capabilities.languages[0] — kept for prompts/back-compat */
   primaryLanguage?: string;
   /** @deprecated derived from capabilities.frameworks[0] */

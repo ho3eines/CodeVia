@@ -71,7 +71,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (1016 tests)
+npm test            # unit + integration + end-to-end (1080 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run backup      # full portable backup (every row + API keys + env) → data/codevia-backup.json
 npm run typecheck   # strict TypeScript
@@ -232,6 +232,9 @@ Features: responsive, dark/light mode, **RTL/Persian-friendly**, command palette
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker + Railway deployment guide |
 | [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) | Environment variables / secret references guide |
 | [docs/GITHUB_SETUP.md](docs/GITHUB_SETUP.md) | GitHub App + OAuth + webhook setup |
+| [docs/LOCAL-GIT-MODE.md](docs/LOCAL-GIT-MODE.md) | Run 100% locally — system git binary instead of GitHub (setup, safety model, tests) |
+| [docs/LOCAL-GIT-MODE-FA.md](docs/LOCAL-GIT-MODE-FA.md) | 🇮🇷 راهنمای فارسی حالت لوکال |
+| [docs/LOCAL-FOLDER-PROJECTS.md](docs/LOCAL-FOLDER-PROJECTS.md) | Create projects from server folders — filesystem scan + analysis, no GitHub required |
 | [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) | Telegram bot setup & commands |
 | [docs/PROVIDER_SETUP.md](docs/PROVIDER_SETUP.md) | Configure AI providers (OpenAI, Anthropic, Gemini, Ollama…) |
 | [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md) | Model selection, load balancing policies, pins, circuit breaker, live distribution |

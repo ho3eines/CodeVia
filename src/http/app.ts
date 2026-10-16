@@ -34,6 +34,8 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerBackupRoutes } from "./routes/backup.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerFilesystemRoutes } from "./routes/filesystem.js";
+import { registerLocalProjectRoutes } from "./routes/local-projects.js";
 import { authMiddleware, canAccessProject, DEMO_USER, demoFallbackUser, resolveRequestUser } from "./auth.js";
 import { extractSessionToken, verifySession } from "../auth/github-oauth.js";
 import type { User } from "../domain/entities.js";
@@ -384,6 +386,8 @@ export async function buildServer(container: Container): Promise<BuildServerResu
     registerAdminRoutes(app, container);
     registerBackupRoutes(app, container);
     registerApprovalRoutes(app, container);
+    registerFilesystemRoutes(app, container);
+    registerLocalProjectRoutes(app, container);
   });
 
   // Global auth guard for everything not whitelisted. Public/unauthenticated

@@ -21,7 +21,7 @@ function notFound(): never {
 async function bootstrapMissingState(c: Container, projectId: string): Promise<void> {
   // Re-read after restore: a repository manifest marks the project initialized.
   const p = c.projectRepo.findById(projectId)?.data;
-  if (!p || p.repositoryState || c.agentRepo.byProject(projectId).length > 0) return;
+  if (!p || p.sourceType === "local" || p.repositoryState || c.agentRepo.byProject(projectId).length > 0) return;
   try {
     if (c.githubForProject(hydrateProject(p)).kind !== "mock") return;
   } catch {
