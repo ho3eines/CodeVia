@@ -163,10 +163,13 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     return agent;
   });
 
-  app.get("/agents/:id", { schema: { tags: ["agents"] } }, async (req) => {
+  app.get("/agents/:id", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
-    if (!r) return { error: "agent not found" };
+    if (!r) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     return r.data;
   });
 
@@ -174,7 +177,10 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     const { id } = req.params as { id: string };
     const body = req.body as Record<string, unknown>;
     let r = container.agentRepo.findById(id);
-    if (!r) return { error: "agent not found" };
+    if (!r) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     // (S01) Gate before any side effect (ensureBaseline writes prompt history).
     if (!canAccessEntity(req, container, r.data)) {
       reply.code(404);
@@ -182,7 +188,10 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
     }
     await ensureBaseline(r.data);
     r = container.agentRepo.findById(id);
-    if (!r) return { error: "agent not found" };
+    if (!r) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     if (body.projectId !== undefined && body.projectId !== r.data.projectId)
       throw Object.assign(new Error("Cannot move an agent across projects"), { statusCode: 400 });
     if (body.configPath !== undefined && body.configPath !== r.data.configPath)
@@ -353,7 +362,10 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
   app.post("/agents/:id/enable", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
-    if (!r) return { error: "agent not found" };
+    if (!r) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     if (!canAccessEntity(req, container, r.data)) {
       reply.code(404);
       return { error: "agent not found" };
@@ -368,7 +380,10 @@ export function registerAgentRoutes(app: FastifyInstance, container: Container):
   app.post("/agents/:id/disable", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const r = container.agentRepo.findById(id);
-    if (!r) return { error: "agent not found" };
+    if (!r) {
+      reply.code(404);
+      return { error: "agent not found" };
+    }
     if (!canAccessEntity(req, container, r.data)) {
       reply.code(404);
       return { error: "agent not found" };

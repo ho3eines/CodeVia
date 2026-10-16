@@ -51,7 +51,11 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       reply.code(404);
       return { error: "task not found" };
     }
-    return task ?? { error: "task not found" };
+    if (!task) {
+      reply.code(404);
+      return { error: "task not found" };
+    }
+    return task;
   });
 
   app.patch("/tasks/:id", { schema: { tags: ["tasks"] } }, async (req, reply) => {
@@ -228,7 +232,11 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       reply.code(404);
       return { error: "run not found" };
     }
-    return run ?? { error: "run not found" };
+    if (!run) {
+      reply.code(404);
+      return { error: "run not found" };
+    }
+    return run;
   });
 
   // AI Run Console — observable steps (never exposes chain-of-thought).
