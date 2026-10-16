@@ -34,6 +34,9 @@ import { Worker } from "../workers/worker.js";
 import { logger } from "../logger.js";
 import type { IGitHubService } from "../github/types.js";
 import { ProjectFilesService } from "../github/project-files.js";
+import { FilesystemService } from "../filesystem/filesystem-service.js";
+import { ProjectAnalyzerService } from "../analyzer/project-analyzer.js";
+import { LocalProjectService } from "../projects/local-project-service.js";
 import { BackupService } from "../backup/service.js";
 import { BackupScheduler } from "../backup/scheduler.js";
 import { ApprovalService, getApprovalRepo, type ApprovalRequest } from "../approvals/service.js";
@@ -97,6 +100,13 @@ export class Container {
   readonly contextEngine: ContextEngine = contextEngine;
   readonly toolRegistry: ToolRegistry = toolRegistry;
   readonly github: IGitHubService = resolveGitHubService();
+  readonly filesystem = new FilesystemService();
+  readonly projectAnalyzer = new ProjectAnalyzerService({ filesystem: this.filesystem });
+  readonly localProjects = new LocalProjectService({
+    projectRepo: this.projectRepo,
+    auditRepo: this.auditRepo,
+    analyzer: this.projectAnalyzer,
+  });
   readonly githubForProject = (project: Project, requestUserId?: string): IGitHubService =>
     resolveGitHubForProject({ project, kv: this.kv, fallback: this.github, requestUserId });
   /**
