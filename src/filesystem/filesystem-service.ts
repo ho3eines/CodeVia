@@ -139,11 +139,34 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+/**
+ * Windows (NTFS) and macOS (default APFS/HFS+) filesystems are case-insensitive:
+ * "d:/Hermes" and "D:/HERMES" are the same directory, so containment checks
+ * must compare case-insensitively there or legitimate paths get rejected.
+ */
+const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
+
+/** True when `child` is `root` itself or located underneath it. */
+function pathContains(root: string, child: string): boolean {
+  const norm = (x: string): string => (CASE_INSENSITIVE_FS ? x.toLowerCase() : x);
+  const r = norm(root);
+  const c = norm(child);
+  if (c === r) return true;
+  const sep = norm(path.sep);
+  // A root that already ends with the separator (e.g. "/" or "D:\") must not
+  // require a second one, or nothing would ever be "under" the filesystem root.
+  const prefix = r.endsWith(sep) ? r : r + sep;
+  return c.startsWith(prefix);
+}
+
 /** Tiny counting semaphore to bound concurrent fs work. */
 class Semaphore {
   private active = 0;
   private readonly waiters: (() => void)[] = [];
-  constructor(private readonly limit: number) {}
+  constructor(limit: number) {
+    this.limit = Math.max(1, Math.floor(limit) || 1);
+  }
+  private readonly limit: number;
   async run<T>(fn: () => Promise<T>): Promise<T> {
     if (this.active >= this.limit) {
       await new Promise<void>((resolve) => this.waiters.push(resolve));
@@ -368,7 +391,7 @@ export class FilesystemService {
 
   private isUnderRoots(resolved: string): boolean {
     for (const root of this.resolvedRoots()) {
-      if (resolved === root || resolved.startsWith(root + path.sep)) return true;
+      if (pathContains(root, resolved)) return true;
     }
     return false;
   }
@@ -377,7 +400,7 @@ export class FilesystemService {
   private async isUnderRealRoots(realPath: string): Promise<boolean> {
     if (this.isUnderRoots(realPath)) return true;
     for (const root of await this.realRoots()) {
-      if (realPath === root || realPath.startsWith(root + path.sep)) return true;
+      if (pathContains(root, realPath)) return true;
     }
     return false;
   }
