@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ho3eines/CodeVia/actions/workflows/ci.yml/badge.svg)](https://github.com/ho3eines/CodeVia/actions/workflows/ci.yml)
 
-A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled** AI engineering platform under active development. CodeVia provides agent definitions and execution paths for research, architecture, backend/frontend development, UI/UX, database, DevOps, QA, security, code review, documentation, debugging, refactoring, performance, and release; not all roles have a complete autonomous implementation.
+A **multi-project, GitHub-centric (or 100% local — see [Local Git Mode](docs/LOCAL-GIT-MODE.md)), multi-agent, multi-model, Telegram-controlled** AI engineering platform under active development. CodeVia provides agent definitions and execution paths for research, architecture, backend/frontend development, UI/UX, database, DevOps, QA, security, code review, documentation, debugging, refactoring, performance, and release; not all roles have a complete autonomous implementation.
 
 > **📖 [راهنمای کامل راه‌اندازی (فارسی)](docs/SETUP_GUIDE.md)** — از نصب محلی تا اتصال OpenAI، GitHub OAuth، Telegram، استقرار Railway/Docker و اجرای اولین Task خودکار.
 
@@ -31,12 +31,13 @@ A **multi-project, GitHub-centric, multi-agent, multi-model, Telegram-controlled
 - 🤖 **18 built-in agent types** generated automatically from your project description (**AI Agent Generator**).
 - 🧠 **Provider-agnostic model system** — OpenAI, Anthropic, Gemini, Azure OpenAI, OpenRouter, Ollama, custom OpenAI-compatible + a built-in **Mock AI provider** so the whole platform runs offline. Providers and models belong to the account that created them; routing never spends another account's key.
 - 🎯 **Intelligent Model Router + load distribution** — picks a model per task by capability, budget, cost, latency and context size, then decides *which of those eligible models should answer now*: adaptive / round-robin / weighted / least-loaded, with a concurrency ceiling, a circuit breaker for models that keep failing and automatic fallback A → B → C. No single provider key carries the whole installation while the rest of the registry idles (a model the user explicitly picked is still pinned). See [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md).
+- 🖥️ **100% Local Git Mode** — flip one env flag and the GitHub service layer is replaced by the **system git binary**: every file write, PR, issue, comment and merge runs against repositories on your own disk — no `api.github.com`, no OAuth, no tokens. Pushing to a real remote stays **optional** and is performed by your own system git with its own Credential Manager / SSH keys (`LOCAL_GIT_AUTO_PUSH`). Agent/orchestrator logic is untouched — only the service layer is swapped behind the `IGitHubService` interface. See [docs/LOCAL-GIT-MODE.md](docs/LOCAL-GIT-MODE.md).
 - 🗂️ **GitHub-backed Memory** — architecture, decisions, bugs, knowledge, lessons and conversation summaries versioned via commits.
 - 🔀 **Workflow Engine** — visual DAG of agent / tool / condition / approval / parallel / trigger nodes.
 - 🏃 **Background Worker + Queue** — agent executions never block the UI/API thread; retries, exponential backoff, dead-letter, idempotency.
 - 📱 **Telegram bot** — project-aware inline keyboards, natural-language requests (فارسی included) and human approval via Telegram. It receives updates over a **webhook when one is reachable, long polling otherwise**, so a bot token alone is enough — no ngrok, no public URL, and `/ping` tells you exactly which path is live.
 - 🔍 **Repository-aware chat** — the project chat is given real evidence (whole-repo file tree, README, manifests), cached per account+repo+branch, with a branch self-heal and a **repository health banner** (`GET /projects/:id/repo-status`) that states *why* a repository could not be read instead of letting the model invent a 404.
-- 📚 **Read-only local mirror** — evidence is read from a per-account bare clone with git *plumbing* (`ls-tree` / `cat-file` / `grep`), so large repositories answer from disk and agents get real content search; every failure falls back to the Git Trees API path. **No repository code is ever executed** — writes still go through the GitHub API and verification still reads CI check runs.
+- 📚 **Read-only local mirror** — evidence is read from a per-account bare clone with git *plumbing* (`ls-tree` / `cat-file` / `grep`), so large repositories answer from disk and agents get real content search; every failure falls back to the Git Trees API path. **No repository code is ever executed** — writes still go through the GitHub API and verification still reads CI check runs (in [Local Git Mode](docs/LOCAL-GIT-MODE.md), writes go through the local git backend and the mirror is auto-disabled).
 - 📊 **Observability** — AI Run Console (observable steps, never chain-of-thought), cost tracking, agent dashboards, audit log, notifications, system health.
 - 🔐 **Security building blocks** — secret references, OAuth login, per-account GitHub tokens (every project action runs with *your* token, not a server PAT), role definitions, webhook signature validation, approval controls and audit events. Some global admin feeds are still shared; see the [remaining gaps](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here).
 - 💾 **Full portable backup** — one JSON file holds *everything*: every runtime row **plus the environment and the API keys/tokens** that made it work. Download it from `Settings`, restore it on any other server (UI upload or `npm run backup:restore`), and the platform comes back complete — credentials are re-encrypted with the new server's `AUTH_SECRET` and the environment is written to `<db dir>/.env` so it survives a restart. Snapshots also go to a GitHub repo and/or the mounted volume on a cron schedule, with SHA-256-verified parts and optional `BACKUP_PASSPHRASE` protection. See [docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md).
@@ -70,7 +71,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (909 tests)
+npm test            # unit + integration + end-to-end (1016 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run backup      # full portable backup (every row + API keys + env) → data/codevia-backup.json
 npm run typecheck   # strict TypeScript
@@ -80,6 +81,68 @@ npm start           # run the production build
 
 > Testing guide (step-by-step, incl. manual UI scenarios): [`TESTING.md`](TESTING.md).
 > Coding-agent execution, CI setup, draft PRs and simulation semantics: [`docs/AGENT_EXECUTION.md`](docs/AGENT_EXECUTION.md).
+
+---
+
+## 🖥️ Run 100% locally — Local Git Mode (no GitHub, no OAuth, no tokens)
+
+Flip one flag and the entire GitHub service layer is swapped for the **system git binary**:
+every file write, PR, issue, comment and merge runs against repositories on your own disk
+via git *plumbing* — `api.github.com` is never called, no OAuth, no server PAT. Pushing to
+a real remote (GitHub, GitLab, anything) stays **optional** and is performed by your own
+system git with its own credentials.
+
+```bash
+# 1) install
+git clone https://github.com/ho3eines/CodeVia.git
+cd CodeVia
+npm install
+
+# 2) configure .env
+LOCAL_GIT_MODE=true
+LOCAL_REPOS_DIR=D:/Hermes/repos     # repositories live as <dir>/<owner>/<repo>
+LOCAL_GIT_OWNER=local               # default owner for repos without one
+
+# optional — push every agent commit through your own git credentials
+LOCAL_GIT_AUTO_PUSH=true
+LOCAL_GIT_REMOTE=origin
+
+# optional — real verification command instead of CI check runs
+LOCAL_GIT_VERIFY_CMD="cmd /c build.cmd"
+
+# 3) run
+npm run dev                         # UI: http://localhost:8080
+```
+
+**Safety model** (each property is covered by tests):
+
+- **Your working copy is never touched** — agent commits are built in a temporary index and
+  only changed paths are synced back; dirty files are never overwritten.
+- **Byte-exact storage** — blobs are hashed with `git hash-object --no-filters`, identical
+  to the GitHub Contents API, so the EOL patch engine keeps working.
+- **No worktrees, no fake checks** — merges use `git merge-tree --write-tree` (git ≥ 2.38);
+  the only required check is a real `local-git-integrity` (commit exists in the object DB)
+  plus your own `LOCAL_GIT_VERIFY_CMD` if configured.
+- **Crash-safe** — stale-lock detection with auto-retry, a `.bak` before every metadata
+  rewrite, and corrupt metadata never resets silently.
+- **Stable error contract** — 11 local-git error codes with `statusCode` / `status` /
+  `retryable` / `committed`, wired into routes, worker and repo-brief.
+- **Concurrency-safe** — per-repository metadata locking and batched git argv so large
+  commits never hit the Windows argv limit.
+
+**Notes:**
+
+- PRs and issues are stored in `<repo>/.git/codevia-local-meta.json` (inside `.git` —
+  invisible to your IDE, never cloned with the repo).
+- Repositories that already carry a valid `CodeVia/` state folder onboard with **no model
+  at all**; fresh repositories need a real AI model (Ollama / OpenRouter / …) for the
+  initial state generation — simulated state is never written to a real repository
+  (a seeding workaround is documented).
+- The read-only mirror is auto-disabled in local mode (path search still works); content
+  search can be re-enabled with a `file://` mirror template.
+
+Full guides: **[docs/LOCAL-GIT-MODE.md](docs/LOCAL-GIT-MODE.md)** (EN) ·
+**[docs/LOCAL-GIT-MODE-FA.md](docs/LOCAL-GIT-MODE-FA.md)** (🇮🇷 فارسی)
 
 ---
 
@@ -132,7 +195,7 @@ src/
 ├── agents/       # agent repo, router, plan, runner, generator, manager
 ├── db/           # runtime SQLite adapter, document repositories, queue, kv
 ├── domain/       # domain entities + repositories
-├── github/       # GitHub service (real + mock), webhook signature validation
+├── github/       # GitHub service (real + mock), local git CLI backend, webhook signature validation
 ├── http/         # Fastify app + REST/v1 routes + auth
 ├── integrations/ # Telegram service (real + mock) + bot command handler
 ├── memory/       # GitHub-backed + local memory stores, resolver
