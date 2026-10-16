@@ -33,6 +33,7 @@ import type { IGitHubService } from "../github/types.js";
 import { discoverProjectRules, rulesToStrings } from "./rules-discovery.js";
 import { buildContextPack, renderPromptContext } from "./context.js";
 import { BUILTIN_SKILLS } from "../skills/catalog.js";
+import { logger } from "../logger.js";
 
 export interface ProjectStateDeps extends StateRepositories {
   files: ProjectFilesService;
@@ -111,7 +112,91 @@ export function workflowDrafts(project: Project, agents: Agent[]): Workflow[] {
 /** Read-first, create-only-if-missing. One bootstrap per project at a time. */
 export class ProjectStateCoordinator {
   private pending = new Map<string, Promise<PullSummary>>();
+  /** Projects whose configured branch was already checked against the repository. */
+  private branchAligned = new Set<string>();
   constructor(private deps: ProjectStateDeps) {}
+
+  /**
+   * (local mode healing) A locally-created repository often defaults to
+   * "master" — or still has an unborn HEAD — while the project record pins
+   * "main" from platform defaults. Every read would then fail forever with
+   * "branch main is unavailable". Adopt the repository's actual default
+   * branch once; that is the smaller, reversible correction compared to
+   * failing every operation on a healthy repository.
+   */
+  private async alignBranch(stored: Project): Promise<Project> {
+    if (this.branchAligned.has(stored.id)) return stored;
+    const markDone = () => this.branchAligned.add(stored.id);
+    const d = this.deps;
+    const project = hydrateProject(stored);
+    const [owner, name] = project.configRepo.split("/");
+    if (!owner || !name) {
+      markDone();
+      return stored;
+    }
+    const gh = d.github(project);
+    const ref = { owner, name };
+    let branches: Array<{ name: string }>;
+    try {
+      branches = await gh.listBranches(ref);
+    } catch {
+      return stored; // unreadable repository: let pull() surface the real error
+    }
+    if (branches.some((b) => b.name === project.branch)) {
+      markDone();
+      return stored;
+    }
+    let target: string | undefined;
+    try {
+      target = (await gh.getRepository?.(ref))?.defaultBranch;
+    } catch {
+      target = undefined;
+    }
+    // An empty repository has no branches, but getRepository still reports the
+    // unborn HEAD's name — adopting it keeps the user's checkout and CodeVia
+    // on the same branch.
+    if (!target || target === project.branch) target = branches[0]?.name;
+    if (!target || target === project.branch || (branches.length > 0 && !branches.some((b) => b.name === target))) {
+      markDone();
+      return stored;
+    }
+    const updated = hydrateProject({
+      ...stored,
+      branch: target,
+      repositories: (stored.repositories ?? []).map((l) =>
+        l.repo.toLowerCase() === project.configRepo.toLowerCase() ? { ...l, branch: target } : l,
+      ),
+      updatedAt: new Date().toISOString(),
+    });
+    d.projectRepo.upsert(updated, { key: updated.slug });
+    logger.warn(
+      `CodeVia state: branch "${stored.branch}" of project "${stored.slug}" does not exist — adopted repository default branch "${target}"`,
+      { projectId: stored.id, repo: project.configRepo },
+    );
+    markDone();
+    return updated;
+  }
+
+  /**
+   * Import a state archive (CodeVia/** files extracted from a user-supplied
+   * zip) into the project repository and load it. This is the model-free path
+   * to a working project: definitions come from the archive instead of AI
+   * generation. Conflicts are not checked — the archive is authoritative —
+   * but existing repository files are never deleted, only overwritten per path.
+   */
+  async applyImportedState(projectId: string, files: GithubFile[]): Promise<{ imported: string[]; project: Project }> {
+    const d = this.deps;
+    let stored = d.projectRepo.findById(projectId)?.data;
+    if (!stored) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    stored = await this.alignBranch(stored);
+    const project = hydrateProject(stored);
+    if (!files.length)
+      throw Object.assign(new Error("The archive contains no CodeVia state files"), { statusCode: 400 });
+    await d.files.writeFiles(project, files, "[CodeVia] import state archive", false);
+    const snapshot = await d.files.pull(project);
+    await d.files.restore(stored, d, { snapshot });
+    return { imported: files.map((f) => f.path), project: hydrateProject(d.projectRepo.findById(projectId)!.data) };
+  }
   ensure(projectId: string): Promise<PullSummary> {
     const active = this.pending.get(projectId);
     if (active) return active;
@@ -121,8 +206,9 @@ export class ProjectStateCoordinator {
   }
   private async loadOrCreate(projectId: string): Promise<PullSummary> {
     const d = this.deps;
-    const stored = d.projectRepo.findById(projectId)?.data;
+    let stored = d.projectRepo.findById(projectId)?.data;
     if (!stored) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    stored = await this.alignBranch(stored);
     const snapshot = await d.files.pull(hydrateProject(stored));
     await d.files.restore(stored, d, { snapshot });
     let project = hydrateProject(d.projectRepo.findById(projectId)!.data);

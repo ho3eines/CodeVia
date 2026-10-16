@@ -43,7 +43,7 @@ import { ProjectStateGenerator } from "./state-generator.js";
 import { SkillRegistry, type SkillRepository } from "../skills/registry.js";
 import type { ModelRepository, ProviderRepository } from "../ai/model-repo.js";
 import type { ProviderRegistry } from "../ai/provider-registry.js";
-import type { IGitHubService } from "../github/types.js";
+import type { GithubFile, IGitHubService } from "../github/types.js";
 import { parseRepoFullName } from "../github/types.js";
 import type { Permission } from "../types.js";
 import { eventBus, generateCorrelationId } from "../events/bus.js";
@@ -210,6 +210,20 @@ export class AgentManager {
     const p = this.deps.projectRepo.findById(projectId)?.data;
     if (!p) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
     return hydrateProject(p);
+  }
+
+  /**
+   * Import a CodeVia state archive (zip → CodeVia/** files, already validated
+   * by the state-archive reader) into the project repository and load it. The
+   * model-free alternative to AI state generation.
+   */
+  async importProjectState(
+    projectId: string,
+    files: GithubFile[],
+  ): Promise<{ imported: string[]; project: Project }> {
+    if (!this.state)
+      throw Object.assign(new Error("Project state sync is not configured on this server"), { statusCode: 503 });
+    return this.state.applyImportedState(projectId, files);
   }
 
   /**

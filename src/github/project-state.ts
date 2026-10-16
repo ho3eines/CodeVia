@@ -251,9 +251,36 @@ export class ProjectFilesService {
     }
   }
   private async head(p: Project): Promise<string> {
-    const branch = (await this.github(p).listBranches(this.ref(p))).find((b) => b.name === p.branch);
-    if (!branch?.sha) throw stateError(`branch ${p.branch} is unavailable; not creating replacement state`);
-    return branch.sha;
+    const gh = this.github(p);
+    const ref = this.ref(p);
+    let branches: Awaited<ReturnType<IGitHubService["listBranches"]>>;
+    try {
+      branches = await gh.listBranches(ref);
+    } catch (err) {
+      // A repository that does not exist YET is an empty repository for
+      // bootstrap purposes: LOCAL_GIT_MODE initializes it on the first write.
+      // A repository that exists but cannot be read must keep failing loudly —
+      // only a confirmed-absent repository (getRepository → undefined) bootstraps.
+      let absent = false;
+      try {
+        absent = (await gh.getRepository?.(ref)) === undefined;
+      } catch {
+        /* getRepository unavailable or itself failing: keep the read error */
+      }
+      if (!absent) throw err;
+      branches = [];
+    }
+    const branch = branches.find((b) => b.name === p.branch);
+    if (branch?.sha) return branch.sha;
+    if (branches.length > 0)
+      throw stateError(`branch ${p.branch} is unavailable; not creating replacement state`);
+    // Empty repository: no commit exists, so nothing can be lost. Creating a
+    // project on a fresh `git init` must work — seed the first commit so state
+    // bootstrap (ensureFiles/first-time generation) can proceed on it.
+    const seed = await gh.commit(ref, p.branch, "[CodeVia] initialize repository", [
+      { path: "README.md", content: `# ${p.name}\n` },
+    ]);
+    return seed.sha;
   }
   private remember(p: Project, sha: string, contents: Map<string, string>): void {
     const history = this.revisions.get(this.cacheKey(p)) ?? new Map<string, Map<string, string>>();
