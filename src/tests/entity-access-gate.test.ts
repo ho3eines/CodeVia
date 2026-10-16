@@ -502,3 +502,33 @@ describe("S01 — agents, workflows, memory and skills gate directly", () => {
     ).toBe(200);
   });
 });
+
+describe("missing entities answer 404, never 200", () => {
+  // Regression: GET /tasks/:id, GET /runs/:id and the agent by-id routes used
+  // to `return { error: "… not found" }` without reply.code(404), so Fastify
+  // serialized the error body with HTTP 200. A client could not distinguish a
+  // missing entity from a real one. Found by the live end-to-end matrix run.
+  it("answers 404 for missing tasks, runs and agents on every by-id route", async () => {
+    stubEmptyCatalog();
+    const srv = await boot();
+    const alice = makeUser(21, "gate-missing-alice");
+
+    for (const attempt of [
+      { method: "GET", url: "/tasks/task-does-not-exist" },
+      { method: "GET", url: "/runs/run-does-not-exist" },
+      { method: "GET", url: "/agents/agent-does-not-exist" },
+      { method: "PATCH", url: "/agents/agent-does-not-exist", payload: { name: "x" } },
+      { method: "POST", url: "/agents/agent-does-not-exist/enable", payload: {} },
+      { method: "POST", url: "/agents/agent-does-not-exist/disable", payload: {} },
+    ] as const) {
+      const res = await srv.inject({ ...attempt, headers: alice.bearer });
+      expect(res.statusCode, `${attempt.method} ${attempt.url} → ${res.body}`).toBe(404);
+    }
+
+    // The same holds for unsigned demo requests (single-user installs).
+    for (const url of ["/tasks/task-does-not-exist", "/runs/run-does-not-exist", "/agents/agent-does-not-exist"]) {
+      const res = await srv.inject({ method: "GET", url });
+      expect(res.statusCode, `GET ${url} → ${res.body}`).toBe(404);
+    }
+  });
+});

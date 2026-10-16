@@ -179,6 +179,12 @@ export function researchBlocker(brief: string): string | undefined {
   return m ? m[0].trim() : undefined;
 }
 
+/** A user answer recorded via POST /tasks/:id/answer (input.researchAnswer). */
+function clarifyingAnswer(task: Task): string | undefined {
+  const answer = (task.input as Record<string, unknown> | undefined)?.researchAnswer;
+  return typeof answer === "string" && answer.trim() ? answer.trim() : undefined;
+}
+
 /**
  * Deterministic research brief (no-AI fallback): requirements distilled from
  * the request, affected areas from keyword signals, owners from the
@@ -275,7 +281,7 @@ export class AutonomousOrchestrator {
     }
     active();
     const github = this.deps.githubForProject?.(project, this.requestUserId) ?? this.deps.github;
-    const budget = new ExecutionBudget(project.settings.budget);
+    let budget = new ExecutionBudget(project.settings.budget);
     const check = () => {
       active();
       budget.check();
@@ -347,7 +353,13 @@ export class AutonomousOrchestrator {
     let brief = "";
     let breakdown: BreakdownItem[] = [];
     let usedRealAi = false;
-    const researchTask = this.spawn(task, `Research: ${task.title}`, task.description, "research");
+    const clarification = clarifyingAnswer(task);
+    const researchTask = this.spawn(
+      task,
+      `Research: ${task.title}`,
+      clarification ? `${task.description}\n\n[User clarification of the earlier blocker] ${clarification}` : task.description,
+      "research",
+    );
     const researchPlan: PreparePlan = async (ctx) => {
       if (ctx.chat) {
         usedRealAi = true;
@@ -395,12 +407,16 @@ export class AutonomousOrchestrator {
     this.requireSuccess(researchRun, "Research");
     // The executor seam can simulate phases without preparing model plans.
     if (!brief) brief = deterministicBrief(project, task, pack.tree, summarizeRun(researchRun));
+    // A recorded answer (POST /tasks/:id/answer) resolves the parked question:
+    // it rides along with the brief and disables re-parking on the same blocker.
+    if (clarification) brief = `${brief}\n\n--- User clarification ---\n${clarification}`;
     if (!breakdown.length) breakdown = this.simulatedBreakdown(project, task, pack.registry, available);
     check();
     // (A13) An explicit research blocker stops implementation before any source
     // write: park the task for human clarification and record the question so
-    // the user can answer and re-run the same task.
-    const blocker = researchBlocker(brief);
+    // the user can answer and re-run the same task. Once the user has answered
+    // (input.researchAnswer), the blocker is resolved and must not re-park.
+    const blocker = clarification ? undefined : researchBlocker(brief);
     if (blocker) {
       const held = this.deps.taskRepo.findById(task.id)!.data;
       this.deps.taskRepo.upsert(
@@ -442,6 +458,11 @@ export class AutonomousOrchestrator {
         blockedQuestion: blocker,
       };
     }
+    // The task ledger aggregates research + N implementers + QA plus up to
+    // maxFixLoops diagnose/implement/re-verify iterations; scale the per-run
+    // caps so a multi-unit autonomous task is not capped as a single run.
+    budget = budget.scaledForRuns(2 + breakdown.length + maxFixLoops * 3);
+
     // Validate every owner/skill before the first source write. Legacy plans
     // without the new fields get explicit, deterministic task contracts.
     breakdown = orderBreakdown(breakdown).map((item, index, ordered) => {

@@ -179,6 +179,9 @@ function isGitDir(dir: string): boolean {
   }
 }
 
+/** The null object id: `git update-ref` reads it as "the ref must not exist yet". */
+const NO_PARENT = "0".repeat(40);
+
 function validateBranchName(name: string): void {
   if (typeof name !== "string" || name.length === 0 || name.length > 250) {
     throw new LocalGitError("LOCAL_INVALID_INPUT", `Invalid branch name: ${JSON.stringify(name)}`);
@@ -376,6 +379,38 @@ export class LocalGitService implements IGitHubService {
     return res.code === 0 ? res.stdout.trim() : undefined;
   }
 
+  /** True when the repository has at least one branch (a commit exists somewhere). */
+  private async repoHasAnyBranch(repoDir: string): Promise<boolean> {
+    const res = await this.git(["for-each-ref", "--count=1", "refs/heads"], repoDir);
+    return res.code === 0 && res.stdout.trim() !== "";
+  }
+
+  /**
+   * Writes may create what reads only discover: a brand-new LOCAL_GIT_MODE
+   * project points at a folder that does not exist yet, or was never
+   * `git init`-ed. Initialize it at the canonical <rootDir>/<owner>/<name>
+   * layout so the project can bootstrap itself. Reads never call this — a
+   * missing repository keeps failing with LOCAL_REPO_NOT_FOUND.
+   */
+  private async ensureRepoDirForWrite(repo: GithubRepoRef, branch: string): Promise<string> {
+    try {
+      return this.resolveRepoDir(repo);
+    } catch (err) {
+      if (!(err instanceof LocalGitError) || err.code !== "LOCAL_REPO_NOT_FOUND") throw err;
+    }
+    const dir = join(this.rootDir, repo.owner, repo.name);
+    mkdirSync(dir, { recursive: true });
+    let res = await this.git(["init", "--initial-branch", branch], dir);
+    if (res.code !== 0) {
+      // git < 2.28 has no --initial-branch; plain init + symbolic-ref works everywhere.
+      res = await this.git(["init"], dir);
+      if (res.code !== 0) throw classifyGitFailure(res.stderr, `git init failed for ${repo.owner}/${repo.name}`);
+      await this.git(["symbolic-ref", "HEAD", `refs/heads/${branch}`], dir);
+    }
+    logger.info(`LocalGitService: initialized repository ${repo.owner}/${repo.name} at ${dir} (branch "${branch}")`);
+    return dir;
+  }
+
   private async requireBranchHead(repoDir: string, branch: string): Promise<string> {
     const sha = await this.branchHeadOpt(repoDir, branch);
     if (!sha) {
@@ -461,7 +496,7 @@ export class LocalGitService implements IGitHubService {
    */
   private async commitViaIndex(
     repoDir: string,
-    parent: string,
+    parent: string | undefined,
     message: string,
     adds: Array<{ path: string; content: string }>,
     removes: string[],
@@ -470,7 +505,9 @@ export class LocalGitService implements IGitHubService {
     const blobDir = join(tmpdir(), `codevia-blobs-${randomUUID()}`);
     const indexEnv = { GIT_INDEX_FILE: indexFile };
     try {
-      await this.gitChecked(["read-tree", parent], repoDir, "git read-tree failed", { env: indexEnv });
+      // An unborn HEAD has no tree to read — the root commit starts from an empty index.
+      if (parent !== undefined)
+        await this.gitChecked(["read-tree", parent], repoDir, "git read-tree failed", { env: indexEnv });
       if (adds.length) {
         // Staging area for the blobs (content bytes are hashed verbatim with
         // --no-filters, exactly like the GitHub contents API).
@@ -492,16 +529,17 @@ export class LocalGitService implements IGitHubService {
         }
         // Existing modes (preserve the executable bit) in one lookup per batch.
         const modes = new Map<string, string>();
-        for (const part of chunk(adds.map((a) => a.path), 80)) {
-          const res = await this.git(["ls-tree", parent, "--", ...part.map((p) => `:(literal)${p}`)], repoDir);
-          if (res.code !== 0) continue;
-          for (const line of res.stdout.split("\n")) {
-            if (!line.trim()) continue;
-            const tabAt = line.indexOf("\t");
-            if (tabAt < 0) continue;
-            modes.set(line.slice(tabAt + 1).trim(), line.slice(0, tabAt).trim().split(/\s+/)[0]);
+        if (parent !== undefined)
+          for (const part of chunk(adds.map((a) => a.path), 80)) {
+            const res = await this.git(["ls-tree", parent, "--", ...part.map((p) => `:(literal)${p}`)], repoDir);
+            if (res.code !== 0) continue;
+            for (const line of res.stdout.split("\n")) {
+              if (!line.trim()) continue;
+              const tabAt = line.indexOf("\t");
+              if (tabAt < 0) continue;
+              modes.set(line.slice(tabAt + 1).trim(), line.slice(0, tabAt).trim().split(/\s+/)[0]);
+            }
           }
-        }
         for (const part of chunk(hashed, 60)) {
           const args = ["update-index", "--add"];
           for (const h of part) {
@@ -519,12 +557,10 @@ export class LocalGitService implements IGitHubService {
       }
       const treeRes = await this.gitChecked(["write-tree"], repoDir, "git write-tree failed", { env: indexEnv });
       const env = await this.commitEnv(repoDir);
-      const commitRes = await this.gitChecked(
-        ["commit-tree", treeRes.stdout.trim(), "-p", parent, "-m", message],
-        repoDir,
-        "git commit-tree failed",
-        { env },
-      );
+      const commitArgs = ["commit-tree", treeRes.stdout.trim()];
+      if (parent !== undefined) commitArgs.push("-p", parent);
+      commitArgs.push("-m", message);
+      const commitRes = await this.gitChecked(commitArgs, repoDir, "git commit-tree failed", { env });
       return { sha: commitRes.stdout.trim(), author: env.GIT_AUTHOR_NAME };
     } finally {
       for (const file of [indexFile, blobDir]) {
@@ -1009,7 +1045,7 @@ export class LocalGitService implements IGitHubService {
   ): Promise<GithubCommit> {
     await this.ensureGitAvailable();
     validateBranchName(branch);
-    const repoDir = this.resolveRepoDir(repo);
+    const repoDir = await this.ensureRepoDirForWrite(repo, branch);
     const adds = (files ?? []).map((f) => {
       const path = normalizeRepoPath(f?.path ?? "");
       if (!path) throw new LocalGitError("LOCAL_INVALID_INPUT", `Unsafe repository path: ${f?.path}`);
@@ -1018,8 +1054,15 @@ export class LocalGitService implements IGitHubService {
     });
 
     return this.withRepoLock(repoDir, async () => {
-      const head = await this.requireBranchHead(repoDir, branch);
-      if (parentSha && parentSha !== head) {
+      const head = await this.branchHeadOpt(repoDir, branch);
+      if (head === undefined) {
+        // Creating a missing branch on a repository that already has commits
+        // would fork history — keep refusing exactly as before. A repository
+        // with no commit at all (a fresh `git init`, unborn HEAD) has nothing
+        // to fork: the write becomes the root commit and creates the branch.
+        if (await this.repoHasAnyBranch(repoDir))
+          throw new LocalGitError("LOCAL_REF_NOT_FOUND", `Branch "${branch}" does not exist in the local repository`);
+      } else if (parentSha && parentSha !== head) {
         throw new LocalGitError(
           "LOCAL_STALE_PARENT",
           "Repository changed after inspection; refusing to overwrite newer work.",
@@ -1028,7 +1071,7 @@ export class LocalGitService implements IGitHubService {
       // Ask BEFORE the ref moves — after it, our own commit would look dirty.
       const dirty = await this.dirtyPaths(repoDir, adds.map((a) => a.path));
       const { sha, author } = await this.commitViaIndex(repoDir, head, message, adds, []);
-      await this.updateRefChecked(repoDir, branch, sha, head);
+      await this.updateRefChecked(repoDir, branch, sha, head ?? NO_PARENT);
       try {
         await this.syncWorktreeIfCheckedOut(repoDir, branch, sha, adds.map((a) => a.path), [], dirty);
       } catch (err) {

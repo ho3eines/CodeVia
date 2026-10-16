@@ -11,6 +11,7 @@ import {
   normalizeRepositories,
 } from "../../domain/project-options.js";
 import { parseRepoFullName } from "../../github/types.js";
+import { extractStateArchive } from "../../github/state-archive.js";
 import { resolveGitHubForUser } from "../../github/registry.js";
 import { githubAuthorizationRequired, isGitHubAuthorizationRequired } from "../../github/authorization.js";
 import { verifyPullRequestBeforeMerge } from "../../github/merge-gate.js";
@@ -1022,6 +1023,43 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
    * CI can never be test-verified), plus the exact repository brief the chat
    * prompt receives. One call, cached listing, actionable `hint` per problem.
    */
+  /**
+   * Import a CodeVia state archive (zip) into the project repository.
+   *
+   * The model-free bootstrap path for LOCAL_GIT_MODE: when a repository has
+   * no CodeVia/ state yet and no AI model is configured, POST the base64 zip
+   * of an existing CodeVia folder here. Only CodeVia/** files are imported
+   * (archive root or one wrapping folder); existing repository files are
+   * never deleted; the imported definitions are loaded immediately.
+   */
+  app.post("/projects/:id/state-import", { schema: { tags: ["projects"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = load(id);
+    if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    if (!p.configRepo) return fail(reply, 400, "this project has no connected repository to import into");
+    const body = (req.body ?? {}) as { archive?: unknown };
+    const archive = typeof body.archive === "string" ? body.archive : "";
+    if (!archive) return fail(reply, 400, "archive is required: base64-encoded zip of a CodeVia folder");
+    const encoded = archive.replace(/\s+/g, "");
+    const raw = Buffer.from(encoded, "base64");
+    if (raw.byteLength === 0 || raw.byteLength > 48_000_000)
+      return fail(reply, 400, "archive must decode to between 1 byte and 48 MB");
+    if (raw.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, ""))
+      return fail(reply, 400, "archive is not valid base64");
+    let files;
+    try {
+      files = extractStateArchive(raw);
+    } catch (err) {
+      return fail(reply, errStatus(err), err instanceof Error ? err.message : String(err));
+    }
+    try {
+      const result = await container.agentManager.importProjectState(id, files);
+      return { ok: true, imported: result.imported, project: result.project };
+    } catch (err) {
+      return fail(reply, errStatus(err), err instanceof Error ? err.message : String(err));
+    }
+  });
+
   app.get("/projects/:id/repo-status", { schema: { tags: ["projects"] } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = load(id);

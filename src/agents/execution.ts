@@ -44,6 +44,27 @@ export class ExecutionBudget {
     over("duration", Date.now() - this.startedAt, this.limits.maxDurationMs);
   }
 
+  /**
+   * Multi-run executions (workflows, autonomous loops) share one task ledger,
+   * while maxTokensPerRun / maxCallsPerRun / maxCostUsdPerRun cap a SINGLE
+   * agent run. Scale the aggregate limits by the number of planned runs so a
+   * legitimate N-run task is not strangled by a single-run cap (found live:
+   * the seeded 6-agent workflow exhausted the default 20k-token task budget
+   * at its last node). Usage already recorded carries over; the wall-clock
+   * duration limit is never scaled.
+   */
+  scaledForRuns(runs: number): ExecutionBudget {
+    const factor = Math.max(1, Math.floor(runs) || 1);
+    const scaled = new ExecutionBudget({
+      ...this.limits,
+      maxTokensPerRun: this.limits.maxTokensPerRun ? this.limits.maxTokensPerRun * factor : undefined,
+      maxCallsPerRun: this.limits.maxCallsPerRun ? this.limits.maxCallsPerRun * factor : undefined,
+      maxCostUsdPerRun: this.limits.maxCostUsdPerRun ? this.limits.maxCostUsdPerRun * factor : undefined,
+    });
+    Object.assign(scaled.usage, this.usage);
+    return scaled;
+  }
+
   remainingTokens(): number {
     return this.limits.maxTokensPerRun && this.limits.maxTokensPerRun > 0
       ? Math.max(0, this.limits.maxTokensPerRun - this.usage.totalTokens)

@@ -51,7 +51,11 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       reply.code(404);
       return { error: "task not found" };
     }
-    return task ?? { error: "task not found" };
+    if (!task) {
+      reply.code(404);
+      return { error: "task not found" };
+    }
+    return task;
   });
 
   app.patch("/tasks/:id", { schema: { tags: ["tasks"] } }, async (req, reply) => {
@@ -130,7 +134,8 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     if (active) return reply.code(409).send({ error: "Owning task is already in flight", taskId: task.id });
     if (task.status === "waiting_for_approval") {
       return reply.code(409).send({
-        error: "Task is waiting for approval; approve, reject, or cancel it before running again",
+        error:
+          "Task is waiting for approval; answer it via POST /tasks/:id/answer (it re-runs with the answer), or cancel it before running again",
         taskId: task.id,
       });
     }
@@ -172,6 +177,68 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
     if (p) await container.projectFiles.syncTask(p, container.taskRepo.findById(task.id)!.data);
     const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
     return { taskId: task.id, requestedTaskId: id, jobId: job.id };
+  });
+
+  // Answer a task parked by a research blocker (status waiting_for_approval):
+  // record the answer on the task (input.researchAnswer) so research sees it,
+  // clear the parked state, and re-queue the owning task in one call.
+  app.post("/tasks/:id/answer", { schema: { tags: ["tasks"] } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const existing = container.taskRepo.findById(id)?.data;
+    if (!existing || !canAccessEntity(req, container, existing))
+      return reply.code(404).send({ error: "task not found" });
+    if (existing.status !== "waiting_for_approval")
+      return reply.code(409).send({
+        error: `Task is ${existing.status}; only a waiting_for_approval task can be answered`,
+        taskId: existing.id,
+      });
+    const body = (req.body ?? {}) as { answer?: unknown };
+    const answer = String(body.answer ?? "").trim();
+    if (!answer) return reply.code(400).send({ error: "A non-empty answer is required" });
+    let task;
+    try {
+      task = executionTask(container.taskRepo, id);
+    } catch (err) {
+      return reply.code(409).send({ error: String(err) });
+    }
+    const active =
+      container.agentManager.isTaskRunning(task.id) || container.queue.hasLiveJob(task.id) || task.status === "running";
+    if (active) return reply.code(409).send({ error: "Owning task is already in flight", taskId: task.id });
+    const { user: reqUser, authenticated: reqAuth } = resolveRequestUser(req, container);
+    const blocked = await preflightProjectWrite(container, task.projectId, {
+      title: task.title,
+      description: task.description ?? task.title,
+      executionMode:
+        ((task.input as Record<string, unknown> | undefined)?.executionMode ?? "") === "simulation"
+          ? "simulation"
+          : task.workflowId
+            ? "workflow"
+            : ((task.input as Record<string, unknown> | undefined)?.executionMode ?? "") === "autonomous" || !task.agentType
+              ? "autonomous"
+              : "agent",
+      agentType: task.agentType,
+      requestUserId: reqAuth ? reqUser.id : undefined,
+    });
+    if (blocked) return reply.code(blocked.status).send({ error: blocked.error, ...(blocked.extra ?? {}) });
+    const input = {
+      ...((task.input as Record<string, unknown> | undefined) ?? {}),
+      researchAnswer: answer,
+      ...(reqAuth ? { requestUserId: reqUser.id } : {}),
+    };
+    const queued = {
+      ...task,
+      status: "queued" as const,
+      approvalRequired: false,
+      error: undefined,
+      input: input as typeof task.input,
+      updatedAt: new Date().toISOString(),
+    };
+    container.taskRepo.upsert(queued, { projectId: task.projectId, parentId: task.parentTaskId });
+    const p = container.projectRepo.findById(task.projectId)?.data;
+    if (p) await container.projectFiles.syncTask(p, container.taskRepo.findById(task.id)!.data);
+    live.emit({ type: "task.updated", taskId: task.id, projectId: task.projectId, data: { status: "queued" } });
+    const job = container.queue.enqueue("agent.run", { taskId: task.id }, { correlationId: task.correlationId });
+    return { taskId: task.id, requestedTaskId: id, jobId: job.id, answer };
   });
 
   app.post("/tasks/:id/cancel", { schema: { tags: ["tasks"] } }, async (req, reply) => {
@@ -228,7 +295,11 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
       reply.code(404);
       return { error: "run not found" };
     }
-    return run ?? { error: "run not found" };
+    if (!run) {
+      reply.code(404);
+      return { error: "run not found" };
+    }
+    return run;
   });
 
   // AI Run Console — observable steps (never exposes chain-of-thought).

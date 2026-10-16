@@ -107,4 +107,37 @@ with no model at all — reads and writes go straight through local git. A
 repository *without* state needs a real AI model to author the initial
 definitions (this is deliberate: simulated state is never written to a real
 repository, local or not). Configure Ollama/OpenRouter/any provider first, or
-seed the state once via a mock-mode install and copy the `CodeVia/` folder in.
+import an existing state archive — see below.
+
+### Self-bootstrap of new/empty repositories
+
+Three situations that used to fail with `branch main is unavailable` are now
+handled automatically:
+
+1. **A project on a folder that does not exist (or was never `git init`-ed):**
+   the first CodeVia *write* initializes the repository at
+   `LOCAL_REPOS_DIR/<owner>/<name>`. Reads never create repositories.
+2. **A fresh `git init` with zero commits (unborn HEAD):** the first write
+   becomes the root commit (a `README.md` seed), so state bootstrap can run.
+3. **A repository whose default branch is `master` (or anything ≠ `main`):**
+   the project adopts the repository's actual default branch once, instead of
+   failing every read. Adoption only happens when the configured branch does
+   not exist in the repository.
+
+### Model-free state import — `POST /projects/:id/state-import`
+
+Without a model, POST the base64 zip of an existing `CodeVia/` folder (archive
+root or one wrapping folder — a GitHub "Download ZIP" works) and the platform
+commits it to the repository and loads the definitions:
+
+```bash
+curl -X POST http://localhost:3000/projects/<ID>/state-import \
+  -H 'content-type: application/json' \
+  --data "{\"archive\": \"$(base64 -w0 codevia-state.zip)\"}"
+```
+
+Only `CodeVia/**` paths are imported (8 MB/file, 32 MB total, 200 files caps —
+same as state commits); encrypted entries and path traversal are rejected;
+existing repository files are never deleted. The full model-less flow works:
+project creation reports the model guard (422) but the project row and the
+seeded repository survive — import the archive and everything loads.

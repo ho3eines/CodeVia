@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Container } from "../app/container.js";
 import type { Project, Run, Task, Workflow, WorkflowEdge, WorkflowNode } from "../domain/entities.js";
 import { WorkflowEngine } from "../workflow/engine.js";
+import { ExecutionBudget } from "../agents/execution.js";
 import { evaluateExpression, resolveWorkflowInput } from "../workflow/expressions.js";
 import { createMockTelegram } from "../integrations/telegram.js";
 import { freshDb } from "./test-helpers.js";
@@ -452,5 +453,56 @@ describe("unimplemented workflow actions cannot report success (A17)", () => {
     );
     expect(result.status).toBe("failed");
     expect(result.trace.find((r) => r.id === "n")?.status).toBe("failed");
+  });
+});
+
+describe("task budget scales with the number of agent runs (F3)", () => {
+  it("scaledForRuns multiplies per-run caps, keeps unlimited caps unlimited and carries usage", () => {
+    const base = new ExecutionBudget({ maxTokensPerRun: 100, maxCallsPerRun: 3, maxCostUsdPerRun: 1 });
+    base.add({ inputTokens: 40, outputTokens: 10, totalTokens: 50, costUsd: 0.2 });
+    const scaled = base.scaledForRuns(4);
+    expect(scaled.remainingTokens()).toBe(4 * 100 - 50); // usage carried over
+    expect(scaled.usage.totalTokens).toBe(50);
+    const unlimited = new ExecutionBudget({ maxTokensPerRun: 0, maxCallsPerRun: 0 }).scaledForRuns(3);
+    expect(unlimited.remainingTokens()).toBe(Infinity);
+    expect(base.scaledForRuns(0).remainingTokens()).toBe(100 - 50); // factor clamps to ≥1
+  });
+
+  it("gives the workflow a ledger of agent-node-count runs, not a single run's cap", async () => {
+    const stored = c.projectRepo.findById(project.id)!.data;
+    c.projectRepo.upsert(
+      {
+        ...stored,
+        settings: {
+          ...stored.settings,
+          budget: { ...stored.settings.budget, maxTokensPerRun: 1000, maxCallsPerRun: 2 },
+        },
+      },
+      { projectId: stored.id },
+    );
+    const refreshed = c.projectRepo.findById(project.id)!.data;
+    const seen: number[] = [];
+    vi.spyOn(c.agentRunner, "run").mockImplementation(async (req) => {
+      seen.push(req.taskBudget!.remainingTokens());
+      return fakeRun(req);
+    });
+    const result = await c.workflowEngine.run(
+      workflow(
+        [
+          node("a", "agent", { agentType: "backend-developer" }),
+          node("b", "agent", { agentType: "frontend-developer" }),
+          node("c", "agent", { agentType: "qa-test" }),
+        ],
+        [],
+      ),
+      refreshed,
+      task,
+      {},
+    );
+    expect(result.status).toBe("succeeded");
+    expect(seen).toHaveLength(3);
+    // 3 agent nodes × 1000-token per-run cap — the seeded 6-agent workflow
+    // used to die at its final node under a single-run cap.
+    expect(seen[0]).toBe(3000);
   });
 });
