@@ -241,6 +241,89 @@ describe("project read paths with a local project", () => {
   });
 });
 
+describe("local project through repo-centric routes (audit regressions)", () => {
+  let projectId: string;
+
+  beforeEach(async () => {
+    const created = await app!.inject({ method: "POST", url: "/projects/from-local", payload: { path: fixtureRoot } });
+    expect(created.statusCode).toBe(201);
+    projectId = (created.json() as Project).id;
+  });
+
+  it("PATCHes metadata without any repository (no 5xx, change persisted)", async () => {
+    const res = await app!.inject({
+      method: "PATCH",
+      url: `/projects/${projectId}`,
+      payload: { description: "renamed description", name: "Renamed App" },
+    });
+    expect(res.statusCode).toBe(200);
+    const got = await app!.inject({ method: "GET", url: `/projects/${projectId}` });
+    const p = got.json() as Project;
+    expect(p.description).toBe("renamed description");
+    expect(p.name).toBe("Renamed App");
+    expect(p.sourceType).toBe("local");
+  });
+
+  it("PATCHes capabilities (re-onboard path) without a repository", async () => {
+    const res = await app!.inject({
+      method: "PATCH",
+      url: `/projects/${projectId}`,
+      payload: { capabilities: { languages: ["python"] }, reonboard: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const p = res.json() as Project;
+    expect(p.capabilities.languages[0]).toBe("python");
+  });
+
+  it("deactivates/reactivates the project", async () => {
+    const res = await app!.inject({ method: "PATCH", url: `/projects/${projectId}`, payload: { active: false } });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as Project).active).toBe(false);
+  });
+
+  it("repo-status answers 200 with an explanation instead of crashing", async () => {
+    const res = await app!.inject({ method: "GET", url: `/projects/${projectId}/repo-status` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.healthy).toBe(false); // no repository linked — by design
+    expect(body.project.id).toBe(projectId);
+  });
+
+  it("repo-centric routes return a clear 400, not a GitHub 502", async () => {
+    for (const [method, url] of [
+      ["POST", `/projects/${projectId}/pull`],
+      ["GET", `/projects/${projectId}/files`],
+      ["GET", `/projects/${projectId}/file?path=CodeVia/project.md`],
+      ["POST", `/projects/${projectId}/ci-setup`],
+      ["POST", `/projects/${projectId}/pull-requests`],
+      ["POST", `/projects/${projectId}/issues`],
+    ] as const) {
+      const res = await app!.inject({
+        method,
+        url,
+        ...(method === "GET" ? {} : { payload: { title: "t", head: "a", base: "b" } }),
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/no linked repository/i);
+    }
+  });
+
+  it("project subresources (agents/tasks/memory/workflows/runs) stay readable", async () => {
+    for (const url of [
+      `/agents?projectId=${projectId}`,
+      `/tasks?projectId=${projectId}`,
+      `/memory?projectId=${projectId}`,
+      `/workflows?projectId=${projectId}`,
+      `/runs?projectId=${projectId}`,
+      `/projects/${projectId}/options`,
+    ]) {
+      const res = await app!.inject({ method: "GET", url });
+      expect([200, 404]).toContain(res.statusCode);
+      expect(res.statusCode).not.toBeGreaterThanOrEqual(500);
+    }
+  });
+});
+
 describe("GET /fs/list and /fs/stat", () => {
   it("lists the allowed roots when no path is given", async () => {
     const res = await app!.inject({ method: "GET", url: "/fs/list" });

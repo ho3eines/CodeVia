@@ -684,12 +684,16 @@ export class ProjectAnalyzerService {
     }
 
     // ---------- config files ----------
-    const configFiles = [...walk.files].filter((f) => CONFIG_FILE_NAMES.has(f)).sort();
+    const configFiles = [...walk.files]
+      .filter((f) => CONFIG_FILE_NAMES.has(f))
+      .sort()
+      .slice(0, 200);
 
     // ---------- env file NAMES (never values) ----------
     const envFiles = [...walk.files]
       .filter((f) => isSensitivePath(f) && (f.startsWith(".env") || f.endsWith(".env")))
-      .sort();
+      .sort()
+      .slice(0, 50);
 
     // ---------- license ----------
     let license: string | undefined = pkg && str(pkg.license) ? String(pkg.license) : undefined;

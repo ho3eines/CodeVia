@@ -323,6 +323,15 @@ export class AgentManager {
   ): Promise<{ agents: number; skills: number; seeded: number }> {
     const stored = this.deps.projectRepo.findById(projectId)?.data;
     if (!stored) throw new Error(`Project ${projectId} not found`);
+    // Local-folder projects have no repository to onboard from — their profile
+    // lives in `analysis`. Rosters are generated once a repository is linked.
+    if (stored.sourceType === "local" && !stored.configRepo) {
+      return {
+        agents: this.deps.agentRepo.byProject(projectId).length,
+        skills: stored.settings?.skills?.length ?? 0,
+        seeded: 0,
+      };
+    }
     // Preserve restored definitions before starter seeding makes a lost mock
     // repository look like an existing (empty) canonical repository.
     await this.ensureProjectRepo(projectId);
@@ -374,6 +383,11 @@ export class AgentManager {
     const old = this.deps.projectRepo.findById(input.id)?.data;
     const next = hydrateProject({ ...input, updatedAt: new Date().toISOString() });
     if (!old) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+    // Local-folder projects carry no repository: persist only, never sync.
+    if (next.sourceType === "local" && !next.configRepo) {
+      this.deps.projectRepo.upsert(next, { key: next.slug });
+      return hydrateProject(this.deps.projectRepo.findById(next.id)!.data);
+    }
     let targetRevision: string | undefined;
     if (next.configRepo !== old.configRepo || next.branch !== old.branch) {
       // Connection changes are explicit. Existing destination state wins; absent state

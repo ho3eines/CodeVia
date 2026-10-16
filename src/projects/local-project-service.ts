@@ -201,9 +201,4 @@ export class LocalProjectService {
     });
     return hydrateProject(project);
   }
-
-  /** Stored analysis for `GET /projects/:id/analysis`. */
-  analysisFor(project: Project): ProjectAnalysis | undefined {
-    return project.analysis;
-  }
 }

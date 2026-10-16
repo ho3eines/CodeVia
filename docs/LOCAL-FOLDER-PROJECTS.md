@@ -63,6 +63,8 @@ never values. The full shape is the `ProjectAnalysis` type in
 - **Allowed roots only.** Paths are resolved (and symlinks realpath'd) before
   every operation; anything that escapes the roots is refused with
   `FS_PATH_OUTSIDE_ROOTS` (403). Default root: the CodeVia install directory.
+  Containment is case-insensitive on Windows/macOS (NTFS/APFS), so `d:/repos`
+  matches a `D:/Repos` root.
 - **Sensitive files are never opened.** `.env*`, `id_rsa*`, `*.pem`, `*.key`,
   `credentials*`, `.npmrc`, `.ssh/`, `.aws/`, … are described by metadata only;
   `readFile` refuses them with `FS_SENSITIVE_BLOCKED` (403). Scans list their

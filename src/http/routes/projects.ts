@@ -267,6 +267,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    if (p.sourceType === "local" && !p.configRepo)
+      return fail(
+        reply,
+        400,
+        "This project has no linked repository (created from a local folder) — link a repository first",
+      );
+
     // In Simulation/Mock mode a repository that was never seen by the mock is
     // rebuilt from the current DB before the canonical read; real connections
     // still fail closed rather than substituting cached state.
@@ -293,6 +300,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    if (p.sourceType === "local" && !p.configRepo)
+      return fail(
+        reply,
+        400,
+        "This project has no linked repository (created from a local folder) — link a repository first",
+      );
+
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     try {
       const gh = githubForProject(req, p);
@@ -311,6 +325,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    if (p.sourceType === "local" && !p.configRepo)
+      return fail(
+        reply,
+        400,
+        "This project has no linked repository (created from a local folder) — link a repository first",
+      );
+
     const q = (req.query ?? {}) as { path?: string; branch?: string };
     if (!q.path) return fail(reply, 400, "path query is required");
     try {
@@ -659,6 +680,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    if (p.sourceType === "local" && !p.configRepo)
+      return fail(
+        reply,
+        400,
+        "This project has no linked repository (created from a local folder) — link a repository first",
+      );
+
     const title = String(body.title ?? "").trim();
     if (!title) return fail(reply, 400, "Issue title is required");
     const target =
@@ -692,6 +720,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const body = (req.body ?? {}) as Record<string, unknown>;
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    if (p.sourceType === "local" && !p.configRepo)
+      return fail(
+        reply,
+        400,
+        "This project has no linked repository (created from a local folder) — link a repository first",
+      );
+
     const title = String(body.title ?? "").trim();
     const head = String(body.head ?? "").trim();
     const base = String(body.base ?? "").trim();
@@ -1220,6 +1255,13 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     const { id } = req.params as { id: string };
     const p = load(id);
     if (!p || !canAccess(req, p)) return fail(reply, 404, "project not found");
+    if (p.sourceType === "local" && !p.configRepo)
+      return fail(
+        reply,
+        400,
+        "This project has no linked repository (created from a local folder) — link a repository first",
+      );
+
     const { user, authenticated } = resolveRequestUser(req, container);
     const userId = authenticated ? user.id : undefined;
     const gh = githubForProject(req, p);
