@@ -64,7 +64,11 @@ export class WorkflowEngine {
     const trace: NodeTrace[] = [];
     const implementations = new Map<string, ImplementationRef>();
     const evidence = new Map<string, { sha?: string; verification: Run["verification"] }>();
-    const taskBudget = new ExecutionBudget(project.settings.budget);
+    // Each agent node is one run; the shared ledger must cover all of them,
+    // not a single run's cap (F3: the seeded 6-agent workflow ran out of the
+    // default single-run budget at its final node).
+    const agentRuns = workflow.nodes.filter((n) => n.type === "agent").length;
+    const taskBudget = new ExecutionBudget(project.settings.budget).scaledForRuns(agentRuns);
     const scope = { inputs: { ...task.input, ...inputs }, outputs };
     const checkActive = () => {
       this.deps.checkActive?.(task);

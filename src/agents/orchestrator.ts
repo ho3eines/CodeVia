@@ -281,7 +281,7 @@ export class AutonomousOrchestrator {
     }
     active();
     const github = this.deps.githubForProject?.(project, this.requestUserId) ?? this.deps.github;
-    const budget = new ExecutionBudget(project.settings.budget);
+    let budget = new ExecutionBudget(project.settings.budget);
     const check = () => {
       active();
       budget.check();
@@ -458,6 +458,11 @@ export class AutonomousOrchestrator {
         blockedQuestion: blocker,
       };
     }
+    // The task ledger aggregates research + N implementers + QA plus up to
+    // maxFixLoops diagnose/implement/re-verify iterations; scale the per-run
+    // caps so a multi-unit autonomous task is not capped as a single run.
+    budget = budget.scaledForRuns(2 + breakdown.length + maxFixLoops * 3);
+
     // Validate every owner/skill before the first source write. Legacy plans
     // without the new fields get explicit, deterministic task contracts.
     breakdown = orderBreakdown(breakdown).map((item, index, ordered) => {
