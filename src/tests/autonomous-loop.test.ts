@@ -663,3 +663,76 @@ describe("autonomous loop with simulated real AI (canned provider, no network)",
     expect(container.taskRepo.findById(task.id)!.data.status).not.toBe("failed");
   });
 });
+
+describe("AutonomousOrchestrator research blocker (A13)", () => {
+  let fx: ReturnType<typeof freshDb>;
+  let container: Container;
+
+  beforeEach(async () => {
+    fx = freshDb();
+    container = new Container();
+    await container.ensureSeed();
+  });
+  afterEach(() => fx.cleanup());
+
+  function build(script: (task: Task, agent: Agent) => Run): AutonomousOrchestrator {
+    const executor: PhaseExecutor = async (task, agent) => script(task, agent);
+    return new AutonomousOrchestrator({
+      projectRepo: container.projectRepo,
+      taskRepo: container.taskRepo,
+      agentRepo: container.agentRepo,
+      agentRunner: container.agentRunner,
+      agentRouter: container.agentRouter,
+      skillsRegistry: container.skillsRegistry,
+      github: container.github,
+      modelRepo: container.modelRepo,
+      providerRepo: container.providerRepo,
+      executor,
+      maxFixLoops: 2,
+    });
+  }
+
+  async function blockedParent(answer?: string): Promise<Task> {
+    const project = await container.agentManager.createProject({
+      name: "Blocker App",
+      description: "app",
+      configRepo: "acme/blocker",
+    });
+    const task = container.agentManager.createTask({
+      projectId: project.id,
+      title: "Add invoice PDF generator",
+      description: "Generate monthly invoice PDFs. BLOCKER: which currency should the invoice totals use before we implement?",
+    });
+    const parked = { ...task, input: { executionMode: "autonomous", ...(answer ? { researchAnswer: answer } : {}) } };
+    container.taskRepo.upsert(parked, { projectId: task.projectId, parentId: task.parentTaskId });
+    return container.taskRepo.findById(task.id)!.data;
+  }
+
+  it("parks the task with the question and writes no source code", async () => {
+    const parent = await blockedParent();
+    const orch = build((task) => stubRun(task, "succeeded"));
+    const summary = await orch.run(parent.id);
+    expect(summary.outcome).toBe("waiting_for_approval");
+    expect(summary.blockedQuestion).toMatch(/currency/);
+    expect(summary.buildTaskIds).toHaveLength(0);
+    expect(summary.repositories).toHaveLength(0);
+    // Only the research subtask exists — nothing was built.
+    const kids = container.taskRepo.findMany({ parentId: parent.id }).map((k) => k.data);
+    expect(kids).toHaveLength(1);
+    expect(kids[0].agentType).toBe("research");
+  });
+
+  it("a recorded answer resumes implementation instead of re-parking", async () => {
+    const parent = await blockedParent("EUR is the invoice currency.");
+    const orch = build((task) => stubRun(task, "succeeded"));
+    const summary = await orch.run(parent.id);
+    expect(summary.outcome).not.toBe("waiting_for_approval");
+    expect(summary.buildTaskIds.length).toBeGreaterThanOrEqual(1);
+    // The clarification rides along with the brief the implementers receive.
+    const implementer = container.taskRepo
+      .findMany({ parentId: parent.id })
+      .map((k) => k.data)
+      .find((k) => k.agentType === "backend-developer")!;
+    expect(implementer.description).toContain("EUR is the invoice currency.");
+  });
+});
