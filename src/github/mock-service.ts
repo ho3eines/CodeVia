@@ -26,6 +26,8 @@ interface MockRepo {
   branches: Map<string, string>; // branch -> head sha
   /** Per-branch file trees — like real git, branches are isolated from each other. */
   trees: Map<string, Map<string, GithubFile>>;
+  /** Tree snapshot at branch creation — the 3-way merge base (fork point). */
+  forks: Map<string, Map<string, GithubFile>>;
   commits: GithubCommit[];
   pulls: GithubPullRequest[];
   issues: GithubIssue[];
@@ -105,6 +107,7 @@ export class MockGitHubService implements IGitHubService {
           ...r,
           branches: [...r.branches.entries()],
           trees: [...r.trees.entries()].map(([b, t]) => [b, [...t.entries()]]),
+          forks: [...r.forks.entries()].map(([b, t]) => [b, [...t.entries()]]),
         },
       ]);
       writeFileSync(mockPersistPath(), JSON.stringify({ version: 2, repos: snap }));
@@ -121,10 +124,11 @@ export class MockGitHubService implements IGitHubService {
         repos: Array<[string, Record<string, unknown>]>;
       };
       for (const [key, r] of snap.repos ?? []) {
-        const rec = r as Omit<MockRepo, "branches" | "trees"> & {
+        const rec = r as Omit<MockRepo, "branches" | "trees" | "forks"> & {
           branches: Array<[string, string]>;
           trees?: Array<[string, Array<[string, GithubFile]>]>;
           files?: Array<[string, GithubFile]>;
+          forks?: Array<[string, Array<[string, GithubFile]>]>;
         };
         // v1 snapshots had one shared file map → migrate it onto the default branch.
         const trees = new Map<string, Map<string, GithubFile>>();
@@ -133,10 +137,15 @@ export class MockGitHubService implements IGitHubService {
         } else if (rec.files) {
           trees.set(rec.defaultBranch ?? "main", new Map(rec.files));
         }
-        const { files: _dropped, trees: _t, ...rest } = rec;
+        // Fork snapshots are optional: older state files predate them; merges
+        // on such branches fall back to the legacy union behavior.
+        const forks = new Map<string, Map<string, GithubFile>>();
+        if (Array.isArray(rec.forks)) for (const [b, entries] of rec.forks) forks.set(b, new Map(entries));
+        const { files: _dropped, trees: _t, forks: _f, ...rest } = rec;
         void _dropped;
         void _t;
-        this.repos.set(key, { ...rest, branches: new Map(rec.branches), trees });
+        void _f;
+        this.repos.set(key, { ...rest, branches: new Map(rec.branches), trees, forks });
       }
     } catch {
       /* corrupted snapshot → start clean */
@@ -169,6 +178,7 @@ export class MockGitHubService implements IGitHubService {
       ref: { owner, name },
       branches: new Map([[branch, sha]]),
       trees: new Map([[branch, tree]]),
+      forks: new Map(),
       commits: [{ sha, message: `seed ${name}`, author: "seed", date: now }],
       pulls: [],
       issues: [],
@@ -205,6 +215,7 @@ export class MockGitHubService implements IGitHubService {
       ref: { owner: ref.owner, name: ref.name },
       branches: new Map([["main", sha]]),
       trees: new Map([["main", new Map<string, GithubFile>()]]),
+      forks: new Map(),
       commits: [{ sha, message: `auto-provision ${key}`, author: "mock-user", date: now }],
       pulls: [],
       issues: [],
@@ -258,6 +269,7 @@ export class MockGitHubService implements IGitHubService {
     const repo: MockRepo = {
       ref: { owner, name },
       branches: new Map([[defaultBranch, sha]]),
+      forks: new Map(),
       trees: new Map([
         [
           defaultBranch,
@@ -383,6 +395,7 @@ export class MockGitHubService implements IGitHubService {
       const source = new Map(this.tree(r, baseSha));
       r.branches.set(name, baseSha);
       r.trees.set(name, source);
+      r.forks.set(name, new Map(source));
       this.remember(r, baseSha, source);
     }
     this.persist();
@@ -504,9 +517,39 @@ export class MockGitHubService implements IGitHubService {
     if (opts.sha && r.branches.get(pr.head) !== opts.sha)
       return { merged: false, message: `Head branch was modified. Review and try the merge again.` };
     const sha = this.sha(`merge-${number}-${Date.now()}`);
-    // Merge = union of the head tree into the base tree (head wins).
+    // 3-way merge when the fork point is known: only files the PR actually
+    // changed are applied; files that advanced on the base branch after the
+    // fork (e.g. CodeVia/memory.md committed during the run) keep their newer
+    // base version instead of being clobbered by the branch's stale copy.
+    // Real git refuses same-file conflicts — so does the mock. Legacy state
+    // without a fork record keeps the previous union/head-wins behavior.
     const base = this.tree(r, pr.base);
-    for (const [p, f] of this.tree(r, pr.head)) base.set(p, f);
+    const head = this.tree(r, pr.head);
+    const fork = r.forks.get(pr.head);
+    if (fork) {
+      const same = (a?: GithubFile, b?: GithubFile) =>
+        a === b || (!!a && !!b && a.path === b.path && a.content === b.content);
+      const conflicts: string[] = [];
+      for (const [path, file] of head) {
+        const forkFile = fork.get(path);
+        if (same(file, forkFile)) continue; // unchanged on head → keep base
+        const baseFile = base.get(path);
+        if (baseFile && !same(baseFile, forkFile) && !same(baseFile, file)) {
+          conflicts.push(path); // changed on both sides since the fork
+          continue;
+        }
+        base.set(path, file); // changed or added on head → apply
+      }
+      for (const path of fork.keys())
+        if (!head.has(path) && same(base.get(path), fork.get(path))) base.delete(path); // removed on head
+      if (conflicts.length)
+        return {
+          merged: false,
+          message: `Merge conflict on: ${conflicts.join(", ")} — merge ${pr.base} into ${pr.head} and try again`,
+        };
+    } else {
+      for (const [p, f] of head) base.set(p, f);
+    }
     r.branches.set(pr.base, sha);
     r.commits.unshift({
       sha,
