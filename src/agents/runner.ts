@@ -229,6 +229,11 @@ export class AgentRunner {
       }
       run.steps = plan.map((p, index) => ({ index, label: p.label, tool: p.tool, status: "pending" }));
       persist();
+      // Simulation mode (input.executionMode === "simulation") is a dry run —
+      // the same contract as the chat-side simulation preview: side-effecting
+      // tools never execute, so a simulation task can never commit, open PRs,
+      // deploy or write memory. Read-only tools still run for real evidence.
+      const simulation = ((task.input as Record<string, unknown> | undefined)?.executionMode ?? "") === "simulation";
       for (let i = 0; i < plan.length; i++) {
         const step = plan[i];
         const record = run.steps[i];
@@ -270,6 +275,25 @@ export class AgentRunner {
                   .join("\n\n") || "No CI verification evidence was recorded.",
             };
             run.summary = String(step.input.content);
+          }
+          if (simulation) {
+            const def = this.deps.toolRegistry.get(step.tool);
+            const sideEffect = def?.permissions.some((perm) => perm.endsWith(".write"));
+            // CI tools attest the exact feature branch that the (simulated)
+            // write steps would have created — without them there is no ref to
+            // verify, so they are simulated too instead of failing the run.
+            const ciTool = step.tool === "run_tests" || step.tool === "run_build";
+            if (sideEffect || ciTool) {
+              record.status = "succeeded";
+              record.detail = sideEffect
+                ? `[SIMULATION] ${step.label} — dry run: ${step.tool} was not executed; no repository, memory or deployment changes were made.`
+                : `[SIMULATION] ${step.label} — dry run: ${step.tool} skipped; the branch it verifies is only created by the (simulated) write steps.`;
+              record.finishedAt = new Date().toISOString();
+              persist();
+              live.emit({ type: "step.updated", runId: run.id, projectId: project.id, data: { ...record } });
+              checkActive();
+              continue;
+            }
           }
           const result = await this.deps.toolRegistry.execute(
             step.tool,
@@ -319,6 +343,7 @@ export class AgentRunner {
       }
       for (const step of run.steps) if (step.status === "pending") step.status = "skipped";
       run.status = run.steps.every((s) => s.status === "succeeded") ? "succeeded" : "failed";
+      if (simulation) run.verification = "simulated";
       if (run.status === "failed")
         run.error = run.steps.find((s) => s.status === "failed")?.detail ?? "Plan did not complete";
       persist();
