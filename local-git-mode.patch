@@ -1,0 +1,2868 @@
+--- a/src/github/registry.ts
++++ b/src/github/registry.ts
+@@ -1,5 +1,6 @@
+ import { MockGitHubService } from "./mock-service.js";
+ import { RealGitHubService } from "./real-service.js";
++import { LocalGitService, isLocalGitMode } from "./local-git-service.js";
+ import type { IGitHubService } from "./types.js";
+ import { getEnv } from "../config/env.js";
+ import { logger } from "../logger.js";
+@@ -35,6 +36,12 @@
+  * mock for dev/test/Simulation Mode.
+  */
+ export function resolveGitHubService(): IGitHubService {
++  // Local Git CLI mode: 100% offline, driven by the git binary on this machine.
++  // Checked FIRST so no token/OAuth requirement can ever kick in.
++  if (isLocalGitMode()) {
++    logger.info("Using LocalGitService (100% local Git CLI mode — no GitHub API, no token)");
++    return new LocalGitService();
++  }
+   // Use the real REST adapter in production (or when explicitly enabled) with a
+   // token. Local dev/test defaults to the mock so the platform never requires
+   // GitHub credentials to boot — a project can still connect to real GitHub via
+@@ -84,6 +91,17 @@
+   authenticated: boolean;
+   fallback: IGitHubService;
+ }): ResolvedGitHub {
++  // Local Git CLI mode: report a full-scope user connection so the write-access
++  // preflight and the "server-token" guards (which would demand GitHub OAuth)
++  // never block local operations.
++  if (isLocalGitMode()) {
++    return {
++      service: opts.fallback,
++      source: "user-oauth",
++      scopes: ["repo", "read:user", "user:email"],
++      hint: "Local Git CLI mode — repositories on this machine are read and written directly via git.",
++    };
++  }
+   if (opts.authenticated && opts.userId) {
+     const stored = getUserGitHubToken(opts.kv, opts.userId);
+     if (stored) {
+@@ -127,6 +145,9 @@
+   project: import("../domain/entities.js").Project;
+   requestUserId?: string;
+ }): string | undefined {
++  // Local Git CLI mode: repositories live on this machine; nothing is cloned
++  // over HTTPS, so no token is ever handed out.
++  if (isLocalGitMode()) return undefined;
+   const requestUserId = opts.requestUserId ?? githubRequestActorId();
+   if (requestUserId) {
+     const own = getUserGitHubToken(opts.kv, requestUserId);
+@@ -232,6 +253,11 @@
+    */
+   requestUserId?: string;
+ }): IGitHubService {
++  // Local Git CLI mode: every project acts through the local git binary — no
++  // per-user GitHub token is ever required or borrowed.
++  if (isLocalGitMode()) {
++    return opts.fallback;
++  }
+   // A signed-in user always acts as themselves, whoever owns the project. This
+   // is also the safer default: the caller can only ever reach repositories
+   // their own token already grants. `requestUserId` is explicit (project
+--- a/src/github/repo-mirror.ts
++++ b/src/github/repo-mirror.ts
+@@ -3,6 +3,7 @@
+ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+ import { dirname, join, resolve } from "node:path";
+ import { logger } from "../logger.js";
++import { isLocalGitMode } from "./local-git-service.js";
+ 
+ /**
+  * Read-only local mirror of a project's repository.
+@@ -148,6 +149,11 @@
+  */
+ function mirrorEnabledByDefault(): boolean {
+   if (process.env.VITEST || process.env.NODE_ENV === "test") return false;
++  // Local Git CLI mode: repositories already live on this machine, so cloning
++  // them again from a URL template (default github.com) is pure overhead — and
++  // would drag the platform back onto the network. Reads go straight through
++  // LocalGitService instead.
++  if (isLocalGitMode()) return false;
+   return true;
+ }
+ 
+--- a/src/github/project-state.ts
++++ b/src/github/project-state.ts
+@@ -589,6 +589,14 @@
+     } catch (error) {
+       this.snapshots.delete(this.cacheKey(p));
+       if ((error as { status?: number })?.status === 404) {
++        // Local Git CLI mode: a 404 means the repository folder is not on disk
++        // under LOCAL_REPOS_DIR — GitHub re-linking advice would be misleading.
++        if ((error as { provider?: string }).provider === "local-git") {
++          throw stateError(
++            `commit failed: local repository not found for ${this.ref(p).owner}/${this.ref(p).name}. Check LOCAL_REPOS_DIR (and that the repository exists on disk with a .git folder); state was not acknowledged as saved`,
++            error,
++          );
++        }
+         // GitHub returns 404 for repos that don't exist AND for repos the
+         // acting token cannot access (to avoid leaking repo existence). When a
+         // repo "exists and you have access", this means the credential that is
+--- a/src/http/routes/projects.ts
++++ b/src/http/routes/projects.ts
+@@ -15,6 +15,7 @@
+ import { githubAuthorizationRequired, isGitHubAuthorizationRequired } from "../../github/authorization.js";
+ import { verifyPullRequestBeforeMerge } from "../../github/merge-gate.js";
+ import { checkProjectWriteAccess } from "../../github/write-access.js";
++import { isLocalGitMode } from "../../github/local-git-service.js";
+ import {
+   CI_SETUP_BRANCH,
+   detectStacks,
+@@ -1109,7 +1110,10 @@
+         row.ciStacks = stacks;
+         row.ciSetupAvailable = !(row.ciWorkflows as string[]).length && stacks.length > 0;
+         const ours = (row.ciWorkflows as string[]).some((w) => w.endsWith("codevia-ci.yml"));
+-        if (ours && stacks.length) {
++        // Local Git CLI mode: GitHub Actions never run for local repositories,
++        // so recording its job names as required checks would permanently block
++        // the merge gate. Real verification happens via LOCAL_GIT_VERIFY_CMD.
++        if (ours && stacks.length && !isLocalGitMode()) {
+           const patch = requiredChecksPatch(p.settings, link.repo, stacks, (p.repositories ?? []).length > 1);
+           if (patch) {
+             try {
+--- a/.env.example
++++ b/.env.example
+@@ -176,3 +176,32 @@
+ WEB_BASE_URL=http://localhost:8080
+ # Set to the public Railway URL in production for absolute links/notifications.
+ # PUBLIC_WEB_BASE_URL=https://your-app.up.railway.app
++
++# ---- Local Git CLI mode (100% offline, no GitHub API / OAuth / token) ----
++# When LOCAL_GIT_MODE=true the platform talks ONLY to the git binary installed
++# on this machine: repositories are folders on disk, commits are made with git
++# plumbing in a private temp index (your working copy and staging area are
++# never disturbed), and merges run via `git merge-tree`. No request ever goes
++# to api.github.com. Pull requests/issues are stored in
++# <repo>/.git/codevia-local-meta.json.
++LOCAL_GIT_MODE=false
++# Root folder that holds your local repositories. Layout: <dir>/<owner>/<repo>,
++# <dir>/<owner>/<repo>.git (bare), or flat <dir>/<repo> (owner "local").
++LOCAL_REPOS_DIR=./repos
++# Full path to the git executable when it is not on PATH (e.g. C:\Program Files\Git\bin\git.exe).
++# LOCAL_GIT_BIN=git
++# Push every commit/merge with YOUR system git (uses your Credential Manager /
++# SSH keys). A failed push is only a warning — commits always stay local.
++LOCAL_GIT_AUTO_PUSH=true
++LOCAL_GIT_REMOTE=origin
++# Owner reported for flat repositories and for the viewer identity.
++LOCAL_GIT_OWNER=local
++# Optional fetch from the remote before repository reads (default off = offline).
++LOCAL_GIT_AUTO_FETCH=false
++# Optional REAL verification command run as the `local-verify` CI check in the
++# merge gate / QA (e.g. "dotnet test" or "npm test --silent"). Without it the
++# only check is `local-git-integrity` (commit exists in the local object DB).
++# LOCAL_GIT_VERIFY_CMD=
++# A git lock file older than this (ms) is treated as stale after a crashed git
++# process and removed automatically (default 10 minutes).
++# LOCAL_GIT_STALE_LOCK_MS=600000
+--- /dev/null
++++ b/src/github/local-git-error.ts
+@@ -0,0 +1,127 @@
++/**
++ * Error contract for LocalGitService.
++ *
++ * Every failure raised by the local Git adapter is a `LocalGitError` carrying:
++ *   - `code`        — machine-readable failure class (stable API),
++ *   - `statusCode` / `status` — the HTTP status the platform routes map it to
++ *     (`errStatus` reads `statusCode`, `repo-brief`/`project-state` read
++ *     `status`; both are always identical),
++ *   - `retryable`   — transient failures the worker may retry (lock contention,
++ *     git binary hiccups); permanent ones dead-letter immediately,
++ *   - `committed`   — `true` only when a ref already moved and the commit
++ *     exists, but a later step (working-tree sync, push) failed. Retrying the
++ *     same operation with the old `parentSha` then yields LOCAL_STALE_PARENT
++ *     instead of silently double-committing,
++ *   - `provider`    — always `"local-git"`, so messages can stop mentioning
++ *     GitHub when the local adapter is active.
++ *
++ * Behavioural rules (enforced by tests in src/tests/local-git-error.test.ts):
++ *   1. Absence is `undefined`, never an error: getFile / getRepository /
++ *      getPullRequest return `undefined` for anything missing.
++ *   2. LOCAL_META_CORRUPT is never muted or overwritten (the metadata file is
++ *      backed up as `.bak` before every rewrite instead).
++ *   3. A failed push after a successful commit is a warning, not an error.
++ */
++
++export type LocalGitErrorCode =
++  | "LOCAL_GIT_UNAVAILABLE" // git binary missing or not runnable (ENOENT/EACCES)
++  | "LOCAL_REPO_NOT_FOUND" // no repository directory for owner/name
++  | "LOCAL_REF_NOT_FOUND" // branch, tag, or commit does not exist
++  | "LOCAL_PATH_NOT_FOUND" // directory prefix does not exist in the commit
++  | "LOCAL_INVALID_INPUT" // unsafe repo name, branch name, or path
++  | "LOCAL_STALE_PARENT" // CAS: parentSha no longer equals the branch head
++  | "LOCAL_LOCKED" // ref or index lock held by another process
++  | "LOCAL_MERGE_CONFLICT" // merge cannot be applied cleanly
++  | "LOCAL_HEAD_MOVED" // expectedSha no longer matches the PR head
++  | "LOCAL_META_CORRUPT" // codevia-local-meta.json cannot be parsed
++  | "LOCAL_GIT_FAILED"; // any other git exit code, stderr attached
++
++const STATUS: Record<LocalGitErrorCode, number> = {
++  LOCAL_GIT_UNAVAILABLE: 503,
++  LOCAL_REPO_NOT_FOUND: 404,
++  LOCAL_REF_NOT_FOUND: 404,
++  LOCAL_PATH_NOT_FOUND: 404,
++  LOCAL_INVALID_INPUT: 400,
++  LOCAL_STALE_PARENT: 409,
++  LOCAL_LOCKED: 423,
++  LOCAL_MERGE_CONFLICT: 409,
++  LOCAL_HEAD_MOVED: 409,
++  LOCAL_META_CORRUPT: 500,
++  LOCAL_GIT_FAILED: 502,
++};
++
++/** Transient failures: safe to retry after a short delay. */
++const RETRYABLE = new Set<LocalGitErrorCode>([
++  "LOCAL_GIT_UNAVAILABLE",
++  "LOCAL_LOCKED",
++  "LOCAL_GIT_FAILED",
++]);
++
++export interface LocalGitErrorOptions {
++  cause?: unknown;
++  /** Set when the ref already moved — see the header comment. */
++  committed?: boolean;
++  /** The commit SHA that was created (only meaningful with `committed`). */
++  sha?: string;
++}
++
++export class LocalGitError extends Error {
++  readonly code: LocalGitErrorCode;
++  readonly statusCode: number;
++  readonly status: number;
++  readonly retryable: boolean;
++  readonly committed: boolean;
++  readonly sha?: string;
++  readonly provider = "local-git" as const;
++
++  constructor(code: LocalGitErrorCode, message: string, opts: LocalGitErrorOptions = {}) {
++    super(message, opts.cause === undefined ? undefined : { cause: opts.cause });
++    this.name = "LocalGitError";
++    this.code = code;
++    this.statusCode = STATUS[code];
++    this.status = this.statusCode;
++    this.retryable = RETRYABLE.has(code);
++    this.committed = opts.committed === true;
++    this.sha = opts.sha;
++  }
++}
++
++export function isLocalGitError(err: unknown): err is LocalGitError {
++  return err instanceof LocalGitError;
++}
++
++/** Trim stderr for inclusion in error messages (no trailing noise, capped). */
++export function trimGitStderr(stderr: string, max = 300): string {
++  return String(stderr ?? "")
++    .replace(/\s+$/g, "")
++    .slice(0, max);
++}
++
++/**
++ * Map a raw git failure (stderr + exit code) onto the contract. Only patterns
++ * that unambiguously identify a class are special-cased; everything else is
++ * LOCAL_GIT_FAILED with the (trimmed) stderr attached.
++ */
++export function classifyGitFailure(stderr: string, fallbackMessage: string): LocalGitError {
++  const text = trimGitStderr(stderr);
++  // Compare-and-swap mismatch: "cannot lock ref 'refs/heads/x': is at <sha> but expected <sha>"
++  if (/is at [0-9a-f]+ but expected [0-9a-f]+/i.test(text)) {
++    return new LocalGitError(
++      "LOCAL_STALE_PARENT",
++      "Repository changed after inspection; refusing to overwrite newer work (the branch moved concurrently).",
++    );
++  }
++  if (/lock/i.test(text) && (/\.lock/i.test(text) || /File exists/i.test(text))) {
++    return new LocalGitError(
++      "LOCAL_LOCKED",
++      "A git lock file is held by another process (IDE or git command). Close it, or — if no git process is running — remove the stale .lock file mentioned in the git output and retry.",
++    );
++  }
++  if (/cannot lock ref/i.test(text)) {
++    return new LocalGitError(
++      "LOCAL_LOCKED",
++      "The branch reference is locked by another process. Retry after the other git process finishes.",
++    );
++  }
++  return new LocalGitError("LOCAL_GIT_FAILED", `${fallbackMessage}: ${text || "git exited with an error"}`);
++}
+--- /dev/null
++++ b/src/github/local-git-service.ts
+@@ -0,0 +1,1439 @@
++/**
++ * LocalGitService — a 100% offline `IGitHubService` backed by the git binary
++ * installed on this machine.
++ *
++ * Design goals (local mode):
++ *   - No request ever leaves the machine: no api.github.com, no OAuth, no
++ *     GITHUB_TOKEN. Reads and writes go through local git plumbing commands
++ *     (`ls-tree`, `cat-file`, `hash-object`, `read-tree`/`update-index`,
++ *     `commit-tree`, `update-ref`, `merge-tree`).
++ *   - The developer's working copy is sacred: commits are built in a private
++ *     temporary index (GIT_INDEX_FILE), the branch is moved with a
++ *     compare-and-swap `update-ref <ref> <new> <old>`, and only the *touched*
++ *     paths are synced to the checked-out working tree — and never when they
++ *     carry uncommitted local changes. Staged/unstaged edits in other files,
++ *     including the index, are left exactly as they were.
++ *   - `git worktree` is never used (nothing to leak into .git/worktrees);
++ *     merges run through `git merge-tree --write-tree` (git >= 2.38), with a
++ *     worktree fallback for older git that is created and removed inside one
++ *     critical section.
++ *   - Pull requests / issues are Git-platform concepts, not git concepts:
++ *     they are stored in `<gitdir>/codevia-local-meta.json` (inside .git, so
++ *     it never pollutes the working tree) and merged with real `merge-tree` +
++ *     `commit-tree` + `update-ref` operations.
++ *
++ * Error contract: every failure is a `LocalGitError` (see local-git-error.ts)
++ * with a stable `code`, HTTP `status`/`statusCode`, and `retryable` flag.
++ * Failures that happen *after* the branch ref moved carry `committed: true`
++ * plus the new `sha`, so callers never mistake a half-applied sync for a
++ * failed commit.
++ *
++ * Push behaviour: with LOCAL_GIT_AUTO_PUSH=true the service runs
++ * `git push <remote> <branch>` through the *user's own* git (credential
++ * manager / SSH keys). A failed push is a warning — commits stay local.
++ */
++
++import { exec, execFile } from "node:child_process";
++import {
++  copyFileSync,
++  existsSync,
++  mkdirSync,
++  readdirSync,
++  readFileSync,
++  rmSync,
++  statSync,
++  writeFileSync,
++} from "node:fs";
++import { dirname, extname, isAbsolute, join, resolve } from "node:path";
++import { tmpdir } from "node:os";
++import { randomUUID } from "node:crypto";
++import type {
++  IGitHubService,
++  GithubRepoRef,
++  GithubRepository,
++  GithubViewer,
++  GithubBranch,
++  GithubCommit,
++  GithubCheck,
++  GithubPullRequest,
++  GithubIssue,
++  GithubRelease,
++  GithubFile,
++  GithubTreeEntry,
++  ListRepositoriesOptions,
++  CreateRepositoryOptions,
++} from "./types.js";
++import { logger } from "../logger.js";
++import { LocalGitError, classifyGitFailure, trimGitStderr } from "./local-git-error.js";
++
++/** True when the platform runs in 100% local git CLI mode (LOCAL_GIT_MODE). */
++export function isLocalGitMode(): boolean {
++  return envFlag(process.env.LOCAL_GIT_MODE);
++}
++
++function envFlag(value: string | undefined): boolean {
++  return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
++}
++
++export interface LocalGitServiceOptions {
++  /** Root directory that holds the local repositories (default LOCAL_REPOS_DIR or ./repos). */
++  rootDir?: string;
++  /** Git executable (default LOCAL_GIT_BIN or "git"). */
++  gitBin?: string;
++  /** Push each commit/merge with the system git (default LOCAL_GIT_AUTO_PUSH). */
++  autoPush?: boolean;
++  /** Remote name to push to (default LOCAL_GIT_REMOTE or "origin"). */
++  remoteName?: string;
++  /** Owner reported for flat repos under rootDir (default LOCAL_GIT_OWNER or "local"). */
++  defaultOwner?: string;
++  /** Fetch the remote before repository reads (default LOCAL_GIT_AUTO_FETCH). */
++  autoFetch?: boolean;
++  /** Shell command run as a real CI check in getChecks (default LOCAL_GIT_VERIFY_CMD). */
++  verifyCmd?: string;
++  /** A lock file older than this is considered stale and removed (default 10 min). */
++  staleLockMs?: number;
++}
++
++interface GitExecResult {
++  stdout: string;
++  stderr: string;
++  code: number;
++}
++
++interface GitExecOptions {
++  env?: Record<string, string>;
++  timeoutMs?: number;
++}
++
++/** PR/issue records as persisted (superset of the public wire types). */
++interface StoredPullRequest extends GithubPullRequest {
++  body?: string;
++  comments?: string[];
++}
++
++interface StoredIssue extends GithubIssue {
++  body?: string;
++  comments?: string[];
++}
++
++interface LocalRepoMeta {
++  pulls: StoredPullRequest[];
++  issues: StoredIssue[];
++  releases: GithubRelease[];
++  description?: string;
++}
++
++const EXT_LANGUAGE: Record<string, string> = {
++  ".cs": "C#",
++  ".cshtml": "C#",
++  ".ts": "TypeScript",
++  ".tsx": "TypeScript",
++  ".js": "JavaScript",
++  ".jsx": "JavaScript",
++  ".mjs": "JavaScript",
++  ".cjs": "JavaScript",
++  ".py": "Python",
++  ".go": "Go",
++  ".java": "Java",
++  ".rs": "Rust",
++  ".c": "C",
++  ".h": "C",
++  ".cpp": "C++",
++  ".cc": "C++",
++  ".hpp": "C++",
++  ".rb": "Ruby",
++  ".php": "PHP",
++  ".swift": "Swift",
++  ".kt": "Kotlin",
++  ".fs": "F#",
++};
++
++/**
++ * Normalize a repository-relative path: backslashes → slashes, leading
++ * slashes / drive letters stripped, `.` segments dropped. Returns `null` for
++ * anything unsafe (empty, traversal via `..`, or anything under `.git`).
++ */
++export function normalizeRepoPath(p: string): string | null {
++  if (typeof p !== "string" || p.length === 0 || p.length > 4096) return null;
++  const s = p
++    .replace(/\\/g, "/")
++    .replace(/^[a-zA-Z]:/, "")
++    .replace(/^\/+/, "");
++  const segs: string[] = [];
++  for (const seg of s.split("/")) {
++    if (seg.length === 0 || seg === ".") continue;
++    if (seg === "..") return null;
++    if (seg.toLowerCase() === ".git") return null;
++    segs.push(seg);
++  }
++  return segs.length ? segs.join("/") : null;
++}
++
++/** A directory is a git repository when it has a .git entry (dir or worktree file) or is a bare repo. */
++function isGitDir(dir: string): boolean {
++  try {
++    if (existsSync(join(dir, ".git"))) return true;
++    return existsSync(join(dir, "HEAD")) && existsSync(join(dir, "objects")) && existsSync(join(dir, "refs"));
++  } catch {
++    return false;
++  }
++}
++
++function validateBranchName(name: string): void {
++  if (typeof name !== "string" || name.length === 0 || name.length > 250) {
++    throw new LocalGitError("LOCAL_INVALID_INPUT", `Invalid branch name: ${JSON.stringify(name)}`);
++  }
++  if (
++    name.startsWith("-") ||
++    name.startsWith("/") ||
++    name.endsWith("/") ||
++    name.endsWith(".") ||
++    name.endsWith(".lock") ||
++    name.includes("..") ||
++    /[\s~^:?*[\\\x00-\x1f]/.test(name)
++  ) {
++    throw new LocalGitError("LOCAL_INVALID_INPUT", `Invalid branch name: ${name}`);
++  }
++}
++
++function isSha(value: string | undefined | null): value is string {
++  return typeof value === "string" && /^[0-9a-f]{7,40}$/i.test(value);
++}
++
++export class LocalGitService implements IGitHubService {
++  /**
++   * "real": repositories on disk are real (not simulation scaffolds), so the
++   * platform's mock-mode bypasses (merge gate, write access) do not apply.
++   */
++  readonly kind = "real" as const;
++
++  private readonly rootDir: string;
++  private readonly gitBin: string;
++  private readonly autoPush: boolean;
++  private readonly remoteName: string;
++  private readonly defaultOwner: string;
++  private readonly autoFetch: boolean;
++  private readonly verifyCmd: string | undefined;
++  private readonly staleLockMs: number;
++
++  private gitAvailable: Promise<void> | undefined;
++  private readonly repoLocks = new Map<string, Promise<unknown>>();
++  private readonly gitDirCache = new Map<string, string>();
++  private readonly repoInfoCache = new Map<string, GithubRepository>();
++  private readonly lastFetch = new Map<string, number>();
++  /** merge-tree --write-tree support (git >= 2.38); detected lazily. */
++  private mergeTreeSupport: boolean | undefined;
++
++  constructor(opts: LocalGitServiceOptions = {}) {
++    this.rootDir = resolve(opts.rootDir ?? process.env.LOCAL_REPOS_DIR ?? "./repos");
++    this.gitBin = opts.gitBin ?? process.env.LOCAL_GIT_BIN ?? "git";
++    this.autoPush = opts.autoPush ?? envFlag(process.env.LOCAL_GIT_AUTO_PUSH);
++    this.remoteName = opts.remoteName ?? process.env.LOCAL_GIT_REMOTE ?? "origin";
++    this.defaultOwner = opts.defaultOwner ?? process.env.LOCAL_GIT_OWNER ?? "local";
++    this.autoFetch = opts.autoFetch ?? envFlag(process.env.LOCAL_GIT_AUTO_FETCH);
++    this.verifyCmd = opts.verifyCmd ?? (process.env.LOCAL_GIT_VERIFY_CMD?.trim() || undefined);
++    this.staleLockMs = opts.staleLockMs ?? (Number(process.env.LOCAL_GIT_STALE_LOCK_MS) || 10 * 60_000);
++    mkdirSync(this.rootDir, { recursive: true });
++  }
++
++  /* ------------------------------------------------------------------ *
++   * git process plumbing
++   * ------------------------------------------------------------------ */
++
++  /** Run git; never rejects — failures come back as a non-zero `code`. */
++  private git(args: string[], cwd: string, opts: GitExecOptions = {}): Promise<GitExecResult> {
++    return new Promise((resolvePromise) => {
++      execFile(
++        this.gitBin,
++        args,
++        {
++          cwd,
++          timeout: opts.timeoutMs ?? 60_000,
++          maxBuffer: 32 * 1024 * 1024,
++          windowsHide: true,
++          env: { ...process.env, ...opts.env, GIT_TERMINAL_PROMPT: "0" },
++        },
++        (error, stdout, stderr) => {
++          const err = error as { code?: number | string } | null;
++          const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
++          let errText = String(stderr ?? "");
++          if (err?.code === "ENOENT" && !errText.trim()) {
++            errText = `git binary not found or not runnable: ${this.gitBin}`;
++          }
++          resolvePromise({ stdout: String(stdout ?? ""), stderr: errText, code });
++        },
++      );
++    });
++  }
++
++  /** Run git and classify failures; retries once after removing a *stale* lock file. */
++  private async gitChecked(
++    args: string[],
++    cwd: string,
++    errContext: string,
++    opts: GitExecOptions = {},
++  ): Promise<GitExecResult> {
++    const first = await this.git(args, cwd, opts);
++    if (first.code === 0) return first;
++    const lockFile = lockPathFromStderr(first.stderr, cwd);
++    if (lockFile && (await this.removeStaleLock(lockFile))) {
++      const second = await this.git(args, cwd, opts);
++      if (second.code === 0) return second;
++      throw classifyGitFailure(second.stderr, errContext);
++    }
++    throw classifyGitFailure(first.stderr, errContext);
++  }
++
++  /** One-time check that the git binary exists; every public method awaits it. */
++  private ensureGitAvailable(): Promise<void> {
++    this.gitAvailable ??= new Promise<void>((resolvePromise, rejectPromise) => {
++      execFile(this.gitBin, ["--version"], { timeout: 15_000, windowsHide: true }, (error) => {
++        if (error) {
++          rejectPromise(
++            new LocalGitError(
++              "LOCAL_GIT_UNAVAILABLE",
++              `Git binary not found or not runnable: "${this.gitBin}". Install Git (https://git-scm.com) or set LOCAL_GIT_BIN to the full path of the git executable.`,
++            ),
++          );
++        } else {
++          resolvePromise();
++        }
++      });
++    });
++    return this.gitAvailable;
++  }
++
++  /** Remove a lock file only when it is clearly stale (crashed git process). */
++  private async removeStaleLock(lockFile: string): Promise<boolean> {
++    try {
++      const st = statSync(lockFile);
++      if (Date.now() - st.mtimeMs < this.staleLockMs) return false;
++      rmSync(lockFile, { force: true });
++      logger.warn(
++        `LocalGitService: removed stale git lock file (untouched for over ${Math.round(this.staleLockMs / 60_000)} minutes): ${lockFile}`,
++      );
++      return true;
++    } catch {
++      return false;
++    }
++  }
++
++  /** Serialize writes per repository inside this process (concurrent state saves all land). */
++  private withRepoLock<T>(repoDir: string, fn: () => Promise<T>): Promise<T> {
++    const key = resolve(repoDir).toLowerCase();
++    const previous = this.repoLocks.get(key) ?? Promise.resolve();
++    const next = previous.then(fn, fn);
++    this.repoLocks.set(
++      key,
++      next.catch(() => undefined),
++    );
++    return next;
++  }
++
++  /* ------------------------------------------------------------------ *
++   * repo / ref / path resolution
++   * ------------------------------------------------------------------ */
++
++  private validateRepoRef(repo: GithubRepoRef): void {
++    const ok = (s: unknown): s is string =>
++      typeof s === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$/.test(s) && s !== "." && s !== ".." && !s.endsWith(".lock");
++    if (!ok(repo?.owner) || !ok(repo?.name)) {
++      throw new LocalGitError("LOCAL_INVALID_INPUT", `Unsafe repository name: ${repo?.owner}/${repo?.name}`);
++    }
++  }
++
++  /** Find the repository directory: <root>/<owner>/<name>[.git] then <root>/<name>[.git]. */
++  private resolveRepoDir(repo: GithubRepoRef): string {
++    this.validateRepoRef(repo);
++    const candidates = [
++      join(this.rootDir, repo.owner, repo.name),
++      join(this.rootDir, repo.owner, `${repo.name}.git`),
++      join(this.rootDir, repo.name),
++      join(this.rootDir, `${repo.name}.git`),
++    ];
++    for (const candidate of candidates) {
++      if (isGitDir(candidate)) return candidate;
++    }
++    throw new LocalGitError(
++      "LOCAL_REPO_NOT_FOUND",
++      `Local repository not found for ${repo.owner}/${repo.name} (searched ${this.rootDir})`,
++    );
++  }
++
++  /** Resolve a branch name or commit SHA to a full commit SHA (undefined when missing). */
++  private async resolveCommitSha(repoDir: string, ref: string): Promise<string | undefined> {
++    if (ref.startsWith("-")) return undefined; // never pass option-like strings to git
++    const asBranch = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${ref}`], repoDir);
++    if (asBranch.code === 0) return asBranch.stdout.trim();
++    const asCommit = await this.git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repoDir);
++    if (asCommit.code === 0) return asCommit.stdout.trim();
++    return undefined;
++  }
++
++  private async branchHeadOpt(repoDir: string, branch: string): Promise<string | undefined> {
++    validateBranchName(branch);
++    const res = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repoDir);
++    return res.code === 0 ? res.stdout.trim() : undefined;
++  }
++
++  private async requireBranchHead(repoDir: string, branch: string): Promise<string> {
++    const sha = await this.branchHeadOpt(repoDir, branch);
++    if (!sha) {
++      throw new LocalGitError("LOCAL_REF_NOT_FOUND", `Branch "${branch}" does not exist in the local repository`);
++    }
++    return sha;
++  }
++
++  private async gitDirOf(repoDir: string): Promise<string> {
++    const cached = this.gitDirCache.get(repoDir);
++    if (cached) return cached;
++    const res = await this.git(["rev-parse", "--absolute-git-dir"], repoDir);
++    const dir = res.code === 0 && res.stdout.trim() ? resolve(repoDir, res.stdout.trim()) : join(repoDir, ".git");
++    this.gitDirCache.set(repoDir, dir);
++    return dir;
++  }
++
++  private async metaPath(repoDir: string): Promise<string> {
++    return join(await this.gitDirOf(repoDir), "codevia-local-meta.json");
++  }
++
++  /* ------------------------------------------------------------------ *
++   * metadata (PRs / issues) — corrupt files are NEVER overwritten
++   * ------------------------------------------------------------------ */
++
++  private async readMeta(repoDir: string): Promise<LocalRepoMeta> {
++    const path = await this.metaPath(repoDir);
++    if (!existsSync(path)) return { pulls: [], issues: [], releases: [] };
++    let parsed: unknown;
++    try {
++      parsed = JSON.parse(readFileSync(path, "utf8"));
++    } catch (err) {
++      throw new LocalGitError(
++        "LOCAL_META_CORRUPT",
++        `Local pull-request metadata is corrupt: ${path}. Restore it from ${path}.bak or fix it manually — CodeVia refuses to overwrite or silently reset it.`,
++        { cause: err },
++      );
++    }
++    const meta = parsed as Partial<LocalRepoMeta>;
++    if (!meta || typeof meta !== "object" || !Array.isArray(meta.pulls) || !Array.isArray(meta.issues) || !Array.isArray(meta.releases)) {
++      throw new LocalGitError(
++        "LOCAL_META_CORRUPT",
++        `Local pull-request metadata has an invalid shape: ${path}. Restore it from ${path}.bak or fix it manually — CodeVia refuses to overwrite or silently reset it.`,
++      );
++    }
++    return { pulls: meta.pulls, issues: meta.issues, releases: meta.releases, description: meta.description };
++  }
++
++  private async writeMeta(repoDir: string, meta: LocalRepoMeta): Promise<void> {
++    const path = await this.metaPath(repoDir);
++    mkdirSync(dirname(path), { recursive: true });
++    if (existsSync(path)) {
++      try {
++        copyFileSync(path, `${path}.bak`);
++      } catch {
++        /* best-effort backup; the write itself must still happen */
++      }
++    }
++    writeFileSync(path, JSON.stringify(meta, null, 2), "utf8");
++  }
++
++  /* ------------------------------------------------------------------ *
++   * commit plumbing (private temp index — the user's index is untouched)
++   * ------------------------------------------------------------------ */
++
++  /** Author/committer identity for commits, from the user's git config (no config is written). */
++  private async commitEnv(repoDir: string): Promise<Record<string, string>> {
++    const name = (await this.git(["config", "user.name"], repoDir)).stdout.trim();
++    const email = (await this.git(["config", "user.email"], repoDir)).stdout.trim();
++    return {
++      GIT_AUTHOR_NAME: name || "CodeVia Local Agent",
++      GIT_AUTHOR_EMAIL: email || "agent@codevia.local",
++      GIT_COMMITTER_NAME: name || "CodeVia Local Agent",
++      GIT_COMMITTER_EMAIL: email || "agent@codevia.local",
++    };
++  }
++
++  /**
++   * Build a commit on `parent` in a private temporary index:
++   * read-tree → update-index (adds/removes) → write-tree → commit-tree.
++   * The repository's real index and working tree are never touched here.
++   * Arguments are batched so very large commits cannot overflow argv (Windows).
++   */
++  private async commitViaIndex(
++    repoDir: string,
++    parent: string,
++    message: string,
++    adds: Array<{ path: string; content: string }>,
++    removes: string[],
++  ): Promise<{ sha: string; author: string }> {
++    const indexFile = join(tmpdir(), `codevia-index-${randomUUID()}`);
++    const blobDir = join(tmpdir(), `codevia-blobs-${randomUUID()}`);
++    const indexEnv = { GIT_INDEX_FILE: indexFile };
++    try {
++      await this.gitChecked(["read-tree", parent], repoDir, "git read-tree failed", { env: indexEnv });
++      if (adds.length) {
++        // Staging area for the blobs (content bytes are hashed verbatim with
++        // --no-filters, exactly like the GitHub contents API).
++        mkdirSync(blobDir, { recursive: true });
++        const staged = adds.map((add, i) => {
++          const tmp = join(blobDir, `f${i}`);
++          writeFileSync(tmp, add.content, "utf8");
++          return { tmp, path: add.path };
++        });
++        const hashed: Array<{ path: string; sha: string }> = [];
++        for (const part of chunk(staged, 60)) {
++          const res = await this.gitChecked(
++            ["hash-object", "-w", "--no-filters", ...part.map((s) => s.tmp)],
++            repoDir,
++            "git hash-object failed",
++          );
++          const shas = res.stdout.trim().split(/\r?\n/).map((s) => s.trim());
++          part.forEach((s, i) => hashed.push({ path: s.path, sha: shas[i] ?? "" }));
++        }
++        // Existing modes (preserve the executable bit) in one lookup per batch.
++        const modes = new Map<string, string>();
++        for (const part of chunk(adds.map((a) => a.path), 80)) {
++          const res = await this.git(["ls-tree", parent, "--", ...part.map((p) => `:(literal)${p}`)], repoDir);
++          if (res.code !== 0) continue;
++          for (const line of res.stdout.split("\n")) {
++            if (!line.trim()) continue;
++            const tabAt = line.indexOf("\t");
++            if (tabAt < 0) continue;
++            modes.set(line.slice(tabAt + 1).trim(), line.slice(0, tabAt).trim().split(/\s+/)[0]);
++          }
++        }
++        for (const part of chunk(hashed, 60)) {
++          const args = ["update-index", "--add"];
++          for (const h of part) {
++            const mode = modes.get(h.path) === "100755" ? "100755" : "100644";
++            args.push("--cacheinfo", `${mode},${h.sha},${h.path}`);
++          }
++          await this.gitChecked(args, repoDir, "git update-index failed", { env: indexEnv });
++        }
++      }
++      // Removing a path that is not in the tree is a successful no-op.
++      for (const part of chunk(removes, 80)) {
++        await this.gitChecked(["update-index", "--force-remove", ...part], repoDir, "git update-index failed", {
++          env: indexEnv,
++        });
++      }
++      const treeRes = await this.gitChecked(["write-tree"], repoDir, "git write-tree failed", { env: indexEnv });
++      const env = await this.commitEnv(repoDir);
++      const commitRes = await this.gitChecked(
++        ["commit-tree", treeRes.stdout.trim(), "-p", parent, "-m", message],
++        repoDir,
++        "git commit-tree failed",
++        { env },
++      );
++      return { sha: commitRes.stdout.trim(), author: env.GIT_AUTHOR_NAME };
++    } finally {
++      for (const file of [indexFile, blobDir]) {
++        try {
++          rmSync(file, { force: true, recursive: true });
++        } catch {
++          /* antivirus may briefly hold temp files on Windows */
++        }
++      }
++    }
++  }
++
++  /** Paths changed between two commits (no renames: A/D pairs instead). */
++  private async changedPaths(repoDir: string, from: string, to: string): Promise<Array<{ status: string; path: string }>> {
++    const res = await this.git(["diff", "--no-renames", "--name-status", from, to], repoDir);
++    if (res.code !== 0) return [];
++    const out: Array<{ status: string; path: string }> = [];
++    for (const line of res.stdout.split("\n")) {
++      if (!line.trim()) continue;
++      const [status, ...rest] = line.split("\t");
++      const path = rest.join("\t").trim();
++      if (path) out.push({ status: status.trim(), path });
++    }
++    return out;
++  }
++
++  /**
++   * Which of the touched paths carry uncommitted local changes? Must be asked
++   * BEFORE the branch ref moves (afterwards our own commit would look dirty).
++   *
++   * A *staged deletion with no file on disk* is NOT counted as dirty: it holds
++   * no local bytes to protect, and it is exactly the residue a failed
++   * working-tree sync leaves behind (scenario C) — so the next commit heals it.
++   * Everything else (untracked files, edits, working-tree deletions) protects
++   * the developer's data and is skipped by the sync.
++   */
++  private async dirtyPaths(repoDir: string, paths: string[]): Promise<Set<string>> {
++    const dirty = new Set<string>();
++    if (!paths.length) return dirty;
++    for (const part of chunk(paths, 80)) {
++      const res = await this.git(["status", "--porcelain", "--", ...part], repoDir);
++      if (res.code !== 0) return dirty; // best effort; real failures surface during sync
++      for (const line of res.stdout.split("\n")) {
++        if (line.length < 4) continue;
++        const x = line[0];
++        const y = line[1];
++        const path = line.slice(3).trim();
++        if (path.includes("->")) {
++          // rename entries list both sides — protect both
++          const [from, to] = path.split("->").map((s) => s.trim());
++          if (from) dirty.add(from);
++          if (to) dirty.add(to);
++          continue;
++        }
++        if (x === "D" && y === " " && !existsSync(join(repoDir, path))) continue; // healable
++        dirty.add(path);
++      }
++    }
++    return dirty;
++  }
++
++  /**
++   * Bring the checked-out working tree up to date with the moved branch — for
++   * the explicitly touched paths only (never a full checkout: the developer's
++   * staged/unstaged state elsewhere is left alone). Files with uncommitted
++   * local changes are skipped (and warned about) so user data is never
++   * overwritten. Paths are passed explicitly — not derived from a diff — so a
++   * re-commit of identical content still heals a previously failed sync.
++   */
++  private async syncWorktreeIfCheckedOut(
++    repoDir: string,
++    branch: string,
++    newSha: string,
++    toWrite: string[],
++    toRemove: string[],
++    dirty: Set<string>,
++  ): Promise<void> {
++    const bare = await this.git(["rev-parse", "--is-bare-repository"], repoDir);
++    if (bare.code === 0 && bare.stdout.trim() === "true") return;
++    const head = await this.git(["symbolic-ref", "--short", "-q", "HEAD"], repoDir);
++    if (head.code !== 0 || head.stdout.trim() !== branch) return;
++
++    const checkout: string[] = [];
++    for (const path of toWrite) {
++      if (dirty.has(path)) {
++        logger.warn(
++          `LocalGitService: "${path}" has uncommitted local changes — the branch was updated but this file was NOT overwritten. Review it and run "git checkout ${branch} -- ${path}" if you want the committed version.`,
++          { branch },
++        );
++        continue;
++      }
++      checkout.push(path);
++    }
++    const remove: string[] = toRemove.filter((path) => {
++      if (dirty.has(path)) {
++        logger.warn(
++          `LocalGitService: "${path}" has uncommitted local changes — the branch was updated but this file was NOT deleted. Review it and run "git rm -- ${path}" if you want the deletion applied.`,
++          { branch },
++        );
++        return false;
++      }
++      return true;
++    });
++    if (checkout.length) {
++      for (const part of chunk(checkout, 80)) {
++        await this.gitChecked(
++          ["restore", `--source=${newSha}`, "--staged", "--worktree", "--", ...part],
++          repoDir,
++          `working-tree sync failed for branch "${branch}"`,
++        );
++      }
++    }
++    if (remove.length) {
++      for (const part of chunk(remove, 80)) {
++        await this.gitChecked(["rm", "-f", "--ignore-unmatch", "--", ...part], repoDir, `working-tree sync failed for branch "${branch}"`);
++      }
++    }
++  }
++
++  /** Wrap post-ref failures so callers can see the commit DID land. */
++  private asCommittedError(err: unknown, sha: string, prefix: string): LocalGitError {
++    const detail = err instanceof Error ? err.message : String(err);
++    if (err instanceof LocalGitError) {
++      return new LocalGitError(err.code, `${prefix}: ${err.message}`, { committed: true, sha });
++    }
++    return new LocalGitError("LOCAL_GIT_FAILED", `${prefix}: ${detail}`, { committed: true, sha, cause: err });
++  }
++
++  /** Compare-and-swap branch update; a concurrent mover yields LOCAL_STALE_PARENT. */
++  private async updateRefChecked(repoDir: string, branch: string, newSha: string, oldSha: string): Promise<void> {
++    await this.gitChecked(
++      ["update-ref", `refs/heads/${branch}`, newSha, oldSha],
++      repoDir,
++      `git update-ref failed for branch "${branch}"`,
++    );
++  }
++
++  /** Push through the user's own git (credential manager / SSH). Failure is a warning. */
++  private async maybePush(repoDir: string, branch: string): Promise<void> {
++    if (!this.autoPush) return;
++    const remotes = await this.git(["remote"], repoDir);
++    const names = remotes.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
++    if (!names.includes(this.remoteName)) {
++      logger.debug(`LocalGitService: auto-push is on but no remote "${this.remoteName}" exists — staying local`, {
++        branch,
++      });
++      return;
++    }
++    const res = await this.git(["push", this.remoteName, branch], repoDir, { timeoutMs: 180_000 });
++    if (res.code !== 0) {
++      logger.warn(
++        `LocalGitService: git push failed for branch "${branch}" — the commits are safe in the local repository and will be pushed on the next successful push.`,
++        { remote: this.remoteName, stderr: trimGitStderr(res.stderr, 400) },
++      );
++    }
++  }
++
++  private async maybeFetch(repoDir: string): Promise<void> {
++    if (!this.autoFetch) return;
++    const now = Date.now();
++    if (now - (this.lastFetch.get(repoDir) ?? 0) < 60_000) return;
++    this.lastFetch.set(repoDir, now);
++    const remotes = await this.git(["remote"], repoDir);
++    if (!remotes.stdout.split(/\r?\n/).map((s) => s.trim()).includes(this.remoteName)) return;
++    const res = await this.git(["fetch", "--prune", this.remoteName], repoDir, { timeoutMs: 120_000 });
++    if (res.code !== 0) {
++      logger.warn("LocalGitService: git fetch failed — continuing with local refs", {
++        remote: this.remoteName,
++        stderr: trimGitStderr(res.stderr, 200),
++      });
++    }
++  }
++
++  /* ------------------------------------------------------------------ *
++   * repository metadata / discovery
++   * ------------------------------------------------------------------ */
++
++  private async inspectRepo(owner: string, name: string, repoDir: string): Promise<GithubRepository | undefined> {
++    if (!isGitDir(repoDir)) return undefined;
++    const headRes = await this.git(["rev-parse", "--verify", "--quiet", "HEAD"], repoDir);
++    const headSha = headRes.code === 0 ? headRes.stdout.trim() : undefined;
++    const branchRes = await this.git(["symbolic-ref", "--short", "HEAD"], repoDir);
++    let defaultBranch = branchRes.code === 0 ? branchRes.stdout.trim() : "";
++    if (!defaultBranch) defaultBranch = "main";
++
++    const cacheKey = `${repoDir}|${headSha ?? `unborn:${defaultBranch}`}`;
++    const cached = this.repoInfoCache.get(cacheKey);
++    if (cached) return { ...cached };
++    if (this.repoInfoCache.size > 400) this.repoInfoCache.clear();
++
++    let updatedAt: string | undefined;
++    if (headSha) {
++      const dateRes = await this.git(["log", "-1", "--format=%cI", headSha], repoDir);
++      if (dateRes.code === 0 && dateRes.stdout.trim()) updatedAt = dateRes.stdout.trim();
++    }
++    const language = headSha ? await this.detectLanguage(repoDir, headSha) : undefined;
++    let description: string | undefined;
++    try {
++      description = (await this.readMeta(repoDir)).description;
++    } catch {
++      /* corrupt metadata must not break listings; writes still refuse */
++    }
++
++    const info: GithubRepository = {
++      owner,
++      name,
++      fullName: `${owner}/${name}`,
++      private: true,
++      defaultBranch,
++      description: description ?? `Local repository at ${repoDir}`,
++      htmlUrl: `file://${repoDir.replace(/\\/g, "/")}`,
++      language,
++      updatedAt: updatedAt ?? new Date().toISOString(),
++      archived: false,
++      permissions: { admin: true, push: true, pull: true },
++    };
++    this.repoInfoCache.set(cacheKey, info);
++    return { ...info };
++  }
++
++  private async detectLanguage(repoDir: string, sha: string): Promise<string | undefined> {
++    try {
++      const res = await this.git(["ls-tree", "-r", "--name-only", sha], repoDir, { timeoutMs: 20_000 });
++      if (res.code !== 0) return undefined;
++      const counts = new Map<string, number>();
++      let seen = 0;
++      for (const line of res.stdout.split("\n")) {
++        const path = line.trim();
++        if (!path) continue;
++        if (++seen > 5000) break; // sampling cap for large repositories
++        if (path.startsWith("CodeVia/")) continue;
++        const language = EXT_LANGUAGE[extname(path).toLowerCase()];
++        if (language) counts.set(language, (counts.get(language) ?? 0) + 1);
++      }
++      let best: string | undefined;
++      let bestCount = 0;
++      for (const [language, count] of counts) {
++        if (count > bestCount) {
++          best = language;
++          bestCount = count;
++        }
++      }
++      return best;
++    } catch {
++      return undefined;
++    }
++  }
++
++  async listRepositories(opts: ListRepositoriesOptions = {}): Promise<GithubRepository[]> {
++    await this.ensureGitAvailable();
++    if (!existsSync(this.rootDir)) return [];
++    const found = new Map<string, GithubRepository>();
++    for (const entry of readdirSync(this.rootDir, { withFileTypes: true })) {
++      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
++      // Case 1: a repository directly under rootDir → owned by defaultOwner.
++      const direct = await this.inspectRepo(this.defaultOwner, stripDotGit(entry.name), join(this.rootDir, entry.name));
++      if (direct) {
++        found.set(direct.fullName, direct);
++        continue;
++      }
++      // Case 2: an owner folder containing <owner>/<repo> pairs.
++      const ownerDir = join(this.rootDir, entry.name);
++      let subs;
++      try {
++        subs = readdirSync(ownerDir, { withFileTypes: true });
++      } catch {
++        continue;
++      }
++      for (const sub of subs) {
++        if (!sub.isDirectory() || sub.name.startsWith(".")) continue;
++        const nested = await this.inspectRepo(entry.name, stripDotGit(sub.name), join(ownerDir, sub.name));
++        if (nested) found.set(nested.fullName, nested);
++      }
++    }
++    const query = (opts.query ?? "").trim().toLowerCase();
++    const list = [...found.values()].filter(
++      (r) => !query || r.fullName.toLowerCase().includes(query) || (r.description ?? "").toLowerCase().includes(query),
++    );
++    return list.slice(0, opts.limit ?? 300);
++  }
++
++  async getRepository(repo: GithubRepoRef): Promise<GithubRepository | undefined> {
++    await this.ensureGitAvailable();
++    try {
++      const repoDir = this.resolveRepoDir(repo);
++      await this.maybeFetch(repoDir);
++      return await this.inspectRepo(repo.owner, repo.name, repoDir);
++    } catch (err) {
++      if (err instanceof LocalGitError && err.code === "LOCAL_REPO_NOT_FOUND") return undefined;
++      throw err;
++    }
++  }
++
++  async createRepository(opts: CreateRepositoryOptions): Promise<GithubRepository> {
++    await this.ensureGitAvailable();
++    const owner = (opts.owner ?? this.defaultOwner).trim();
++    const name = opts.name.trim();
++    this.validateRepoRef({ owner, name });
++    const defaultBranch = opts.defaultBranch ?? "main";
++    validateBranchName(defaultBranch);
++    const repoDir = join(this.rootDir, owner, name);
++    if (existsSync(repoDir)) {
++      throw new LocalGitError("LOCAL_INVALID_INPUT", `Repository already exists at ${repoDir}`);
++    }
++    mkdirSync(repoDir, { recursive: true });
++    let initRes = await this.git(["init", "-b", defaultBranch], repoDir);
++    if (initRes.code !== 0 && /unknown option/i.test(initRes.stderr)) {
++      // git < 2.28 has no `init -b`
++      initRes = await this.git(["init"], repoDir);
++      if (initRes.code === 0) {
++        await this.git(["symbolic-ref", "HEAD", `refs/heads/${defaultBranch}`], repoDir);
++      }
++    }
++    if (initRes.code !== 0) throw classifyGitFailure(initRes.stderr, "git init failed");
++    if (opts.autoInit !== false) {
++      writeFileSync(join(repoDir, "README.md"), `# ${name}\n\n${opts.description ?? ""}\n`, "utf8");
++      const env = await this.commitEnv(repoDir);
++      await this.gitChecked(["add", "README.md"], repoDir, "git add failed");
++      await this.gitChecked(["commit", "-m", "Initial commit"], repoDir, "git commit failed", { env });
++    }
++    if (opts.description) {
++      const meta = await this.readMeta(repoDir);
++      meta.description = opts.description;
++      await this.writeMeta(repoDir, meta);
++    }
++    const info = await this.inspectRepo(owner, name, repoDir);
++    if (!info) throw new LocalGitError("LOCAL_GIT_FAILED", `Failed to initialize local repository at ${repoDir}`);
++    return info;
++  }
++
++  async getViewer(): Promise<GithubViewer> {
++    await this.ensureGitAvailable();
++    const name = (await this.git(["config", "user.name"], this.rootDir)).stdout.trim();
++    return {
++      login: name ? name.replace(/\s+/g, "-") : this.defaultOwner,
++      name: name || "Local Git User",
++      scopes: ["repo", "read:user", "user:email"],
++    };
++  }
++
++  /* ------------------------------------------------------------------ *
++   * reads
++   * ------------------------------------------------------------------ */
++
++  async listBranches(repo: GithubRepoRef): Promise<GithubBranch[]> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    const res = await this.git(["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads"], repoDir);
++    if (res.code !== 0) throw classifyGitFailure(res.stderr, `git for-each-ref failed in ${repo.owner}/${repo.name}`);
++    return res.stdout
++      .split(/\r?\n/)
++      .map((line) => line.trim())
++      .filter(Boolean)
++      .map((line) => {
++        const spaceAt = line.lastIndexOf(" ");
++        return { name: line.slice(0, spaceAt), sha: line.slice(spaceAt + 1) };
++      });
++  }
++
++  async listCommits(repo: GithubRepoRef, branch?: string): Promise<GithubCommit[]> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    const ref = (branch ?? "").trim();
++    const sha = await this.resolveCommitSha(repoDir, ref || "HEAD");
++    if (!sha) return []; // unknown branch → empty history (UI-friendly absence)
++    const res = await this.git(["log", "-n", "30", "--format=%H%x09%an%x09%cI%x09%s", sha], repoDir);
++    if (res.code !== 0) throw classifyGitFailure(res.stderr, `git log failed in ${repo.owner}/${repo.name}`);
++    return res.stdout
++      .split(/\r?\n/)
++      .filter(Boolean)
++      .map((line) => {
++        const [sha2, author, date, ...message] = line.split("\t");
++        return { sha: sha2, author, date, message: message.join("\t") };
++      });
++  }
++
++  async listFiles(repo: GithubRepoRef, branch?: string, path?: string): Promise<GithubTreeEntry[]> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    const ref = (branch ?? "").trim();
++    const sha = await this.resolveCommitSha(repoDir, ref || "HEAD");
++    if (!sha) {
++      if (!ref && (await this.git(["rev-parse", "--verify", "--quiet", "HEAD"], repoDir)).code !== 0) {
++        return []; // freshly initialized repository: no commits yet
++      }
++      throw new LocalGitError("LOCAL_REF_NOT_FOUND", `Ref "${ref || "HEAD"}" not found in ${repo.owner}/${repo.name}`);
++    }
++    const prefix = path ? normalizeRepoPath(path) : null;
++    if (path && !prefix) return []; // unsafe/empty path → no matches
++    const args = ["ls-tree", "-r", "-l", "-z", "--full-tree", sha];
++    if (prefix) args.push("--", `:(literal)${prefix}`);
++    const res = await this.git(args, repoDir);
++    if (res.code !== 0) throw classifyGitFailure(res.stderr, `git ls-tree failed in ${repo.owner}/${repo.name}`);
++    const stdout = res.stdout;
++    if (prefix && !stdout.trim()) {
++      // project-state relies on this exact signal: a missing CodeVia/ folder
++      // is a 404 so it falls back to reading the repository root.
++      throw new LocalGitError(
++        "LOCAL_PATH_NOT_FOUND",
++        `Path "${prefix}" not found in ${repo.owner}/${repo.name}@${sha.slice(0, 7)}`,
++      );
++    }
++    const entries: GithubTreeEntry[] = [];
++    for (const chunk of stdout.split("\0")) {
++      if (!chunk) continue;
++      const tabAt = chunk.indexOf("\t");
++      if (tabAt < 0) continue;
++      const meta = chunk.slice(0, tabAt).trim().split(/\s+/);
++      const filePath = chunk.slice(tabAt + 1);
++      const size = Number(meta[3]);
++      entries.push({
++        path: filePath,
++        type: meta[1] === "tree" ? "tree" : "blob",
++        size: Number.isFinite(size) ? size : undefined,
++      });
++    }
++    return entries;
++  }
++
++  async getFile(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFile | undefined> {
++    await this.ensureGitAvailable();
++    const cleanPath = normalizeRepoPath(path);
++    if (!cleanPath) return undefined; // unsafe paths simply do not exist
++    let repoDir: string;
++    try {
++      repoDir = this.resolveRepoDir(repo);
++    } catch (err) {
++      if (err instanceof LocalGitError && err.code === "LOCAL_REPO_NOT_FOUND") return undefined;
++      throw err;
++    }
++    const ref = (branch ?? "").trim() || "HEAD";
++    if (ref.startsWith("-")) return undefined;
++    const shaRes = await this.git(["rev-parse", "--verify", "--quiet", `${ref}:${cleanPath}`], repoDir);
++    if (shaRes.code !== 0) return undefined;
++    const blobSha = shaRes.stdout.trim();
++    const typeRes = await this.git(["cat-file", "-t", blobSha], repoDir);
++    if (typeRes.code !== 0 || typeRes.stdout.trim() !== "blob") return undefined; // directories are not files
++    const show = await this.git(["cat-file", "blob", blobSha], repoDir);
++    if (show.code !== 0) return undefined;
++    return { path: cleanPath, content: show.stdout, sha: blobSha };
++  }
++
++  /* ------------------------------------------------------------------ *
++   * writes
++   * ------------------------------------------------------------------ */
++
++  async createBranch(repo: GithubRepoRef, name: string, baseSha: string): Promise<GithubBranch> {
++    await this.ensureGitAvailable();
++    validateBranchName(name);
++    if (!isSha(baseSha)) {
++      throw new LocalGitError("LOCAL_INVALID_INPUT", `Invalid base commit SHA: ${String(baseSha).slice(0, 12)}`);
++    }
++    const repoDir = this.resolveRepoDir(repo);
++    const res = await this.git(["branch", "--force", name, baseSha], repoDir);
++    if (res.code !== 0) {
++      if (/not a valid object name|not a valid branch point/i.test(res.stderr)) {
++        throw new LocalGitError(
++          "LOCAL_REF_NOT_FOUND",
++          `Base commit ${baseSha.slice(0, 7)} not found in ${repo.owner}/${repo.name}`,
++        );
++      }
++      if (/checked out/i.test(res.stderr)) {
++        throw new LocalGitError(
++          "LOCAL_GIT_FAILED",
++          `Cannot force-update branch "${name}": it is checked out. Use a different agent branch name.`,
++        );
++      }
++      throw classifyGitFailure(res.stderr, `git branch failed for "${name}"`);
++    }
++    const sha = (await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], repoDir)).stdout.trim();
++    if (!sha) throw classifyGitFailure(res.stderr, `git branch failed for "${name}"`);
++    await this.maybePush(repoDir, name);
++    return { name, sha };
++  }
++
++  async commit(
++    repo: GithubRepoRef,
++    branch: string,
++    message: string,
++    files: GithubFile[],
++    parentSha?: string,
++  ): Promise<GithubCommit> {
++    await this.ensureGitAvailable();
++    validateBranchName(branch);
++    const repoDir = this.resolveRepoDir(repo);
++    const adds = (files ?? []).map((f) => {
++      const path = normalizeRepoPath(f?.path ?? "");
++      if (!path) throw new LocalGitError("LOCAL_INVALID_INPUT", `Unsafe repository path: ${f?.path}`);
++      if (typeof f.content !== "string") throw new LocalGitError("LOCAL_INVALID_INPUT", `File content must be a string: ${path}`);
++      return { path, content: f.content };
++    });
++
++    return this.withRepoLock(repoDir, async () => {
++      const head = await this.requireBranchHead(repoDir, branch);
++      if (parentSha && parentSha !== head) {
++        throw new LocalGitError(
++          "LOCAL_STALE_PARENT",
++          "Repository changed after inspection; refusing to overwrite newer work.",
++        );
++      }
++      // Ask BEFORE the ref moves — after it, our own commit would look dirty.
++      const dirty = await this.dirtyPaths(repoDir, adds.map((a) => a.path));
++      const { sha, author } = await this.commitViaIndex(repoDir, head, message, adds, []);
++      await this.updateRefChecked(repoDir, branch, sha, head);
++      try {
++        await this.syncWorktreeIfCheckedOut(repoDir, branch, sha, adds.map((a) => a.path), [], dirty);
++      } catch (err) {
++        throw this.asCommittedError(err, sha, `Commit ${sha.slice(0, 7)} was created and branch "${branch}" points to it, but the working tree could not be synced`);
++      }
++      await this.maybePush(repoDir, branch);
++      return { sha, message, author, date: new Date().toISOString() };
++    });
++  }
++
++  async deleteFiles(
++    repo: GithubRepoRef,
++    branch: string,
++    message: string,
++    paths: string[],
++    parentSha?: string,
++  ): Promise<GithubCommit> {
++    await this.ensureGitAvailable();
++    validateBranchName(branch);
++    const repoDir = this.resolveRepoDir(repo);
++    const removes = (paths ?? []).map((p) => {
++      const path = normalizeRepoPath(p ?? "");
++      if (!path) throw new LocalGitError("LOCAL_INVALID_INPUT", `Unsafe repository path: ${p}`);
++      return path;
++    });
++
++    return this.withRepoLock(repoDir, async () => {
++      const head = await this.requireBranchHead(repoDir, branch);
++      if (parentSha && parentSha !== head) {
++        throw new LocalGitError(
++          "LOCAL_STALE_PARENT",
++          "Repository changed after inspection; refusing to delete newer work.",
++        );
++      }
++      const dirty = await this.dirtyPaths(repoDir, removes);
++      const { sha, author } = await this.commitViaIndex(repoDir, head, message, [], removes);
++      await this.updateRefChecked(repoDir, branch, sha, head);
++      try {
++        await this.syncWorktreeIfCheckedOut(repoDir, branch, sha, [], removes, dirty);
++      } catch (err) {
++        throw this.asCommittedError(err, sha, `Commit ${sha.slice(0, 7)} was created and branch "${branch}" points to it, but the working tree could not be synced`);
++      }
++      await this.maybePush(repoDir, branch);
++      return { sha, message, author, date: new Date().toISOString() };
++    });
++  }
++
++  /* ------------------------------------------------------------------ *
++   * pull requests (local metadata) & merges (real git)
++   * ------------------------------------------------------------------ */
++
++  async listPullRequests(repo: GithubRepoRef): Promise<GithubPullRequest[]> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    const meta = await this.readMeta(repoDir);
++    return meta.pulls.filter((p) => p.state === "open").map((p) => ({ ...p }));
++  }
++
++  async getPullRequest(repo: GithubRepoRef, number: number): Promise<GithubPullRequest | undefined> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    const pr = (await this.readMeta(repoDir)).pulls.find((p) => p.number === number);
++    if (!pr) return undefined;
++    const liveHead = await this.branchHeadOpt(repoDir, pr.head);
++    return { ...pr, headSha: liveHead ?? pr.headSha };
++  }
++
++  async createPullRequest(
++    repo: GithubRepoRef,
++    title: string,
++    body: string,
++    head: string,
++    base: string,
++    opts?: { draft?: boolean },
++  ): Promise<GithubPullRequest> {
++    await this.ensureGitAvailable();
++    validateBranchName(head);
++    validateBranchName(base);
++    const repoDir = this.resolveRepoDir(repo);
++    const headSha = await this.branchHeadOpt(repoDir, head);
++    if (!headSha) {
++      throw new LocalGitError("LOCAL_REF_NOT_FOUND", `Cannot open a pull request: head branch "${head}" not found`);
++    }
++    if (!(await this.branchHeadOpt(repoDir, base))) {
++      throw new LocalGitError("LOCAL_REF_NOT_FOUND", `Cannot open a pull request: base branch "${base}" not found`);
++    }
++    // The whole read-modify-write runs under the repo lock so a concurrent
++    // merge (or another PR) can never lose this write.
++    return this.withRepoLock(repoDir, async () => {
++      const meta = await this.readMeta(repoDir);
++      // Idempotent: an open PR for the same head/base pair is returned as-is.
++      const existing = meta.pulls.find((p) => p.state === "open" && p.head === head && p.base === base);
++      if (existing) {
++        return { ...existing, headSha: (await this.branchHeadOpt(repoDir, head)) ?? existing.headSha };
++      }
++      const number = meta.pulls.reduce((max, p) => Math.max(max, p.number), 0) + 1;
++      const pr: StoredPullRequest = {
++        number,
++        draft: opts?.draft ?? false,
++        title,
++        state: "open",
++        head,
++        base,
++        body,
++        htmlUrl: `local://${repo.owner}/${repo.name}/pull/${number}`,
++        createdAt: new Date().toISOString(),
++        headSha,
++      };
++      meta.pulls.unshift(pr);
++      await this.writeMeta(repoDir, meta);
++      return { ...pr };
++    });
++  }
++
++  async updatePullRequest(
++    repo: GithubRepoRef,
++    number: number,
++    patch: Partial<{ title: string; body: string; state: string }>,
++  ): Promise<GithubPullRequest> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    return this.withRepoLock(repoDir, async () => {
++      const meta = await this.readMeta(repoDir);
++      const pr = meta.pulls.find((p) => p.number === number);
++      if (!pr) {
++        throw new LocalGitError("LOCAL_REF_NOT_FOUND", `Pull request #${number} not found in ${repo.owner}/${repo.name}`);
++      }
++      if (patch.title !== undefined) pr.title = patch.title;
++      if (patch.body !== undefined) pr.body = patch.body;
++      if (patch.state !== undefined) pr.state = patch.state;
++      await this.writeMeta(repoDir, meta);
++      return { ...pr };
++    });
++  }
++
++  async mergePullRequest(
++    repo: GithubRepoRef,
++    number: number,
++    opts?: { method?: "merge" | "squash" | "rebase"; commitTitle?: string; sha?: string },
++  ): Promise<{ merged: boolean; sha?: string; message?: string }> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++
++    return this.withRepoLock(repoDir, async () => {
++      const meta = await this.readMeta(repoDir);
++      const pr = meta.pulls.find((p) => p.number === number);
++      if (!pr) return { merged: false, message: `Pull request #${number} not found in ${repo.owner}/${repo.name}` };
++      if (pr.state !== "open") return { merged: false, message: `Pull request #${number} is already ${pr.state}` };
++      const headSha = await this.branchHeadOpt(repoDir, pr.head);
++      const baseSha = await this.branchHeadOpt(repoDir, pr.base);
++      if (!headSha || !baseSha) {
++        return { merged: false, message: `Branch "${pr.head}" or "${pr.base}" not found — nothing to merge` };
++      }
++      if (opts?.sha && headSha !== opts.sha) {
++        return { merged: false, message: "Head branch moved since review" };
++      }
++      const merged = await this.mergeTree(repoDir, baseSha, headSha);
++      if (merged.code !== 0) {
++        const conflicts = merged.stdout
++          .split(/\r?\n/)
++          .map((l) => l.trim())
++          .filter((l) => /^CONFLICT/i.test(l))
++          .slice(0, 5);
++        return {
++          merged: false,
++          message:
++            `Merge conflict between "${pr.head}" and "${pr.base}"` +
++            (conflicts.length ? `: ${conflicts.join("; ")}` : "") +
++            ". Resolve it locally (git merge), push a rebased branch, then retry.",
++        };
++      }
++      const tree = merged.stdout.split(/\r?\n/)[0].trim();
++      const method = opts?.method === "squash" || opts?.method === "rebase" ? "squash" : "merge";
++      const commitTitle =
++        opts?.commitTitle ??
++        (method === "squash" ? `Merge PR #${number}: ${pr.title}` : `Merge pull request #${number} from ${pr.head}`);
++      const env = await this.commitEnv(repoDir);
++      const args =
++        method === "squash"
++          ? ["commit-tree", tree, "-p", baseSha, "-m", commitTitle]
++          : ["commit-tree", tree, "-p", baseSha, "-p", headSha, "-m", commitTitle];
++      const commitRes = await this.gitChecked(args, repoDir, `git commit-tree failed while merging PR #${number}`, { env });
++      const newSha = commitRes.stdout.trim();
++
++      // Dirty check before the ref moves (see commit()).
++      const changed = await this.changedPaths(repoDir, baseSha, newSha);
++      const dirty = await this.dirtyPaths(repoDir, changed.map((c) => c.path));
++      const toWrite = changed.filter((c) => !c.status.startsWith("D")).map((c) => c.path);
++      const toRemove = changed.filter((c) => c.status.startsWith("D")).map((c) => c.path);
++
++      const upd = await this.git(["update-ref", `refs/heads/${pr.base}`, newSha, baseSha], repoDir);
++      if (upd.code !== 0) {
++        if (/is at [0-9a-f]+ but expected/i.test(upd.stderr)) {
++          return { merged: false, message: `Base branch "${pr.base}" moved during the merge — please retry` };
++        }
++        throw classifyGitFailure(upd.stderr, `git update-ref failed while merging PR #${number}`);
++      }
++      pr.state = "merged";
++      await this.writeMeta(repoDir, meta);
++      try {
++        await this.syncWorktreeIfCheckedOut(repoDir, pr.base, newSha, toWrite, toRemove, dirty);
++      } catch (err) {
++        throw this.asCommittedError(err, newSha, `PR #${number} was merged as ${newSha.slice(0, 7)}, but the working tree could not be synced`);
++      }
++      await this.maybePush(repoDir, pr.base);
++      return { merged: true, sha: newSha, message: `Merged locally via git (${method})` };
++    });
++  }
++
++  /**
++   * 3-way merge via `git merge-tree --write-tree <base> <head>` (git >= 2.38).
++   * Exit 0 + first line = merged tree OID; exit 1 = conflict. Older git falls
++   * back to a throwaway worktree that is always removed and pruned.
++   */
++  private async mergeTree(repoDir: string, baseSha: string, headSha: string): Promise<GitExecResult> {
++    if (this.mergeTreeSupport !== false) {
++      const res = await this.git(["merge-tree", "--write-tree", baseSha, headSha], repoDir);
++      if (res.code === 0 || res.code === 1) return res;
++      if (/unknown option|usage:/i.test(res.stderr)) {
++        this.mergeTreeSupport = false;
++      } else {
++        return res;
++      }
++    }
++    return this.mergeTreeViaWorktree(repoDir, baseSha, headSha);
++  }
++
++  private async mergeTreeViaWorktree(repoDir: string, baseSha: string, headSha: string): Promise<GitExecResult> {
++    const worktreeDir = join(tmpdir(), `codevia-merge-${randomUUID()}`);
++    try {
++      const add = await this.git(["worktree", "add", "--detach", worktreeDir, baseSha], repoDir);
++      if (add.code !== 0) return { stdout: "", stderr: add.stderr, code: 1 };
++      const merge = await this.git(["merge", "--no-ff", "--no-commit", headSha], worktreeDir);
++      if (merge.code !== 0) {
++        return { stdout: "", stderr: merge.stderr, code: 1 };
++      }
++      const tree = await this.git(["write-tree"], worktreeDir);
++      if (tree.code !== 0) return { stdout: "", stderr: tree.stderr, code: 1 };
++      return { stdout: tree.stdout, stderr: "", code: 0 };
++    } finally {
++      await this.git(["worktree", "remove", "--force", worktreeDir], repoDir);
++      try {
++        rmSync(worktreeDir, { recursive: true, force: true });
++      } catch {
++        /* best effort */
++      }
++      await this.git(["worktree", "prune"], repoDir);
++    }
++  }
++
++  /* ------------------------------------------------------------------ *
++   * checks (local CI) / issues / releases
++   * ------------------------------------------------------------------ */
++
++  /**
++   * Local CI evidence for a commit:
++   *   - `local-git-integrity` — success iff the commit exists in the local
++   *     object database (never a fabricated GitHub Actions job name),
++   *   - `local-verify` — the REAL result of LOCAL_GIT_VERIFY_CMD (e.g.
++   *     "dotnet test" / "npm test") when configured, so QA and the merge gate
++   *     verify actual builds, not a stub.
++   */
++  async getChecks(repo: GithubRepoRef, sha: string): Promise<GithubCheck[]> {
++    await this.ensureGitAvailable();
++    let repoDir: string | undefined;
++    try {
++      repoDir = this.resolveRepoDir(repo);
++    } catch {
++      return [{ name: "local-git-integrity", status: "failure", detail: "Local repository not found" }];
++    }
++    if (!isSha(sha)) {
++      return [
++        { name: "local-git-integrity", status: "failure", detail: `Invalid commit SHA: ${String(sha).slice(0, 12)}` },
++      ];
++    }
++    const exists = await this.git(["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], repoDir);
++    if (exists.code !== 0) {
++      return [
++        {
++          name: "local-git-integrity",
++          status: "failure",
++          detail: `Commit ${sha.slice(0, 7)} does not exist in the local repository`,
++        },
++      ];
++    }
++    const checks: GithubCheck[] = [
++      {
++        name: "local-git-integrity",
++        status: "success",
++        detail: `Commit ${sha.slice(0, 7)} verified in the local git object database`,
++      },
++    ];
++    if (this.verifyCmd) {
++      checks.push(await this.runVerifyCommand(repoDir, this.verifyCmd));
++    }
++    return checks;
++  }
++
++  private runVerifyCommand(repoDir: string, command: string): Promise<GithubCheck> {
++    return new Promise((resolvePromise) => {
++      exec(
++        command,
++        {
++          cwd: repoDir,
++          timeout: 10 * 60_000,
++          maxBuffer: 4 * 1024 * 1024,
++          windowsHide: true,
++          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
++        },
++        (error, stdout, stderr) => {
++          const ok = !error;
++          resolvePromise({
++            name: "local-verify",
++            status: ok ? "success" : "failure",
++            detail: ok
++              ? `LOCAL_GIT_VERIFY_CMD passed (${command})`
++              : `LOCAL_GIT_VERIFY_CMD failed (${command}): ${trimGitStderr(`${stdout}\n${stderr}`, 200)}`,
++          });
++        },
++      );
++    });
++  }
++
++  async listIssues(repo: GithubRepoRef): Promise<GithubIssue[]> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    return (await this.readMeta(repoDir)).issues.map((i) => ({ ...i }));
++  }
++
++  async createIssue(repo: GithubRepoRef, title: string, body: string): Promise<GithubIssue> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    return this.withRepoLock(repoDir, async () => {
++      const meta = await this.readMeta(repoDir);
++      const number = meta.issues.reduce((max, i) => Math.max(max, i.number), 0) + 1;
++      const issue: StoredIssue = {
++        number,
++        title,
++        state: "open",
++        body,
++        htmlUrl: `local://${repo.owner}/${repo.name}/issues/${number}`,
++      };
++      meta.issues.unshift(issue);
++      await this.writeMeta(repoDir, meta);
++      return { ...issue };
++    });
++  }
++
++  async commentOnIssue(repo: GithubRepoRef, number: number, body: string): Promise<void> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    await this.withRepoLock(repoDir, async () => {
++      const meta = await this.readMeta(repoDir);
++      const issue = meta.issues.find((i) => i.number === number);
++      if (!issue) {
++        logger.debug(`LocalGitService: comment on missing issue #${number} ignored`, { repo: `${repo.owner}/${repo.name}` });
++        return;
++      }
++      issue.comments = [...(issue.comments ?? []), body];
++      await this.writeMeta(repoDir, meta);
++    });
++  }
++
++  async commentOnPullRequest(repo: GithubRepoRef, number: number, body: string): Promise<void> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    await this.withRepoLock(repoDir, async () => {
++      const meta = await this.readMeta(repoDir);
++      const pr = meta.pulls.find((p) => p.number === number);
++      if (!pr) {
++        logger.debug(`LocalGitService: comment on missing pull request #${number} ignored`, {
++          repo: `${repo.owner}/${repo.name}`,
++        });
++        return;
++      }
++      pr.comments = [...(pr.comments ?? []), body];
++      await this.writeMeta(repoDir, meta);
++    });
++  }
++
++  async listReleases(repo: GithubRepoRef): Promise<GithubRelease[]> {
++    await this.ensureGitAvailable();
++    const repoDir = this.resolveRepoDir(repo);
++    return (await this.readMeta(repoDir)).releases.map((r) => ({ ...r }));
++  }
++}
++
++function stripDotGit(name: string): string {
++  return name.endsWith(".git") ? name.slice(0, -4) : name;
++}
++
++/**
++ * Split a list into fixed-size chunks. Guards against Windows argv length
++ * limits (~32k chars) when an agent commits/reads hundreds of files at once.
++ */
++function chunk<T>(items: T[], size: number): T[][] {
++  const out: T[][] = [];
++  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
++  return out;
++}
++
++/** Extract the lock file path git complains about (absolute or cwd-relative). */
++function lockPathFromStderr(stderr: string, cwd: string): string | undefined {
++  const match = /unable to create '([^']+)'(?:\.\.\.)?:?/i.exec(stderr) ?? /'([^']+\.lock)'/i.exec(stderr);
++  if (!match) return undefined;
++  const path = match[1];
++  return isAbsolute(path) ? path : resolve(cwd, path);
++}
+--- /dev/null
++++ b/src/tests/local-git-error.test.ts
+@@ -0,0 +1,123 @@
++import { describe, expect, it } from "vitest";
++import { LocalGitError, classifyGitFailure, isLocalGitError, trimGitStderr } from "../github/local-git-error.js";
++
++/* ------------------------------------------------------------------ *
++ * LocalGitError contract — the error taxonomy every consumer relies on:
++ * routes read `statusCode`, repo-brief/project-state read `status`, the
++ * worker reads `retryable`, and half-applied commits carry `committed`.
++ * ------------------------------------------------------------------ */
++
++describe("LocalGitError contract", () => {
++  it("exposes statusCode and status with the same value", () => {
++    const e = new LocalGitError("LOCAL_REF_NOT_FOUND", "x");
++    expect(e.statusCode).toBe(404);
++    expect(e.status).toBe(404);
++  });
++
++  it("maps each code to the agreed HTTP status", () => {
++    const expected: Array<[LocalGitError["code"], number]> = [
++      ["LOCAL_GIT_UNAVAILABLE", 503],
++      ["LOCAL_REPO_NOT_FOUND", 404],
++      ["LOCAL_REF_NOT_FOUND", 404],
++      ["LOCAL_PATH_NOT_FOUND", 404],
++      ["LOCAL_INVALID_INPUT", 400],
++      ["LOCAL_STALE_PARENT", 409],
++      ["LOCAL_LOCKED", 423],
++      ["LOCAL_MERGE_CONFLICT", 409],
++      ["LOCAL_HEAD_MOVED", 409],
++      ["LOCAL_META_CORRUPT", 500],
++      ["LOCAL_GIT_FAILED", 502],
++    ];
++    for (const [code, status] of expected) {
++      expect(new LocalGitError(code, "m").statusCode, code).toBe(status);
++    }
++  });
++
++  it("marks only the transient codes as retryable", () => {
++    const retryable = ["LOCAL_GIT_UNAVAILABLE", "LOCAL_LOCKED", "LOCAL_GIT_FAILED"] as const;
++    const permanent = [
++      "LOCAL_REPO_NOT_FOUND",
++      "LOCAL_REF_NOT_FOUND",
++      "LOCAL_PATH_NOT_FOUND",
++      "LOCAL_INVALID_INPUT",
++      "LOCAL_STALE_PARENT",
++      "LOCAL_MERGE_CONFLICT",
++      "LOCAL_HEAD_MOVED",
++      "LOCAL_META_CORRUPT",
++    ] as const;
++    for (const code of retryable) expect(new LocalGitError(code, "m").retryable, code).toBe(true);
++    for (const code of permanent) expect(new LocalGitError(code, "m").retryable, code).toBe(false);
++  });
++
++  it("defaults committed to false and keeps the sha only when given", () => {
++    const plain = new LocalGitError("LOCAL_GIT_FAILED", "m");
++    expect(plain.committed).toBe(false);
++    expect(plain.sha).toBeUndefined();
++    const after = new LocalGitError("LOCAL_GIT_FAILED", "push", { committed: true, sha: "abc1234" });
++    expect(after.committed).toBe(true);
++    expect(after.sha).toBe("abc1234");
++  });
++
++  it("carries provider local-git, the name and the code", () => {
++    const e = new LocalGitError("LOCAL_META_CORRUPT", "m");
++    expect(e.provider).toBe("local-git");
++    expect(e.name).toBe("LocalGitError");
++    expect(e.code).toBe("LOCAL_META_CORRUPT");
++  });
++
++  it("keeps the cause when one is supplied", () => {
++    const original = new Error("ENOENT");
++    const e = new LocalGitError("LOCAL_GIT_UNAVAILABLE", "m", { cause: original });
++    expect(e.cause).toBe(original);
++  });
++
++  it("is recognised by isLocalGitError and not by plain errors", () => {
++    expect(isLocalGitError(new LocalGitError("LOCAL_GIT_FAILED", "m"))).toBe(true);
++    expect(isLocalGitError(new Error("m"))).toBe(false);
++    expect(isLocalGitError(undefined)).toBe(false);
++  });
++});
++
++describe("classifyGitFailure", () => {
++  it("classifies an index lock as LOCAL_LOCKED (retryable)", () => {
++    const e = classifyGitFailure(
++      "fatal: Unable to create '/r/.git/index.lock': File exists.\n\nAnother git process seems to be running...",
++      "git read-tree failed",
++    );
++    expect(e.code).toBe("LOCAL_LOCKED");
++    expect(e.retryable).toBe(true);
++    expect(e.statusCode).toBe(423);
++  });
++
++  it("classifies a locked branch reference as LOCAL_LOCKED", () => {
++    const e = classifyGitFailure("error: cannot lock ref 'refs/heads/main'", "update-ref failed");
++    expect(e.code).toBe("LOCAL_LOCKED");
++  });
++
++  it("classifies a compare-and-swap mismatch as LOCAL_STALE_PARENT", () => {
++    const e = classifyGitFailure(
++      "fatal: update_ref failed for ref 'refs/heads/main': cannot lock ref 'refs/heads/main': is at 0e1882ef5d04e702a30b8d80c115665d9a29d923 but expected 1234567890123456789012345678901234567890",
++      "git update-ref failed",
++    );
++    expect(e.code).toBe("LOCAL_STALE_PARENT");
++    expect(e.statusCode).toBe(409);
++    expect(e.retryable).toBe(false);
++  });
++
++  it("falls back to LOCAL_GIT_FAILED with stderr attached", () => {
++    const e = classifyGitFailure("fatal: bad object", "git cat-file failed");
++    expect(e.code).toBe("LOCAL_GIT_FAILED");
++    expect(e.message).toMatch(/git cat-file failed: fatal: bad object/);
++  });
++
++  it("uses a generic message when stderr is empty", () => {
++    expect(classifyGitFailure("", "git failed").message).toMatch(/git exited with an error/);
++  });
++});
++
++describe("trimGitStderr", () => {
++  it("removes trailing whitespace and caps the length", () => {
++    expect(trimGitStderr("abc   \n\n")).toBe("abc");
++    expect(trimGitStderr("x".repeat(500), 10).length).toBe(10);
++  });
++});
+--- /dev/null
++++ b/src/tests/local-git-service.compat.test.ts
+@@ -0,0 +1,313 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { execFileSync } from "node:child_process";
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { dirname, join } from "node:path";
++import { LocalGitService } from "../github/local-git-service.js";
++
++vi.mock("../logger.js", () => ({
++  logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn() })) },
++}));
++
++const ENV = {
++  ...process.env,
++  GIT_AUTHOR_NAME: "Dev",
++  GIT_AUTHOR_EMAIL: "dev@local",
++  GIT_COMMITTER_NAME: "Dev",
++  GIT_COMMITTER_EMAIL: "dev@local",
++};
++const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, encoding: "utf8" }).trim();
++
++let root: string;
++let svc: LocalGitService;
++const ref = { owner: "acme", name: "shop" };
++const repoDir = () => join(root, "acme", "shop");
++
++function makeRepo(files: Record<string, string>, branch = "main"): string {
++  const dir = repoDir();
++  mkdirSync(dir, { recursive: true });
++  git(dir, "init", "-b", branch);
++  for (const [p, c] of Object.entries(files)) {
++    mkdirSync(dirname(join(dir, p)), { recursive: true });
++    writeFileSync(join(dir, p), c);
++  }
++  git(dir, "add", "-A");
++  git(dir, "commit", "-m", "init");
++  return dir;
++}
++
++const head = async (branch = "main") => (await svc.listBranches(ref)).find((b) => b.name === branch)!.sha;
++
++beforeEach(() => {
++  root = mkdtempSync(join(tmpdir(), "cv-compat-"));
++  svc = new LocalGitService({ rootDir: root, defaultOwner: "local", autoPush: false, autoFetch: false });
++});
++afterEach(() => rmSync(root, { recursive: true, force: true }));
++
++describe("LocalGit compatibility: repository discovery", () => {
++  it("01 discovers an owner/name repo and reports its default branch", async () => {
++    makeRepo({ "README.md": "x" });
++    const list = await svc.listRepositories();
++    expect(list.map((r) => r.fullName)).toContain("acme/shop");
++    expect((await svc.getRepository(ref))?.defaultBranch).toBe("main");
++  });
++
++  it("02 a flat repo directly under the root is owned by defaultOwner", async () => {
++    const dir = join(root, "legacy");
++    mkdirSync(dir, { recursive: true });
++    git(dir, "init", "-b", "main");
++    writeFileSync(join(dir, "a.txt"), "a");
++    git(dir, "add", "-A");
++    git(dir, "commit", "-m", "init");
++    const list = await svc.listRepositories();
++    expect(list.map((r) => r.fullName)).toContain("local/legacy");
++  });
++
++  it("03 a bare repository (name.git) is resolved and readable", async () => {
++    const dir = makeRepo({ "README.md": "bare me" });
++    git(root, "clone", "--bare", dir, join(root, "acme", "shop.git"));
++    const files = await svc.listFiles(ref, "main");
++    expect(files.map((f) => f.path)).toContain("README.md");
++  });
++
++  it("04 an empty repository (no commits) has no branches and no files", async () => {
++    mkdirSync(repoDir(), { recursive: true });
++    git(repoDir(), "init", "-b", "main");
++    expect(await svc.listBranches(ref)).toEqual([]);
++    expect(await svc.listFiles(ref)).toEqual([]);
++  });
++
++  it("05 plain folders that are not git repos are ignored", async () => {
++    mkdirSync(join(root, "acme", "notes"), { recursive: true });
++    writeFileSync(join(root, "acme", "notes", "todo.txt"), "x");
++    const list = await svc.listRepositories();
++    expect(list.map((r) => r.fullName)).not.toContain("acme/notes");
++  });
++
++  it("06 detects the primary language from extensions and ignores CodeVia/", async () => {
++    makeRepo({
++      "a.cs": "1",
++      "b.cs": "2",
++      "c.ts": "3",
++      "CodeVia/x.ts": "4",
++      "CodeVia/y.ts": "5",
++      "CodeVia/z.ts": "6",
++    });
++    expect((await svc.getRepository(ref))?.language).toBe("C#");
++  });
++
++  it("07 rejects unsafe repository names (path traversal)", async () => {
++    await expect(svc.getRepository({ owner: "..", name: "etc" })).rejects.toThrow(/Unsafe/);
++  });
++});
++
++describe("LocalGit compatibility: CodeVia/* state", () => {
++  it("08 commit writes CodeVia/project.md and reads it back byte-identical (utf-8)", async () => {
++    makeRepo({ "README.md": "x" });
++    const content = "---\nid: p1\n---\n# فروشگاه\n中文\n";
++    await svc.commit(ref, "main", "[CodeVia] save project state [skip ci]", [{ path: "CodeVia/project.md", content }], await head());
++    expect((await svc.getFile(ref, "CodeVia/project.md", "main"))?.content).toBe(content);
++  });
++
++  it("09 a stale parentSha is refused (compare-and-swap)", async () => {
++    makeRepo({ "README.md": "x" });
++    const old = await head();
++    await svc.commit(ref, "main", "A", [{ path: "CodeVia/a.md", content: "a" }], old);
++    await expect(svc.commit(ref, "main", "B", [{ path: "CodeVia/b.md", content: "b" }], old)).rejects.toThrow(
++      /changed after inspection/,
++    );
++  });
++
++  it("10 five concurrent state writes all land; none is lost", async () => {
++    makeRepo({ "README.md": "x" });
++    await Promise.all(
++      [1, 2, 3, 4, 5].map((i) => svc.commit(ref, "main", `c${i}`, [{ path: `CodeVia/f${i}.md`, content: `${i}` }])),
++    );
++    const names = (await svc.listFiles(ref, "main", "CodeVia")).map((f) => f.path);
++    expect(names.sort()).toEqual([1, 2, 3, 4, 5].map((i) => `CodeVia/f${i}.md`));
++    expect(git(repoDir(), "rev-list", "--count", "main")).toBe("6");
++  });
++
++  it("11 an unstaged edit in the developer's working tree survives a state commit", async () => {
++    const dir = makeRepo({ "src.cs": "original" });
++    writeFileSync(join(dir, "src.cs"), "dirty local edit");
++    await svc.commit(ref, "main", "state", [{ path: "CodeVia/project.md", content: "p" }], await head());
++    expect(readFileSync(join(dir, "src.cs"), "utf8")).toBe("dirty local edit");
++  });
++
++  it("11b a STAGED change in the developer's index survives a state commit", async () => {
++    const dir = makeRepo({ "src.cs": "original", "other.ts": "o" });
++    writeFileSync(join(dir, "other.ts"), "staged edit");
++    git(dir, "add", "other.ts"); // staged, not committed
++    writeFileSync(join(dir, "src.cs"), "unstaged edit");
++    await svc.commit(ref, "main", "state", [{ path: "CodeVia/project.md", content: "p" }], await head());
++    // the developer's staging area is exactly as they left it:
++    expect(git(dir, "diff", "--cached", "--name-only")).toBe("other.ts");
++    expect(git(dir, "diff", "--name-only")).toBe("src.cs");
++    // and the state file is present on disk:
++    expect(readFileSync(join(dir, "CodeVia", "project.md"), "utf8")).toBe("p");
++  });
++
++  it("12 a state commit on the checked-out branch appears on disk immediately", async () => {
++    const dir = makeRepo({ "README.md": "x" });
++    const content = "on disk";
++    await svc.commit(ref, "main", "state", [{ path: "CodeVia/project.md", content }], await head());
++    expect(readFileSync(join(dir, "CodeVia", "project.md"), "utf8")).toBe(content);
++  });
++
++  it("13 deleteFiles removes a CodeVia file; getFile then returns undefined", async () => {
++    makeRepo({ "README.md": "x" });
++    await svc.commit(ref, "main", "add", [{ path: "CodeVia/tmp.md", content: "t" }], await head());
++    await svc.deleteFiles(ref, "main", "remove", ["CodeVia/tmp.md"], await head());
++    expect(await svc.getFile(ref, "CodeVia/tmp.md", "main")).toBeUndefined();
++  });
++
++  it("14 deleteFiles of a path that does not exist is a successful no-op", async () => {
++    makeRepo({ "README.md": "x" });
++    await expect(svc.deleteFiles(ref, "main", "noop", ["CodeVia/nope.md"], await head())).resolves.toBeDefined();
++  });
++
++  it("15 listFiles on a missing CodeVia folder throws a 404 (state layer relies on this)", async () => {
++    makeRepo({ "README.md": "x" });
++    await expect(svc.listFiles(ref, "main", "CodeVia")).rejects.toMatchObject({ status: 404 });
++  });
++
++  it("16 getFile refuses path traversal and returns undefined", async () => {
++    makeRepo({ "README.md": "x" });
++    expect(await svc.getFile(ref, "../secret", "main")).toBeUndefined();
++  });
++
++  it("17 getFile accepts a commit SHA in place of a branch name (state layer reads by SHA)", async () => {
++    makeRepo({ "README.md": "hello" });
++    expect((await svc.getFile(ref, "README.md", await head()))?.content).toBe("hello");
++  });
++
++  it("18 Windows-style backslash paths are normalized in listFiles", async () => {
++    makeRepo({ "CodeVia/agents/a.md": "a" });
++    const paths = (await svc.listFiles(ref, "main", "CodeVia\\agents")).map((f) => f.path);
++    expect(paths).toContain("CodeVia/agents/a.md");
++  });
++
++  it("19 the [skip ci] marker is stored verbatim in the commit message", async () => {
++    const dir = makeRepo({ "README.md": "x" });
++    await svc.commit(ref, "main", "[CodeVia] save memory [skip ci]", [{ path: "CodeVia/memory.md", content: "m" }], await head());
++    expect(git(dir, "log", "-1", "--format=%B")).toContain("[skip ci]");
++  });
++
++  it("20 a commit on a path with a leading slash is accepted and stored under the clean path", async () => {
++    makeRepo({ "README.md": "x" });
++    await svc.commit(ref, "main", "s", [{ path: "/CodeVia/lead.md", content: "l" }], await head());
++    expect((await svc.getFile(ref, "CodeVia/lead.md", "main"))?.content).toBe("l");
++  });
++});
++
++describe("LocalGit compatibility: branches and working copy", () => {
++  it("21 createBranch from a commit creates a branch that listBranches reports", async () => {
++    makeRepo({ "README.md": "x" });
++    await svc.createBranch(ref, "agent-task-1", await head());
++    expect((await svc.listBranches(ref)).map((b) => b.name)).toContain("agent-task-1");
++  });
++
++  it("22 createBranch rejects option-like names", async () => {
++    makeRepo({ "README.md": "x" });
++    await expect(svc.createBranch(ref, "-bad", await head())).rejects.toThrow(/Invalid branch name/);
++  });
++
++  it("23 a commit to a feature branch leaves main untouched", async () => {
++    makeRepo({ "README.md": "x" });
++    const main = await head();
++    await svc.createBranch(ref, "feat", main);
++    await svc.commit(ref, "feat", "feature work", [{ path: "src/feat.ts", content: "export {}" }], main);
++    expect(await head("main")).toBe(main);
++    expect(await head("feat")).not.toBe(main);
++  });
++});
++
++describe("LocalGit compatibility: pull requests, merge gate and checks", () => {
++  it("24 createPullRequest is idempotent for the same head and base", async () => {
++    makeRepo({ "README.md": "x" });
++    await svc.createBranch(ref, "feat", await head());
++    const a = await svc.createPullRequest(ref, "T", "B", "feat", "main", { draft: true });
++    const b = await svc.createPullRequest(ref, "T", "B", "feat", "main", { draft: true });
++    expect(b.number).toBe(a.number);
++    expect(await svc.listPullRequests(ref)).toHaveLength(1);
++  });
++
++  it("25 numbers increase per repository", async () => {
++    makeRepo({ "README.md": "x" });
++    await svc.createBranch(ref, "f1", await head());
++    await svc.createBranch(ref, "f2", await head());
++    const p1 = await svc.createPullRequest(ref, "1", "", "f1", "main");
++    const p2 = await svc.createPullRequest(ref, "2", "", "f2", "main");
++    expect([p1.number, p2.number]).toEqual([1, 2]);
++  });
++
++  it("26 getPullRequest reports the live head SHA after a new commit on the head branch", async () => {
++    makeRepo({ "README.md": "x" });
++    const main = await head();
++    await svc.createBranch(ref, "feat", main);
++    const pr = await svc.createPullRequest(ref, "T", "", "feat", "main");
++    await svc.commit(ref, "feat", "more", [{ path: "src/a.ts", content: "a" }], main);
++    const live = await svc.getPullRequest(ref, pr.number);
++    expect(live?.headSha).toBe(await head("feat"));
++    expect(live?.headSha).not.toBe(pr.headSha);
++  });
++
++  it("27 squash merge advances main, marks the PR merged and brings the head's files", async () => {
++    makeRepo({ "README.md": "x" });
++    const main = await head();
++    await svc.createBranch(ref, "feat", main);
++    await svc.commit(ref, "feat", "feat", [{ path: "src/new.ts", content: "n" }], main);
++    const pr = await svc.createPullRequest(ref, "T", "", "feat", "main");
++    const res = await svc.mergePullRequest(ref, pr.number, { method: "squash" });
++    expect(res.merged).toBe(true);
++    expect(await head("main")).toBe(res.sha);
++    expect((await svc.getFile(ref, "src/new.ts", "main"))?.content).toBe("n");
++    expect(await svc.listPullRequests(ref)).toHaveLength(0);
++  });
++
++  it("28 merge with a stale expected SHA is refused and main is unchanged", async () => {
++    makeRepo({ "README.md": "x" });
++    const main = await head();
++    await svc.createBranch(ref, "feat", main);
++    await svc.commit(ref, "feat", "v1", [{ path: "src/a.ts", content: "1" }], main);
++    const pr = await svc.createPullRequest(ref, "T", "", "feat", "main");
++    const reviewed = await head("feat");
++    await svc.commit(ref, "feat", "v2", [{ path: "src/a.ts", content: "2" }], reviewed);
++    const res = await svc.mergePullRequest(ref, pr.number, { sha: reviewed });
++    expect(res.merged).toBe(false);
++    expect(res.message).toMatch(/moved/);
++    expect(await head("main")).toBe(main);
++  });
++
++  it("29 a conflicting merge is refused cleanly and main is unchanged", async () => {
++    makeRepo({ "README.md": "line" });
++    const base = await head();
++    await svc.createBranch(ref, "feat", base);
++    await svc.commit(ref, "feat", "feat edit", [{ path: "README.md", content: "feat side" }], base);
++    await svc.commit(ref, "main", "main edit", [{ path: "README.md", content: "main side" }], base);
++    const mainBefore = await head("main");
++    const pr = await svc.createPullRequest(ref, "T", "", "feat", "main");
++    const res = await svc.mergePullRequest(ref, pr.number, { method: "squash" });
++    expect(res.merged).toBe(false);
++    expect(res.message).toMatch(/conflict/i);
++    expect(await head("main")).toBe(mainBefore);
++    expect(existsSync(join(repoDir(), ".git", "worktrees"))).toBe(false);
++  });
++
++  it("30 method 'merge' keeps both parents; getChecks passes a real commit and fails an unknown SHA", async () => {
++    const dir = makeRepo({ "README.md": "x" });
++    const main = await head();
++    await svc.createBranch(ref, "feat", main);
++    await svc.commit(ref, "feat", "feat", [{ path: "src/m.ts", content: "m" }], main);
++    const pr = await svc.createPullRequest(ref, "T", "", "feat", "main");
++    const res = await svc.mergePullRequest(ref, pr.number, { method: "merge" });
++    expect(res.merged).toBe(true);
++    expect(git(dir, "rev-list", "--parents", "-n", "1", res.sha!).split(" ")).toHaveLength(3);
++
++    const ok = await svc.getChecks(ref, res.sha!);
++    expect(ok.some((c) => c.name === "local-git-integrity" && c.status === "success")).toBe(true);
++    const bad = await svc.getChecks(ref, "f".repeat(40));
++    expect(bad[0].status).toBe("failure");
++  });
++});
+--- /dev/null
++++ b/src/tests/local-git-service.property.test.ts
+@@ -0,0 +1,215 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { execFileSync } from "node:child_process";
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { LocalGitService } from "../github/local-git-service.js";
++
++vi.mock("../logger.js", () => ({
++  logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn() })) },
++}));
++
++const ENV = {
++  ...process.env,
++  GIT_AUTHOR_NAME: "Dev",
++  GIT_AUTHOR_EMAIL: "dev@local",
++  GIT_COMMITTER_NAME: "Dev",
++  GIT_COMMITTER_EMAIL: "dev@local",
++};
++const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, encoding: "utf8" }).trim();
++
++/* ---------- deterministic PRNG (mulberry32): failures are reproducible via the seed ---------- */
++function rng(seed: number) {
++  let s = seed >>> 0;
++  const next = () => {
++    s = (s + 0x6d2b79f5) >>> 0;
++    let t = s;
++    t = Math.imul(t ^ (t >>> 15), t | 1);
++    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
++    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
++  };
++  return {
++    int: (min: number, max: number) => min + Math.floor(next() * (max - min + 1)),
++    pick: <T>(xs: T[]): T => xs[Math.floor(next() * xs.length)],
++    text: (maxLen: number) => {
++      const alphabet = ["a", "Z", "0", " ", "\n", "\r\n", "\t", "ü", "中", "😀", "{", "}", "#", "-", "‌"];
++      const n = Math.floor(next() * (maxLen + 1));
++      let out = "";
++      for (let i = 0; i < n; i++) out += alphabet[Math.floor(next() * alphabet.length)];
++      return out;
++    },
++  };
++}
++
++const SEEDS = [1, 7, 42, 1337, 2024];
++const ITER = 15;
++
++let root: string;
++let svc: LocalGitService;
++const ref = { owner: "acme", name: "shop" };
++const repoDir = () => join(root, "acme", "shop");
++
++function makeRepo(branch = "main") {
++  const dir = repoDir();
++  mkdirSync(dir, { recursive: true });
++  git(dir, "init", "-b", branch);
++  writeFileSync(join(dir, "README.md"), "x");
++  git(dir, "add", "-A");
++  git(dir, "commit", "-m", "init");
++}
++const head = async (branch = "main") => (await svc.listBranches(ref)).find((b) => b.name === branch)!.sha;
++
++beforeEach(() => {
++  root = mkdtempSync(join(tmpdir(), "cv-prop-"));
++  svc = new LocalGitService({ rootDir: root, defaultOwner: "local", autoPush: false, autoFetch: false });
++  makeRepo();
++});
++afterEach(() => rmSync(root, { recursive: true, force: true }));
++
++describe("LocalGit property: content round-trip", () => {
++  for (const seed of SEEDS) {
++    it(`P1 any UTF-8 content (incl. CRLF, emoji, empty) round-trips byte-identical [seed ${seed}]`, async () => {
++      const r = rng(seed);
++      for (let i = 0; i < ITER; i++) {
++        const content = r.text(200);
++        const path = `CodeVia/p${i}.md`;
++        await svc.commit(ref, "main", `p${i}`, [{ path, content }], await head());
++        const got = await svc.getFile(ref, path, "main");
++        expect(got?.content, `seed=${seed} iter=${i}`).toBe(content);
++      }
++    });
++  }
++});
++
++describe("LocalGit property: model-based state equivalence", () => {
++  for (const seed of SEEDS) {
++    it(`P2 random write/delete sequences match an in-memory model [seed ${seed}]`, async () => {
++      const r = rng(seed);
++      const model = new Map<string, string>();
++      const names = ["a.md", "b.md", "c.md", "sub/d.md", "sub/e.md"];
++      for (let i = 0; i < ITER; i++) {
++        const name = r.pick(names);
++        const path = `CodeVia/${name}`;
++        if (model.size > 0 && r.int(0, 2) === 0) {
++          const victim = r.pick([...model.keys()]);
++          await svc.deleteFiles(ref, "main", `del ${i}`, [victim], await head());
++          model.delete(victim);
++        } else {
++          const content = r.text(60);
++          await svc.commit(ref, "main", `w ${i}`, [{ path, content }], await head());
++          model.set(path, content);
++        }
++        const listed = (await svc.listFiles(ref, "main", "CodeVia").catch(() => []))
++          .filter((e) => e.type === "blob")
++          .map((e) => e.path)
++          .sort();
++        expect(listed, `seed=${seed} step=${i}`).toEqual([...model.keys()].sort());
++      }
++      for (const [p, c] of model) {
++        expect((await svc.getFile(ref, p, "main"))?.content, `seed=${seed} ${p}`).toBe(c);
++      }
++    });
++  }
++});
++
++describe("LocalGit property: path normalization", () => {
++  for (const seed of SEEDS) {
++    it(`P3 backslash and slash spellings address the same file [seed ${seed}]`, async () => {
++      const r = rng(seed);
++      for (let i = 0; i < ITER; i++) {
++        const segs = Array.from({ length: r.int(1, 3) }, (_, k) => `seg${k}${r.int(0, 9)}`);
++        const slash = `CodeVia/${segs.join("/")}.md`;
++        const back = slash.replace(/\//g, "\\");
++        const content = `v${i}`;
++        await svc.commit(ref, "main", `n${i}`, [{ path: slash, content }], await head());
++        expect((await svc.getFile(ref, back, "main"))?.content, `seed=${seed} iter=${i} ${back}`).toBe(content);
++      }
++    });
++
++    it(`P4 traversal-like segments never read or write outside the repository [seed ${seed}]`, async () => {
++      const r = rng(seed);
++      const bad = ["..", ".", "", "a/../../etc", "./x", "a//b"];
++      for (let i = 0; i < ITER; i++) {
++        const p = `${r.pick(bad)}/${r.int(0, 99)}`;
++        expect(await svc.getFile(ref, p, "main"), `seed=${seed} path=${p}`).toBeUndefined();
++      }
++    });
++  }
++});
++
++describe("LocalGit property: compare-and-swap and concurrency", () => {
++  for (const seed of SEEDS) {
++    it(`P5 any stale parent is refused; the current parent (or none) always succeeds [seed ${seed}]`, async () => {
++      const r = rng(seed);
++      for (let i = 0; i < 6; i++) {
++        const stale = await head();
++        await svc.commit(ref, "main", `adv ${i}`, [{ path: `CodeVia/s${i}.md`, content: "s" }], stale);
++        const current = await head();
++        expect(current).not.toBe(stale);
++        await expect(
++          svc.commit(ref, "main", "stale", [{ path: `CodeVia/x${i}.md`, content: "x" }], stale),
++        ).rejects.toThrow(/changed after inspection/);
++        // a valid parent — either the fresh head or no parent at all — must work:
++        const cur = r.int(0, 1) === 0 ? current : undefined;
++        await svc.commit(ref, "main", "ok", [{ path: `CodeVia/ok${i}.md`, content: "ok" }], cur);
++      }
++    });
++
++    it(`P6 N concurrent commits without a parent all land; history length is exact [seed ${seed}]`, async () => {
++      const r = rng(seed);
++      let total = 0;
++      for (let batch = 0; batch < 3; batch++) {
++        const n = r.int(2, 6);
++        await Promise.all(
++          Array.from({ length: n }, (_, k) =>
++            svc.commit(ref, "main", `b${batch}-${k}`, [{ path: `CodeVia/b${batch}-${k}.md`, content: "c" }]),
++          ),
++        );
++        total += n;
++      }
++      expect(git(repoDir(), "rev-list", "--count", "main")).toBe(String(1 + total));
++      const files = (await svc.listFiles(ref, "main", "CodeVia")).filter((e) => e.type === "blob");
++      expect(files).toHaveLength(total);
++    });
++  }
++});
++
++describe("LocalGit property: pull requests and merges", () => {
++  for (const seed of SEEDS) {
++    it(`P7 PR creation is idempotent and numbers are dense [seed ${seed}]`, async () => {
++      const r = rng(seed);
++      const k = r.int(2, 5);
++      const created: number[] = [];
++      for (let i = 0; i < k; i++) {
++        await svc.createBranch(ref, `f${i}`, await head());
++        const pr = await svc.createPullRequest(ref, `t${i}`, "", `f${i}`, "main");
++        created.push(pr.number);
++        const again = await svc.createPullRequest(ref, `t${i}`, "", `f${i}`, "main");
++        expect(again.number).toBe(pr.number);
++      }
++      expect(created).toEqual(Array.from({ length: k }, (_, i) => i + 1));
++      expect(await svc.listPullRequests(ref)).toHaveLength(k);
++    });
++
++    it(`P8 disjoint squash merges produce the union of all files [seed ${seed}]`, async () => {
++      const r = rng(seed);
++      const k = r.int(2, 4);
++      const base = await head();
++      const expected: string[] = [];
++      const numbers: number[] = [];
++      for (let i = 0; i < k; i++) {
++        const path = `src/mod${i}.ts`;
++        expected.push(path);
++        await svc.createBranch(ref, `m${i}`, base);
++        await svc.commit(ref, `m${i}`, `m${i}`, [{ path, content: `export const v${i} = ${i};` }], base);
++        numbers.push((await svc.createPullRequest(ref, `m${i}`, "", `m${i}`, "main")).number);
++      }
++      for (const n of numbers) {
++        const res = await svc.mergePullRequest(ref, n, { method: "squash" });
++        expect(res.merged, `pr ${n}`).toBe(true);
++      }
++      const names = (await svc.listFiles(ref, "main", "src")).map((e) => e.path).sort();
++      expect(names).toEqual([...expected].sort());
++    });
++  }
++});
+--- /dev/null
++++ b/src/tests/local-git-service.failure.test.ts
+@@ -0,0 +1,263 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { execFileSync } from "node:child_process";
++import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { dirname, join } from "node:path";
++import { LocalGitService } from "../github/local-git-service.js";
++import { LocalGitError } from "../github/local-git-error.js";
++import { logger } from "../logger.js";
++
++vi.mock("../logger.js", () => ({
++  logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn() })) },
++}));
++
++const ENV = {
++  ...process.env,
++  GIT_AUTHOR_NAME: "Dev",
++  GIT_AUTHOR_EMAIL: "dev@local",
++  GIT_COMMITTER_NAME: "Dev",
++  GIT_COMMITTER_EMAIL: "dev@local",
++};
++const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, encoding: "utf8" }).trim();
++
++let root: string;
++let svc: LocalGitService;
++const ref = { owner: "acme", name: "shop" };
++const repoDir = () => join(root, "acme", "shop");
++
++function makeRepo(files: Record<string, string> = { "README.md": "x" }): string {
++  const dir = repoDir();
++  mkdirSync(dir, { recursive: true });
++  git(dir, "init", "-b", "main");
++  for (const [p, c] of Object.entries(files)) writeFileSync(join(dir, p), c);
++  git(dir, "add", "-A");
++  git(dir, "commit", "-m", "init");
++  return dir;
++}
++
++const head = async (branch = "main") => (await svc.listBranches(ref)).find((b) => b.name === branch)!.sha;
++const asError = async (p: Promise<unknown>): Promise<LocalGitError> => {
++  try {
++    await p;
++  } catch (err) {
++    return err as LocalGitError;
++  }
++  throw new Error("expected the promise to reject");
++};
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  root = mkdtempSync(join(tmpdir(), "cv-fail-"));
++  svc = new LocalGitService({ rootDir: root, defaultOwner: "local", autoPush: false, autoFetch: false });
++});
++afterEach(() => rmSync(root, { recursive: true, force: true }));
++
++/* ------------------------------------------------------------------ *
++ * Crash / failure scenarios for LocalGitService, mirroring the
++ * recovery analysis: A (crash mid-commit), B (stale lock files),
++ * C (index.lock during working-tree sync), D (missing git binary),
++ * E (corrupt metadata), F (unreachable remote), G (worktree leaks).
++ * ------------------------------------------------------------------ */
++
++describe("LocalGit failure scenarios", () => {
++  it("A: a crash between commit-tree and update-ref leaves the branch untouched (dangling commit only)", async () => {
++    const dir = makeRepo();
++    const before = await head();
++    // Directly exercise the plumbing step that would be interrupted: the
++    // commit object is created, but update-ref never runs (process "crashed").
++    const internal = svc as unknown as {
++      commitViaIndex(
++        repoDir: string,
++        parent: string,
++        message: string,
++        adds: Array<{ path: string; content: string }>,
++        removes: string[],
++      ): Promise<{ sha: string; author: string }>;
++    };
++    const { sha } = await internal.commitViaIndex(dir, before, "dangling", [{ path: "CodeVia/d.md", content: "d" }], []);
++    expect(sha).not.toBe(before);
++    expect(await head()).toBe(before); // the branch never moved
++    // The dangling commit is harmless: it is not on main, and a normal commit
++    // right after still works.
++    const res = await svc.commit(ref, "main", "real", [{ path: "CodeVia/r.md", content: "r" }], before);
++    expect(await head()).toBe(res.sha);
++    expect(git(dir, "rev-list", "--count", "main")).toBe("2"); // init + the real commit only
++  });
++
++  it("B1: a STALE ref lock (older than the threshold) is removed and the commit succeeds", async () => {
++    makeRepo();
++    const lockPath = join(repoDir(), ".git", "refs", "heads", "main.lock");
++    mkdirSync(dirname(lockPath), { recursive: true });
++    writeFileSync(lockPath, "", "utf8");
++    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
++    utimesSync(lockPath, twoHoursAgo, twoHoursAgo);
++
++    const res = await svc.commit(ref, "main", "after stale lock", [{ path: "CodeVia/x.md", content: "x" }]);
++    expect(res.sha).toMatch(/^[0-9a-f]{40}$/);
++    expect(existsSync(lockPath)).toBe(false); // the stale lock was cleaned up
++    expect((await svc.getFile(ref, "CodeVia/x.md", "main"))?.content).toBe("x");
++    expect(vi.mocked(logger.warn)).toHaveBeenCalled(); // the recovery was logged
++  });
++
++  it("B2: a FRESH lock fails with LOCAL_LOCKED (retryable) and the branch does not move", async () => {
++    makeRepo();
++    const before = await head();
++    const lockPath = join(repoDir(), ".git", "refs", "heads", "main.lock");
++    mkdirSync(dirname(lockPath), { recursive: true });
++    writeFileSync(lockPath, "", "utf8"); // fresh — another process may own it
++
++    const err = await asError(svc.commit(ref, "main", "blocked", [{ path: "CodeVia/x.md", content: "x" }]));
++    expect(err.code).toBe("LOCAL_LOCKED");
++    expect(err.retryable).toBe(true);
++    expect(err.statusCode).toBe(423);
++    expect(err.message).toMatch(/lock/i);
++    expect(await head()).toBe(before); // nothing was committed
++    expect(existsSync(lockPath)).toBe(true); // we did not delete a live lock
++  });
++
++  it("C: index.lock held during the working-tree sync → committed:true with the sha, branch moved", async () => {
++    makeRepo();
++    const before = await head();
++    const indexLock = join(repoDir(), ".git", "index.lock");
++    writeFileSync(indexLock, "", "utf8"); // e.g. the IDE is mid-operation
++
++    const err = await asError(
++      svc.commit(ref, "main", "state", [{ path: "CodeVia/project.md", content: "p" }], before),
++    );
++    expect(err.code).toBe("LOCAL_LOCKED");
++    expect(err.committed).toBe(true); // the caller must NOT think the commit failed
++    expect(err.sha).toMatch(/^[0-9a-f]{40}$/);
++    expect(await head()).toBe(err.sha); // the branch DID advance
++    expect((await svc.getFile(ref, "CodeVia/project.md", "main"))?.content).toBe("p");
++
++    // Retrying with the pre-crash parent is a clean, explicit stale-parent error:
++    const retry = await asError(svc.commit(ref, "main", "retry", [{ path: "CodeVia/q.md", content: "q" }], before));
++    expect(retry.code).toBe("LOCAL_STALE_PARENT");
++
++    rmSync(indexLock);
++    // after the lock is gone, the next commit to the same path heals the working
++    // tree: the "staged deletion, no file on disk" residue is recognized as
++    // healable rather than as the developer's data:
++    await svc.commit(ref, "main", "heal", [{ path: "CodeVia/project.md", content: "p" }]);
++    expect(readFileSync(join(repoDir(), "CodeVia", "project.md"), "utf8")).toBe("p");
++    expect(git(repoDir(), "status", "--porcelain")).toBe(""); // fully reconciled
++  });
++
++  it("D: a missing git binary fails fast with LOCAL_GIT_UNAVAILABLE (503) on every entry point", async () => {
++    makeRepo();
++    const broken = new LocalGitService({ rootDir: root, gitBin: "/nonexistent/git-binary-xyz" });
++    const err = await asError(broken.listBranches(ref));
++    expect(err.code).toBe("LOCAL_GIT_UNAVAILABLE");
++    expect(err.statusCode).toBe(503);
++    expect(err.retryable).toBe(true);
++    expect(err.message).toMatch(/LOCAL_GIT_BIN|Install Git/i);
++    // every entry point shares the same cached verdict — no misleading downstream errors:
++    await expect(broken.getViewer()).rejects.toMatchObject({ code: "LOCAL_GIT_UNAVAILABLE" });
++    await expect(broken.listRepositories()).rejects.toMatchObject({ code: "LOCAL_GIT_UNAVAILABLE" });
++  });
++
++  it("E: corrupt metadata is reported as LOCAL_META_CORRUPT and NEVER silently reset", async () => {
++    makeRepo();
++    await svc.createBranch(ref, "feat", await head());
++    const metaFile = join(repoDir(), ".git", "codevia-local-meta.json");
++    writeFileSync(metaFile, "{ not valid json !!", "utf8");
++
++    const err = await asError(svc.createPullRequest(ref, "T", "", "feat", "main"));
++    expect(err.code).toBe("LOCAL_META_CORRUPT");
++    expect(err.statusCode).toBe(500);
++    expect(err.retryable).toBe(false);
++    expect(err.message).toMatch(/codevia-local-meta\.json/);
++    // the corrupt file was NOT overwritten (PR #1 was not silently erased):
++    expect(readFileSync(metaFile, "utf8")).toBe("{ not valid json !!");
++
++    // commits keep working — they never needed the metadata:
++    await svc.commit(ref, "main", "unaffected", [{ path: "CodeVia/u.md", content: "u" }]);
++
++    // after the operator restores a valid file, PRs work again and writes are backed up:
++    writeFileSync(metaFile, JSON.stringify({ pulls: [], issues: [], releases: [] }), "utf8");
++    const pr = await svc.createPullRequest(ref, "T2", "", "feat", "main");
++    expect(pr.number).toBe(1);
++    expect(existsSync(`${metaFile}.bak`)).toBe(true);
++  });
++
++  it("F: a failed push is a warning — the commit succeeds and stays local", async () => {
++    makeRepo();
++    const pushSvc = new LocalGitService({ rootDir: root, defaultOwner: "local", autoPush: true, autoFetch: false });
++    git(repoDir(), "remote", "add", "origin", join(root, "no-such-remote.git")); // unreachable
++
++    const res = await pushSvc.commit(ref, "main", "offline commit", [{ path: "CodeVia/a.md", content: "a" }]);
++    expect(res.sha).toMatch(/^[0-9a-f]{40}$/);
++    expect((await pushSvc.getFile(ref, "CodeVia/a.md", "main"))?.content).toBe("a");
++    expect(vi.mocked(logger.warn)).toHaveBeenCalled(); // surfaced, not swallowed
++    expect(await head()).toBe(res.sha);
++  });
++
++  it("G: merges never create (or leak) git worktree metadata", async () => {
++    makeRepo();
++    const base = await head();
++    for (let i = 0; i < 3; i++) {
++      await svc.createBranch(ref, `g${i}`, base);
++      await svc.commit(ref, `g${i}`, `g${i}`, [{ path: `src/g${i}.ts`, content: "g" }], base);
++      const pr = await svc.createPullRequest(ref, `g${i}`, "", `g${i}`, "main");
++      const res = await svc.mergePullRequest(ref, pr.number, { method: "merge" });
++      expect(res.merged).toBe(true);
++    }
++    expect(existsSync(join(repoDir(), ".git", "worktrees"))).toBe(false);
++    expect(git(repoDir(), "worktree", "list")).not.toMatch(/codevia-/);
++    // init + (branch commit + merge commit) × 3 — merges keep both parents:
++    expect(git(repoDir(), "rev-list", "--count", "main")).toBe("7");
++  });
++
++  it("H: dirty local files are never overwritten by a state commit (skip + warn, ref still advances)", async () => {
++    const dir = makeRepo();
++    // the developer hand-edited a state file without committing it:
++    mkdirSync(join(dir, "CodeVia"), { recursive: true });
++    writeFileSync(join(dir, "CodeVia", "project.md"), "developer's uncommitted edit");
++
++    const res = await svc.commit(ref, "main", "state", [{ path: "CodeVia/project.md", content: "agent version" }]);
++    expect(res.sha).toMatch(/^[0-9a-f]{40}$/);
++    // the ref moved and the agent version is what git serves:
++    expect((await svc.getFile(ref, "CodeVia/project.md", "main"))?.content).toBe("agent version");
++    // but the developer's uncommitted bytes on disk were preserved:
++    expect(readFileSync(join(dir, "CodeVia", "project.md"), "utf8")).toBe("developer's uncommitted edit");
++    expect(vi.mocked(logger.warn)).toHaveBeenCalled();
++  });
++
++  it("I: a concurrent merge and PR creation never lose each other's metadata write", async () => {
++    makeRepo();
++    const base = await head();
++    for (const b of ["f1", "f2", "f3"]) await svc.createBranch(ref, b, base);
++    await svc.commit(ref, "f1", "c1", [{ path: "src/1.ts", content: "1" }], base);
++    await svc.commit(ref, "f2", "c2", [{ path: "src/2.ts", content: "2" }], base);
++    const pr1 = await svc.createPullRequest(ref, "T1", "", "f1", "main");
++    await svc.createPullRequest(ref, "T2", "", "f2", "main");
++
++    // Both rewrite codevia-local-meta.json — without the per-repo lock one
++    // write silently erased the other (a merged PR springing back open, or a
++    // created PR vanishing).
++    const [mergeResult, pr3] = await Promise.all([
++      svc.mergePullRequest(ref, pr1.number, { method: "squash" }),
++      svc.createPullRequest(ref, "T3", "", "f3", "main"),
++    ]);
++    expect(mergeResult.merged).toBe(true);
++    expect(pr3.number).toBe(3);
++    expect((await svc.listPullRequests(ref)).map((p) => p.number).sort()).toEqual([2, 3]);
++    // the merge really is recorded — not lost to the racing write:
++    expect((await svc.getPullRequest(ref, pr1.number))?.state).toBe("merged");
++  });
++
++  it("J: a commit with 200 files lands correctly (batched argv — Windows E2BIG safety)", async () => {
++    makeRepo({ "README.md": "x" });
++    const files = Array.from({ length: 200 }, (_, i) => ({
++      path: `src/mod${i}.ts`,
++      content: `export const v${i} = ${i};\n`,
++    }));
++    const res = await svc.commit(ref, "main", "bulk commit", files);
++    expect(res.sha).toMatch(/^[0-9a-f]{40}$/);
++    const listed = (await svc.listFiles(ref, "main", "src")).filter((e) => e.type === "blob");
++    expect(listed).toHaveLength(200);
++    expect((await svc.getFile(ref, "src/mod199.ts", "main"))?.content).toBe("export const v199 = 199;\n");
++    // and the working tree got them all:
++    expect(readFileSync(join(repoDir(), "src", "mod0.ts"), "utf8")).toBe("export const v0 = 0;\n");
++  });
++});
+--- /dev/null
++++ b/docs/LOCAL-GIT-MODE.md
+@@ -0,0 +1,110 @@
++# Local Git CLI Mode (100% offline)
++
++Local Git mode makes CodeVia run entirely on one machine: no GitHub API, no
++OAuth, no `GITHUB_TOKEN`. Every read and write goes through the **git binary
++installed on that machine**, and the platform runs directly on your local
++repositories.
++
++```
++LOCAL_GIT_MODE=true
++LOCAL_REPOS_DIR=./repos        # your repositories live here
++```
++
++## What it does
++
++| Concern | Behaviour in local mode |
++| --- | --- |
++| Repository discovery | `<dir>/<owner>/<repo>`, `<dir>/<owner>/<repo>.git` (bare) and flat `<dir>/<repo>` (owner `local`) |
++| Reads | `git ls-tree` / `git cat-file` — millisecond reads straight from disk |
++| Commits | `git hash-object` + `read-tree`/`update-index` in a **private temp index**, then `commit-tree` and a compare-and-swap `update-ref` |
++| Developer's working copy | Never touched: only the paths the agent changed are synced, and only when they carry no uncommitted local changes. Your staged files, unstaged edits and open IDE state are left exactly as they are |
++| Branches | Real branches (`agent-task-*`), created with `git branch` |
++| Pull requests | Git-platform concepts — stored in `<repo>/.git/codevia-local-meta.json`, never inside the working tree |
++| Merges | Real git: `git merge-tree --write-tree` + `commit-tree` (+ `-p` twice for merge commits) + CAS `update-ref`. **No `git worktree` is ever created** |
++| Push | Optional `LOCAL_GIT_AUTO_PUSH=true` pushes with **your** git (Credential Manager / SSH keys). A failed push is a warning; commits always stay local |
++| CI / merge gate | `local-git-integrity` (commit exists in the object DB) + optional **real** `local-verify` check running `LOCAL_GIT_VERIFY_CMD` (e.g. `dotnet test`) |
++
++## Safety properties (all covered by tests)
++
++- **Compare-and-swap commits** — a write built against a stale `parentSha` is
++  refused with `LOCAL_STALE_PARENT` instead of overwriting newer work.
++- **Concurrent state saves** — writes are serialized per repository; five
++  concurrent `CodeVia/*` saves all land (exact `rev-list --count` verified).
++- **Your data wins** — a file with uncommitted local changes is never
++  overwritten by an agent commit; the branch advances and the file is skipped
++  with a warning.
++- **No silent half-applied commits** — if the branch moved but the working-tree
++  sync failed (e.g. `index.lock` held by the IDE), the error carries
++  `committed: true` and the new `sha`. The residue heals automatically on the
++  next commit to the same path.
++- **Corrupt metadata never destroys data** — a broken `codevia-local-meta.json`
++  raises `LOCAL_META_CORRUPT`; it is never silently reset, and every rewrite
++  keeps a `.bak`.
++- **Stale lock recovery** — a ref/index lock older than
++  `LOCAL_GIT_STALE_LOCK_MS` (default 10 min) is removed and the operation
++  retried once; a *fresh* lock fails fast with retryable `LOCAL_LOCKED`.
++- **Metadata writes are serialized per repository** — a concurrent merge and
++  PR creation can never erase each other's `codevia-local-meta.json` update.
++- **Large commits are batched** — hundreds of files never overflow the Windows
++  argv limit (hash-object / update-index / restore / status run in chunks).
++
++## Error contract
++
++All failures are `LocalGitError` (`src/github/local-git-error.ts`) with a
++stable `code`, HTTP `status`/`statusCode`, `retryable`, and `committed`:
++
++`LOCAL_GIT_UNAVAILABLE` 503 · `LOCAL_REPO_NOT_FOUND` 404 ·
++`LOCAL_REF_NOT_FOUND` 404 · `LOCAL_PATH_NOT_FOUND` 404 ·
++`LOCAL_INVALID_INPUT` 400 · `LOCAL_STALE_PARENT` 409 · `LOCAL_LOCKED` 423 ·
++`LOCAL_MERGE_CONFLICT` 409 · `LOCAL_HEAD_MOVED` 409 ·
++`LOCAL_META_CORRUPT` 500 · `LOCAL_GIT_FAILED` 502
++
++## Requirements
++
++- git **2.38+** on PATH (or `LOCAL_GIT_BIN` pointing at it) — for
++  `merge-tree --write-tree`. Older git falls back to a throwaway worktree that
++  is always cleaned up.
++- A real AI model provider (Ollama, OpenRouter, OpenAI, ...) or Mock AI for
++  simulation. Local repositories are real repositories (`kind: "real"`), so
++  simulated agent code is never committed to them without a real model.
++
++## Running
++
++```bash
++npm install
++LOCAL_GIT_MODE=true LOCAL_REPOS_DIR=./repos npm run dev
++# or: npm run build && LOCAL_GIT_MODE=true npm start
++```
++
++Put your projects under `LOCAL_REPOS_DIR` (e.g. `repos/my-owner/my-project`)
++and they appear in the repository picker. The repo mirror is disabled
++automatically in local mode (the repositories are already local — cloning them
++again from a URL template would be pure overhead).
++
++## Tests
++
++```bash
++npx vitest run src/tests/local-git-error.test.ts \
++               src/tests/local-git-service.compat.test.ts \
++               src/tests/local-git-service.property.test.ts \
++               src/tests/local-git-service.failure.test.ts
++```
++
++- `local-git-error.test.ts` — the error contract (13 tests)
++- `local-git-service.compat.test.ts` — 31 end-to-end scenarios against real git
++  repositories (discovery, CodeVia/* state, CAS, working-copy safety, PRs,
++  merge gate)
++- `local-git-service.property.test.ts` — seeded property tests (byte-identical
++  round-trips, model-based write/delete equivalence, concurrency, merge
++  unions) across 5 seeds each
++- `local-git-service.failure.test.ts` — crash/lock/corruption/offline-push
++  recovery scenarios A–J (including the metadata race and a 200-file batch)
++
++## Bootstrapping a repository
++
++A repository that already carries a valid `CodeVia/` state folder is onboarded
++with no model at all — reads and writes go straight through local git. A
++repository *without* state needs a real AI model to author the initial
++definitions (this is deliberate: simulated state is never written to a real
++repository, local or not). Configure Ollama/OpenRouter/any provider first, or
++seed the state once via a mock-mode install and copy the `CodeVia/` folder in.
+--- /dev/null
++++ b/docs/LOCAL-GIT-MODE-FA.md
+@@ -0,0 +1,96 @@
++# راهنمای فارسی — اجرای ۱۰۰٪ لوکال CodeVia با Git سیستم (LocalGitService)
++
++این سند خلاصه‌ی فارسی‌ی `docs/LOCAL-GIT-MODE.md` است.
++
++## چی شد؟
++
++هر سه لایه‌ی قبلی (سرویس، قرارداد خطا، تست‌ها) پیاده‌سازی و **واقعاً اجرا** شدند — نه فقط نوشته شدند:
++
++- **۱۰۱۵ تست** کل پروژه پاس شد (فقط ۱ خطای از‌قبل‌موجود در `app-assembly` که روی نسخه‌ی دست‌نخورده‌ی ریپوی گیت‌هاب هم دقیقاً همین خطاست).
++- **۹۵ تست جدید** مخصوص LocalGit — همه پاس.
++- **Typecheck و ESLint** پاک.
++- **تست انتها-به-انتهای کامل** با سرور واقعی (بوت در حالت لوکال → ساخت پروژه → ثبت memory → کامیت واقعی `[CodeVia] update memory [skip ci]` در ریپوی لوکال → `repo-status: healthy`).
++
++## نکته‌ی مهم برای اولین اتصال یک ریپو (bootstrap)
++
++- ریپویی که **از قبل state معتبر دارد** (پوشه‌ی `CodeVia/` کامل): ساخت پروژه بدون هیچ مدلی انجام می‌شود؛ خواندن و نوشتن state مستقیم با گیت لوکال کار می‌کند (در e2e تأیید شد).
++- ریپوی **بدون** `CodeVia/`: پلتفرم برای تولید اولیه‌ی state به یک **مدل واقعی** نیاز دارد (Ollama لوکال، OpenRouter، OpenAI، ...). این محافظت عمدی است: روی ریپوی واقعی (لوکال یا GitHub) هرگز state‌ی شبیه‌سازی‌شده نوشته نمی‌شود.
++- راه میان‌بر بدون مدل: یک‌بار پلتفرم را با `MOCK_GITHUB_PATH` و بدون `LOCAL_GIT_MODE` بالا بیاورید، یک پروژه‌ی demo بسازید تا state معتبر تولید شود، سپس پوشه‌ی `CodeVia/` آن را در ریپوی لوکال‌تان کپی کنید (فقط مقدار `repo` در frontmatter را اصلاح کنید).
++
++## فایل‌های جدید/تغییر یافته
++
++| فایل | توضیح |
++| --- | --- |
++| `src/github/local-git-error.ts` | **جدید** — قرارداد خطا: `LocalGitError` با ۱۱ کد پایدار، statusCode، retryable، committed |
++| `src/github/local-git-service.ts` | **جدید** — سرویس کامل لوکال با plumbing گیت (بدون worktree، با CAS) |
++| `src/github/registry.ts` | ویرایش — فعال‌سازی حالت لوکال؛ `source: "user-oauth"` تا گاردهای no-token فعال نشوند |
++| `src/github/repo-mirror.ts` | ویرایش — در حالت لوکال، mirror خودکار خاموش است (ریپوها همین‌جا روی دیسکند) |
++| `src/http/routes/projects.ts` | ویرایش — در حالت لوکال، `requiredChecks` از `codevia-ci.yml` پر نمی‌شود (Actions وجود ندارد) |
++| `src/tests/local-git-*.test.ts` | **۴ فایل جدید** — قرارداد خطا (۱۳)، سازگاری (۳۱)، property-based (۴۰)، خرابی/بازیابی (۹) |
++| `.env.example` | بخش `LOCAL_GIT_*` اضافه شد |
++| `docs/LOCAL-GIT-MODE.md` | سند انگلیسی |
++
++## راه‌اندازی روی سیستم خودت (ویندوز)
++
++۱. این فایل‌ها را در ریپوی لوکال CodeVia کپی کن (ساختار پوشه‌ها یکی است).
++
++۲. فایل `.env` در ریشه:
++
++```env
++LOCAL_GIT_MODE=true
++LOCAL_REPOS_DIR=D:/Hermes/repos     # پوشه‌ای که پروژه‌های گیت لوکالت داخلش است
++LOCAL_GIT_AUTO_PUSH=true            # اگر ریموت داری؛ کاملاً آفلاین می‌خواهی → false
++LOCAL_GIT_OWNER=local
++# LOCAL_GIT_VERIFY_CMD=dotnet test  # اختیاری: تست واقعی به‌جای GitHub Actions
++```
++
++۳. اجرا:
++
++```bash
++npm install
++npm run build
++npm start          # یا: npm run dev
++```
++
++۴. در UI، ریپازیتوری‌های داخل `D:/Hermes/repos` (با ساختار `owner/repo` یا تخت) دیده می‌شوند. **هیچ توکن/OAuth لازم نیست.**
++
++## چرا این نسخه کم‌مشکل‌ترین است؟ (رفع موارد P0/P1 قبلی)
++
++| مشکل قبلی | وضعیت |
++| --- | --- |
++| متادیتای خراب → پاک‌شدن بی‌صدا PRها (سناریو E) | ✅ خطای `LOCAL_META_CORRUPT`، بدون overwrite، با نسخه‌ی `.bak` |
++| خطای sync نادیده گرفته می‌شد (سناریو C) | ✅ خطای `committed: true` + sha؛ ترمیم خودکار در کامیت بعدی همان مسیر |
++| باینری git پیدا نمی‌شد → خطای گمراه‌کننده (D) | ✅ بررسی هنگام اولین فراخوانی → `LOCAL_GIT_UNAVAILABLE` با پیام روشن |
++| قفل stale مانع همه‌ی کامیت‌ها می‌شد (B) | ✅ قفل قدیمی‌تر از ۱۰ دقیقه حذف و عملیات retry می‌شود؛ قفل تازه → `LOCAL_LOCKED` |
++| read-tree ایندکس کاربر را پاک می‌کرد (P0) | ✅ ایندکس واقعی هرگز دست نمی‌خورد؛ کامیت در temp index ساخته می‌شود؛ فقط مسیرهای تغییریافته sync می‌شوند و فایل dirty هرگز بازنویسی نمی‌شود (تست H) |
++| Checks ساختگی همیشه success (P0) | ✅ فقط `local-git-integrity` (واقعی: وجود کامیت در object DB) + `local-verify` با اجرای واقعی `LOCAL_GIT_VERIFY_CMD` |
++| worktreeهای مانده بعد از کرش (G) | ✅ اصلاً worktree ساخته نمی‌شود (merge-tree plumbing) |
++
++## سه رفعِ اضافه در بازبینی نهایی (نکاتی که در پیام‌های قبلی فراموش شده بود)
++
++- **Race condition متادیتا**: `createPullRequest` / `updatePullRequest` / `createIssue` / `commentOn*` و `mergePullRequest` حالا همه‌ی عملیات read-modify-write روی `codevia-local-meta.json` را زیر قفل repo انجام می‌دهند — قبلاً merge همزمان با ساخت PR می‌توانست نوشته‌ی یکی را بی‌صدا پاک کند (تست I این را قفل کرده است).
++- **سرریز argv ویندوز**: کامیت‌های حجیم (صدها فایل) حالا batch می‌شوند (تست J: کامیت ۲۰۰ فایلی) — قبلاً در ویندوز ممکن بود با خطای E2BIG شکست بخورد.
++- **پیام خطای 404 در project-state**: در حالت لوکال دیگر نمی‌گوید «حساب GitHub را دوباره وصل کن»، بلکه مسیر `LOCAL_REPOS_DIR` و وجود ریپو را راهنمایی می‌کند.
++
++## نکته‌ها
++
++- کامیت‌ها **بایت‌به‌بایت** (بدون فیلتر CRLF) ذخیره می‌شوند — دقیقاً مثل GitHub Contents API؛ نردبان EOL موتور patch خودش را اعمال می‌کند.
++- چون سرویس `kind: "real"` است، برای کامیت واقعی کد باید یک مدل واقعی (Ollama/OpenRouter/...) فعال باشد — کدهای Simulation روی ریپوی واقعی لوکالت کامیت نمی‌شوند.
++- PR و Issue در `<repo>/.git/codevia-local-meta.json` ذخیره می‌شوند (داخل `.git`، پس در working tree دیده نمی‌شوند و با clone ریموت منتقل نمی‌شوند).
++- جستجوی **مسیر فایل‌ها** و حافظه در حالت لوکال کار می‌کند؛ جستجوی **محتوای** فایل‌ها (git grep) به mirror نیاز دارد که در حالت لوکال پیش‌فرض خاموش است (بدون خطا رد می‌شود). اگر می‌خواهید فعال باشد: `REPO_MIRROR_ENABLED=true` و `REPO_MIRROR_URL_TEMPLATE=file:///D:/Hermes/repos/{repo}` با چیدمان `owner/repo`.
++- گیت **2.38+** لازم است (برای `merge-tree --write-tree`)؛ گیت قدیمی‌تر به fallback با worktree موقت (همیشه پاک‌شونده) می‌رود.
++
++## اجرای تست‌ها
++
++```bash
++npx vitest run src/tests/local-git-error.test.ts src/tests/local-git-service.compat.test.ts src/tests/local-git-service.property.test.ts src/tests/local-git-service.failure.test.ts
++```
++
++نتیجه‌ی واقعی این اجرا (git 2.47.3، Node 22):
++
++```
++Test Files  4 passed (4)
++     Tests  95 passed (95)
++```
++
++و کل مجموعه‌ی پروژه: **۱۰۱۵ تست پاس، ۱ خطای از‌قبل‌موجودِ خود ریپوی بالادستی** (`app-assembly` — روی کلون دست‌نخورده‌ی github.com/ho3eines/CodeVia هم دقیقاً همان خطا fail می‌شود؛ فایل `public/app.js` بایت‌به‌بایت با بالادستی یکسان است).

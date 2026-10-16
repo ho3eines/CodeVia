@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { logger } from "../logger.js";
+import { isLocalGitMode } from "./local-git-service.js";
 
 /**
  * Read-only local mirror of a project's repository.
@@ -148,6 +149,11 @@ function envNumber(name: string, fallback: number): number {
  */
 function mirrorEnabledByDefault(): boolean {
   if (process.env.VITEST || process.env.NODE_ENV === "test") return false;
+  // Local Git CLI mode: repositories already live on this machine, so cloning
+  // them again from a URL template (default github.com) is pure overhead — and
+  // would drag the platform back onto the network. Reads go straight through
+  // LocalGitService instead.
+  if (isLocalGitMode()) return false;
   return true;
 }
 

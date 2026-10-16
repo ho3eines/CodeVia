@@ -1,5 +1,6 @@
 import { MockGitHubService } from "./mock-service.js";
 import { RealGitHubService } from "./real-service.js";
+import { LocalGitService, isLocalGitMode } from "./local-git-service.js";
 import type { IGitHubService } from "./types.js";
 import { getEnv } from "../config/env.js";
 import { logger } from "../logger.js";
@@ -35,6 +36,12 @@ export function isServerGitHubEnabled(): boolean {
  * mock for dev/test/Simulation Mode.
  */
 export function resolveGitHubService(): IGitHubService {
+  // Local Git CLI mode: 100% offline, driven by the git binary on this machine.
+  // Checked FIRST so no token/OAuth requirement can ever kick in.
+  if (isLocalGitMode()) {
+    logger.info("Using LocalGitService (100% local Git CLI mode — no GitHub API, no token)");
+    return new LocalGitService();
+  }
   // Use the real REST adapter in production (or when explicitly enabled) with a
   // token. Local dev/test defaults to the mock so the platform never requires
   // GitHub credentials to boot — a project can still connect to real GitHub via
@@ -84,6 +91,17 @@ export function resolveGitHubForUser(opts: {
   authenticated: boolean;
   fallback: IGitHubService;
 }): ResolvedGitHub {
+  // Local Git CLI mode: report a full-scope user connection so the write-access
+  // preflight and the "server-token" guards (which would demand GitHub OAuth)
+  // never block local operations.
+  if (isLocalGitMode()) {
+    return {
+      service: opts.fallback,
+      source: "user-oauth",
+      scopes: ["repo", "read:user", "user:email"],
+      hint: "Local Git CLI mode — repositories on this machine are read and written directly via git.",
+    };
+  }
   if (opts.authenticated && opts.userId) {
     const stored = getUserGitHubToken(opts.kv, opts.userId);
     if (stored) {
@@ -127,6 +145,9 @@ export function resolveGitHubTokenForProject(opts: {
   project: import("../domain/entities.js").Project;
   requestUserId?: string;
 }): string | undefined {
+  // Local Git CLI mode: repositories live on this machine; nothing is cloned
+  // over HTTPS, so no token is ever handed out.
+  if (isLocalGitMode()) return undefined;
   const requestUserId = opts.requestUserId ?? githubRequestActorId();
   if (requestUserId) {
     const own = getUserGitHubToken(opts.kv, requestUserId);
@@ -232,6 +253,11 @@ export function resolveGitHubForProject(opts: {
    */
   requestUserId?: string;
 }): IGitHubService {
+  // Local Git CLI mode: every project acts through the local git binary — no
+  // per-user GitHub token is ever required or borrowed.
+  if (isLocalGitMode()) {
+    return opts.fallback;
+  }
   // A signed-in user always acts as themselves, whoever owns the project. This
   // is also the safer default: the caller can only ever reach repositories
   // their own token already grants. `requestUserId` is explicit (project
