@@ -8,7 +8,23 @@ import { LocalGitError } from "../github/local-git-error.js";
 import { logger } from "../logger.js";
 
 vi.mock("../logger.js", () => ({
-  logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn() })) },
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    debug: vi.fn(),
+    error: vi.fn(),
+    trace: vi.fn(),
+    fatal: vi.fn(),
+    child: vi.fn(() => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+      trace: vi.fn(),
+      fatal: vi.fn(),
+      child: vi.fn(),
+    })),
+  },
 }));
 
 const ENV = {
@@ -74,7 +90,13 @@ describe("LocalGit failure scenarios", () => {
         removes: string[],
       ): Promise<{ sha: string; author: string }>;
     };
-    const { sha } = await internal.commitViaIndex(dir, before, "dangling", [{ path: "CodeVia/d.md", content: "d" }], []);
+    const { sha } = await internal.commitViaIndex(
+      dir,
+      before,
+      "dangling",
+      [{ path: "CodeVia/d.md", content: "d" }],
+      [],
+    );
     expect(sha).not.toBe(before);
     expect(await head()).toBe(before); // the branch never moved
     // The dangling commit is harmless: it is not on main, and a normal commit
@@ -121,9 +143,7 @@ describe("LocalGit failure scenarios", () => {
     const indexLock = join(repoDir(), ".git", "index.lock");
     writeFileSync(indexLock, "", "utf8"); // e.g. the IDE is mid-operation
 
-    const err = await asError(
-      svc.commit(ref, "main", "state", [{ path: "CodeVia/project.md", content: "p" }], before),
-    );
+    const err = await asError(svc.commit(ref, "main", "state", [{ path: "CodeVia/project.md", content: "p" }], before));
     expect(err.code).toBe("LOCAL_LOCKED");
     expect(err.committed).toBe(true); // the caller must NOT think the commit failed
     expect(err.sha).toMatch(/^[0-9a-f]{40}$/);

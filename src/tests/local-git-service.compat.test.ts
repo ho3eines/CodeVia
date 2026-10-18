@@ -6,7 +6,23 @@ import { dirname, join } from "node:path";
 import { LocalGitService } from "../github/local-git-service.js";
 
 vi.mock("../logger.js", () => ({
-  logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn() })) },
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    debug: vi.fn(),
+    error: vi.fn(),
+    trace: vi.fn(),
+    fatal: vi.fn(),
+    child: vi.fn(() => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+      trace: vi.fn(),
+      fatal: vi.fn(),
+      child: vi.fn(),
+    })),
+  },
 }));
 
 const ENV = {
@@ -105,7 +121,13 @@ describe("LocalGit compatibility: CodeVia/* state", () => {
   it("08 commit writes CodeVia/project.md and reads it back byte-identical (utf-8)", async () => {
     makeRepo({ "README.md": "x" });
     const content = "---\nid: p1\n---\n# فروشگاه\n中文\n";
-    await svc.commit(ref, "main", "[CodeVia] save project state [skip ci]", [{ path: "CodeVia/project.md", content }], await head());
+    await svc.commit(
+      ref,
+      "main",
+      "[CodeVia] save project state [skip ci]",
+      [{ path: "CodeVia/project.md", content }],
+      await head(),
+    );
     expect((await svc.getFile(ref, "CodeVia/project.md", "main"))?.content).toBe(content);
   });
 
@@ -190,7 +212,13 @@ describe("LocalGit compatibility: CodeVia/* state", () => {
 
   it("19 the [skip ci] marker is stored verbatim in the commit message", async () => {
     const dir = makeRepo({ "README.md": "x" });
-    await svc.commit(ref, "main", "[CodeVia] save memory [skip ci]", [{ path: "CodeVia/memory.md", content: "m" }], await head());
+    await svc.commit(
+      ref,
+      "main",
+      "[CodeVia] save memory [skip ci]",
+      [{ path: "CodeVia/memory.md", content: "m" }],
+      await head(),
+    );
     expect(git(dir, "log", "-1", "--format=%B")).toContain("[skip ci]");
   });
 

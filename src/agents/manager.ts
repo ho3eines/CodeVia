@@ -217,10 +217,7 @@ export class AgentManager {
    * by the state-archive reader) into the project repository and load it. The
    * model-free alternative to AI state generation.
    */
-  async importProjectState(
-    projectId: string,
-    files: GithubFile[],
-  ): Promise<{ imported: string[]; project: Project }> {
+  async importProjectState(projectId: string, files: GithubFile[]): Promise<{ imported: string[]; project: Project }> {
     if (!this.state)
       throw Object.assign(new Error("Project state sync is not configured on this server"), { statusCode: 503 });
     return this.state.applyImportedState(projectId, files);
