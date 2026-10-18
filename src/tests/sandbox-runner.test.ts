@@ -661,7 +661,26 @@ describe("sandbox image availability", () => {
     expect(result.ok).toBe(false);
     expect(result.data).toMatchObject({ verification: "unverified", fixable: false, sandbox: "image-missing" });
     expect(String(result.output)).toMatch(/docker pull node:22-alpine/);
+    expect(String(result.output)).toContain("PROJECT_SANDBOX_IMAGE_PULL=missing");
     expect(seenArgs).toContain("--pull=never");
+  });
+
+  it("names the active image policy when a pulled image is still missing", async () => {
+    const runDocker = vi.fn(async (_bin: string, args: string[]) => {
+      if (args[0] === "pull") return ok({ stdoutTail: "pulled" });
+      return ok({
+        exitCode: 125,
+        stdoutTail: "",
+        stderrTail: "docker: Error response from daemon: No such image: node:22-alpine:latest.",
+      });
+    });
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), imagePull: "always", runDocker });
+
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+
+    expect(result.data).toMatchObject({ sandbox: "image-missing", fixable: false });
+    expect(String(result.output)).toContain("PROJECT_SANDBOX_IMAGE_PULL=always");
+    expect(String(result.output)).not.toContain("pull it once, or set PROJECT_SANDBOX_IMAGE_PULL=missing");
   });
 
   it("inspects and pulls a missing image first when imagePull=missing", async () => {

@@ -645,9 +645,15 @@ export class SandboxRunner {
                 ? "Failing stage: install — a dependency/environment failure. Not auto-fixed by code changes: allow sandbox network for the install step, or pre-install dependencies."
                 : `Failing stage: ${failedStage} — not attributed to project code, so no automatic fix loop will start.`
           : "";
+      // `docker run` always keeps `--pull=never`; the only pull is the explicit
+      // preflight. Say which policy was in effect so the message is exact.
+      const pullNote =
+        this.config.imagePull === "never"
+          ? "docker run keeps --pull=never; pull it once, or set PROJECT_SANDBOX_IMAGE_PULL=missing"
+          : `docker run keeps --pull=never and the explicit image step (PROJECT_SANDBOX_IMAGE_PULL=${this.config.imagePull}) did not leave it present`;
       const output = [
         imageMissing
-          ? `Docker sandbox could not start: image "${image}" is not present on this host. Pull it with: docker pull ${image} (the sandbox always runs with --pull=never).`
+          ? `Docker sandbox could not start: image "${image}" is not present on this host. Pull it with: docker pull ${image} (${pullNote}).`
           : `Docker sandbox ${succeeded ? "passed" : "failed"} for ${target} (exit ${result.exitCode}${result.timedOut ? ", timeout" : ""}${result.aborted ? ", cancelled" : ""}${result.outputLimited ? ", output limit" : ""}).`,
         sourceNote,
         stageNote,

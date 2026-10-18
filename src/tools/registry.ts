@@ -1,6 +1,7 @@
 import { CORE_TOOLS } from "./core-tools.js";
 import type { ToolDefinition, ToolResult, ToolContext, IToolRegistry } from "./types.js";
 import type { Agent } from "../domain/entities.js";
+import { sandboxFolderSource } from "../projects/sandbox-runner.js";
 import { logger } from "../logger.js";
 
 /**
@@ -71,9 +72,9 @@ export class ToolRegistry implements IToolRegistry {
     // folder project, whose real source is localPath and which therefore runs
     // even when no GitHub account is connected. A missing runner cannot execute
     // code. Real sandbox runs are force-human unless the project is explicitly
-    // trusted and networking remains off.
-    const runsFromLocalFolder =
-      ctx.project.sourceType === "local" && !ctx.project.configRepo?.trim() && !!ctx.project.localPath?.trim();
+    // trusted and networking remains off. `sandboxFolderSource` is the single
+    // definition of "runs from localPath" (shared with the runner itself).
+    const runsFromLocalFolder = sandboxFolderSource(ctx.project) !== undefined;
     const willExecuteSandbox =
       tool.sandboxExecution === true &&
       ctx.project.sourceType === "local" &&

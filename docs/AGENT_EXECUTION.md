@@ -233,7 +233,7 @@ inputs.needFrontend && outputs["backend-node"].status === "succeeded"
 ### ۱) Docker sandbox (پیش‌فرض وقتی Docker در دسترس است)
 
 - دستورهای `install/build/test/lint` پروژه را در `Project → Edit → Operations` تنظیم کنید. خالی گذاشتن `test` یعنی QA راهی برای تأیید ندارد و `unverified` می‌ماند.
-- تصویر مناسب را از قبل pull کنید (`docker pull node:22-alpine`) چون sandbox با `--pull=never` اجرا می‌شود.
+- تصویر مناسب را از قبل pull کنید (`docker pull node:22-alpine`): خودِ `docker run` همیشه `--pull=never` دارد و pull فقط در مرحلهٔ صریح `PROJECT_SANDBOX_IMAGE_PULL` انجام می‌شود (`never` پیش‌فرض، `missing` = inspect و سپس pull فقط در صورت نبودن، `always` = pull قبل از هر اجرا).
 - برای پروژه‌ای که نصب وابستگی نیاز به شبکه دارد، `settings.sandboxNetworkAccess=true` را آگاهانه روشن کنید؛ در این حالت هر اجرا تأیید انسانی می‌خواهد.
 - نتیجهٔ هر اجرا (`stdout`/`stderr` tail، `exitCode`، `sha`، `timedOut`، `durationMs`) در Run Console و روی تسک ثبت می‌شود.
 

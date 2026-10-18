@@ -59,9 +59,16 @@ Health: Railway polls `/health`.
 
 ### Option B — split services (web + worker)
 
-Run two services from the same image:
-- **Web/API** service: `CMD node dist/index.js` (starts the HTTP server **and** an in-process worker). Single-node deployments are fine.
-- **Worker** service: to run only the worker, add an env flag (e.g. `WORKER_ONLY=true`) and start `node dist/index.js` with the worker-only branch. (This is the extension point for horizontal scaling; the queue is the shared runtime store.)
+The image exposes one entrypoint that always starts the HTTP server **and** an
+in-process worker (`src/index.ts` starts `container.worker.start(1000)` next to
+`app.listen`). There is currently **no** worker-only mode and no `WORKER_ONLY`
+flag — do not deploy a second service with a `command:` override expecting it
+to consume jobs; it would start another full web/API instance.
+
+Horizontal scaling is an extension point, not an implemented feature: the queue
+lives in the shared runtime store, so a future worker-only process could lease
+jobs from the same `DATABASE_PATH` volume, but that split still has to be built
+(a flag, a CLI entry point and tests). Until then, run a single service.
 
 ### Option C — persistent storage (REQUIRED on Railway to keep settings)
 
