@@ -392,8 +392,10 @@ on restart) and run again.
 
 ## `run_tests` / `run_build` says the Docker sandbox is unavailable
 
-The tool runs project commands only inside a disposable Docker container; it
-never falls back to a host shell.
+Only local/imported projects (`sourceType: "local"`) run commands, always
+inside a disposable Docker container; the tool never falls back to a host shell
+or to CI. GitHub-backed projects verify through their CI checks instead and never
+start a container.
 
 - `Docker executable not found: docker` → install the Docker CLI/daemon, or set
   `PROJECT_SANDBOX_DOCKER_BIN` to its absolute path. When CodeVia itself runs in
@@ -407,9 +409,9 @@ never falls back to a host shell.
   guess a command that the repository does not declare.
 - Dependency installation needs the network → set
   `settings.sandboxNetworkAccess = true`; every run then asks for approval.
-- Repository-backed projects without Docker fall back to GitHub CI check runs.
-  If no workflow exists, the result stays `unverified`; see
-  [AGENT_EXECUTION.md](AGENT_EXECUTION.md).
+- For a GitHub-backed project this message means no CI workflow reported checks
+  for that commit: the result stays `unverified` — add a workflow or run the
+  checks manually; see [AGENT_EXECUTION.md](AGENT_EXECUTION.md).
 
 ## ZIP/RAR import returns 400
 

@@ -66,20 +66,20 @@ export class ToolRegistry implements IToolRegistry {
       return projectPermissions?.[key] === false;
     });
     if (deniedByProject) return { ok: false, output: `Project policy denies ${name}`, data: { denied: true } };
-    // Sandboxed project execution is force-human for untrusted projects even
-    // when the global policy auto-approves ordinary dangerous tools. Explicit
-    // project trust bypasses only while the container network remains off.
-    const trustedOfflineSandbox =
+    // Only local-source tools actually enter Docker. GitHub-backed projects read
+    // GitHub CI, mock mode simulates it, and a missing runner cannot execute code.
+    // Real sandbox runs are force-human unless the project is explicitly trusted
+    // and networking remains off.
+    const willExecuteSandbox =
       tool.sandboxExecution === true &&
+      ctx.project.sourceType === "local" &&
+      ctx.github.kind !== "mock" &&
+      ctx.sandboxRunner !== undefined;
+    const trustedOfflineSandbox =
+      willExecuteSandbox &&
       ctx.project.settings?.trustedForExecution === true &&
       ctx.project.settings?.sandboxNetworkAccess !== true;
-    // Approval exists to gate *code execution*. A sandbox tool with no runner
-    // (PROJECT_SANDBOX_ENABLED=false → CI evidence only) or against a mock
-    // repository executes nothing, so blocking every demo/autonomous QA run on a
-    // human approval would be security theatre.
-    const simulatedSandbox =
-      tool.sandboxExecution === true && (ctx.sandboxRunner === undefined || ctx.github.kind === "mock");
-    const needsApproval = tool.dangerous && !trustedOfflineSandbox && !simulatedSandbox;
+    const needsApproval = tool.dangerous && (!tool.sandboxExecution || (willExecuteSandbox && !trustedOfflineSandbox));
     ctx.checkActive?.();
     if (needsApproval && !ctx.approved) {
       if (!ctx.requestApproval)
@@ -92,7 +92,7 @@ export class ToolRegistry implements IToolRegistry {
         tool: tool.name,
         input: summarizeInput(input),
         ...binding,
-        ...(tool.sandboxExecution ? { forceHumanApproval: true } : {}),
+        ...(willExecuteSandbox ? { forceHumanApproval: true } : {}),
       });
       if (!approved) {
         return { ok: false, output: `Approval rejected for ${name}`, requiresApproval: true, data: { rejected: true } };

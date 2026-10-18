@@ -51,11 +51,7 @@ const STATUS: Record<LocalGitErrorCode, number> = {
 };
 
 /** Transient failures: safe to retry after a short delay. */
-const RETRYABLE = new Set<LocalGitErrorCode>([
-  "LOCAL_GIT_UNAVAILABLE",
-  "LOCAL_LOCKED",
-  "LOCAL_GIT_FAILED",
-]);
+const RETRYABLE = new Set<LocalGitErrorCode>(["LOCAL_GIT_UNAVAILABLE", "LOCAL_LOCKED", "LOCAL_GIT_FAILED"]);
 
 export interface LocalGitErrorOptions {
   cause?: unknown;

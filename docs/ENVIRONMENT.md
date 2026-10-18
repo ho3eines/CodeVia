@@ -121,7 +121,7 @@ Docker container (`src/projects/sandbox-runner.ts`) with a read-only root FS,
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROJECT_SANDBOX_ENABLED` | `true` | Master switch. `false` never runs a container: `run_tests`/`run_build` read GitHub CI checks (no sandbox approval, no Docker requirement) |
+| `PROJECT_SANDBOX_ENABLED` | `true` | Master switch. `false` never runs a container: GitHub-backed projects already verify through CI, and local projects report `unverified` / `sandbox: "unavailable"` instead of executing (no Docker requirement, no sandbox approval) |
 | `PROJECT_SANDBOX_DOCKER_BIN` | `docker` | Docker CLI to spawn (absolute path when it is not on `PATH`) |
 | `PROJECT_SANDBOX_IMAGE` | (from stack) | Image override. Unset = `node:22-alpine`, `python:3.12-slim`, `golang:1.24-alpine`, `rust:1.88-slim` or `php:8.3-cli-alpine` based on the project language. The image must already be present (`--pull=never`) |
 | `PROJECT_SANDBOX_TIMEOUT_MS` | `480000` | Hard wall-clock limit for one execution (max 10 min) |

@@ -460,9 +460,9 @@ export async function prepareSingleImplementation(
   plan.push(pullRequestStep(agent, task, ctx.project.configRepo, branch, ctx.project.branch, item.files));
   // A workflow QA node verifies the integrated branch after all writers finish.
   if (task.workflowId) return plan;
-  // Verification runs in the project's Docker sandbox; when Docker (or
-  // PROJECT_SANDBOX_ENABLED) is off it falls back to the repository's CI
-  // evidence for that commit. It never runs the platform's own npm scripts.
+  // Verification reads this commit's evidence: GitHub CI for repository-backed
+  // projects, the Docker sandbox for local projects. It never runs the
+  // platform's own npm scripts.
   if (!agent.tools.includes("run_tests"))
     throw new Error(`${agent.name} needs run_tests to verify a standalone implementation`);
   plan.push({

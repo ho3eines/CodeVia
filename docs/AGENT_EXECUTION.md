@@ -27,13 +27,13 @@
 |---|---|
 | خواندن پروژه | یک **آینهٔ محلی فقط‌خواندنی** (bare clone) + `ls-tree` / `cat-file` / `grep`؛ در صورت نبود آینه، REST گیت‌هاب (Git Trees API). هیچ checkout و هیچ working copy قابل نوشتنی وجود ندارد |
 | تغییرات ایجنت‌ها | تولید patch/فایل و **یک commit اتمیک** روی شاخهٔ مشترک تسک `agent-task-<task id>` (Git Data API) |
-| اجرای تست/build | **Docker sandbox** (`run_tests` / `run_build`): فقط دستورهای lifecycle همان پروژه داخل کانتینر محدود اجرا می‌شوند. اگر Docker روی میزبان نباشد، برای پروژه‌های متصل به ریپو، شواهد از **CI گیت‌هاب** خوانده می‌شود |
+| اجرای تست/build | **مسیر بر اساس منبع پروژه:** پروژه‌های متصل به GitHub همیشه شواهد **CI همان commit** را می‌خوانند (Docker اجرا نمی‌شود)؛ مخزن Mock نتیجهٔ `simulated` می‌دهد؛ فقط پروژه‌های واردشده/پوشه‌ای (`sourceType: "local"`) دستورهای lifecycle را داخل **Docker sandbox** اجرا می‌کنند |
 | push / PR | باز کردن **Draft PR** برای هر مخزن؛ انتشار از draft و merge تصمیم انسان است (گیت ادغام CI را شرط می‌کند) |
 | pull بازگشتی | `POST /projects/:id/pull` تعریف‌ها (`CodeVia/`) را از گیت به دیتابیس برمی‌گرداند |
 
-### اجرای ایزوله در Docker sandbox
+### اجرای ایزوله در Docker sandbox (فقط پروژه‌های local)
 
-کد مخزن **هرگز روی میزبان CodeVia اجرا نمی‌شود**. `run_tests` و `run_build` درخواست را به `SandboxRunner` (`src/projects/sandbox-runner.ts`) می‌دهند که:
+کد مخزن **هرگز روی میزبان CodeVia اجرا نمی‌شود**. برای پروژه‌های متصل به GitHub، `run_tests`/`run_build` فقط CI را می‌خوانند؛ تنها پروژه‌های `sourceType: "local"` (فولدر سرور یا ZIP/RAR) درخواست را به `SandboxRunner` (`src/projects/sandbox-runner.ts`) می‌دهند که:
 
 1. درخت فایل را از یک **SHA تغییرناپذیر** بیرون می‌کشد (مخزن محلی: `git ls-tree`/`cat-file`؛ گیت‌هاب: Git Trees API + blobها). فایل‌های حساس (`.env*`، `*.pem`، `id_rsa*`، `.npmrc`، …) کنار گذاشته می‌شوند و symlink/فایل ویژه باعث توقف با `unverified` می‌شود.
 2. فایل‌ها را در یک workspace موقت می‌نویسد (پاک‌سازی در `finally`).
@@ -42,13 +42,13 @@
 
 **دستورها per-project هستند** و در `Project → Edit → Operations` (یا `PATCH /projects/:id` با `commands`) ویرایش می‌شوند: `install`, `build`, `test`, `lint`, `start`. اگر خالی باشند از تحلیل پروژه (`package.json` scripts، lockfile، `pyproject.toml`، `go.mod`، `Cargo.toml`، `composer.json`) پر می‌شوند. مرحلهٔ `test` دستورهای `install` → `test` → `lint` و مرحلهٔ `build` دستورهای `install` → `build` → `test` → `lint` را به‌ترتیب اجرا می‌کند. نبودِ دستور همان مرحله یعنی `unverified` — به‌جای اجرای حدسی.
 
-**شبکه** به‌صورت پیش‌فرض بسته است. `settings.sandboxNetworkAccess = true` آن را باز می‌کند و در این حالت حتی پروژهٔ trusted هم برای هر اجرا تأیید انسانی می‌خواهد. `settings.trustedForExecution = true` فقط وقتی شبکه بسته است تأییدِ هر اجرا را رد می‌کند؛ sandbox هرگز خاموش نمی‌شود. وقتی هیچ کدی اجرا نمی‌شود (مخزن Mock، یا `PROJECT_SANDBOX_ENABLED=false`) ابزار Approval نمی‌خواهد، چون فقط شواهد CI خوانده می‌شود.
+**شبکه** به‌صورت پیش‌فرض بسته است. `settings.sandboxNetworkAccess = true` آن را باز می‌کند و در این حالت حتی پروژهٔ trusted هم برای هر اجرا تأیید انسانی می‌خواهد. `settings.trustedForExecution = true` فقط وقتی شبکه بسته است تأییدِ هر اجرا را رد می‌کند؛ sandbox هرگز خاموش نمی‌شود. Approval فقط جایی اجباری است که کد واقعاً اجرا می‌شود: پروژهٔ local با runner فعال و شبکهٔ باز، یا پروژهٔ trusted‌نشده. وقتی هیچ کدی اجرا نمی‌شود (پروژهٔ متصل به GitHub، مخزن Mock، یا `PROJECT_SANDBOX_ENABLED=false`) ابزار Approval نمی‌خواهد، چون فقط شواهد CI خوانده می‌شود.
 
 **تصویر:** به‌صورت پیش‌فرض از زبان پروژه انتخاب می‌شود (`node:22-alpine`، `python:3.12-slim`، `golang:1.24-alpine`، `rust:1.88-slim`، `php:8.3-cli-alpine`) و با `PROJECT_SANDBOX_IMAGE` قابل تغییر است. چون `--pull=never` است، تصویر باید از قبل روی میزبان موجود باشد (`docker pull node:22-alpine`).
 
-**پیکربندی** (`.env.example` / `docs/ENVIRONMENT.md`): `PROJECT_SANDBOX_ENABLED` (خاموش = مسیر فقط‌CI، بدون نیاز به Docker و بدون Approval)، `PROJECT_SANDBOX_DOCKER_BIN`، `PROJECT_SANDBOX_IMAGE`، `PROJECT_SANDBOX_TIMEOUT_MS` (پیش‌فرض ۸ دقیقه)، `PROJECT_SANDBOX_MEMORY_MB`، `PROJECT_SANDBOX_CPUS`، `PROJECT_SANDBOX_PIDS_LIMIT`، `PROJECT_SANDBOX_LOG_TAIL_BYTES`، `PROJECT_SANDBOX_DIR`. همه در قرارداد اعتبارسنجی env هستند و در بکاپ کامل هم ذخیره می‌شوند.
+**پیکربندی** (`.env.example` / `docs/ENVIRONMENT.md`): `PROJECT_SANDBOX_ENABLED` (خاموش = هیچ کانتینری اجرا نمی‌شود؛ پروژه‌های متصل به GitHub از CI و پروژه‌های local با `unverified`/`sandbox: unavailable` پاسخ می‌گیرند، بدون نیاز به Docker و بدون Approval)، `PROJECT_SANDBOX_DOCKER_BIN`، `PROJECT_SANDBOX_IMAGE`، `PROJECT_SANDBOX_TIMEOUT_MS` (پیش‌فرض ۸ دقیقه)، `PROJECT_SANDBOX_MEMORY_MB`، `PROJECT_SANDBOX_CPUS`، `PROJECT_SANDBOX_PIDS_LIMIT`، `PROJECT_SANDBOX_LOG_TAIL_BYTES`، `PROJECT_SANDBOX_DIR`. همه در قرارداد اعتبارسنجی env هستند و در بکاپ کامل هم ذخیره می‌شوند.
 
-> **استقرار:** فرآیند CodeVia باید به یک Docker daemon دسترسی داشته باشد. اگر خودِ CodeVia داخل کانتینر اجرا می‌شود، یا Docker CLI و سوکت را به آن بدهید (`/var/run/docker.sock`) یا sandbox اجرا نمی‌شود و `run_tests` برای پروژه‌های repo-backed به شواهد CI برمی‌گردد. در استقرار بدون Docker، همان مسیر قبلی (CI) معتبر است.
+> **استقرار:** فقط برای پروژه‌های local به Docker نیاز است. پروژه‌های متصل به GitHub همیشه از CI استفاده می‌کنند و بدون Docker هم کار می‌کنند. اگر خودِ CodeVia داخل کانتینر اجرا می‌شود و پروژهٔ local هم دارید، Docker CLI و سوکت را به آن بدهید (`/var/run/docker.sock`)؛ در غیر این صورت `run_tests` برای همان پروژه‌های local با `unverified`/`sandbox: unavailable` برمی‌گردد و هرگز روی میزبان اجرا نمی‌شود.
 
 ### آینهٔ محلی فقط‌خواندنی (Read-only mirror)
 
@@ -256,4 +256,4 @@ npx vitest run src/tests/sandbox-runner.test.ts src/tests/project-archive.test.t
   src/tests/rar-archive.test.ts src/tests/project-import-routes.test.ts src/tests/env-contract-sandbox.test.ts
 ```
 
-پوشش: دستورهای هر مرحله، پرچم‌های سخت‌سازی Docker، شبکهٔ بسته/باز، پاک‌سازی workspace، نگاشت `passed`/`failed`/`unverified`، fallback به CI وقتی Docker نیست، رد traversal/symlink/CRC/zip-bomb در ZIP، پروتکل listing/streaming در RAR، و زنجیرهٔ کامل `POST /projects/import` → مخزن محلی + commit اولیه + حذف فایل حساس.
+پوشش: دستورهای هر مرحله، پرچم‌های سخت‌سازی Docker، شبکهٔ بسته/باز، پاک‌سازی workspace، نگاشت `passed`/`failed`/`unverified`، استفاده از CI برای پروژه‌های GitHub و شکست سخت (بدون اجرای میزبان) برای پروژهٔ local بدون Docker، رد traversal/symlink/CRC/zip-bomb در ZIP، پروتکل listing/streaming در RAR، و زنجیرهٔ کامل `POST /projects/import` → مخزن محلی + commit اولیه + حذف فایل حساس.

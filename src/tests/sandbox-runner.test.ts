@@ -304,11 +304,9 @@ describe("sandbox availability", () => {
     expect(result.data).toMatchObject({ verification: "unverified", fixable: false, sandbox: "unavailable" });
   });
 
-  it("falls back to GitHub CI evidence when no Docker CLI exists", async () => {
-    const runner = new SandboxRunner({
-      workspaceRoot: tempRoot(),
-      runDocker: async () => ok({ exitCode: 127, stdoutTail: "", stderrTail: "Docker executable not found: docker" }),
-    });
+  it("verifies a GitHub-backed project through CI without starting Docker", async () => {
+    const runDocker = vi.fn(async () => ok());
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
     const gh = {
       ...github(),
       kind: "real",
@@ -317,8 +315,26 @@ describe("sandbox availability", () => {
     } as unknown as IGitHubService;
     const ctx = { project: project(), github: gh, sandboxRunner: runner } as unknown as ToolContext;
     const result = await runTestsTool.execute(ctx, { ref: "main", waitMs: 0 });
-    expect(result.data).toMatchObject({ verification: "passed", sandbox: "unavailable", sha: SHA });
-    expect(result.output).toMatch(/falling back to GitHub CI/i);
+    expect(result.data).toMatchObject({ verification: "passed", sha: SHA });
+    expect(result.output).toMatch(/GitHub CI passed/i);
+    expect(runDocker).not.toHaveBeenCalled();
+  });
+
+  it("keeps a local project on Docker even when CI would look green", async () => {
+    const runDocker = vi.fn(async () => ok({ exitCode: 127, stderrTail: "Docker executable not found: docker" }));
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+    const local = project({ sourceType: "local", configRepo: "local/demo" });
+    const gh = {
+      ...github(),
+      kind: "real",
+      listBranches: async () => [{ name: "main", sha: SHA }],
+      getChecks: async () => [{ name: "build", status: "success" }],
+    } as unknown as IGitHubService;
+    const ctx = { project: local, github: gh, sandboxRunner: runner } as unknown as ToolContext;
+    const result = await runTestsTool.execute(ctx, { ref: "main", waitMs: 0 });
+    expect(runDocker).toHaveBeenCalledTimes(1);
+    expect(result.data).toMatchObject({ verification: "unverified", sandbox: "unavailable" });
+    expect(result.output).not.toMatch(/GitHub CI passed/i);
   });
 
   it("does not pretend CI covers a repo-less local project", async () => {
@@ -354,7 +370,11 @@ describe("mock repositories", () => {
   it("needs no human approval for a sandbox simulation", async () => {
     const runDocker = vi.fn(async () => ok());
     const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
-    const mock = { ...github(), kind: "mock" } as unknown as IGitHubService;
+    const mock = {
+      ...github(),
+      kind: "mock",
+      listBranches: async () => [{ name: "main", sha: SHA }],
+    } as unknown as IGitHubService;
     const agent = {
       id: "a1",
       slug: "qa",

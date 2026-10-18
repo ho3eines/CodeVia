@@ -454,8 +454,9 @@ export class SandboxRunner {
         data: {
           verification,
           fixable: !succeeded && result.exitCode !== 127 && !result.aborted,
-          // "unavailable" lets callers fall back to CI evidence when no Docker
-          // CLI exists on this host; "docker" means the sandbox really ran.
+          // "unavailable" means no container ran (missing Docker CLI/daemon);
+          // local projects then stay unverified instead of executing anywhere
+          // else. "docker" means the sandbox really ran.
           sandbox: dockerMissing ? "unavailable" : "docker",
           repo: repoName,
           ref,

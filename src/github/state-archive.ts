@@ -98,8 +98,7 @@ function readZipEntries(buffer: Buffer): ZipEntry[] {
     const extraLen = u16(buffer, pos + 30);
     const commentLen = u16(buffer, pos + 32);
     const localOffset = u32(buffer, pos + 42);
-    if (compSize === 0xffffffff || uncompSize === 0xffffffff)
-      throw badArchive("zip64 entries are not supported");
+    if (compSize === 0xffffffff || uncompSize === 0xffffffff) throw badArchive("zip64 entries are not supported");
     const name = buffer.slice(pos + 46, pos + 46 + nameLen).toString("utf8");
     pos += 46 + nameLen + extraLen + commentLen;
 
@@ -132,8 +131,7 @@ function readZipEntries(buffer: Buffer): ZipEntry[] {
     }
     if (crc32 && crc32(content) !== crc) throw badArchive(`CRC mismatch for "${path}" — the archive is corrupt`);
     totalRaw += content.length;
-    if (totalRaw > MAX_ARCHIVE_RAW_BYTES)
-      throw badArchive(`archive expands beyond ${MAX_ARCHIVE_RAW_BYTES} bytes`);
+    if (totalRaw > MAX_ARCHIVE_RAW_BYTES) throw badArchive(`archive expands beyond ${MAX_ARCHIVE_RAW_BYTES} bytes`);
     entries.push({ path, content });
   }
   return entries;
@@ -166,8 +164,7 @@ export function extractStateArchive(buffer: Buffer): GithubFile[] {
     if (total > MAX_TOTAL_BYTES) throw badArchive(`state files exceed the ${MAX_TOTAL_BYTES} byte total limit`);
     files.set(path, entry.content.toString("utf8"));
   }
-  if (!files.size)
-    throw badArchive("the CodeVia/ folder contains no readable state files (.md definitions)");
+  if (!files.size) throw badArchive("the CodeVia/ folder contains no readable state files (.md definitions)");
   if (files.size > MAX_STATE_FILES)
     throw badArchive(`too many state files (${files.size}; maximum ${MAX_STATE_FILES})`);
   return [...files].map(([path, content]) => ({ path, content }));

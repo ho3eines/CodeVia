@@ -701,7 +701,8 @@ describe("AutonomousOrchestrator research blocker (A13)", () => {
     const task = container.agentManager.createTask({
       projectId: project.id,
       title: "Add invoice PDF generator",
-      description: "Generate monthly invoice PDFs. BLOCKER: which currency should the invoice totals use before we implement?",
+      description:
+        "Generate monthly invoice PDFs. BLOCKER: which currency should the invoice totals use before we implement?",
     });
     const parked = { ...task, input: { executionMode: "autonomous", ...(answer ? { researchAnswer: answer } : {}) } };
     container.taskRepo.upsert(parked, { projectId: task.projectId, parentId: task.parentTaskId });

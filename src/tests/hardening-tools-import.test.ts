@@ -83,6 +83,46 @@ describe("tool registry — permission matrix, approval gate, timeout", () => {
     expect(res.requiresApproval).toBe(true);
   });
 
+  it("requires force-human approval before an untrusted local project enters Docker", async () => {
+    const stored = container.projectRepo.findMany()[0]!.data;
+    const project = {
+      ...stored,
+      sourceType: "local" as const,
+      commands: { test: "npm test" },
+      settings: { ...stored.settings, trustedForExecution: false, sandboxNetworkAccess: false },
+    };
+    const agent = container.agentRepo.byType(project.id, "qa-test")!;
+    const github = container.github;
+    Object.defineProperty(github, "kind", { value: "real", configurable: true });
+    let sandboxCalls = 0;
+    let approvalDetail: Record<string, unknown> | undefined;
+    const res = await container.toolRegistry.execute(
+      "run_tests",
+      ctxFor(
+        {
+          project,
+          agent: { ...agent, permissions: ["github.read"] as never },
+          github,
+          sandboxRunner: {
+            verify: async () => {
+              sandboxCalls++;
+              return { ok: true, output: "Docker sandbox passed", data: { verification: "passed" } };
+            },
+          } as unknown as ToolContext["sandboxRunner"],
+          requestApproval: async (_action, detail) => {
+            approvalDetail = detail;
+            return true;
+          },
+        },
+        ["github.read"],
+      ),
+      { repo: project.configRepo, ref: "feature/login" },
+    );
+    expect(res.ok).toBe(true);
+    expect(sandboxCalls).toBe(1);
+    expect(approvalDetail).toMatchObject({ forceHumanApproval: true, sandbox: "Docker", networkAccess: false });
+  });
+
   it("skips the second prompt when the step was already approved (ctx.approved)", async () => {
     let asked = 0;
     const res = await container.toolRegistry.execute(
