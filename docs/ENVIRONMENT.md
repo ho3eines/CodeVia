@@ -130,12 +130,20 @@ Docker container (`src/projects/sandbox-runner.ts`) with a read-only root FS,
 | `PROJECT_SANDBOX_PIDS_LIMIT` | `128` | Process limit (fork-bomb guard) |
 | `PROJECT_SANDBOX_LOG_TAIL_BYTES` | `12000` | Trailing stdout/stderr kept as run evidence |
 | `PROJECT_SANDBOX_DIR` | OS temp dir | Scratch root for exported source trees |
+| `PROJECT_SANDBOX_IMAGE_PULL` | `never` | Explicit image step before `docker run` (which keeps `--pull=never`): `never` = fail with the exact `docker pull <image>` command, `missing` = `docker image inspect`, pull only when absent, `always` = pull before every run |
 
 If Docker is missing, `run_tests`/`run_build` fall back to GitHub CI check runs
 for repository-backed projects (`verification: unverified` when there is no CI
-either). **Deployment note:** the bundled image does not ship the Docker CLI; a
-containerized CodeVia needs the CLI plus access to a daemon (`/var/run/docker.sock`
-or a remote `DOCKER_HOST`) for the sandbox to run.
+either). **Deployment note:** the bundled image builds without the Docker CLI by
+default; use `--build-arg INSTALL_DOCKER_CLI=true` (CLI only, no daemon) and give
+it access to a daemon (`/var/run/docker.sock`, a sidecar, or a remote
+`DOCKER_HOST`) for the sandbox to run. Mounting the host socket is equivalent to
+host root access — see the warning in `docker-compose.yml`. Local folder projects
+without git (`gitInit: false`) still verify: the sandbox reads
+`project.localPath` directly.
+
+`.rar` import works out of the box in the bundled image (`p7zip-full` +
+`PROJECT_IMPORT_7Z_BIN=/usr/bin/7z`).
 
 ## Project import (.zip / .rar)
 
@@ -150,7 +158,7 @@ external archiver.
 | `PROJECT_IMPORT_MAX_FILE_BYTES` | `26214400` (25 MiB) | Maximum size of one extracted file |
 | `PROJECT_IMPORT_MAX_TOTAL_BYTES` | `209715200` (200 MiB) | Maximum expanded total |
 | `PROJECT_IMPORT_MAX_COMPRESSION_RATIO` | `500` | Zip-bomb guard (declared expansion ratio) |
-| `PROJECT_IMPORT_7Z_BIN` | (PATH) | `7z`/`7zz` used to read `.rar`; without it RAR import answers `503` |
+| `PROJECT_IMPORT_7Z_BIN` | (PATH) | `7z`/`7zz` used to read `.rar`; without it RAR import answers `503`. The bundled image installs `p7zip-full` and pins `/usr/bin/7z` |
 
 ## Local Git mode & server-folder projects
 

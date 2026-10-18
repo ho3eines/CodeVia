@@ -164,7 +164,16 @@ const OMIT_DIRECTORIES = new Set([
   ".kube",
 ]);
 
-async function collectSafeFolderFiles(
+/**
+ * Read a server folder into a bounded, in-memory file list.
+ *
+ * Shared by the local-project creation flow and by the Docker sandbox: a
+ * folder project created with `gitInit: false` has no repository at all, so the
+ * sandbox takes its source from `project.localPath` through exactly this walk
+ * (same file/size limits, same symlink/special-file refusal, same secret
+ * exclusion) instead of inventing a GitHub or local-git source.
+ */
+export async function collectSafeFolderFiles(
   rootPath: string,
 ): Promise<{ files: ProjectArchiveFile[]; omittedSensitive: string[] }> {
   const limits = projectArchiveLimitsFromEnv();

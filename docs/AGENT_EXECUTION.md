@@ -35,7 +35,7 @@
 
 کد مخزن **هرگز روی میزبان CodeVia اجرا نمی‌شود**. برای پروژه‌های متصل به GitHub، `run_tests`/`run_build` فقط CI را می‌خوانند؛ تنها پروژه‌های `sourceType: "local"` (فولدر سرور یا ZIP/RAR) درخواست را به `SandboxRunner` (`src/projects/sandbox-runner.ts`) می‌دهند که:
 
-1. درخت فایل را از یک **SHA تغییرناپذیر** بیرون می‌کشد (مخزن محلی: `git ls-tree`/`cat-file`؛ گیت‌هاب: Git Trees API + blobها). فایل‌های حساس (`.env*`، `*.pem`، `id_rsa*`، `.npmrc`، …) کنار گذاشته می‌شوند و symlink/فایل ویژه باعث توقف با `unverified` می‌شود.
+1. درخت فایل را از یک **SHA تغییرناپذیر** بیرون می‌کشد (مخزن محلی: `git ls-tree`/`cat-file`؛ گیت‌هاب: Git Trees API + blobها). پروژهٔ پوشه‌ای که با `gitInit: false` ساخته شده **هیچ مخزنی ندارد**؛ برای همین سندباکس به‌جای GitHub/LocalGit مستقیماً `project.localPath` را با همان `collectSafeFolderFiles` می‌خواند (همان سقف فایل/حجم/تعداد، همان رد کردن symlink و فایل ویژه). چون commitی وجود ندارد، `sha` گزارش‌شده یک **digest محتوایی SHA-256** از همان درختی است که به کانتینر داده شد. فایل‌های حساس (`.env*`، `*.pem`، `id_rsa*`، `.npmrc`، …) کنار گذاشته می‌شوند و symlink/فایل ویژه باعث توقف با `unverified` می‌شود. خروجی صریح می‌گوید: «این پروژه گیت ندارد؛ از localPath اجرا شد».
 2. فایل‌ها را در یک workspace موقت می‌نویسد (پاک‌سازی در `finally`).
 3. `docker run --rm` با این محدودیت‌ها اجرا می‌کند: `--network=none` (مگر opt-in پروژه)، `--read-only`، `--cap-drop=ALL`، `--security-opt=no-new-privileges`، `--user=1000:1000`، `--pids-limit`، `--cpus`، `--memory`/`--memory-swap`، `--tmpfs /tmp` و `--pull=never`.
 4. خروجی را به `passed` / `failed` / `unverified` نگاشت می‌کند؛ `exit 127` یعنی ابزار/Docker در دسترس نیست و **قابل اصلاح با کد نیست** (`fixable: false`).
@@ -44,11 +44,72 @@
 
 **شبکه** به‌صورت پیش‌فرض بسته است. `settings.sandboxNetworkAccess = true` آن را باز می‌کند و در این حالت حتی پروژهٔ trusted هم برای هر اجرا تأیید انسانی می‌خواهد. `settings.trustedForExecution = true` فقط وقتی شبکه بسته است تأییدِ هر اجرا را رد می‌کند؛ sandbox هرگز خاموش نمی‌شود. Approval فقط جایی اجباری است که کد واقعاً اجرا می‌شود: پروژهٔ local با runner فعال و شبکهٔ باز، یا پروژهٔ trusted‌نشده. وقتی هیچ کدی اجرا نمی‌شود (پروژهٔ متصل به GitHub، مخزن Mock، یا `PROJECT_SANDBOX_ENABLED=false`) ابزار Approval نمی‌خواهد، چون فقط شواهد CI خوانده می‌شود.
 
-**تصویر:** به‌صورت پیش‌فرض از زبان پروژه انتخاب می‌شود (`node:22-alpine`، `python:3.12-slim`، `golang:1.24-alpine`، `rust:1.88-slim`، `php:8.3-cli-alpine`) و با `PROJECT_SANDBOX_IMAGE` قابل تغییر است. چون `--pull=never` است، تصویر باید از قبل روی میزبان موجود باشد (`docker pull node:22-alpine`).
+**تصویر:** به‌صورت پیش‌فرض از زبان پروژه انتخاب می‌شود (`node:22-alpine`، `python:3.12-slim`، `golang:1.24-alpine`، `rust:1.88-slim`، `php:8.3-cli-alpine`) و با `PROJECT_SANDBOX_IMAGE` قابل تغییر است. خودِ اجرا همیشه `--pull=never` دارد. مرحلهٔ تصویر صریح و قابل‌تنظیم است (`PROJECT_SANDBOX_IMAGE_PULL`): `never` (پیش‌فرض) هیچ فرمان اضافه‌ای نمی‌زند و اگر تصویر نباشد خطای دقیق «ایمیج موجود نیست؛ `docker pull <image>`» با `sandbox: "image-missing"` و `fixable: false` برمی‌گردد؛ `missing` اول `docker image inspect` می‌زند و فقط در صورت نبودن `docker pull` می‌کند؛ `always` قبل از هر اجرا pull می‌کند. pull از شبکهٔ میزبان/daemon استفاده می‌کند و ربطی به `--network` کانتینر ندارد.
 
-**پیکربندی** (`.env.example` / `docs/ENVIRONMENT.md`): `PROJECT_SANDBOX_ENABLED` (خاموش = هیچ کانتینری اجرا نمی‌شود؛ پروژه‌های متصل به GitHub از CI و پروژه‌های local با `unverified`/`sandbox: unavailable` پاسخ می‌گیرند، بدون نیاز به Docker و بدون Approval)، `PROJECT_SANDBOX_DOCKER_BIN`، `PROJECT_SANDBOX_IMAGE`، `PROJECT_SANDBOX_TIMEOUT_MS` (پیش‌فرض ۸ دقیقه)، `PROJECT_SANDBOX_MEMORY_MB`، `PROJECT_SANDBOX_CPUS`، `PROJECT_SANDBOX_PIDS_LIMIT`، `PROJECT_SANDBOX_LOG_TAIL_BYTES`، `PROJECT_SANDBOX_DIR`. همه در قرارداد اعتبارسنجی env هستند و در بکاپ کامل هم ذخیره می‌شوند.
+**پیکربندی** (`.env.example` / `docs/ENVIRONMENT.md`): `PROJECT_SANDBOX_ENABLED` (خاموش = هیچ کانتینری اجرا نمی‌شود؛ پروژه‌های متصل به GitHub از CI و پروژه‌های local با `unverified`/`sandbox: unavailable` پاسخ می‌گیرند، بدون نیاز به Docker و بدون Approval)، `PROJECT_SANDBOX_DOCKER_BIN`، `PROJECT_SANDBOX_IMAGE`، `PROJECT_SANDBOX_TIMEOUT_MS` (پیش‌فرض ۸ دقیقه)، `PROJECT_SANDBOX_MEMORY_MB`، `PROJECT_SANDBOX_CPUS`، `PROJECT_SANDBOX_PIDS_LIMIT`، `PROJECT_SANDBOX_LOG_TAIL_BYTES`، `PROJECT_SANDBOX_DIR`، `PROJECT_SANDBOX_IMAGE_PULL`. همه در قرارداد اعتبارسنجی env هستند و در بکاپ کامل هم ذخیره می‌شوند.
 
-> **استقرار:** فقط برای پروژه‌های local به Docker نیاز است. پروژه‌های متصل به GitHub همیشه از CI استفاده می‌کنند و بدون Docker هم کار می‌کنند. اگر خودِ CodeVia داخل کانتینر اجرا می‌شود و پروژهٔ local هم دارید، Docker CLI و سوکت را به آن بدهید (`/var/run/docker.sock`)؛ در غیر این صورت `run_tests` برای همان پروژه‌های local با `unverified`/`sandbox: unavailable` برمی‌گردد و هرگز روی میزبان اجرا نمی‌شود.
+> **استقرار:** فقط برای پروژه‌های local به Docker نیاز است. پروژه‌های متصل به GitHub همیشه از CI استفاده می‌کنند و بدون Docker هم کار می‌کنند. اگر خودِ CodeVia داخل کانتینر اجرا می‌شود و پروژهٔ local هم دارید:
+>
+> - ایمیج را با `docker build --build-arg INSTALL_DOCKER_CLI=true .` بسازید (فقط CLI نصب می‌شود، نه daemon) و یک daemon در دسترس بدهید: سوکت میزبان (`/var/run/docker.sock` — معادل دسترسی root روی میزبان؛ گزینهٔ کامنت‌شده و هشدار امنیتی در `docker-compose.yml`)، یا سایدکار با `DOCKER_HOST=tcp://docker:2375`، یا daemon روی شبکه.
+> - ایمیج‌ها را از قبل pull کنید، یا `PROJECT_SANDBOX_IMAGE_PULL=missing` را روشن کنید تا `inspect`/`pull` صریح انجام شود.
+> - بدون این‌ها `run_tests` برای همان پروژه‌های local با `unverified`/`sandbox: unavailable` یا `image-missing` برمی‌گردد و هرگز روی میزبان اجرا نمی‌شود.
+
+### چه چیزی بدون Docker، بدون مدل واقعی و بدون گیت کار می‌کند؟
+
+«بدون گیت» یعنی نه GitHub و نه Local Git لازم نیست؛ «بدون مدل واقعی» یعنی فقط Mock AI فعال است؛ «بدون Docker» یعنی هیچ کانتینری اجرا نمی‌شود. همهٔ ادعاهای این جدول با تست‌های همین مخزن پوشش داده شده‌اند.
+
+| قابلیت | بدون Docker | بدون مدل واقعی (Mock) | بدون گیت / GitHub |
+|---|---|---|---|
+| اجرای UI، ورود، scan پوشه (`POST /projects/scan`) | ✅ | ✅ | ✅ |
+| ساخت پروژه از پوشه با `gitInit: false` (`POST /projects/from-local`) | ✅ | ✅ | ✅ — `sourceType: "local"` بدون `configRepo` |
+| ساخت پروژه از پوشه با `gitInit: true` | ✅ (فقط git سیستم) | ✅ | ✅ — Local Git؛ GitHub لازم نیست |
+| `POST /projects/new-local` و `POST /projects/import` (ZIP) | ✅ (فقط git سیستم) | ✅ | ✅ — مخزن `local/<slug>` |
+| `POST /projects/import` برای `.rar` | ✅ | ✅ | ✅ — به `7z` نیاز دارد (در ایمیج نصب است) |
+| تحلیل، فهرست فایل، جست‌وجو و `analysis` پروژهٔ پوشه‌ای | ✅ | ✅ | ✅ |
+| **اجرای `install/test/lint/build` پروژهٔ پوشه‌ای بدون گیت** | ❌ → `unverified` / `sandbox: "unavailable"` | ✅ (Mock مدل دخالتی ندارد) | ✅ — منبع مستقیم `project.localPath` |
+| اجرای دستورها برای پروژهٔ local دارای مخزن | ❌ → `unverified` | ✅ | ✅ — Local Git، بدون GitHub |
+| تأیید پروژهٔ متصل به GitHub از طریق CI | ✅ | ❌ → `simulated` | ❌ — GitHub لازم است |
+| Simulation (`executionMode: "simulation"`) | ✅ | ✅ | ✅ (فقط پلن، بدون نوشتن) |
+| تسک Autonomous/Agent/Workflow با **تغییر واقعی کد** | بستگی به مسیر دارد | ❌ → scaffold/TODO یا `simulated`؛ کد واقعی تغییر نمی‌کند | ❌ — نیاز به مخزن برای commit/PR |
+| Draft PR، merge و چرخهٔ QA روی مخزن | — | ❌ | GitHub یا Local Git لازم است |
+| بکاپ کامل و بازیابی | ✅ | ✅ | ✅ |
+
+**نکتهٔ دقیق دربارهٔ پروژهٔ پوشه‌ای بدون گیت:** اجرای تست/build در سندباکس مجاز است (منبع، `localPath` است)، اما درخواست پیاده‌سازی/تغییر کد برای آن همچنان با `409` و `repositoryRequired: true` رد می‌شود، چون commit/PR جایی برای نوشتن ندارد. برای اجرای کامل زنجیره، پروژه را با `gitInit: true` بسازید یا یک ZIP/RAR را import کنید.
+
+### نمونهٔ curl
+
+```bash
+BASE=http://localhost:8080
+# اگر REQUIRE_AUTH=true است، کوکی نشست را اضافه کنید: -b "codevia_session=…"
+
+# 1) scan یک پوشهٔ سرور (بدون ساخت پروژه)
+curl -s $BASE/projects/scan -H 'content-type: application/json' \
+  -d '{"path":"/srv/repos/shop3"}' | jq .analysis.suggestions
+
+# 2) ساخت پروژه از پوشه، بدون گیت (analysis-only؛ تست/build از localPath اجرا می‌شود)
+curl -s $BASE/projects/from-local -H 'content-type: application/json' \
+  -d '{"path":"/srv/repos/shop3","overrides":{"name":"Shop 3"}}'
+
+# 3) همان پوشه به‌صورت مخزن Local Git (برای commit/PR ایجنت‌ها)
+curl -s $BASE/projects/from-local -H 'content-type: application/json' \
+  -d '{"path":"/srv/repos/shop3","gitInit":true,"overrides":{"name":"Shop 3"}}'
+
+# 4) ساخت پروژهٔ خالی جدید (README + یک commit اولیه)
+curl -s $BASE/projects/new-local -H 'content-type: application/json' \
+  -d '{"name":"Shop 3"}'
+
+# 5) آپلود ZIP (یا RAR) و ساخت مخزن local/<slug>
+curl -s $BASE/projects/import \
+  -F name='Shop 3' -F file=@shop3.zip
+
+# 6) ساخت تسک روی پروژه (projectId از خروجی مراحل قبل)
+curl -s $BASE/tasks -H 'content-type: application/json' \
+  -d '{"projectId":"proj-1a2b3c4d","title":"افزودن صفحهٔ ورود","description":"ورود با ایمیل و رمز"}' | jq .
+
+# 7) اجرای دستی همان تسک (خروجی: run id؛ اجرای واقعی به مدل/مخزن نیاز دارد)
+TASK_ID=task-1234abcd
+curl -s -X POST "$BASE/tasks/$TASK_ID/run" | jq .
+```
 
 ### آینهٔ محلی فقط‌خواندنی (Read-only mirror)
 

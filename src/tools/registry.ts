@@ -67,13 +67,17 @@ export class ToolRegistry implements IToolRegistry {
     });
     if (deniedByProject) return { ok: false, output: `Project policy denies ${name}`, data: { denied: true } };
     // Only local-source tools actually enter Docker. GitHub-backed projects read
-    // GitHub CI, mock mode simulates it, and a missing runner cannot execute code.
-    // Real sandbox runs are force-human unless the project is explicitly trusted
-    // and networking remains off.
+    // GitHub CI, mock mode simulates it — unless the project is a repo-less
+    // folder project, whose real source is localPath and which therefore runs
+    // even when no GitHub account is connected. A missing runner cannot execute
+    // code. Real sandbox runs are force-human unless the project is explicitly
+    // trusted and networking remains off.
+    const runsFromLocalFolder =
+      ctx.project.sourceType === "local" && !ctx.project.configRepo?.trim() && !!ctx.project.localPath?.trim();
     const willExecuteSandbox =
       tool.sandboxExecution === true &&
       ctx.project.sourceType === "local" &&
-      ctx.github.kind !== "mock" &&
+      (ctx.github.kind !== "mock" || runsFromLocalFolder) &&
       ctx.sandboxRunner !== undefined;
     const trustedOfflineSandbox =
       willExecuteSandbox &&

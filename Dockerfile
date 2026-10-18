@@ -33,14 +33,54 @@ WORKDIR /app
 # mirror reports "git not installed" and every read silently falls back to the
 # API — correct, but slow on large repositories. ca-certificates is needed for
 # the HTTPS clone. No repository code is ever executed from the mirror.
+#
+# `p7zip-full` provides `/usr/bin/7z`, which reads uploaded `.rar` archives
+# (PROJECT_IMPORT_7Z_BIN below). Without it the RAR import endpoint would answer
+# 503 on a stock image. ZIP import is pure Node and needs nothing extra.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates p7zip-full \
   && rm -rf /var/lib/apt/lists/* \
-  && git --version
+  && git --version \
+  && command -v 7z
+
+# RAR import: pin the binary so a PATH change cannot silently break it. Remove
+# this ENV if you prefer the service to probe `7z`/`7zz` on PATH instead.
+ENV PROJECT_IMPORT_7Z_BIN=/usr/bin/7z
 
 ENV npm_config_cache=/tmp/.npm
 COPY --from=build /app/package.json /app/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && rm -rf /tmp/.npm
+
+# ---- Optional: Docker CLI (CLI only, never the daemon) ----
+# Project lifecycle commands run in a disposable container, so a deployment that
+# executes local/imported project code needs a reachable Docker daemon:
+#   * sidecar:     `DOCKER_HOST=tcp://docker:2375` (commented service in
+#                  docker-compose.yml)
+#   * host socket: mount /var/run/docker.sock — equivalent to host root access,
+#                  see the commented option + security warning in compose
+# Build with `--build-arg INSTALL_DOCKER_CLI=true` to install just the static
+# `docker` client from download.docker.com. The daemon is NOT installed; the
+# platform only ever spawns the CLI. Default: off (GitHub-backed projects work
+# without Docker at all).
+ARG INSTALL_DOCKER_CLI=false
+ARG DOCKER_CLI_VERSION=27.3.1
+ARG TARGETARCH
+RUN set -eu; \
+  if [ "$INSTALL_DOCKER_CLI" = "true" ]; then \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl; \
+    case "${TARGETARCH:-amd64}" in \
+      arm64|aarch64) cli_arch=aarch64 ;; \
+      *) cli_arch=x86_64 ;; \
+    esac; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${cli_arch}/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker-cli.tgz; \
+    tar -xzf /tmp/docker-cli.tgz -C /tmp; \
+    install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker-cli.tgz; \
+    apt-get purge -y --auto-remove curl; \
+    rm -rf /var/lib/apt/lists/*; \
+    docker --version; \
+  fi
 
 # Reference the compiled output + static UI.
 COPY --from=build /app/dist ./dist

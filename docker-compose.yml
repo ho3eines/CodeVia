@@ -39,12 +39,35 @@ services:
       REPO_MIRROR_REFRESH_MS: ${REPO_MIRROR_REFRESH_MS:-300000}
       # Imported / newly created local Git projects (inside the volume).
       LOCAL_REPOS_DIR: ${LOCAL_REPOS_DIR:-/app/data/repos}
+      # Docker sandbox: local/imported project commands run in a disposable
+      # container. This needs the docker CLI in the image
+      # (`docker build --build-arg INSTALL_DOCKER_CLI=true .`) and a reachable
+      # daemon (see the socket option below or DOCKER_HOST for a sidecar).
+      # GitHub-backed projects verify through CI and need none of this.
+      PROJECT_SANDBOX_ENABLED: ${PROJECT_SANDBOX_ENABLED:-true}
+      PROJECT_SANDBOX_IMAGE: ${PROJECT_SANDBOX_IMAGE:-}
+      # never | missing | always — explicit `docker image inspect`/`pull` step
+      # before `docker run` (the run itself always keeps --pull=never).
+      PROJECT_SANDBOX_IMAGE_PULL: ${PROJECT_SANDBOX_IMAGE_PULL:-never}
+      # 7z reads uploaded .rar archives; installed by the Dockerfile.
+      PROJECT_IMPORT_7Z_BIN: ${PROJECT_IMPORT_7Z_BIN:-/usr/bin/7z}
       # Platform
       ENABLE_SIMULATION_MODE: ${ENABLE_SIMULATION_MODE:-true}
     ports:
       - "8080:8080"
     volumes:
       - codevia-data:/app/data
+      # ⚠️ SECURITY WARNING — Docker socket mount (opt-in, commented out).
+      # Mounting /var/run/docker.sock gives this container root-equivalent
+      # control over the HOST: project code already runs only inside the
+      # sandbox, but anyone who compromises CodeVia (or the API) could start a
+      # privileged container and escape. Enable it only on a dedicated,
+      # single-tenant host, never with untrusted multi-user accounts. Prefer a
+      # rootless daemon or an isolated sidecar (see the commented service below)
+      # plus `PROJECT_SANDBOX_IMAGE_PULL=missing` if you cannot pre-pull images.
+      # - /var/run/docker.sock:/var/run/docker.sock
+      # When using a sidecar instead of the host socket, point the CLI at it:
+      # DOCKER_HOST: tcp://docker:2375
     restart: unless-stopped
     healthcheck:
       test:
@@ -58,5 +81,26 @@ services:
       timeout: 5s
       retries: 3
 
+  # ---------------------------------------------------------------------------
+  # OPTIONAL sidecar daemon for the sandbox (commented out by default).
+  # Instead of handing the host socket to the app, run a separate Docker daemon
+  # and let the CLI talk to it. Still privileged (a daemon is root-equivalent),
+  # but blast radius and image cache are isolated from the host daemon.
+  # Set `DOCKER_HOST: tcp://docker:2375` on codevia-web and build the image with
+  # `--build-arg INSTALL_DOCKER_CLI=true`.
+  # ---------------------------------------------------------------------------
+  # docker:
+  #   image: docker:27-dind
+  #   container_name: codevia-docker
+  #   privileged: true
+  #   environment:
+  #     # No TLS here: the socket is only reachable inside the compose network.
+  #     DOCKER_TLS_CERTDIR: ""
+  #   command: ["--host=tcp://0.0.0.0:2375"]
+  #   volumes:
+  #     - docker-data:/var/lib/docker
+  #   restart: unless-stopped
+
 volumes:
   codevia-data:
+  # docker-data:
