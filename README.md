@@ -37,7 +37,9 @@ A **multi-project, GitHub-centric (or 100% local — see [Local Git Mode](docs/L
 - 🏃 **Background Worker + Queue** — agent executions never block the UI/API thread; retries, exponential backoff, dead-letter, idempotency.
 - 📱 **Telegram bot** — project-aware inline keyboards, natural-language requests (فارسی included) and human approval via Telegram. It receives updates over a **webhook when one is reachable, long polling otherwise**, so a bot token alone is enough — no ngrok, no public URL, and `/ping` tells you exactly which path is live.
 - 🔍 **Repository-aware chat** — the project chat is given real evidence (whole-repo file tree, README, manifests), cached per account+repo+branch, with a branch self-heal and a **repository health banner** (`GET /projects/:id/repo-status`) that states *why* a repository could not be read instead of letting the model invent a 404.
-- 📚 **Read-only local mirror** — evidence is read from a per-account bare clone with git *plumbing* (`ls-tree` / `cat-file` / `grep`), so large repositories answer from disk and agents get real content search; every failure falls back to the Git Trees API path. **No repository code is ever executed** — writes still go through the GitHub API and verification still reads CI check runs (in [Local Git Mode](docs/LOCAL-GIT-MODE.md), writes go through the local git backend and the mirror is auto-disabled).
+- 📚 **Read-only local mirror** — evidence is read from a per-account bare clone with git *plumbing* (`ls-tree` / `cat-file` / `grep`), so large repositories answer from disk and agents get real content search; every failure falls back to the Git Trees API path. **No repository code is ever executed on the host** — writes go through the GitHub API and verification runs either in the Docker sandbox below or in the repository's own CI (in [Local Git Mode](docs/LOCAL-GIT-MODE.md), writes go through the local git backend and the mirror is auto-disabled).
+- 🧪 **Real test/build execution in a Docker sandbox** — per-project `install` / `build` / `test` / `lint` / `start` commands (editable in Project → Edit → Operations, auto-detected from the stack) run inside a disposable container with `--network=none`, `--read-only`, `--cap-drop=ALL`, `no-new-privileges`, PID/CPU/memory limits and no host shell. Results are recorded as `passed` / `failed` / `unverified` with exit code and output tails. GitHub-backed projects verify through their own CI checks (no container), and local projects never fall back to a host shell. See [docs/AGENT_EXECUTION.md](docs/AGENT_EXECUTION.md).
+- 📦 **ZIP/RAR project import & local project creation** — upload a `.zip`/`.rar` (bounded in-memory parsing, traversal/symlink/zip-bomb/CRC checks) or start from nothing; CodeVia writes the files into a fresh `local/<slug>` Git repository with one atomic initial commit, so agents can branch, commit and open Draft PRs without GitHub. Secret-bearing files are excluded before anything is written. See [docs/LOCAL-FOLDER-PROJECTS.md](docs/LOCAL-FOLDER-PROJECTS.md).
 - 📊 **Observability** — AI Run Console (observable steps, never chain-of-thought), cost tracking, agent dashboards, audit log, notifications, system health.
 - 🔐 **Security building blocks** — secret references, OAuth login, per-account GitHub tokens (every project action runs with *your* token, not a server PAT), role definitions, webhook signature validation, approval controls and audit events. Some global admin feeds are still shared; see the [remaining gaps](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here).
 - 💾 **Full portable backup** — one JSON file holds *everything*: every runtime row **plus the environment and the API keys/tokens** that made it work. Download it from `Settings`, restore it on any other server (UI upload or `npm run backup:restore`), and the platform comes back complete — credentials are re-encrypted with the new server's `AUTH_SECRET` and the environment is written to `<db dir>/.env` so it survives a restart. Snapshots also go to a GitHub repo and/or the mounted volume on a cron schedule, with SHA-256-verified parts and optional `BACKUP_PASSPHRASE` protection. See [docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md).
@@ -71,7 +73,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (1080 tests)
+npm test            # unit + integration + end-to-end (1185 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run backup      # full portable backup (every row + API keys + env) → data/codevia-backup.json
 npm run typecheck   # strict TypeScript
@@ -234,7 +236,8 @@ Features: responsive, dark/light mode, **RTL/Persian-friendly**, command palette
 | [docs/GITHUB_SETUP.md](docs/GITHUB_SETUP.md) | GitHub App + OAuth + webhook setup |
 | [docs/LOCAL-GIT-MODE.md](docs/LOCAL-GIT-MODE.md) | Run 100% locally — system git binary instead of GitHub (setup, safety model, tests) |
 | [docs/LOCAL-GIT-MODE-FA.md](docs/LOCAL-GIT-MODE-FA.md) | 🇮🇷 راهنمای فارسی حالت لوکال |
-| [docs/LOCAL-FOLDER-PROJECTS.md](docs/LOCAL-FOLDER-PROJECTS.md) | Create projects from server folders — filesystem scan + analysis, no GitHub required |
+| [docs/LOCAL-FOLDER-PROJECTS.md](docs/LOCAL-FOLDER-PROJECTS.md) | Create projects from server folders, ZIP/RAR uploads or scratch — filesystem scan + local Git repository, no GitHub required |
+| [docs/AGENT_EXECUTION.md](docs/AGENT_EXECUTION.md) | Execution contract: branches, atomic commits, Draft PRs, Docker sandbox, QA/fix loop and verification semantics |
 | [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) | Telegram bot setup & commands |
 | [docs/PROVIDER_SETUP.md](docs/PROVIDER_SETUP.md) | Configure AI providers (OpenAI, Anthropic, Gemini, Ollama…) |
 | [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md) | Model selection, load balancing policies, pins, circuit breaker, live distribution |

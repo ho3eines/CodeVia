@@ -54,6 +54,9 @@ const envNumber = (defaultValue: number, min?: number) =>
     return n;
   }, z.coerce.number().default(defaultValue));
 
+/** Optional string where a blank value means "unset", never "". */
+const blankString = () => z.preprocess(blankToUndefined, z.string().optional());
+
 /**
  * Environment variable contract. All secrets come from environment variables /
  * secret management (Railway Variables, Railway Secrets, Secret Manager). They are
@@ -134,6 +137,76 @@ const EnvSchema = z.object({
   // File patching — existing files at or below this many bytes may be replaced
   // by a full model rewrite instead of an {"edits":[…]} patch (step-1 ladder).
   PATCH_FULL_REWRITE_MAX_BYTES: envNumber(8192, 0),
+
+  // ---- Docker sandbox for project lifecycle commands ----
+  // Project code is NEVER executed on the CodeVia host. Configured
+  // install/build/test/lint/start commands run only inside a disposable,
+  // resource-limited Docker container (`src/projects/sandbox-runner.ts`).
+  // The container gets a read-only root FS, no capabilities, no-new-privileges
+  // and `--network=none` unless the project explicitly opts in.
+  /**
+   * Master switch. When off, project commands are never run in a container;
+   * run_tests/run_build use GitHub CI evidence (the pre-sandbox behaviour).
+   * Deployments without Docker, and the automated test/smoke harness, set this
+   * to false.
+   */
+  PROJECT_SANDBOX_ENABLED: envBoolean(true),
+  /** Docker CLI to spawn. Use an absolute path when it is not on PATH. */
+  PROJECT_SANDBOX_DOCKER_BIN: blankString(),
+  /** Image override; unset = chosen from the project language (node/python/go/rust/php). */
+  PROJECT_SANDBOX_IMAGE: blankString(),
+  /** Hard wall-clock limit for one sandbox execution (ms). */
+  PROJECT_SANDBOX_TIMEOUT_MS: envNumber(8 * 60_000, 1000),
+  /** Memory cap for the container (MiB). */
+  PROJECT_SANDBOX_MEMORY_MB: envNumber(1024, 128),
+  /** CPU quota for the container. */
+  PROJECT_SANDBOX_CPUS: envNumber(1, 1),
+  /** Maximum process count inside the container (fork-bomb guard). */
+  PROJECT_SANDBOX_PIDS_LIMIT: envNumber(128, 16),
+  /** How many trailing bytes of stdout/stderr are kept for the run evidence. */
+  PROJECT_SANDBOX_LOG_TAIL_BYTES: envNumber(12_000, 1000),
+  /** Scratch root for exported source trees (default: the OS temp directory). */
+  PROJECT_SANDBOX_DIR: blankString(),
+
+  // ---- Project import (.zip / .rar) ----
+  // Bounded, streaming-free archive parsing: no archive entry is ever written
+  // to disk before its path, size and CRC are validated.
+  PROJECT_IMPORT_MAX_UPLOAD_BYTES: envNumber(25 * 1024 * 1024, 1024),
+  PROJECT_IMPORT_MAX_FILES: envNumber(5000, 1),
+  PROJECT_IMPORT_MAX_FILE_BYTES: envNumber(25 * 1024 * 1024, 1024),
+  PROJECT_IMPORT_MAX_TOTAL_BYTES: envNumber(200 * 1024 * 1024, 1024),
+  PROJECT_IMPORT_MAX_COMPRESSION_RATIO: envNumber(500, 1),
+  /** 7z/7zz binary used to read `.rar` archives; unset = probe PATH. */
+  PROJECT_IMPORT_7Z_BIN: blankString(),
+
+  // ---- Local Git CLI mode (100% local, no GitHub API) ----
+  // See docs/LOCAL-GIT-MODE.md. Declared here so a portable backup carries the
+  // configuration of the machine it was taken on.
+  LOCAL_GIT_MODE: envBoolean(false),
+  /** Root holding `<owner>/<repo>` working copies and bare repositories. */
+  LOCAL_REPOS_DIR: blankString(),
+  /** Owner reported for flat repositories and for the viewer identity. */
+  LOCAL_GIT_OWNER: blankString(),
+  /** Path to the git executable when it is not on PATH. */
+  LOCAL_GIT_BIN: blankString(),
+  /** Fetch from the configured remote before repository reads (default off). */
+  LOCAL_GIT_AUTO_FETCH: envBoolean(false),
+  /** Push every agent commit/merge with the host's own git credentials. */
+  LOCAL_GIT_AUTO_PUSH: envBoolean(false),
+  /** Remote name used by LOCAL_GIT_AUTO_PUSH / LOCAL_GIT_AUTO_FETCH. */
+  LOCAL_GIT_REMOTE: blankString(),
+  /**
+   * LEGACY / NOT EXECUTED ON THE HOST: a shell command used as the
+   * `local-verify` check. Kept for compatibility, but local mode now refuses to
+   * run it and points at the Docker sandbox instead.
+   */
+  LOCAL_GIT_VERIFY_CMD: blankString(),
+  /** A git lock older than this is treated as stale after a crash (ms). */
+  LOCAL_GIT_STALE_LOCK_MS: envNumber(600_000, 1000),
+
+  // ---- Local folder projects (server filesystem) ----
+  /** Comma-separated roots the server may scan; unset = CodeVia install dir only. */
+  CODEVIA_ALLOWED_ROOTS: blankString(),
 
   // State commits — CodeVia saves every project update (task/run status,
   // memory, agents, conversations…) as a commit that only touches `CodeVia/**`.

@@ -7,6 +7,10 @@ export default defineConfig({
     globals: true,
     testTimeout: 20000,
     pool: "forks",
+    // Unit/integration tests must not spawn Docker or wait for a human sandbox
+    // approval. The sandbox itself is covered by src/tests/sandbox-runner.test.ts
+    // with an injected process runner.
+    env: { PROJECT_SANDBOX_ENABLED: "false" },
     // Node's experimental `node:sqlite` is not a Vite-recognized builtin; mark it
     // external so it is loaded straight from the Node runtime at test time.
     deps: {

@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { getEnv } from "../config/env.js";
 import {
   safeProjectArchivePath,
   projectArchiveLimitsFromEnv,
@@ -137,8 +138,8 @@ export async function extractProjectRar(buffer: Buffer, opts: RarArchiveOptions 
   const limits = opts.limits ?? projectArchiveLimitsFromEnv();
   if (buffer.length > limits.maxUploadBytes)
     throw importError(`Compressed archive exceeds ${limits.maxUploadBytes} bytes`);
-  const candidates =
-    opts.binaryCandidates ?? (process.env.PROJECT_IMPORT_7Z_BIN ? [process.env.PROJECT_IMPORT_7Z_BIN] : ["7z", "7zz"]);
+  const configuredBinary = getEnv().PROJECT_IMPORT_7Z_BIN;
+  const candidates = opts.binaryCandidates ?? (configuredBinary ? [configuredBinary] : ["7z", "7zz"]);
   const run = opts.run ?? defaultRun;
   const temp = await mkdtemp(join(tmpdir(), "codevia-rar-"));
   const archivePath = join(temp, `upload-${randomUUID()}.rar`);
@@ -166,8 +167,14 @@ export async function extractProjectRar(buffer: Buffer, opts: RarArchiveOptions 
         throw error;
       }
     }
-    if (!selected || !listing)
+    if (!selected || !listing) {
+      // A runner may surface a raw ENOENT instead of the friendly 503 the
+      // default runner builds. Normalise it here so every caller sees the same
+      // "install 7z" contract (and the route answers 503, not 500).
+      if ((missingMessage as NodeJS.ErrnoException | undefined)?.code === "ENOENT")
+        throw importError("RAR support requires 7z or 7zz to be installed on the server", 503);
       throw missingMessage ?? importError("RAR support requires 7z or 7zz to be installed on the server", 503);
+    }
     const entries = parseListing(listing.stdout.toString("utf8"), limits);
     const files: ProjectArchiveFile[] = [];
     let total = 0;

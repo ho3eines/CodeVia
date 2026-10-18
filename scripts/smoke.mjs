@@ -60,7 +60,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function startServer() {
   server = spawn(join(ROOT, "node_modules", ".bin", "tsx"), ["src/index.ts"], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), DATABASE_PATH: DB, MOCK_GITHUB_PATH: SNAP, NODE_ENV: "test" },
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      DATABASE_PATH: DB,
+      MOCK_GITHUB_PATH: SNAP,
+      NODE_ENV: "test",
+      // The smoke run has no Docker daemon and no human to approve project
+      // commands; it validates the CI-evidence path instead.
+      PROJECT_SANDBOX_ENABLED: "false",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   server.stdout.on("data", (d) => (serverLogs += d.toString().slice(-4000)));

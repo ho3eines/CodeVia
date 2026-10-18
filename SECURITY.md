@@ -73,6 +73,19 @@ The following are treated as security issues and are prioritized:
 - **Dangerous operations** — merges are gated behind an `ApprovalRequest` that
   is validated for project, PR, repository, commit SHA, actor and expiry before
   the worker acts (A04, `src/workers/worker.ts`).
+- **Untrusted project code** — a repository's own `install`/`build`/`test`
+  commands are **never executed on the CodeVia host**. They run in a disposable
+  Docker container with `--network=none` (unless the project opts in),
+  `--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`,
+  `--pids-limit`, CPU/memory caps, a non-root user and `--pull=never`; the
+  exported source tree is deleted afterwards. Sandbox runs are force-human
+  approved for untrusted projects, and project trust only skips that approval
+  while the network stays off. Nothing is approved when nothing can execute:
+  a mock repository or `PROJECT_SANDBOX_ENABLED=false` reads CI evidence only
+  (`src/projects/sandbox-runner.ts`, `src/tools/registry.ts`). Uploaded `.zip`/`.rar` archives are parsed in memory
+  and rejected on traversal, links, CRC mismatch, oversized expansion or a bad
+  compression ratio **before** a file is written; secret-bearing files are
+  excluded from the initial commit (`src/projects/project-archive.ts`).
 - **Secrets** — credentials, sessions and queue lease state are intentionally
   kept out of the `CodeVia/` repository state; a *project* repository is never a
   credential store. At rest in the runtime database they are AES-256-GCM
@@ -91,12 +104,15 @@ The following are treated as security issues and are prioritized:
 
 ## Known advisories (transitive, runtime)
 
-`npm audit` reports a **high** advisory for a transitive `@fastify/static`
-(`GHSA-8pvw-jcv7-9cmj`, `GHSA-83w8-p2f5-377r`) pulled in through
-`@fastify/swagger-ui@5`. The project's direct `@fastify/static@^10.1.3` is not
-affected; the vulnerable copy only serves the `/docs` Swagger UI assets.
-Upgrading `@fastify/swagger-ui` to `6.1.1` removes it and is tracked in the
-roadmap — it is a semver-major change that has not been forced without testing.
+Audit at the time of writing: `npm audit --omit=dev` reports **one moderate**
+advisory, `GHSA-4mh8-r7rc-xpvc` (Fastify denial of service via an unhandled
+exception on HTTP/2 trailer responses). This deployment does not enable HTTP/2
+(it serves plain HTTP/1.1 behind a TLS-terminating proxy), so the affected path
+is not reachable; track the upstream fix and upgrade Fastify when it lands.
+
+The earlier `@fastify/static` advisory (`GHSA-8pvw-jcv7-9cmj`,
+`GHSA-83w8-p2f5-377r`) is no longer present: the direct dependency is
+`@fastify/static@^10.1.3` and `@fastify/swagger-ui` is on `6.1.1`.
 
 `npm audit` also reports advisories for the **dev-only** Vitest toolchain
 (`GHSA-82fw-gwwq-j7x9` and friends). These affect the Vitest UI dev server,
@@ -112,3 +128,7 @@ policy:
 - `src/tests/merge-approval.test.ts` (A04)
 - `src/tests/multi-user-ownership.test.ts` (per-account isolation)
 - `src/tests/auth-guard.test.ts` and `src/tests/webhook-fail-closed.test.ts`
+- `src/tests/sandbox-runner.test.ts` (host isolation, hardening flags, approval/network)
+- `src/tests/project-archive.test.ts` and `src/tests/rar-archive.test.ts` (zip-slip, links, CRC, zip bombs)
+- `src/tests/project-import-routes.test.ts` (secret exclusion before the initial commit)
+- `src/tests/env-contract-sandbox.test.ts` (sandbox/import settings survive a backup)

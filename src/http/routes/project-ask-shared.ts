@@ -66,6 +66,17 @@ export async function preflightProjectWrite(
   const stored = container.projectRepo.findById(projectId)?.data;
   if (!stored) return undefined;
   const project = hydrateProject(stored);
+  // A folder project created with `gitInit: false` has no repository at all.
+  // Its analysis is still useful, but implementation would have nowhere to
+  // write (and used to fail later with an internal TypeError), so refuse it
+  // up front with an actionable message.
+  if (!project.configRepo)
+    return {
+      status: 409,
+      error:
+        "This project has no linked repository. Create it from a local folder with gitInit, import a ZIP/RAR, or link a GitHub/local repository before asking for implementation work.",
+      extra: { repositoryRequired: true },
+    };
   try {
     const github = container.githubForProject(project, params.requestUserId);
     const access = await checkProjectWriteAccess({
@@ -153,6 +164,17 @@ export function dispatchProjectAsk(
     if (!wf?.enabled || wf.projectId !== projectId)
       return { status: 400, error: "Workflow must be enabled and belong to this project" };
   }
+
+  // Direct callers (chat, Telegram) bypass `preflightProjectWrite`; keep the
+  // same guard here so an implementation task can never be queued for a
+  // project without a repository.
+  if (mode !== "simulation" && !container.projectRepo.findById(projectId)?.data?.configRepo)
+    return {
+      status: 409,
+      error:
+        "This project has no linked repository. Create it from a local folder with gitInit, import a ZIP/RAR, or link a GitHub/local repository before asking for implementation work.",
+      extra: { repositoryRequired: true },
+    };
 
   if (mode === "simulation") {
     const agent = routedAgentType ? container.agentRepo.byType(projectId, routedAgentType) : undefined;

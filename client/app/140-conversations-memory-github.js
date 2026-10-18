@@ -422,7 +422,7 @@
         <div dir="${dir}" style="white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.55">${esc(m.content)}</div>
         ${atts}
         ${metaRow}
-        ${!isUser && meta.applyOffer && meta.applyOffer.request ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-primary" style="padding:3px 10px;font-size:12px" data-apply-request="${esc(meta.applyOffer.request)}" onclick="chatApplyChange(this)" title="Research → implement → commit to a new branch → Draft PR → GitHub CI">🚀 اعمال در پروژه (Autonomous)</button><span style="font-size:11px;opacity:.65;align-self:center">روی شاخهٔ جدا + Draft PR؛ بدون تأیید شما merge نمی‌شود</span></div>` : ""}
+        ${!isUser && meta.applyOffer && meta.applyOffer.request ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-primary" style="padding:3px 10px;font-size:12px" data-apply-request="${esc(meta.applyOffer.request)}" onclick="chatApplyChange(this)" title="Research → implement → commit to a new branch → Draft PR → Docker sandbox (or GitHub CI)">🚀 اعمال در پروژه (Autonomous)</button><span style="font-size:11px;opacity:.65;align-self:center">روی شاخهٔ جدا + Draft PR؛ بدون تأیید شما merge نمی‌شود</span></div>` : ""}
       </div>
       ${isUser ? `<span style="font-size:22px;line-height:1;align-self:flex-end">${icon}</span>` : ""}
     </div>`;

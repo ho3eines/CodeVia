@@ -509,7 +509,8 @@ export class AgentManager {
       const files = this.deps.projectFiles;
       if (!files) return false;
       const stored = this.deps.projectRepo.findById(projectId)?.data;
-      if (!stored) return false;
+      // A folder project without a repository has nowhere to mirror to.
+      if (!stored || !stored.configRepo) return false;
       const ok = await files.syncTask(hydrateProject(stored), task);
       if (ok) this.pendingTaskSyncs.delete(key);
       else this.pendingTaskSyncs.add(key);
@@ -528,7 +529,7 @@ export class AgentManager {
       const files = this.deps.projectFiles;
       if (!files) return false;
       const stored = this.deps.projectRepo.findById(projectId)?.data;
-      if (!stored) return false;
+      if (!stored || !stored.configRepo) return false;
       const ok = await files.syncRun(hydrateProject(stored), run);
       if (ok) this.pendingRunSyncs.delete(key);
       else this.pendingRunSyncs.add(key);
