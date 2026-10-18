@@ -66,10 +66,16 @@ export class ToolRegistry implements IToolRegistry {
       return projectPermissions?.[key] === false;
     });
     if (deniedByProject) return { ok: false, output: `Project policy denies ${name}`, data: { denied: true } };
-    // Dangerous tools always pass through the approval policy unless the caller
-    // already obtained approval for this exact step (`ctx.approved`).
+    // Sandboxed project execution is force-human for untrusted projects even
+    // when the global policy auto-approves ordinary dangerous tools. Explicit
+    // project trust bypasses only while the container network remains off.
+    const trustedOfflineSandbox =
+      tool.sandboxExecution === true &&
+      ctx.project.settings?.trustedForExecution === true &&
+      ctx.project.settings?.sandboxNetworkAccess !== true;
+    const needsApproval = tool.dangerous && !trustedOfflineSandbox;
     ctx.checkActive?.();
-    if (tool.dangerous && !ctx.approved) {
+    if (needsApproval && !ctx.approved) {
       if (!ctx.requestApproval)
         return { ok: false, output: `No approval channel configured for ${name}`, requiresApproval: true };
       // Dangerous tools can bind the approval to the exact subject (e.g. the
@@ -80,6 +86,7 @@ export class ToolRegistry implements IToolRegistry {
         tool: tool.name,
         input: summarizeInput(input),
         ...binding,
+        ...(tool.sandboxExecution ? { forceHumanApproval: true } : {}),
       });
       if (!approved) {
         return { ok: false, output: `Approval rejected for ${name}`, requiresApproval: true, data: { rejected: true } };

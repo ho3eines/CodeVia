@@ -6,11 +6,14 @@
     } catch (_) { return {}; }
   }
   async function api(path, opts = {}) {
+    const multipart = typeof FormData !== "undefined" && opts.body instanceof FormData;
+    const headers = { ...authHeaders(), ...(opts.headers || {}) };
+    if (!multipart) headers["Content-Type"] = "application/json";
     const res = await fetch(path, {
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...authHeaders(), ...(opts.headers || {}) },
+      headers,
       method: opts.method || "GET",
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      body: opts.body ? (multipart ? opts.body : JSON.stringify(opts.body)) : undefined,
     });
     if (!res.ok) {
       let msg = res.statusText;

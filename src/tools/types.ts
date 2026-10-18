@@ -11,6 +11,8 @@ export interface ToolContext {
   correlationId: string;
   /** Runtime workspace root (local execution sandbox). */
   workspaceRoot?: string;
+  /** Docker-backed executor; absent means project commands are not available. */
+  sandboxRunner?: import("../projects/sandbox-runner.js").SandboxRunner;
   /** Configured base branch; source tools must never write to it directly. */
   baseBranch?: string;
   /** Cooperative cancellation and budget check, also used after approval waits. */
@@ -54,6 +56,8 @@ export interface ToolDefinition {
   description: string;
   /** Whether the tool can perform destructive/irreversible actions. */
   dangerous: boolean;
+  /** Approval policy for project commands: trusted projects can skip approval only while network is off. */
+  sandboxExecution?: boolean;
   inputSchema: Record<string, unknown>;
   permissions: string[];
   timeoutMs: number;

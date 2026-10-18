@@ -10,6 +10,7 @@ import type {
   GithubIssue,
   GithubRelease,
   GithubFile,
+  GithubFileBuffer,
   GithubTreeEntry,
   ListRepositoriesOptions,
   CreateRepositoryOptions,
@@ -238,7 +239,7 @@ export class RealGitHubService implements IGitHubService {
       `/repos/${repo.owner}/${repo.name}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
     );
     const body = (await res.json()) as {
-      tree?: Array<{ path?: string; type?: string; size?: number }>;
+      tree?: Array<{ path?: string; type?: string; size?: number; mode?: string }>;
       truncated?: boolean;
     };
     // A test double (or an unexpected payload shape) that answers with an array
@@ -252,7 +253,7 @@ export class RealGitHubService implements IGitHubService {
       const p = typeof entry?.path === "string" ? entry.path : "";
       if (!p || p.startsWith(".git/")) continue;
       if (prefix && p !== base && !p.startsWith(prefix)) continue;
-      out.push({ path: p, type: entry.type === "tree" ? "tree" : "blob", size: entry.size });
+      out.push({ path: p, type: entry.type === "tree" ? "tree" : "blob", size: entry.size, mode: entry.mode });
     }
     return out;
   }
@@ -462,6 +463,48 @@ export class RealGitHubService implements IGitHubService {
       if (typeof file.download_url === "string") {
         const download = await this.request(file.download_url, { headers: { Accept: "application/vnd.github.raw" } });
         return { path, content: await download.text(), sha: String(file.sha ?? "") || undefined };
+      }
+      throw new Error(`GitHub returned an empty content field for ${path}`);
+    } catch (err) {
+      if ((err as { status?: number }).status === 404) return undefined;
+      throw err;
+    }
+  }
+
+  async getFileBuffer(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFileBuffer | undefined> {
+    try {
+      const q = branch ? `?ref=${encodeURIComponent(branch)}` : "";
+      const url = `/repos/${repo.owner}/${repo.name}/contents/${path.split("/").map(encodeURIComponent).join("/")}${q}`;
+      const res = await this.request(url, { headers: { Accept: "application/vnd.github.raw+json" } });
+      const bytes = Buffer.from(await res.arrayBuffer());
+      const contentType = res.headers.get("content-type") ?? "";
+      const rawMediaType = /(?:github\.raw|octet-stream)/i.test(contentType);
+      if (rawMediaType || !contentType.includes("json")) return { path, content: bytes };
+      let body: unknown;
+      try {
+        body = JSON.parse(bytes.toString("utf8")) as unknown;
+      } catch {
+        return { path, content: bytes };
+      }
+      if (!body || typeof body !== "object") return { path, content: bytes };
+      const file = body as {
+        content?: unknown;
+        encoding?: unknown;
+        sha?: unknown;
+        path?: unknown;
+        download_url?: unknown;
+      };
+      if (typeof file.content === "string" && file.encoding === "base64")
+        return {
+          path,
+          content: Buffer.from(file.content.replace(/\s+/g, ""), "base64"),
+          sha: String(file.sha ?? "") || undefined,
+        };
+      if (typeof file.content === "string")
+        return { path, content: Buffer.from(file.content, "utf8"), sha: String(file.sha ?? "") || undefined };
+      if (typeof file.download_url === "string") {
+        const download = await this.request(file.download_url, { headers: { Accept: "application/vnd.github.raw" } });
+        return { path, content: Buffer.from(await download.arrayBuffer()), sha: String(file.sha ?? "") || undefined };
       }
       throw new Error(`GitHub returned an empty content field for ${path}`);
     } catch (err) {

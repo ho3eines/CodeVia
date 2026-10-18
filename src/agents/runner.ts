@@ -22,6 +22,7 @@ import { toRepoRef } from "../tools/core-tools.js";
 import type { MemoryRepository } from "../domain/repos.js";
 import type { MemoryScope, MemoryType } from "../domain/entities.js";
 import type { ProjectFilesService } from "../github/project-files.js";
+import type { SandboxRunner } from "../projects/sandbox-runner.js";
 import { TaskCancelledError, runBudget, type ExecutionBudget } from "./execution.js";
 import { realChatFor, type RealChat } from "./llm.js";
 import { isWriter, prepareSingleImplementation, repositoryForAgent } from "./implementation.js";
@@ -48,6 +49,8 @@ export interface AgentRunnerDeps {
   repoMirror?: RepoMirrorService;
   /** Credential for mirroring a private repository, resolved from the acting account. */
   mirrorTokenForProject?: (project: Project, requestUserId?: string) => string | undefined;
+  /** Docker-only project command executor; never falls back to host shell. */
+  sandboxRunner?: SandboxRunner;
   refresh?: (projectId: string) => Promise<{ project: Project; agents: Agent[] }>;
   isCancelled?: (taskId: string) => boolean;
   /** Checks the complete ancestry, not just the current subtask. */
@@ -309,6 +312,7 @@ export class AgentRunner {
               mirrorScope: req.requestUserId ?? project.ownerId,
               mirrorToken: this.deps.mirrorTokenForProject?.(project, req.requestUserId),
               workspaceRoot: req.workspaceRoot,
+              sandboxRunner: this.deps.sandboxRunner,
               baseBranch: repository?.defaultBranch ?? project.branch,
               checkActive,
               requestApproval: this.deps.requestApproval
