@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
@@ -45,6 +46,7 @@ import { pendingGitHubAuthorization, runWithGitHubRequestContext } from "../gith
 import { GitHubAuthorizationRequiredError } from "../github/authorization.js";
 import { correlationId, runWithCorrelation } from "../correlation.js";
 import { getEnv } from "../config/env.js";
+import { projectArchiveLimitsFromEnv } from "../projects/project-archive.js";
 
 export interface BuildServerResult {
   app: FastifyInstance;
@@ -57,10 +59,14 @@ export interface BuildServerResult {
  * middleware attaches the current user for permission checks.
  */
 export async function buildServer(container: Container): Promise<BuildServerResult> {
+  const importLimits = projectArchiveLimitsFromEnv();
   const app = Fastify({
     logger: false,
     trustProxy: true,
-    bodyLimit: 5 * 1024 * 1024,
+    bodyLimit: Math.max(5 * 1024 * 1024, importLimits.maxUploadBytes + 1024 * 1024),
+  });
+  await app.register(multipart, {
+    limits: { files: 1, fields: 8, parts: 10, fileSize: importLimits.maxUploadBytes },
   });
 
   // Accept empty JSON bodies (e.g. POST /tasks/:id/run, /projects/:id/activate)

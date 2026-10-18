@@ -84,11 +84,19 @@ export interface GithubFile {
   sha?: string;
 }
 
+export interface GithubFileBuffer {
+  path: string;
+  content: Buffer;
+  sha?: string;
+}
+
 /** Lightweight file-system entry returned by the repository tree API. */
 export interface GithubTreeEntry {
   path: string;
   type: "blob" | "tree";
   size?: number;
+  /** Git tree mode when the provider exposes it (120000 is a symlink). */
+  mode?: string;
 }
 
 export interface CreateRepositoryOptions {
@@ -124,6 +132,8 @@ export interface IGitHubService {
   listIssues(repo: GithubRepoRef): Promise<GithubIssue[]>;
   listReleases(repo: GithubRepoRef): Promise<GithubRelease[]>;
   getFile(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFile | undefined>;
+  /** Optional binary-safe file read for sandbox/archive plumbing. */
+  getFileBuffer?(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFileBuffer | undefined>;
   createBranch(repo: GithubRepoRef, name: string, baseSha: string): Promise<GithubBranch>;
   commit(
     repo: GithubRepoRef,

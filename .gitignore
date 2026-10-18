@@ -7,6 +7,7 @@ dist/
 
 # Runtime data (never commit the database — GitHub restores project state)
 data/
+repos/
 *.db
 *.db-wal
 *.db-shm

@@ -228,7 +228,17 @@ export interface ProjectAnalysisSuggestions {
   startCommand?: string;
   testCommand?: string;
   devCommand?: string;
+  commands?: ProjectCommands;
   tags?: string[];
+}
+
+/** Editable project-local lifecycle commands. Commands are never run on the host. */
+export interface ProjectCommands {
+  install?: string;
+  build?: string;
+  test?: string;
+  lint?: string;
+  start?: string;
 }
 
 /**
@@ -245,6 +255,7 @@ export interface ProjectAnalysis {
   frameworks: string[];
   packageManager?: string;
   scripts: Record<string, string>;
+  commands?: ProjectCommands;
   dependencies?: string[];
   devDependencies?: string[];
   isMonorepo?: boolean;
@@ -296,6 +307,8 @@ export interface Project {
   localPath?: string;
   /** Folder analysis snapshot captured when a local project was created. */
   analysis?: ProjectAnalysis;
+  /** Editable lifecycle commands; persisted in the project JSON record. */
+  commands?: ProjectCommands;
   /** @deprecated derived from capabilities.languages[0] — kept for prompts/back-compat */
   primaryLanguage?: string;
   /** @deprecated derived from capabilities.frameworks[0] */
@@ -325,8 +338,12 @@ export interface ProjectSettings {
   generatedSkills?: string[];
   workflows: string[];
   budget: Budget;
-  /** Max autonomous QA↔Fix retry loops before the parent task fails. */
+  /** Max autonomous QA↔Fix retry loops before the task is handed to a human. */
   maxFixLoops?: number;
+  /** Trust this project to run its lifecycle commands in the Docker sandbox without per-run approval. Default false. */
+  trustedForExecution?: boolean;
+  /** Allow sandbox containers network access. Default false (Docker --network=none). */
+  sandboxNetworkAccess?: boolean;
   /** When QA fails, route back through research to re-analyse before fixing
    *  instead of patching directly on the same implementer. */
   researchBeforeFix?: boolean;

@@ -33,6 +33,7 @@ import {
 import { logger } from "../../logger.js";
 import { DISCOVERED_RULE_TAG } from "../../agents/manager.js";
 import { defaultPlanFor } from "../../agents/plan.js";
+import { normalizeProjectCommands } from "../../analyzer/project-commands.js";
 import { isAgentType } from "../../agents/generator.js";
 import { dispatchProjectAskChecked, isAskError } from "./project-ask-shared.js";
 import { invalidateRepoBrief, readRepoBrief, repoContextFor } from "../../agents/repo-brief.js";
@@ -216,8 +217,19 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     }
     if (typeof body.telegramChatId === "string") patch.telegramChatId = body.telegramChatId || undefined;
     if (typeof body.active === "boolean") patch.active = body.active;
+    if (Object.hasOwn(body, "commands")) {
+      try {
+        patch.commands = normalizeProjectCommands(body.commands) ?? {};
+      } catch (err) {
+        return fail(reply, 400, err instanceof Error ? err.message : "Invalid project commands");
+      }
+    }
     if (body.settings && typeof body.settings === "object") {
       const settings = body.settings as Partial<Project["settings"]>;
+      for (const key of ["trustedForExecution", "sandboxNetworkAccess"] as const) {
+        if (Object.hasOwn(settings, key) && typeof settings[key] !== "boolean")
+          return fail(reply, 400, `settings.${key} must be a boolean`);
+      }
       patch.settings = {
         ...p.settings,
         ...settings,

@@ -129,6 +129,7 @@ export class ApprovalService {
    */
   async request(action: string, detail: Record<string, unknown> = {}): Promise<boolean> {
     const policy = this.policy();
+    const autoApprove = policy.autoApprove && detail.forceHumanApproval !== true;
     const now = new Date();
     const req: ApprovalRequest = {
       id: `apr-${randomUUID().slice(0, 8)}`,
@@ -141,13 +142,13 @@ export class ApprovalService {
       correlationId: strOrUndef(detail.correlationId) ?? generateCorrelationId(),
       status: "pending",
       requestedAt: now.toISOString(),
-      expiresAt: policy.autoApprove ? undefined : new Date(now.getTime() + policy.timeoutMs).toISOString(),
+      expiresAt: autoApprove ? undefined : new Date(now.getTime() + policy.timeoutMs).toISOString(),
     };
 
     const watchedTask = req.taskId ? this.deps.taskRepo?.findById(req.taskId)?.data : undefined;
     if (watchedTask && this.deps.taskRepo) assertTaskActive(this.deps.taskRepo, watchedTask);
 
-    if (policy.autoApprove) {
+    if (autoApprove) {
       req.status = "approved";
       req.decidedAt = req.requestedAt;
       req.decidedBy = "policy";

@@ -3,7 +3,7 @@
     const list = await api("/projects");
     $("#content").innerHTML = `
       <div class="overview"><div><h1>Projects</h1><p>Multi-project AI engineering workspaces</p></div>
-        <button class="btn btn-primary" onclick="openProjectModal()">＋ Create Project</button></div>
+        <div class="action-row"><button class="btn" onclick="openProjectModal()">＋ GitHub Project</button><button class="btn" onclick="openNewLocalProjectModal()">＋ New Local</button><button class="btn" onclick="openLocalFolderModal()">📂 Server Folder</button><button class="btn btn-primary" onclick="openProjectImportModal()">↑ Import ZIP/RAR</button></div></div>
       ${searchPanelHtml("project-search", "Search projects by name, repo, branch, framework or status…")}
       ${list.length ? `<div class="card card-body"><div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Repo</th><th>Branch</th><th>Framework</th><th>Status</th><th>Created</th><th></th></tr></thead>
@@ -252,6 +252,46 @@
     load();
     return { get selected() { return state.selected; } };
   }
+
+  function intakeProjectResult(project, message) {
+    closeModal();
+    toast("Project created", message || project.name, "ok");
+    location.hash = "#/projects/" + project.id;
+  }
+  window.openNewLocalProjectModal = () => {
+    openModal("New Local Project", `<div class="field"><label>Name</label><input class="input" id="nl-name" maxlength="200" placeholder="My application"/></div><div class="field"><label>Description</label><textarea class="textarea" id="nl-description" maxlength="2000"></textarea></div><div class="field-hint">Creates a private local Git repository under LOCAL_REPOS_DIR and commits an initial README. No project code is executed on the host.</div><div class="flex mt"><button class="btn btn-primary" id="nl-create">Create</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#nl-create").onclick = async () => {
+      const name = $("#nl-name").value.trim();
+      if (!name) return toast("Name required", "Give the project a name", "err");
+      const btn = $("#nl-create"); btn.disabled = true;
+      try { const p = await api("/projects/new-local", { method: "POST", body: { name, description: $("#nl-description").value } }); intakeProjectResult(p, "Local Git repository initialized"); }
+      catch (e) { toast("Could not create project", e.message, "err"); btn.disabled = false; }
+    };
+  };
+  window.openLocalFolderModal = () => {
+    openModal("Import Server Folder", `<div class="field"><label>Absolute folder path on the CodeVia server</label><input class="input mono" id="lf-path" placeholder="/srv/projects/my-app"/></div><div class="field"><label>Project name (optional)</label><input class="input" id="lf-name" placeholder="Detected from the folder"/></div><label class="check"><input type="checkbox" id="lf-gitinit" checked/> Copy into LOCAL_REPOS_DIR and create an initial Git commit (recommended for agent edits)</label><div class="field-hint">The source must be inside a server folder allowed by the operator. Symbolic links and secret files are refused or omitted. The original folder is not modified when copying.</div><div class="flex mt"><button class="btn btn-primary" id="lf-import">Import folder</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#lf-import").onclick = async () => {
+      const path = $("#lf-path").value.trim();
+      if (!path) return toast("Path required", "Enter an absolute server path", "err");
+      const overrides = $("#lf-name").value.trim() ? { name: $("#lf-name").value.trim() } : undefined;
+      const btn = $("#lf-import"); btn.disabled = true;
+      try { const p = await api("/projects/from-local", { method: "POST", body: { path, gitInit: $("#lf-gitinit").checked, ...(overrides ? { overrides } : {}) } }); intakeProjectResult(p, p.configRepo ? `Created ${p.configRepo}` : "Folder linked read-only"); }
+      catch (e) { toast("Folder import failed", e.message, "err"); btn.disabled = false; }
+    };
+  };
+  window.openProjectImportModal = () => {
+    openModal("Import ZIP / RAR Project", `<div class="field"><label>Project archive (.zip or .rar)</label><input class="input" type="file" id="pi-file" accept=".zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed"/></div><div class="field"><label>Project name (optional)</label><input class="input" id="pi-name" maxlength="200" placeholder="Use the archive filename"/></div><div class="field"><label>Description (optional)</label><textarea class="textarea" id="pi-description" maxlength="2000"></textarea></div><div class="field-hint">Archive paths, symlinks, file counts, expansion ratio and total size are checked before a local Git repository is created. RAR requires 7z/7zz on the server.</div><div class="flex mt"><button class="btn btn-primary" id="pi-import">Import archive</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pi-import").onclick = async () => {
+      const file = $("#pi-file").files?.[0];
+      if (!file) return toast("Archive required", "Choose a ZIP or RAR file", "err");
+      const form = new FormData(); form.append("archive", file, file.name);
+      if ($("#pi-name").value.trim()) form.append("name", $("#pi-name").value.trim());
+      if ($("#pi-description").value.trim()) form.append("description", $("#pi-description").value.trim());
+      const btn = $("#pi-import"); btn.disabled = true; btn.textContent = "Importing…";
+      try { const p = await api("/projects/import", { method: "POST", body: form }); intakeProjectResult(p, `Imported ${p.configRepo}`); }
+      catch (e) { toast("Archive import failed", e.message, "err"); btn.disabled = false; btn.textContent = "Import archive"; }
+    };
+  };
 
   async function openProjectModal() {
     openModal("Create Project", `<div class="repo-empty">Loading options…</div>`);

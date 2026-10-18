@@ -33,18 +33,20 @@
  * manager / SSH keys). A failed push is a warning — commits stay local.
  */
 
-import { exec, execFile } from "node:child_process";
+import { execFile } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type {
@@ -59,11 +61,13 @@ import type {
   GithubIssue,
   GithubRelease,
   GithubFile,
+  GithubFileBuffer,
   GithubTreeEntry,
   ListRepositoriesOptions,
   CreateRepositoryOptions,
 } from "./types.js";
 import { logger } from "../logger.js";
+import { isSensitivePath } from "../filesystem/filesystem-service.js";
 import { LocalGitError, classifyGitFailure, trimGitStderr } from "./local-git-error.js";
 
 /** True when the platform runs in 100% local git CLI mode (LOCAL_GIT_MODE). */
@@ -103,6 +107,29 @@ interface GitExecResult {
 interface GitExecOptions {
   env?: Record<string, string>;
   timeoutMs?: number;
+}
+
+export interface LocalGitImportFile {
+  path: string;
+  content: Buffer;
+}
+
+export interface LocalGitImportResult {
+  repository: GithubRepository;
+  repoDir: string;
+  commit: GithubCommit;
+}
+
+export interface LocalGitTreeExport {
+  sha: string;
+  files: LocalGitImportFile[];
+  totalBytes: number;
+}
+
+export interface LocalGitTreeExportLimits {
+  maxFiles?: number;
+  maxFileBytes?: number;
+  maxTotalBytes?: number;
 }
 
 /** PR/issue records as persisted (superset of the public wire types). */
@@ -216,7 +243,6 @@ export class LocalGitService implements IGitHubService {
   private readonly remoteName: string;
   private readonly defaultOwner: string;
   private readonly autoFetch: boolean;
-  private readonly verifyCmd: string | undefined;
   private readonly staleLockMs: number;
 
   private gitAvailable: Promise<void> | undefined;
@@ -228,15 +254,53 @@ export class LocalGitService implements IGitHubService {
   private mergeTreeSupport: boolean | undefined;
 
   constructor(opts: LocalGitServiceOptions = {}) {
-    this.rootDir = resolve(opts.rootDir ?? process.env.LOCAL_REPOS_DIR ?? "./repos");
+    const rootDir = resolve(opts.rootDir ?? process.env.LOCAL_REPOS_DIR ?? "./repos");
+    mkdirSync(rootDir, { recursive: true });
+    this.rootDir = realpathSync(rootDir);
     this.gitBin = opts.gitBin ?? process.env.LOCAL_GIT_BIN ?? "git";
     this.autoPush = opts.autoPush ?? envFlag(process.env.LOCAL_GIT_AUTO_PUSH);
     this.remoteName = opts.remoteName ?? process.env.LOCAL_GIT_REMOTE ?? "origin";
     this.defaultOwner = opts.defaultOwner ?? process.env.LOCAL_GIT_OWNER ?? "local";
     this.autoFetch = opts.autoFetch ?? envFlag(process.env.LOCAL_GIT_AUTO_FETCH);
-    this.verifyCmd = opts.verifyCmd ?? (process.env.LOCAL_GIT_VERIFY_CMD?.trim() || undefined);
+    if ((opts.verifyCmd ?? process.env.LOCAL_GIT_VERIFY_CMD)?.trim())
+      logger.warn(
+        "LOCAL_GIT_VERIFY_CMD is ignored: repository commands are never executed on the CodeVia host; use the Docker sandbox runner",
+      );
     this.staleLockMs = opts.staleLockMs ?? (Number(process.env.LOCAL_GIT_STALE_LOCK_MS) || 10 * 60_000);
-    mkdirSync(this.rootDir, { recursive: true });
+  }
+
+  private assertNoSymlinkComponents(targetPath: string): void {
+    const root = realpathSync(this.rootDir);
+    const target = resolve(targetPath);
+    const rel = relative(root, target);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))
+      throw new LocalGitError("LOCAL_INVALID_INPUT", "Repository path escapes LOCAL_REPOS_DIR");
+    let current = root;
+    for (const segment of rel ? rel.split(sep) : []) {
+      current = join(current, segment);
+      try {
+        if (lstatSync(current).isSymbolicLink())
+          throw new LocalGitError(
+            "LOCAL_INVALID_INPUT",
+            `Symbolic links are not allowed in repository paths: ${current}`,
+          );
+      } catch (err) {
+        if (err instanceof LocalGitError) throw err;
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") break;
+        throw err;
+      }
+    }
+  }
+
+  private assertSafeRepoDir(repoDir: string): void {
+    this.assertNoSymlinkComponents(repoDir);
+    try {
+      if (lstatSync(join(repoDir, ".git")).isSymbolicLink())
+        throw new LocalGitError("LOCAL_INVALID_INPUT", "A repository with a symbolic-link .git entry is not supported");
+    } catch (err) {
+      if (err instanceof LocalGitError) throw err;
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -264,6 +328,40 @@ export class LocalGitService implements IGitHubService {
             errText = `git binary not found or not runnable: ${this.gitBin}`;
           }
           resolvePromise({ stdout: String(stdout ?? ""), stderr: errText, code });
+        },
+      );
+    });
+  }
+
+  /** Capture binary object data from git plumbing without UTF-8 corruption. */
+  private gitBuffer(
+    args: string[],
+    cwd: string,
+    opts: GitExecOptions = {},
+  ): Promise<{ stdout: Buffer; stderr: string; code: number }> {
+    return new Promise((resolvePromise) => {
+      execFile(
+        this.gitBin,
+        args,
+        {
+          cwd,
+          timeout: opts.timeoutMs ?? 60_000,
+          maxBuffer: 128 * 1024 * 1024,
+          windowsHide: true,
+          encoding: "buffer",
+          env: { ...process.env, ...opts.env, GIT_TERMINAL_PROMPT: "0" },
+        },
+        (error, stdout, stderr) => {
+          const err = error as { code?: number | string } | null;
+          const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
+          let errText = Buffer.isBuffer(stderr) ? stderr.toString("utf8") : String(stderr ?? "");
+          if (err?.code === "ENOENT" && !errText.trim())
+            errText = `git binary not found or not runnable: ${this.gitBin}`;
+          resolvePromise({
+            stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout ?? "")),
+            stderr: errText,
+            code,
+          });
         },
       );
     });
@@ -339,7 +437,11 @@ export class LocalGitService implements IGitHubService {
 
   private validateRepoRef(repo: GithubRepoRef): void {
     const ok = (s: unknown): s is string =>
-      typeof s === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$/.test(s) && s !== "." && s !== ".." && !s.endsWith(".lock");
+      typeof s === "string" &&
+      /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$/.test(s) &&
+      s !== "." &&
+      s !== ".." &&
+      !s.endsWith(".lock");
     if (!ok(repo?.owner) || !ok(repo?.name)) {
       throw new LocalGitError("LOCAL_INVALID_INPUT", `Unsafe repository name: ${repo?.owner}/${repo?.name}`);
     }
@@ -355,6 +457,8 @@ export class LocalGitService implements IGitHubService {
       join(this.rootDir, `${repo.name}.git`),
     ];
     for (const candidate of candidates) {
+      if (!existsSync(candidate)) continue;
+      this.assertSafeRepoDir(candidate);
       if (isGitDir(candidate)) return candidate;
     }
     throw new LocalGitError(
@@ -399,7 +503,9 @@ export class LocalGitService implements IGitHubService {
       if (!(err instanceof LocalGitError) || err.code !== "LOCAL_REPO_NOT_FOUND") throw err;
     }
     const dir = join(this.rootDir, repo.owner, repo.name);
+    this.assertNoSymlinkComponents(dirname(dir));
     mkdirSync(dir, { recursive: true });
+    this.assertSafeRepoDir(dir);
     let res = await this.git(["init", "--initial-branch", branch], dir);
     if (res.code !== 0) {
       // git < 2.28 has no --initial-branch; plain init + symbolic-ref works everywhere.
@@ -450,7 +556,13 @@ export class LocalGitService implements IGitHubService {
       );
     }
     const meta = parsed as Partial<LocalRepoMeta>;
-    if (!meta || typeof meta !== "object" || !Array.isArray(meta.pulls) || !Array.isArray(meta.issues) || !Array.isArray(meta.releases)) {
+    if (
+      !meta ||
+      typeof meta !== "object" ||
+      !Array.isArray(meta.pulls) ||
+      !Array.isArray(meta.issues) ||
+      !Array.isArray(meta.releases)
+    ) {
       throw new LocalGitError(
         "LOCAL_META_CORRUPT",
         `Local pull-request metadata has an invalid shape: ${path}. Restore it from ${path}.bak or fix it manually — CodeVia refuses to overwrite or silently reset it.`,
@@ -498,7 +610,7 @@ export class LocalGitService implements IGitHubService {
     repoDir: string,
     parent: string | undefined,
     message: string,
-    adds: Array<{ path: string; content: string }>,
+    adds: Array<{ path: string; content: string | Buffer }>,
     removes: string[],
   ): Promise<{ sha: string; author: string }> {
     const indexFile = join(tmpdir(), `codevia-index-${randomUUID()}`);
@@ -514,7 +626,7 @@ export class LocalGitService implements IGitHubService {
         mkdirSync(blobDir, { recursive: true });
         const staged = adds.map((add, i) => {
           const tmp = join(blobDir, `f${i}`);
-          writeFileSync(tmp, add.content, "utf8");
+          writeFileSync(tmp, add.content);
           return { tmp, path: add.path };
         });
         const hashed: Array<{ path: string; sha: string }> = [];
@@ -524,13 +636,19 @@ export class LocalGitService implements IGitHubService {
             repoDir,
             "git hash-object failed",
           );
-          const shas = res.stdout.trim().split(/\r?\n/).map((s) => s.trim());
+          const shas = res.stdout
+            .trim()
+            .split(/\r?\n/)
+            .map((s) => s.trim());
           part.forEach((s, i) => hashed.push({ path: s.path, sha: shas[i] ?? "" }));
         }
         // Existing modes (preserve the executable bit) in one lookup per batch.
         const modes = new Map<string, string>();
         if (parent !== undefined)
-          for (const part of chunk(adds.map((a) => a.path), 80)) {
+          for (const part of chunk(
+            adds.map((a) => a.path),
+            80,
+          )) {
             const res = await this.git(["ls-tree", parent, "--", ...part.map((p) => `:(literal)${p}`)], repoDir);
             if (res.code !== 0) continue;
             for (const line of res.stdout.split("\n")) {
@@ -574,7 +692,11 @@ export class LocalGitService implements IGitHubService {
   }
 
   /** Paths changed between two commits (no renames: A/D pairs instead). */
-  private async changedPaths(repoDir: string, from: string, to: string): Promise<Array<{ status: string; path: string }>> {
+  private async changedPaths(
+    repoDir: string,
+    from: string,
+    to: string,
+  ): Promise<Array<{ status: string; path: string }>> {
     const res = await this.git(["diff", "--no-renames", "--name-status", from, to], repoDir);
     if (res.code !== 0) return [];
     const out: Array<{ status: string; path: string }> = [];
@@ -675,7 +797,11 @@ export class LocalGitService implements IGitHubService {
     }
     if (remove.length) {
       for (const part of chunk(remove, 80)) {
-        await this.gitChecked(["rm", "-f", "--ignore-unmatch", "--", ...part], repoDir, `working-tree sync failed for branch "${branch}"`);
+        await this.gitChecked(
+          ["rm", "-f", "--ignore-unmatch", "--", ...part],
+          repoDir,
+          `working-tree sync failed for branch "${branch}"`,
+        );
       }
     }
   }
@@ -702,7 +828,10 @@ export class LocalGitService implements IGitHubService {
   private async maybePush(repoDir: string, branch: string): Promise<void> {
     if (!this.autoPush) return;
     const remotes = await this.git(["remote"], repoDir);
-    const names = remotes.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const names = remotes.stdout
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
     if (!names.includes(this.remoteName)) {
       logger.debug(`LocalGitService: auto-push is on but no remote "${this.remoteName}" exists — staying local`, {
         branch,
@@ -724,7 +853,13 @@ export class LocalGitService implements IGitHubService {
     if (now - (this.lastFetch.get(repoDir) ?? 0) < 60_000) return;
     this.lastFetch.set(repoDir, now);
     const remotes = await this.git(["remote"], repoDir);
-    if (!remotes.stdout.split(/\r?\n/).map((s) => s.trim()).includes(this.remoteName)) return;
+    if (
+      !remotes.stdout
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .includes(this.remoteName)
+    )
+      return;
     const res = await this.git(["fetch", "--prune", this.remoteName], repoDir, { timeoutMs: 120_000 });
     if (res.code !== 0) {
       logger.warn("LocalGitService: git fetch failed — continuing with local refs", {
@@ -862,10 +997,12 @@ export class LocalGitService implements IGitHubService {
     const defaultBranch = opts.defaultBranch ?? "main";
     validateBranchName(defaultBranch);
     const repoDir = join(this.rootDir, owner, name);
+    this.assertNoSymlinkComponents(dirname(repoDir));
     if (existsSync(repoDir)) {
       throw new LocalGitError("LOCAL_INVALID_INPUT", `Repository already exists at ${repoDir}`);
     }
     mkdirSync(repoDir, { recursive: true });
+    this.assertSafeRepoDir(repoDir);
     let initRes = await this.git(["init", "-b", defaultBranch], repoDir);
     if (initRes.code !== 0 && /unknown option/i.test(initRes.stderr)) {
       // git < 2.28 has no `init -b`
@@ -889,6 +1026,93 @@ export class LocalGitService implements IGitHubService {
     const info = await this.inspectRepo(owner, name, repoDir);
     if (!info) throw new LocalGitError("LOCAL_GIT_FAILED", `Failed to initialize local repository at ${repoDir}`);
     return info;
+  }
+
+  /** Create a local repo and a single initial commit from validated regular files (including binary assets). */
+  async createRepositoryFromFiles(
+    opts: CreateRepositoryOptions,
+    files: LocalGitImportFile[],
+  ): Promise<LocalGitImportResult> {
+    if (!files.length) throw new LocalGitError("LOCAL_INVALID_INPUT", "A project import needs at least one file");
+    if (files.length > 20_000)
+      throw new LocalGitError("LOCAL_INVALID_INPUT", "A project import cannot exceed 20,000 files");
+    let totalBytes = 0;
+    const validated = files.map((file) => {
+      const path = normalizeRepoPath(file.path);
+      if (
+        !path ||
+        path !== file.path ||
+        path.split("/").some((segment) => [".git", ".hg", ".svn"].includes(segment.toLowerCase()))
+      )
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `Unsafe imported file path: ${file.path}`);
+      if (!Buffer.isBuffer(file.content))
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `Imported content must be a Buffer: ${path}`);
+      if (file.content.length > 100 * 1024 * 1024)
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `Imported file is too large: ${path}`);
+      totalBytes += file.content.length;
+      if (totalBytes > 200 * 1024 * 1024)
+        throw new LocalGitError("LOCAL_INVALID_INPUT", "Project import exceeds the 200 MiB Git-service limit");
+      if (isSensitivePath(path))
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `Secret-bearing file is not importable: ${path}`);
+      return { path, content: file.content };
+    });
+    const paths = validated.map((file) => file.path.toLocaleLowerCase("en-US"));
+    if (new Set(paths).size !== paths.length)
+      throw new LocalGitError("LOCAL_INVALID_INPUT", "Duplicate imported file paths");
+    for (const file of validated) {
+      const parts = file.path.split("/");
+      for (let i = 1; i < parts.length; i++)
+        if (paths.includes(parts.slice(0, i).join("/").toLocaleLowerCase("en-US")))
+          throw new LocalGitError(
+            "LOCAL_INVALID_INPUT",
+            `File/directory path collision: ${parts.slice(0, i).join("/")}`,
+          );
+    }
+    const repository = await this.createRepository({ ...opts, autoInit: false });
+    const ref = { owner: repository.owner, name: repository.name };
+    const repoDir = this.resolveRepoDir(ref);
+    try {
+      for (const file of validated) {
+        const destination = resolve(repoDir, ...file.path.split("/"));
+        const rel = relative(repoDir, destination);
+        if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))
+          throw new LocalGitError("LOCAL_INVALID_INPUT", `Imported file escapes the repository: ${file.path}`);
+        this.assertNoSymlinkComponents(dirname(destination));
+        mkdirSync(dirname(destination), { recursive: true });
+        this.assertNoSymlinkComponents(dirname(destination));
+        writeFileSync(destination, file.content, { flag: "wx", mode: 0o644 });
+      }
+      const now = new Date().toISOString();
+      const commit = await this.withRepoLock(repoDir, async () => {
+        const { sha, author } = await this.commitViaIndex(repoDir, undefined, "Initial project import", validated, []);
+        await this.updateRefChecked(repoDir, repository.defaultBranch, sha, NO_PARENT);
+        await this.gitChecked(["read-tree", sha], repoDir, "git read-tree failed after project import");
+        await this.maybePush(repoDir, repository.defaultBranch);
+        return { sha, message: "Initial project import", author, date: now };
+      });
+      this.repoInfoCache.clear();
+      const saved = await this.inspectRepo(repository.owner, repository.name, repoDir);
+      if (!saved) throw new LocalGitError("LOCAL_GIT_FAILED", `Imported repository disappeared: ${repoDir}`);
+      return { repository: saved, repoDir, commit };
+    } catch (err) {
+      this.repoInfoCache.clear();
+      rmSync(repoDir, { recursive: true, force: true });
+      throw err;
+    }
+  }
+
+  /** Remove a just-created import that could not be registered; never follows symlinked repository components. */
+  discardUnregisteredRepository(repoDir: string): void {
+    const absolute = resolve(repoDir);
+    this.assertSafeRepoDir(absolute);
+    const rel = relative(this.rootDir, absolute);
+    if (rel.split(sep).filter(Boolean).length < 2 || rel.split(sep).filter(Boolean).length > 2)
+      throw new LocalGitError(
+        "LOCAL_INVALID_INPUT",
+        "Only a direct LOCAL_REPOS_DIR owner/name repository can be discarded",
+      );
+    rmSync(absolute, { recursive: true, force: true });
+    this.repoInfoCache.clear();
   }
 
   async getViewer(): Promise<GithubViewer> {
@@ -975,6 +1199,7 @@ export class LocalGitService implements IGitHubService {
         path: filePath,
         type: meta[1] === "tree" ? "tree" : "blob",
         size: Number.isFinite(size) ? size : undefined,
+        mode: meta[0],
       });
     }
     return entries;
@@ -1001,6 +1226,109 @@ export class LocalGitService implements IGitHubService {
     const show = await this.git(["cat-file", "blob", blobSha], repoDir);
     if (show.code !== 0) return undefined;
     return { path: cleanPath, content: show.stdout, sha: blobSha };
+  }
+
+  async getFileBuffer(repo: GithubRepoRef, path: string, branch?: string): Promise<GithubFileBuffer | undefined> {
+    await this.ensureGitAvailable();
+    const cleanPath = normalizeRepoPath(path);
+    if (!cleanPath) return undefined;
+    let repoDir: string;
+    try {
+      repoDir = this.resolveRepoDir(repo);
+    } catch (err) {
+      if (err instanceof LocalGitError && err.code === "LOCAL_REPO_NOT_FOUND") return undefined;
+      throw err;
+    }
+    const ref = (branch ?? "").trim() || "HEAD";
+    if (ref.startsWith("-")) return undefined;
+    const shaRes = await this.git(["rev-parse", "--verify", "--quiet", `${ref}:${cleanPath}`], repoDir);
+    if (shaRes.code !== 0) return undefined;
+    const blobSha = shaRes.stdout.trim();
+    const typeRes = await this.git(["cat-file", "-t", blobSha], repoDir);
+    if (typeRes.code !== 0 || typeRes.stdout.trim() !== "blob") return undefined;
+    const blob = await this.gitBuffer(["cat-file", "blob", blobSha], repoDir);
+    if (blob.code !== 0) return undefined;
+    return { path: cleanPath, content: blob.stdout, sha: blobSha };
+  }
+
+  /** Export an immutable commit tree as regular-file buffers for the Docker sandbox; symlinks are refused. */
+  async exportTreeFiles(
+    repo: GithubRepoRef,
+    ref: string,
+    limits: LocalGitTreeExportLimits = {},
+  ): Promise<LocalGitTreeExport> {
+    await this.ensureGitAvailable();
+    const repoDir = this.resolveRepoDir(repo);
+    const sha = await this.resolveCommitSha(repoDir, ref);
+    if (!sha) throw new LocalGitError("LOCAL_REF_NOT_FOUND", `Ref "${ref}" not found in ${repo.owner}/${repo.name}`);
+    const maxFiles = limits.maxFiles ?? 5000;
+    const maxFileBytes = limits.maxFileBytes ?? 25 * 1024 * 1024;
+    const maxTotalBytes = limits.maxTotalBytes ?? 200 * 1024 * 1024;
+    const listed = await this.gitBuffer(["ls-tree", "-r", "-l", "-z", "--full-tree", sha], repoDir, {
+      timeoutMs: 60_000,
+    });
+    if (listed.code !== 0) throw classifyGitFailure(listed.stderr, `git ls-tree failed in ${repo.owner}/${repo.name}`);
+    const records: Array<{ meta: string; path: string }> = [];
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let offset = 0;
+    while (offset < listed.stdout.length) {
+      const end = listed.stdout.indexOf(0, offset);
+      if (end < 0) throw new LocalGitError("LOCAL_GIT_FAILED", "Malformed NUL-delimited git tree output");
+      const record = listed.stdout.subarray(offset, end);
+      offset = end + 1;
+      if (!record.length) continue;
+      const tabAt = record.indexOf(0x09);
+      if (tabAt < 0) throw new LocalGitError("LOCAL_GIT_FAILED", "Malformed git tree entry");
+      try {
+        records.push({
+          meta: decoder.decode(record.subarray(0, tabAt)).trim(),
+          path: decoder.decode(record.subarray(tabAt + 1)),
+        });
+      } catch {
+        throw new LocalGitError(
+          "LOCAL_INVALID_INPUT",
+          "Repository contains a non-UTF-8 path that cannot be safely sandboxed",
+        );
+      }
+    }
+    if (records.length > maxFiles)
+      throw new LocalGitError(
+        "LOCAL_INVALID_INPUT",
+        `Repository has more than ${maxFiles} files for sandbox execution`,
+      );
+    const files: LocalGitImportFile[] = [];
+    let totalBytes = 0;
+    for (const record of records) {
+      const [mode, type, blobSha, rawSize] = record.meta.split(/\s+/);
+      const path = record.path;
+      if (mode === "120000")
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `Sandbox refuses repository symbolic links: ${path}`);
+      if (mode === "160000" || type !== "blob")
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `Sandbox refuses submodule or non-file tree entries: ${path}`);
+      const cleanPath = normalizeRepoPath(path);
+      if (!cleanPath || cleanPath !== path || path.includes("\\") || /[\x00-\x1f\x7f]/.test(path))
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `Unsafe path in repository tree: ${JSON.stringify(path)}`);
+      if (isSensitivePath(path)) continue;
+      const size = Number(rawSize);
+      if (!Number.isSafeInteger(size) || size < 0 || size > maxFileBytes)
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `File exceeds the sandbox per-file limit: ${path}`);
+      totalBytes += size;
+      if (totalBytes > maxTotalBytes)
+        throw new LocalGitError(
+          "LOCAL_INVALID_INPUT",
+          `Repository exceeds the sandbox source limit of ${maxTotalBytes} bytes`,
+        );
+      const blob = await this.gitBuffer(["cat-file", "blob", blobSha], repoDir, { timeoutMs: 60_000 });
+      if (blob.code !== 0 || blob.stdout.length !== size)
+        throw new LocalGitError("LOCAL_GIT_FAILED", `Could not read repository object for ${path}`);
+      files.push({ path, content: blob.stdout });
+    }
+    if (!files.length)
+      throw new LocalGitError(
+        "LOCAL_INVALID_INPUT",
+        "Repository has no importable regular files for sandbox execution",
+      );
+    return { sha, files, totalBytes };
   }
 
   /* ------------------------------------------------------------------ *
@@ -1049,7 +1377,8 @@ export class LocalGitService implements IGitHubService {
     const adds = (files ?? []).map((f) => {
       const path = normalizeRepoPath(f?.path ?? "");
       if (!path) throw new LocalGitError("LOCAL_INVALID_INPUT", `Unsafe repository path: ${f?.path}`);
-      if (typeof f.content !== "string") throw new LocalGitError("LOCAL_INVALID_INPUT", `File content must be a string: ${path}`);
+      if (typeof f.content !== "string")
+        throw new LocalGitError("LOCAL_INVALID_INPUT", `File content must be a string: ${path}`);
       return { path, content: f.content };
     });
 
@@ -1069,13 +1398,27 @@ export class LocalGitService implements IGitHubService {
         );
       }
       // Ask BEFORE the ref moves — after it, our own commit would look dirty.
-      const dirty = await this.dirtyPaths(repoDir, adds.map((a) => a.path));
+      const dirty = await this.dirtyPaths(
+        repoDir,
+        adds.map((a) => a.path),
+      );
       const { sha, author } = await this.commitViaIndex(repoDir, head, message, adds, []);
       await this.updateRefChecked(repoDir, branch, sha, head ?? NO_PARENT);
       try {
-        await this.syncWorktreeIfCheckedOut(repoDir, branch, sha, adds.map((a) => a.path), [], dirty);
+        await this.syncWorktreeIfCheckedOut(
+          repoDir,
+          branch,
+          sha,
+          adds.map((a) => a.path),
+          [],
+          dirty,
+        );
       } catch (err) {
-        throw this.asCommittedError(err, sha, `Commit ${sha.slice(0, 7)} was created and branch "${branch}" points to it, but the working tree could not be synced`);
+        throw this.asCommittedError(
+          err,
+          sha,
+          `Commit ${sha.slice(0, 7)} was created and branch "${branch}" points to it, but the working tree could not be synced`,
+        );
       }
       await this.maybePush(repoDir, branch);
       return { sha, message, author, date: new Date().toISOString() };
@@ -1112,7 +1455,11 @@ export class LocalGitService implements IGitHubService {
       try {
         await this.syncWorktreeIfCheckedOut(repoDir, branch, sha, [], removes, dirty);
       } catch (err) {
-        throw this.asCommittedError(err, sha, `Commit ${sha.slice(0, 7)} was created and branch "${branch}" points to it, but the working tree could not be synced`);
+        throw this.asCommittedError(
+          err,
+          sha,
+          `Commit ${sha.slice(0, 7)} was created and branch "${branch}" points to it, but the working tree could not be synced`,
+        );
       }
       await this.maybePush(repoDir, branch);
       return { sha, message, author, date: new Date().toISOString() };
@@ -1197,7 +1544,10 @@ export class LocalGitService implements IGitHubService {
       const meta = await this.readMeta(repoDir);
       const pr = meta.pulls.find((p) => p.number === number);
       if (!pr) {
-        throw new LocalGitError("LOCAL_REF_NOT_FOUND", `Pull request #${number} not found in ${repo.owner}/${repo.name}`);
+        throw new LocalGitError(
+          "LOCAL_REF_NOT_FOUND",
+          `Pull request #${number} not found in ${repo.owner}/${repo.name}`,
+        );
       }
       if (patch.title !== undefined) pr.title = patch.title;
       if (patch.body !== undefined) pr.body = patch.body;
@@ -1253,12 +1603,17 @@ export class LocalGitService implements IGitHubService {
         method === "squash"
           ? ["commit-tree", tree, "-p", baseSha, "-m", commitTitle]
           : ["commit-tree", tree, "-p", baseSha, "-p", headSha, "-m", commitTitle];
-      const commitRes = await this.gitChecked(args, repoDir, `git commit-tree failed while merging PR #${number}`, { env });
+      const commitRes = await this.gitChecked(args, repoDir, `git commit-tree failed while merging PR #${number}`, {
+        env,
+      });
       const newSha = commitRes.stdout.trim();
 
       // Dirty check before the ref moves (see commit()).
       const changed = await this.changedPaths(repoDir, baseSha, newSha);
-      const dirty = await this.dirtyPaths(repoDir, changed.map((c) => c.path));
+      const dirty = await this.dirtyPaths(
+        repoDir,
+        changed.map((c) => c.path),
+      );
       const toWrite = changed.filter((c) => !c.status.startsWith("D")).map((c) => c.path);
       const toRemove = changed.filter((c) => c.status.startsWith("D")).map((c) => c.path);
 
@@ -1274,7 +1629,11 @@ export class LocalGitService implements IGitHubService {
       try {
         await this.syncWorktreeIfCheckedOut(repoDir, pr.base, newSha, toWrite, toRemove, dirty);
       } catch (err) {
-        throw this.asCommittedError(err, newSha, `PR #${number} was merged as ${newSha.slice(0, 7)}, but the working tree could not be synced`);
+        throw this.asCommittedError(
+          err,
+          newSha,
+          `PR #${number} was merged as ${newSha.slice(0, 7)}, but the working tree could not be synced`,
+        );
       }
       await this.maybePush(repoDir, pr.base);
       return { merged: true, sha: newSha, message: `Merged locally via git (${method})` };
@@ -1326,14 +1685,7 @@ export class LocalGitService implements IGitHubService {
    * checks (local CI) / issues / releases
    * ------------------------------------------------------------------ */
 
-  /**
-   * Local CI evidence for a commit:
-   *   - `local-git-integrity` — success iff the commit exists in the local
-   *     object database (never a fabricated GitHub Actions job name),
-   *   - `local-verify` — the REAL result of LOCAL_GIT_VERIFY_CMD (e.g.
-   *     "dotnet test" / "npm test") when configured, so QA and the merge gate
-   *     verify actual builds, not a stub.
-   */
+  /** Repository-integrity evidence only. Project code is verified by the Docker sandbox tool, never by a host shell command. */
   async getChecks(repo: GithubRepoRef, sha: string): Promise<GithubCheck[]> {
     await this.ensureGitAvailable();
     let repoDir: string | undefined;
@@ -1364,35 +1716,7 @@ export class LocalGitService implements IGitHubService {
         detail: `Commit ${sha.slice(0, 7)} verified in the local git object database`,
       },
     ];
-    if (this.verifyCmd) {
-      checks.push(await this.runVerifyCommand(repoDir, this.verifyCmd));
-    }
     return checks;
-  }
-
-  private runVerifyCommand(repoDir: string, command: string): Promise<GithubCheck> {
-    return new Promise((resolvePromise) => {
-      exec(
-        command,
-        {
-          cwd: repoDir,
-          timeout: 10 * 60_000,
-          maxBuffer: 4 * 1024 * 1024,
-          windowsHide: true,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-        },
-        (error, stdout, stderr) => {
-          const ok = !error;
-          resolvePromise({
-            name: "local-verify",
-            status: ok ? "success" : "failure",
-            detail: ok
-              ? `LOCAL_GIT_VERIFY_CMD passed (${command})`
-              : `LOCAL_GIT_VERIFY_CMD failed (${command}): ${trimGitStderr(`${stdout}\n${stderr}`, 200)}`,
-          });
-        },
-      );
-    });
   }
 
   async listIssues(repo: GithubRepoRef): Promise<GithubIssue[]> {
@@ -1427,7 +1751,9 @@ export class LocalGitService implements IGitHubService {
       const meta = await this.readMeta(repoDir);
       const issue = meta.issues.find((i) => i.number === number);
       if (!issue) {
-        logger.debug(`LocalGitService: comment on missing issue #${number} ignored`, { repo: `${repo.owner}/${repo.name}` });
+        logger.debug(`LocalGitService: comment on missing issue #${number} ignored`, {
+          repo: `${repo.owner}/${repo.name}`,
+        });
         return;
       }
       issue.comments = [...(issue.comments ?? []), body];

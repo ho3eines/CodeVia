@@ -37,6 +37,9 @@ import { ProjectFilesService } from "../github/project-files.js";
 import { FilesystemService } from "../filesystem/filesystem-service.js";
 import { ProjectAnalyzerService } from "../analyzer/project-analyzer.js";
 import { LocalProjectService } from "../projects/local-project-service.js";
+import { ProjectImportService } from "../projects/project-import-service.js";
+import { LocalGitService } from "../github/local-git-service.js";
+import { SandboxRunner } from "../projects/sandbox-runner.js";
 import { BackupService } from "../backup/service.js";
 import { BackupScheduler } from "../backup/scheduler.js";
 import { ApprovalService, getApprovalRepo, type ApprovalRequest } from "../approvals/service.js";
@@ -102,13 +105,20 @@ export class Container {
   readonly github: IGitHubService = resolveGitHubService();
   readonly filesystem = new FilesystemService();
   readonly projectAnalyzer = new ProjectAnalyzerService({ filesystem: this.filesystem });
+  /** Local Git backend used for imported/folder projects even when remote GitHub is enabled globally. */
+  readonly localGit = new LocalGitService();
   readonly localProjects = new LocalProjectService({
     projectRepo: this.projectRepo,
     auditRepo: this.auditRepo,
     analyzer: this.projectAnalyzer,
+    localGit: () => this.localGit,
   });
+  readonly projectImports = new ProjectImportService(this.localProjects);
+  readonly sandboxRunner = new SandboxRunner();
   readonly githubForProject = (project: Project, requestUserId?: string): IGitHubService =>
-    resolveGitHubForProject({ project, kv: this.kv, fallback: this.github, requestUserId });
+    project.sourceType === "local" && project.configRepo
+      ? this.localGit
+      : resolveGitHubForProject({ project, kv: this.kv, fallback: this.github, requestUserId });
   /**
    * The credential a *local, read-only* operation may use for a project (same
    * precedence as `githubForProject`). Used by the repository mirror to clone a
@@ -203,6 +213,7 @@ export class Container {
       // mirror (git plumbing only). Writes still go through the GitHub API.
       repoMirror: this.repoMirror,
       mirrorTokenForProject: this.githubTokenForProject,
+      sandboxRunner: this.sandboxRunner,
       refresh: async (id) => ({
         project: await this.agentManager.refreshProject(id),
         agents: this.agentRepo.byProject(id),

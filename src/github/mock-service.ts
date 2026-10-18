@@ -9,6 +9,7 @@ import type {
   GithubIssue,
   GithubRelease,
   GithubFile,
+  GithubFileBuffer,
   GithubTreeEntry,
   ListRepositoriesOptions,
   CreateRepositoryOptions,
@@ -313,7 +314,7 @@ export class MockGitHubService implements IGitHubService {
     const base = path && path !== "." ? (path.endsWith("/") ? path : path + "/") : "";
     return [...tree.keys()]
       .filter((p) => p.startsWith(base))
-      .map((p) => ({ path: p, type: "blob", size: (tree.get(p)?.content ?? "").length }));
+      .map((p) => ({ path: p, type: "blob" as const, size: (tree.get(p)?.content ?? "").length, mode: "100644" }));
   }
 
   async listRepositories(opts: ListRepositoriesOptions = {}): Promise<GithubRepository[]> {
@@ -387,6 +388,11 @@ export class MockGitHubService implements IGitHubService {
 
   async getFile(ref: GithubRepoRef, path: string, branch?: string): Promise<GithubFile | undefined> {
     return this.tree(this.repo(ref), branch).get(path);
+  }
+
+  async getFileBuffer(ref: GithubRepoRef, path: string, branch?: string): Promise<GithubFileBuffer | undefined> {
+    const file = this.tree(this.repo(ref), branch).get(path);
+    return file ? { path, content: Buffer.from(file.content, "utf8"), sha: file.sha } : undefined;
   }
 
   async createBranch(ref: GithubRepoRef, name: string, baseSha: string): Promise<GithubBranch> {
@@ -540,8 +546,7 @@ export class MockGitHubService implements IGitHubService {
         }
         base.set(path, file); // changed or added on head → apply
       }
-      for (const path of fork.keys())
-        if (!head.has(path) && same(base.get(path), fork.get(path))) base.delete(path); // removed on head
+      for (const path of fork.keys()) if (!head.has(path) && same(base.get(path), fork.get(path))) base.delete(path); // removed on head
       if (conflicts.length)
         return {
           merged: false,

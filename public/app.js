@@ -10,11 +10,14 @@
     } catch (_) { return {}; }
   }
   async function api(path, opts = {}) {
+    const multipart = typeof FormData !== "undefined" && opts.body instanceof FormData;
+    const headers = { ...authHeaders(), ...(opts.headers || {}) };
+    if (!multipart) headers["Content-Type"] = "application/json";
     const res = await fetch(path, {
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...authHeaders(), ...(opts.headers || {}) },
+      headers,
       method: opts.method || "GET",
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      body: opts.body ? (multipart ? opts.body : JSON.stringify(opts.body)) : undefined,
     });
     if (!res.ok) {
       let msg = res.statusText;
@@ -1252,7 +1255,7 @@
     const list = await api("/projects");
     $("#content").innerHTML = `
       <div class="overview"><div><h1>Projects</h1><p>Multi-project AI engineering workspaces</p></div>
-        <button class="btn btn-primary" onclick="openProjectModal()">＋ Create Project</button></div>
+        <div class="action-row"><button class="btn" onclick="openProjectModal()">＋ GitHub Project</button><button class="btn" onclick="openNewLocalProjectModal()">＋ New Local</button><button class="btn" onclick="openLocalFolderModal()">📂 Server Folder</button><button class="btn btn-primary" onclick="openProjectImportModal()">↑ Import ZIP/RAR</button></div></div>
       ${searchPanelHtml("project-search", "Search projects by name, repo, branch, framework or status…")}
       ${list.length ? `<div class="card card-body"><div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Repo</th><th>Branch</th><th>Framework</th><th>Status</th><th>Created</th><th></th></tr></thead>
@@ -1501,6 +1504,46 @@
     load();
     return { get selected() { return state.selected; } };
   }
+
+  function intakeProjectResult(project, message) {
+    closeModal();
+    toast("Project created", message || project.name, "ok");
+    location.hash = "#/projects/" + project.id;
+  }
+  window.openNewLocalProjectModal = () => {
+    openModal("New Local Project", `<div class="field"><label>Name</label><input class="input" id="nl-name" maxlength="200" placeholder="My application"/></div><div class="field"><label>Description</label><textarea class="textarea" id="nl-description" maxlength="2000"></textarea></div><div class="field-hint">Creates a private local Git repository under LOCAL_REPOS_DIR and commits an initial README. No project code is executed on the host.</div><div class="flex mt"><button class="btn btn-primary" id="nl-create">Create</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#nl-create").onclick = async () => {
+      const name = $("#nl-name").value.trim();
+      if (!name) return toast("Name required", "Give the project a name", "err");
+      const btn = $("#nl-create"); btn.disabled = true;
+      try { const p = await api("/projects/new-local", { method: "POST", body: { name, description: $("#nl-description").value } }); intakeProjectResult(p, "Local Git repository initialized"); }
+      catch (e) { toast("Could not create project", e.message, "err"); btn.disabled = false; }
+    };
+  };
+  window.openLocalFolderModal = () => {
+    openModal("Import Server Folder", `<div class="field"><label>Absolute folder path on the CodeVia server</label><input class="input mono" id="lf-path" placeholder="/srv/projects/my-app"/></div><div class="field"><label>Project name (optional)</label><input class="input" id="lf-name" placeholder="Detected from the folder"/></div><label class="check"><input type="checkbox" id="lf-gitinit" checked/> Copy into LOCAL_REPOS_DIR and create an initial Git commit (recommended for agent edits)</label><div class="field-hint">The source must be inside a server folder allowed by the operator. Symbolic links and secret files are refused or omitted. The original folder is not modified when copying.</div><div class="flex mt"><button class="btn btn-primary" id="lf-import">Import folder</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#lf-import").onclick = async () => {
+      const path = $("#lf-path").value.trim();
+      if (!path) return toast("Path required", "Enter an absolute server path", "err");
+      const overrides = $("#lf-name").value.trim() ? { name: $("#lf-name").value.trim() } : undefined;
+      const btn = $("#lf-import"); btn.disabled = true;
+      try { const p = await api("/projects/from-local", { method: "POST", body: { path, gitInit: $("#lf-gitinit").checked, ...(overrides ? { overrides } : {}) } }); intakeProjectResult(p, p.configRepo ? `Created ${p.configRepo}` : "Folder linked read-only"); }
+      catch (e) { toast("Folder import failed", e.message, "err"); btn.disabled = false; }
+    };
+  };
+  window.openProjectImportModal = () => {
+    openModal("Import ZIP / RAR Project", `<div class="field"><label>Project archive (.zip or .rar)</label><input class="input" type="file" id="pi-file" accept=".zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed"/></div><div class="field"><label>Project name (optional)</label><input class="input" id="pi-name" maxlength="200" placeholder="Use the archive filename"/></div><div class="field"><label>Description (optional)</label><textarea class="textarea" id="pi-description" maxlength="2000"></textarea></div><div class="field-hint">Archive paths, symlinks, file counts, expansion ratio and total size are checked before a local Git repository is created. RAR requires 7z/7zz on the server.</div><div class="flex mt"><button class="btn btn-primary" id="pi-import">Import archive</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    $("#pi-import").onclick = async () => {
+      const file = $("#pi-file").files?.[0];
+      if (!file) return toast("Archive required", "Choose a ZIP or RAR file", "err");
+      const form = new FormData(); form.append("archive", file, file.name);
+      if ($("#pi-name").value.trim()) form.append("name", $("#pi-name").value.trim());
+      if ($("#pi-description").value.trim()) form.append("description", $("#pi-description").value.trim());
+      const btn = $("#pi-import"); btn.disabled = true; btn.textContent = "Importing…";
+      try { const p = await api("/projects/import", { method: "POST", body: form }); intakeProjectResult(p, `Imported ${p.configRepo}`); }
+      catch (e) { toast("Archive import failed", e.message, "err"); btn.disabled = false; btn.textContent = "Import archive"; }
+    };
+  };
 
   async function openProjectModal() {
     openModal("Create Project", `<div class="repo-empty">Loading options…</div>`);
@@ -2555,6 +2598,7 @@
     const selectedModel = p.defaultModelId || "";
     const selectedAgent = p.defaultAgentId || "";
     const perms = p.settings?.permissions || {};
+    const commands = p.commands || p.analysis?.commands || p.analysis?.suggestions?.commands || {};
     const permTab = `<div class="field-hint" style="margin-bottom:8px">Project-level permission matrix — gates what this project's members, agents and workflows may touch.</div><div class="grid-2">${PROJECT_PERMISSION_GROUPS.map(([g, label]) => `<div class="field"><label>${esc(label)}</label><label class="check"><input type="checkbox" data-perm="${g}.read" ${perms[`${g}.read`] !== false ? "checked" : ""}/> read</label><label class="check"><input type="checkbox" data-perm="${g}.write" ${perms[`${g}.write`] !== false ? "checked" : ""}/> write</label></div>`).join("")}</div>`;
     const reposTab = `<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Branch</th><th>Role</th><th>Config</th><th></th></tr></thead><tbody>${(p.repositories || []).map((r) => `<tr><td class="mono">${esc(r.repo)}</td><td class="mono">${esc(r.branch)}</td><td>${esc(r.role)}</td><td>${r.isConfigRepo ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-muted">no</span>'}</td><td><button class="btn btn-ghost pe-unlink" data-repo="${esc(r.repo)}">Unlink</button></td></tr>`).join("")}</tbody></table></div><div class="flex mt"><button class="btn btn-primary" id="pe-link-repo">＋ Link repository</button></div><div class="field-hint">Branch, role and config-repo switches live in the edit dialog of each repository link.</div>`;
     $("#modal-body").innerHTML = `
@@ -2563,7 +2607,7 @@
         { id: "capabilities", label: "Capabilities", html: `${CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], caps[k] || [], { placeholder: ph, single: new Set(catalog.singleSelectKeys || ["databases"]).has(k) })).join("")}${chipGroupHtml("agentTypes", "Agents to generate", catalog.agentTypes || [], caps.agentTypes || [], { core: catalog.coreAgentTypes || [], allowCustom: false, hint: "Saving reads CodeVia and creates only missing definitions. Existing prompts and enabled/disabled choices are preserved." })}` },
         { id: "permissions", label: "Permissions", html: permTab },
         { id: "repositories", label: "Repositories", html: reposTab },
-        { id: "operations", label: "Operations", html: `<div class="grid-2"><div class="field"><label>Max tokens per run</label><input class="input" type="number" id="pe-b-tokens" value="${esc(b.maxTokensPerRun ?? 20000)}"/></div><div class="field"><label>Max calls per run</label><input class="input" type="number" id="pe-b-calls" value="${esc(b.maxCallsPerRun ?? 20)}"/></div><div class="field"><label>Max cost per run (USD)</label><input class="input" type="number" step="0.01" id="pe-b-cost" value="${esc(b.maxCostUsdPerRun ?? 5)}"/></div><div class="field"><label>Max duration (ms)</label><input class="input" type="number" id="pe-b-ms" value="${esc(b.maxDurationMs ?? 300000)}"/></div></div><div class="grid-2"><div class="field"><label>Max QA↔Fix loops</label><input class="input" type="number" id="pe-fixloops" min="0" max="6" value="${esc(p.settings?.maxFixLoops ?? 2)}"/><div class="field-hint">How many diagnosis/fix rounds after a failing QA run before giving up.</div></div><div class="field"><label>Diagnose via research before fixing</label><select class="select" id="pe-researchfix"><option value="true" ${p.settings?.researchBeforeFix !== false ? "selected" : ""}>On (recommended)</option><option value="false" ${p.settings?.researchBeforeFix === false ? "selected" : ""}>Off (direct fix)</option></select></div><div class="field"><label>Cache GitHub context in memory</label><select class="select" id="pe-cachectx"><option value="true" ${p.settings?.cacheContextInMemory !== false ? "selected" : ""}>On</option><option value="false" ${p.settings?.cacheContextInMemory === false ? "selected" : ""}>Off (rescan every run)</option></select></div></div><div class="field"><label>Notifications</label><input class="input" id="pe-notifications" value="${esc((p.settings?.notifications || []).join(", "))}" placeholder="web, telegram"/></div><div class="field"><label>Metadata (JSON)</label><textarea class="textarea mono" id="pe-meta">${esc(JSON.stringify(p.settings?.metadata || {}, null, 2))}</textarea></div>` },
+        { id: "operations", label: "Operations", html: `<div class="grid-2"><div class="field"><label>Max tokens per run</label><input class="input" type="number" id="pe-b-tokens" value="${esc(b.maxTokensPerRun ?? 20000)}"/></div><div class="field"><label>Max calls per run</label><input class="input" type="number" id="pe-b-calls" value="${esc(b.maxCallsPerRun ?? 20)}"/></div><div class="field"><label>Max cost per run (USD)</label><input class="input" type="number" step="0.01" id="pe-b-cost" value="${esc(b.maxCostUsdPerRun ?? 5)}"/></div><div class="field"><label>Max duration (ms)</label><input class="input" type="number" id="pe-b-ms" value="${esc(b.maxDurationMs ?? 300000)}"/></div></div><div class="grid-2"><div class="field"><label>Max QA↔Fix loops</label><input class="input" type="number" id="pe-fixloops" min="0" max="6" value="${esc(p.settings?.maxFixLoops ?? 2)}"/><div class="field-hint">How many diagnosis/fix rounds after a failing QA run before giving up.</div></div><div class="field"><label>Diagnose via research before fixing</label><select class="select" id="pe-researchfix"><option value="true" ${p.settings?.researchBeforeFix !== false ? "selected" : ""}>On (recommended)</option><option value="false" ${p.settings?.researchBeforeFix === false ? "selected" : ""}>Off (direct fix)</option></select></div><div class="field"><label>Cache GitHub context in memory</label><select class="select" id="pe-cachectx"><option value="true" ${p.settings?.cacheContextInMemory !== false ? "selected" : ""}>On</option><option value="false" ${p.settings?.cacheContextInMemory === false ? "selected" : ""}>Off (rescan every run)</option></select></div></div><div class="card card-body mt"><div class="card-title">Sandbox lifecycle commands</div><div class="field-hint">Commands run only inside the Docker sandbox. Empty commands are not executed. Network is off unless explicitly enabled; trust only skips per-run approval and never disables the sandbox.</div><div class="grid-2"><div class="field"><label>Install</label><input class="input mono" id="pe-cmd-install" value="${esc(commands.install || "")}" placeholder="npm ci"/></div><div class="field"><label>Build</label><input class="input mono" id="pe-cmd-build" value="${esc(commands.build || "")}" placeholder="npm run build"/></div><div class="field"><label>Test</label><input class="input mono" id="pe-cmd-test" value="${esc(commands.test || "")}" placeholder="npm test"/></div><div class="field"><label>Lint</label><input class="input mono" id="pe-cmd-lint" value="${esc(commands.lint || "")}" placeholder="npm run lint"/></div><div class="field"><label>Start</label><input class="input mono" id="pe-cmd-start" value="${esc(commands.start || "")}" placeholder="npm start"/></div></div><label class="check"><input type="checkbox" id="pe-trusted" ${p.settings?.trustedForExecution === true ? "checked" : ""}/> Trust this project for sandbox commands (skip approval when network remains off)</label><label class="check"><input type="checkbox" id="pe-network" ${p.settings?.sandboxNetworkAccess === true ? "checked" : ""}/> Allow network inside the sandbox (approval is still required)</label></div><div class="field"><label>Notifications</label><input class="input" id="pe-notifications" value="${esc((p.settings?.notifications || []).join(", "))}" placeholder="web, telegram"/></div><div class="field"><label>Metadata (JSON)</label><textarea class="textarea mono" id="pe-meta">${esc(JSON.stringify(p.settings?.metadata || {}, null, 2))}</textarea></div>` },
       ])}
       <div class="flex mt"><button class="btn btn-primary" id="pe-save">Save & re-onboard</button><button class="btn" id="pe-save-lite">Save without onboarding</button><button class="btn btn-danger" id="pe-delete">Delete project</button><button class="btn" onclick="closeModal()">Cancel</button></div>`;
     bindChipGroups($("#modal-body"));
@@ -2580,6 +2624,7 @@
           name: $("#pe-name").value.trim(), description: $("#pe-desc").value,
           active: $("#pe-active").value === "true", defaultModelId: $("#pe-model").value, defaultAgentId: $("#pe-agent").value, memoryRepo: $("#pe-memrepo").value, 
           capabilities: readChipGroups($("#modal-body")), reonboard,
+          commands: Object.fromEntries(["install","build","test","lint","start"].map((key) => [key, $("#pe-cmd-" + key).value.trim()]).filter(([, value]) => value)),
           settings: {
             environment: $("#pe-env").value,
             notifications: ($("#pe-notifications").value || "").split(",").map((x)=>x.trim()).filter(Boolean),
@@ -2589,6 +2634,8 @@
             maxFixLoops: Math.max(0, Math.min(6, Number($("#pe-fixloops").value) || 0)),
             researchBeforeFix: $("#pe-researchfix").value === "true",
             cacheContextInMemory: $("#pe-cachectx").value === "true",
+            trustedForExecution: $("#pe-trusted").checked,
+            sandboxNetworkAccess: $("#pe-network").checked,
           },
         } });
         closeModal(); toast("Project updated", reonboard ? "Repository loaded; missing definitions initialized" : "Settings saved", "ok"); refreshCurrent();

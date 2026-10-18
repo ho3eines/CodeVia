@@ -14,7 +14,9 @@ import { promises as fsp } from "node:fs";
 import type { Dirent } from "node:fs";
 import * as path from "node:path";
 import { FilesystemService, isSensitivePath } from "../filesystem/filesystem-service.js";
-import type { ProjectAnalysis, ProjectAnalysisSuggestions } from "../domain/entities.js";
+import type { ProjectAnalysis, ProjectAnalysisSuggestions, ProjectCommands } from "../domain/entities.js";
+import { detectProjectStack } from "./project-commands.js";
+import { readGitFolderFacts } from "./git-facts.js";
 
 export interface ProjectAnalyzerOptions {
   filesystem?: FilesystemService;
@@ -517,6 +519,18 @@ export class ProjectAnalyzerService {
     const cargo = await this.readText(resolvedRoot, "Cargo.toml");
     const gomod = await this.readText(resolvedRoot, "go.mod");
     const composer = await this.readJson(resolvedRoot, "composer.json");
+    const requirements = await this.readText(resolvedRoot, "requirements.txt");
+    const dockerfile = await this.readText(resolvedRoot, "Dockerfile");
+    const stack = detectProjectStack({
+      files: walk.files,
+      packageJson: pkg,
+      pyprojectToml: pyproject,
+      requirementsTxt: requirements,
+      goMod: gomod,
+      cargoToml: cargo,
+      composerJson: composer,
+      dockerfile,
+    });
 
     // ---------- name / description ----------
     const folderName = path.basename(resolvedRoot) || resolvedRoot;
@@ -551,6 +565,7 @@ export class ProjectAnalyzerService {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
       .map(([lang]) => lang);
+    if (!languages.length) languages.push(...stack.languages.slice(0, 5));
 
     // ---------- frameworks / libraries ----------
     const frameworks = new Set<string>();
@@ -607,7 +622,7 @@ export class ProjectAnalyzerService {
     }
 
     // ---------- package manager ----------
-    let packageManager: string | undefined = pkg && str(pkg.packageManager)?.split("@")[0];
+    let packageManager: string | undefined = stack.packageManager ?? (pkg && str(pkg.packageManager)?.split("@")[0]);
     if (!packageManager) {
       for (const [lockfile, pm] of LOCKFILE_PACKAGE_MANAGER) {
         if (has(lockfile)) {
@@ -755,6 +770,7 @@ export class ProjectAnalyzerService {
       frameworks: [...frameworks],
       packageManager,
       scripts,
+      commands: stack.commands,
       docker,
       isMonorepo,
       hasBuild: !!scripts.build || !!cargo || has("Dockerfile"),
@@ -768,6 +784,7 @@ export class ProjectAnalyzerService {
       frameworks: [...frameworks].slice(0, 10),
       packageManager,
       scripts,
+      commands: stack.commands,
       dependencies: dependencies.length ? dependencies.slice(0, 200) : undefined,
       devDependencies: devDependencies.length ? devDependencies.slice(0, 200) : undefined,
       isMonorepo,
@@ -892,66 +909,9 @@ export class ProjectAnalyzerService {
     return undefined;
   }
 
-  /** Git facts read straight from `.git` — no subprocess, no secrets. */
+  /** Read git facts without following a .git symlink or any child metadata link. */
   private async gitFacts(root: string): Promise<ProjectAnalysis["git"]> {
-    const gitDir = path.join(root, ".git");
-    try {
-      await fsp.access(gitDir);
-    } catch {
-      return undefined;
-    }
-    const out: NonNullable<ProjectAnalysis["git"]> = {};
-    // branch (HEAD may be detached)
-    try {
-      const head = (await fsp.readFile(path.join(gitDir, "HEAD"), "utf8")).trim();
-      const m = head.match(/^ref:\s*refs\/heads\/(.+)$/);
-      out.branch = m ? m[1] : head.slice(0, 12) || undefined;
-    } catch {
-      /* ignore */
-    }
-    // remote (credentials redacted)
-    try {
-      const config = await fsp.readFile(path.join(gitDir, "config"), "utf8");
-      const remoteMatch =
-        config.match(/\[remote\s+"origin"\][^[]*?url\s*=\s*(\S+)/s) ??
-        config.match(/\[remote\s+"[^"]+"\][^[]*?url\s*=\s*(\S+)/s);
-      if (remoteMatch) out.remote = redactGitUrl(remoteMatch[1]);
-    } catch {
-      /* ignore */
-    }
-    // last commit: ref file → packed-refs; subject from the reflog when present
-    try {
-      let sha: string | undefined;
-      if (out.branch) {
-        try {
-          sha = (await fsp.readFile(path.join(gitDir, "refs", "heads", ...out.branch.split("/")), "utf8")).trim();
-        } catch {
-          const packed = await fsp.readFile(path.join(gitDir, "packed-refs"), "utf8");
-          const m = packed.match(new RegExp(`^([0-9a-f]{40}) refs/heads/${escapeRegExp(out.branch)}$`, "m"));
-          sha = m?.[1];
-        }
-      }
-      let subject: string | undefined;
-      try {
-        const log = await fsp.readFile(path.join(gitDir, "logs", "HEAD"), "utf8");
-        const lines = log.trim().split("\n");
-        for (let i = lines.length - 1; i >= 0; i--) {
-          const m = lines[i].match(/\tcommit[^:]*:\s*(.+)$/);
-          if (m) {
-            subject = m[1].trim();
-            break;
-          }
-        }
-      } catch {
-        /* no reflog */
-      }
-      if (sha || subject) {
-        out.lastCommit = [sha?.slice(0, 7), subject].filter(Boolean).join(" ") || undefined;
-      }
-    } catch {
-      /* ignore */
-    }
-    return out;
+    return readGitFolderFacts(root);
   }
 
   private suggest(input: {
@@ -962,6 +922,7 @@ export class ProjectAnalyzerService {
     frameworks: string[];
     packageManager?: string;
     scripts: Record<string, string>;
+    commands: ProjectCommands;
     docker: boolean;
     isMonorepo: boolean;
     hasBuild: boolean;
@@ -1022,10 +983,12 @@ export class ProjectAnalyzerService {
           return input.scripts[script];
       }
     };
+    s.commands = input.commands;
     s.devCommand = run("dev");
-    s.buildCommand = run("build");
-    s.startCommand = run("start") ?? (input.hasBuild && pm === "npm" ? "node dist/index.js" : undefined);
-    s.testCommand = run("test");
+    s.buildCommand = input.commands.build ?? run("build");
+    s.startCommand =
+      input.commands.start ?? run("start") ?? (input.hasBuild && pm === "npm" ? "node dist/index.js" : undefined);
+    s.testCommand = input.commands.test ?? run("test");
 
     const tags = new Set<string>();
     for (const lang of input.languages.slice(0, 3)) tags.add(lang.toLowerCase());
@@ -1047,10 +1010,6 @@ function str(v: unknown): string | undefined {
 
 function recordField(v: unknown): Record<string, unknown> | undefined {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function reason(err: unknown): string {
