@@ -200,31 +200,35 @@ async function verifyInSandboxOrGithubCi(
   input: Record<string, unknown>,
   stage: "test" | "build",
 ): Promise<import("./types.js").ToolResult> {
-  if (ctx.sandboxRunner) {
-    return ctx.sandboxRunner.verify({
-      project: ctx.project,
-      github: ctx.github,
-      repoName: str(input.repo ?? ctx.project.configRepo),
-      ref: str(input.ref ?? input.branch ?? ctx.project.branch),
-      expectedSha: input.expectedSha === undefined ? undefined : str(input.expectedSha),
-      stage,
-      signal: ctx.signal,
-      checkActive: ctx.checkActive,
-    });
-  }
-  if (ctx.project.sourceType === "local")
+  // The mock adapter never reads or executes project code: preserve its explicit
+  // simulated CI result for tests/demo instead of requesting sandbox approval.
+  if (ctx.github.kind === "mock") return verifyGithubChecks(ctx, input);
+  // GitHub-backed projects use GitHub's CI checks. Only imported/folder projects
+  // execute configured lifecycle commands, and those commands must stay inside
+  // the Docker runner; a missing runner is a hard failure, never a host fallback.
+  if (ctx.project.sourceType !== "local") return verifyGithubChecks(ctx, input);
+  if (!ctx.sandboxRunner)
     return {
       ok: false,
       output: "Docker sandbox runner is unavailable; project commands were not run on the host.",
       data: { verification: "unverified", fixable: false, sandbox: "unavailable" },
     };
-  return verifyGithubChecks(ctx, input);
+  return ctx.sandboxRunner.verify({
+    project: ctx.project,
+    github: ctx.github,
+    repoName: str(input.repo ?? ctx.project.configRepo),
+    ref: str(input.ref ?? input.branch ?? ctx.project.branch),
+    expectedSha: input.expectedSha === undefined ? undefined : str(input.expectedSha),
+    stage,
+    signal: ctx.signal,
+    checkActive: ctx.checkActive,
+  });
 }
 
 export const runTestsTool: ToolDefinition = {
   name: "run_tests",
   description:
-    "Run configured install, test and lint commands in a resource-limited Docker sandbox; network is off by default.",
+    "Verify GitHub-backed projects through GitHub CI; run configured local-project commands only in the resource-limited Docker sandbox, with networking off by default.",
   dangerous: true,
   sandboxExecution: true,
   inputSchema: {
@@ -241,7 +245,7 @@ export const runBuildTool: ToolDefinition = {
   ...runTestsTool,
   name: "run_build",
   description:
-    "Run configured install, build, test and lint commands in a resource-limited Docker sandbox; network is off by default.",
+    "Verify GitHub-backed projects through GitHub CI; run configured local-project build commands only in the resource-limited Docker sandbox, with networking off by default.",
   prepareApproval: (ctx, input) => sandboxApprovalDetail("build", ctx, input),
   execute: (ctx, input) => verifyInSandboxOrGithubCi(ctx, input, "build"),
 };

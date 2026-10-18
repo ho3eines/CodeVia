@@ -123,7 +123,9 @@ describe("POST /tasks/:id/answer", () => {
     const srv = await boot();
     const { taskId } = await createProjectAndTask();
 
-    expect((await srv.inject({ method: "POST", url: "/tasks/task-missing/answer", payload: { answer: "x" } })).statusCode).toBe(404);
+    expect(
+      (await srv.inject({ method: "POST", url: "/tasks/task-missing/answer", payload: { answer: "x" } })).statusCode,
+    ).toBe(404);
 
     const notWaiting = await srv.inject({ method: "POST", url: `/tasks/${taskId}/answer`, payload: { answer: "x" } });
     expect(notWaiting.statusCode).toBe(409);

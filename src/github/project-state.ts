@@ -272,8 +272,7 @@ export class ProjectFilesService {
     }
     const branch = branches.find((b) => b.name === p.branch);
     if (branch?.sha) return branch.sha;
-    if (branches.length > 0)
-      throw stateError(`branch ${p.branch} is unavailable; not creating replacement state`);
+    if (branches.length > 0) throw stateError(`branch ${p.branch} is unavailable; not creating replacement state`);
     // Empty repository: no commit exists, so nothing can be lost. Creating a
     // project on a fresh `git init` must work — seed the first commit so state
     // bootstrap (ensureFiles/first-time generation) can proceed on it.

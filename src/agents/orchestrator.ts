@@ -357,7 +357,9 @@ export class AutonomousOrchestrator {
     const researchTask = this.spawn(
       task,
       `Research: ${task.title}`,
-      clarification ? `${task.description}\n\n[User clarification of the earlier blocker] ${clarification}` : task.description,
+      clarification
+        ? `${task.description}\n\n[User clarification of the earlier blocker] ${clarification}`
+        : task.description,
       "research",
     );
     const researchPlan: PreparePlan = async (ctx) => {

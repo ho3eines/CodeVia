@@ -213,7 +213,8 @@ export function registerTaskRoutes(app: FastifyInstance, container: Container): 
           ? "simulation"
           : task.workflowId
             ? "workflow"
-            : ((task.input as Record<string, unknown> | undefined)?.executionMode ?? "") === "autonomous" || !task.agentType
+            : ((task.input as Record<string, unknown> | undefined)?.executionMode ?? "") === "autonomous" ||
+                !task.agentType
               ? "autonomous"
               : "agent",
       agentType: task.agentType,

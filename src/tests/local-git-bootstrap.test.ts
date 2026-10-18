@@ -21,7 +21,15 @@ vi.mock("../logger.js", () => ({
     error: vi.fn(),
     trace: vi.fn(),
     fatal: vi.fn(),
-    child: vi.fn(() => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn(), child: vi.fn() })),
+    child: vi.fn(() => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+      trace: vi.fn(),
+      fatal: vi.fn(),
+      child: vi.fn(),
+    })),
   },
 }));
 
@@ -32,8 +40,7 @@ const ENV = {
   GIT_COMMITTER_NAME: "Dev",
   GIT_COMMITTER_EMAIL: "dev@local",
 };
-const git = (cwd: string, ...args: string[]) =>
-  execFileSync("git", args, { cwd, env: ENV, encoding: "utf8" }).trim();
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, encoding: "utf8" }).trim();
 
 /** Minimal deflate zip builder (store/deflate, correct CRCs — see state-archive.test.ts for coverage). */
 function buildZip(files: Array<{ name: string; content: string }>): Buffer {
