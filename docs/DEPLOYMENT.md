@@ -57,7 +57,7 @@ Health: Railway polls `/health`.
 > `docker-compose.yml` and plain `docker run` need no `command:` override — the
 > image declares the entrypoint itself, so the volume is always prepared.
 
-### Option B — split services (web + worker)
+### Option B — web/API and worker in one service
 
 The image exposes one entrypoint that always starts the HTTP server **and** an
 in-process worker (`src/index.ts` starts `container.worker.start(1000)` next to
