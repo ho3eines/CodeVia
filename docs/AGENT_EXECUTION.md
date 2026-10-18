@@ -38,7 +38,7 @@
 1. درخت فایل را از یک **SHA تغییرناپذیر** بیرون می‌کشد (مخزن محلی: `git ls-tree`/`cat-file`؛ گیت‌هاب: Git Trees API + blobها). پروژهٔ پوشه‌ای که با `gitInit: false` ساخته شده **هیچ مخزنی ندارد**؛ برای همین سندباکس به‌جای GitHub/LocalGit مستقیماً `project.localPath` را با همان `collectSafeFolderFiles` می‌خواند (همان سقف فایل/حجم/تعداد، همان رد کردن symlink و فایل ویژه). چون commitی وجود ندارد، `sha` گزارش‌شده یک **digest محتوایی SHA-256** از همان درختی است که به کانتینر داده شد. فایل‌های حساس (`.env*`، `*.pem`، `id_rsa*`، `.npmrc`، …) کنار گذاشته می‌شوند و symlink/فایل ویژه باعث توقف با `unverified` می‌شود. خروجی صریح می‌گوید: «این پروژه گیت ندارد؛ از localPath اجرا شد».
 2. فایل‌ها را در یک workspace موقت می‌نویسد (پاک‌سازی در `finally`).
 3. `docker run --rm` با این محدودیت‌ها اجرا می‌کند: `--network=none` (مگر opt-in پروژه)، `--read-only`، `--cap-drop=ALL`، `--security-opt=no-new-privileges`، `--user=1000:1000`، `--pids-limit`، `--cpus`، `--memory`/`--memory-swap`، `--tmpfs /tmp` و `--pull=never`.
-4. خروجی را به `passed` / `failed` / `unverified` نگاشت می‌کند؛ `exit 127` یعنی ابزار/Docker در دسترس نیست و **قابل اصلاح با کد نیست** (`fixable: false`).
+4. خروجی را به `passed` / `failed` / `unverified` نگاشت می‌کند؛ `exit 127` یعنی ابزار/Docker در دسترس نیست و **قابل اصلاح با کد نیست** (`fixable: false`). هر مرحله با یک نشانگر در stdout اعلام می‌شود و یک `trap EXIT` پس از خروجیِ فرمان شکست‌خورده خط `failed-stage=<stage>` را می‌نویسد؛ به این ترتیب `failedStage` حتی با tail بریده‌شده هم قابل تشخیص است. **`fixable` فقط برای شکست `test`/`build`/`lint` مقدار `true` می‌گیرد** — یعنی جایی که کد پروژه مسئول است. شکست `install` (که با `--network=none` معمول است)، `start`، timeout، لغو و محدودیت خروجی همیشه `fixable: false` با `fixableReason` مشخص برمی‌گردانند و حلقهٔ QA→Fix را استارت نمی‌زنند.
 
 **دستورها per-project هستند** و در `Project → Edit → Operations` (یا `PATCH /projects/:id` با `commands`) ویرایش می‌شوند: `install`, `build`, `test`, `lint`, `start`. اگر خالی باشند از تحلیل پروژه (`package.json` scripts، lockfile، `pyproject.toml`، `go.mod`، `Cargo.toml`، `composer.json`) پر می‌شوند. مرحلهٔ `test` دستورهای `install` → `test` → `lint` و مرحلهٔ `build` دستورهای `install` → `build` → `test` → `lint` را به‌ترتیب اجرا می‌کند. نبودِ دستور همان مرحله یعنی `unverified` — به‌جای اجرای حدسی.
 
@@ -280,7 +280,7 @@ inputs.needFrontend && outputs["backend-node"].status === "succeeded"
 | verification | معنی |
 |---|---|
 | `passed` | sandbox با کد خروج ۰ تمام شد، یا همهٔ checkهای گزارش‌شده/الزامی CI برای SHA موردنظر سبزند |
-| `failed` | sandbox/CI شکست واقعی گزارش کرده؛ بازخورد برای اصلاح قابل استفاده است (`fixable: true`، به‌جز timeout/لغو) |
+| `failed` | sandbox/CI شکست واقعی گزارش کرده است. حلقهٔ اصلاح فقط وقتی شروع می‌شود که `fixable: true` باشد، یعنی شکست از مرحلهٔ `test`/`build`/`lint` آمده باشد؛ شکست `install`، timeout، لغو یا محدودیت خروجی `fixable: false` است (دلیل در `fixableReason`: `environment:install`، `timeout`، `output-limit`، `unknown-stage`) |
 | `unverified` | دستور مرحله تنظیم نشده، Docker/ابزار در دسترس نیست، فایل حساس/symlink مانع export شد، یا CI ناقص/pending/skipped است |
 | `simulated` | مخزن Mock است؛ هیچ build یا تست واقعی اجرا نشده است |
 

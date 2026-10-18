@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SandboxRunner, sandboxConfigFromEnv, type DockerExecutionResult } from "../projects/sandbox-runner.js";
+import {
+  SandboxRunner,
+  sandboxConfigFromEnv,
+  sandboxFailedStage,
+  sandboxScript,
+  type DockerExecutionResult,
+} from "../projects/sandbox-runner.js";
 import type { Project } from "../domain/entities.js";
 import type { GithubRepoRef, IGitHubService } from "../github/types.js";
 import { CORE_TOOLS, runTestsTool } from "../tools/core-tools.js";
@@ -172,7 +178,12 @@ describe("SandboxRunner.verify", () => {
       runDocker: async (_bin, args) => {
         workspace = volumeArg(args).split(":")[0];
         expect(existsSync(workspace)).toBe(true);
-        return ok({ exitCode: 1, stderrTail: "tests failed" });
+        // Same tail shape a real failing `test` step produces (EXIT trap line).
+        return ok({
+          exitCode: 1,
+          stdoutTail: "[CodeVia sandbox] test\nboom\n[CodeVia sandbox] failed-stage=test exit=1",
+          stderrTail: "tests failed",
+        });
       },
     });
     const result = await runner.verify({ project: project(), github: github(), stage: "test" });
@@ -264,6 +275,82 @@ describe("SandboxRunner.verify", () => {
     expect(result.ok).toBe(false);
     expect(result.data?.verification).toBe("failed");
     expect(String(result.output)).toMatch(/timeout/i);
+    // A timeout says nothing about the project's code: never auto-fix it.
+    expect(result.data?.fixable).toBe(false);
+    expect(result.data?.fixableReason).toBe("timeout");
+  });
+
+  it("marks a failing test/build/lint step as fixable and names the stage", async () => {
+    for (const stage of ["test", "build", "lint"]) {
+      const runner = new SandboxRunner({
+        workspaceRoot: tempRoot(),
+        runDocker: async () =>
+          ok({
+            exitCode: 1,
+            stdoutTail: `[CodeVia sandbox] ${stage}\nboom\n[CodeVia sandbox] failed-stage=${stage} exit=1`,
+          }),
+      });
+      const result = await runner.verify({
+        project: project(),
+        github: github(),
+        stage: stage === "build" ? "build" : "test",
+      });
+      expect(result.data, stage).toMatchObject({ verification: "failed", fixable: true, failedStage: stage });
+      expect(result.data?.fixableReason, stage).toBe(`project-code:${stage}`);
+    }
+  });
+
+  it("never sends an install/environment failure into the fix loop", async () => {
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      runDocker: async () =>
+        ok({
+          exitCode: 1,
+          stdoutTail:
+            "[CodeVia sandbox] install\nnpm ERR! network request failed\n[CodeVia sandbox] failed-stage=install exit=1",
+        }),
+    });
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+    expect(result.data).toMatchObject({
+      verification: "failed",
+      fixable: false,
+      failedStage: "install",
+      fixableReason: "environment:install",
+    });
+    expect(String(result.output)).toMatch(/Failing stage: install/);
+    expect(String(result.output)).toMatch(/Not auto-fixed/i);
+  });
+
+  it("treats a failure without a stage marker as not fixable", async () => {
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      runDocker: async () => ok({ exitCode: 1, stdoutTail: "segfault", stderrTail: "killed" }),
+    });
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+    expect(result.data).toMatchObject({ verification: "failed", fixable: false, fixableReason: "unknown-stage" });
+    expect(String(result.output)).toMatch(/Failing stage: unknown/);
+  });
+
+  it("emits the stage markers and the EXIT trap that reports the failing stage", async () => {
+    let script = "";
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      runDocker: async (_bin, args) => {
+        script = args[args.length - 1];
+        return ok();
+      },
+    });
+    await runner.verify({ project: project(), github: github(), stage: "test" });
+    expect(script).toContain("trap codevia_report EXIT");
+    expect(script).toContain("failed-stage=%s exit=%s");
+    expect(sandboxScript([{ stage: "test", command: "npm test" }])).toContain("codevia_stage=test; npm test");
+    // The trap line is written after the failing command's own output.
+    expect(
+      sandboxFailedStage({
+        stdoutTail: "noise\n[CodeVia sandbox] failed-stage=build exit=2\n",
+        stderrTail: "",
+      }),
+    ).toBe("build");
   });
 
   it("refuses symlinks and oversized sources before Docker is called", async () => {

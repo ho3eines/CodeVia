@@ -320,6 +320,59 @@ describe("UI shell", () => {
     }
   }, 60000);
 
+  it("warns about a folder project without git and deep-links into the Operations tab", async () => {
+    // A folder project created with `gitInit: false`: verification still runs
+    // from localPath, but implementation needs a repository and an empty test
+    // command means every QA request ends "unverified" — both must be visible.
+    const linked = await container.agentManager.createProject({
+      name: "Folder No Repo QA",
+      description: "Scanned folder without a repository",
+      configRepo: "acme/folder-no-repo-qa",
+      branch: "main",
+    });
+    const folderProject = {
+      ...linked,
+      sourceType: "local" as const,
+      localPath: "/srv/projects/folder-no-repo-qa",
+      configRepo: "",
+      repositories: [],
+      commands: { install: "npm ci" },
+    };
+    container.projectRepo.upsert(folderProject, { key: folderProject.slug });
+    const { win, go } = await boot();
+    const content = await go(`#/projects/${folderProject.id}/project`);
+    const text = content.textContent ?? "";
+    expect(text).not.toMatch(/Something went wrong/);
+    expect(text).toMatch(/no git repository/i);
+    expect(text).toMatch(/localPath/);
+    expect(text).toMatch(/No test command is configured/i);
+
+    // The banner button itself is a complete, callable handler (a raw JSON id
+    // inside a double-quoted attribute would truncate the markup).
+    const configure = [...(content.querySelectorAll("button") as Iterable<El>)].find((b) =>
+      ((b as El).textContent ?? "").includes("Configure sandbox commands"),
+    ) as El | undefined;
+    expect(configure, "banner offers a configure button").toBeTruthy();
+    const handler = configure!.getAttribute("onclick") ?? "";
+    expect(handler).toMatch(/^projectEdit\(.*'operations'\)$/);
+    expect(() => new Function(handler)).not.toThrow();
+
+    // The banner button opens Edit → Operations directly (commands + network).
+    expect(typeof win.projectOperations, "projectOperations is exposed").toBe("function");
+    win.projectOperations(folderProject.id);
+    await new Promise((r) => setTimeout(r, 1500));
+    const modal = win.document.querySelector("#modal-body") as El | null;
+    expect(modal, "edit dialog opened").toBeTruthy();
+    expect(modal!.textContent ?? "").toMatch(/Sandbox lifecycle commands/);
+    const operationsPanel = win.document.querySelector('[data-tab-panel="pe:operations"]') as
+      (El & { hasAttribute(a: string): boolean }) | null;
+    expect(operationsPanel, "operations panel exists").toBeTruthy();
+    expect(operationsPanel!.hasAttribute("hidden"), "operations tab is the active panel").toBe(false);
+    expect(win.document.querySelector("#pe-cmd-test"), "test command field rendered").toBeTruthy();
+    expect(win.document.querySelector("#pe-network"), "sandbox network toggle rendered").toBeTruthy();
+    win.closeModal();
+  }, 60000);
+
   it("shows the planned owners, criteria and task-local skills in task details and run evidence", async () => {
     const project = await container.agentManager.createProject({
       name: "Skill Trace UI",

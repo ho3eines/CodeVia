@@ -346,6 +346,55 @@ function stageCommands(
 }
 
 /**
+ * Stages whose failure is attributable to the project's own code and can
+ * therefore be repaired by an agent. `install` failures are environment/
+ * dependency problems (with `--network=none` they are the normal outcome),
+ * and `start` is a long-running command usually ended by the timeout — sending
+ * either back into the QA→fix loop would burn the task budget on something a
+ * code edit cannot change.
+ */
+const CODE_STAGES: ReadonlySet<string> = new Set(["build", "test", "lint"]);
+
+/**
+ * In-container script for the selected steps.
+ *
+ * Each step is announced with a marker, and an EXIT trap appends
+ * `failed-stage=<stage>` **after** the failing command's output. The trap line
+ * is therefore always part of the retained stdout tail, so the platform can
+ * tell whether an install step or a test/build step failed even when the tail
+ * is truncated.
+ */
+export function sandboxScript(steps: ReadonlyArray<{ stage: string; command: string }>): string {
+  return [
+    "set -e",
+    "codevia_stage=",
+    'codevia_report() { codevia_status=$?; if [ "$codevia_status" -ne 0 ] && [ -n "$codevia_stage" ]; then ' +
+      'printf \'\\n[CodeVia sandbox] failed-stage=%s exit=%s\\n\' "$codevia_stage" "$codevia_status"; fi; }',
+    "trap codevia_report EXIT",
+    ...steps.map(
+      ({ stage, command }) => `printf '\\n[CodeVia sandbox] ${stage}\\n'; codevia_stage=${stage}; ${command}`,
+    ),
+  ].join("\n");
+}
+
+/** Stage reported by the EXIT trap, or `undefined` when the failure is unknown. */
+export function sandboxFailedStage(
+  result: Pick<DockerExecutionResult, "stdoutTail" | "stderrTail">,
+): string | undefined {
+  const pattern = /\[CodeVia sandbox\] failed-stage=([a-z]+) exit=\d+/;
+  return (pattern.exec(result.stdoutTail) ?? pattern.exec(result.stderrTail))?.[1];
+}
+
+/** Only a failing project-code step (test/build/lint) may enter the fix loop. */
+export function isFixableSandboxFailure(
+  result: Pick<DockerExecutionResult, "stdoutTail" | "stderrTail" | "timedOut" | "aborted" | "outputLimited">,
+  failedStage: string | undefined = sandboxFailedStage(result),
+): boolean {
+  if (result.timedOut || result.aborted || result.outputLimited) return false;
+  return !!failedStage && CODE_STAGES.has(failedStage);
+}
+
+/**
  * Executes project lifecycle commands only inside a disposable Docker
  * container. It deliberately has no host-shell fallback.
  */
@@ -504,10 +553,7 @@ export class SandboxRunner {
     try {
       await writeWorkspace(workspace, source.files);
       const network = input.project.settings?.sandboxNetworkAccess === true;
-      const script = [
-        "set -e",
-        ...selected.commands.map(({ stage, command }) => `printf '\\n[CodeVia sandbox] ${stage}\\n'; ${command}`),
-      ].join("\n");
+      const script = sandboxScript(selected.commands);
       const containerName = `codevia-${randomUUID()}`;
       const args = [
         "run",
@@ -580,11 +626,31 @@ export class SandboxRunner {
       const sourceNote = folderPath
         ? `This project has no git repository; the sandbox source was read directly from localPath (${folderPath}).`
         : "";
+      // A failing `install` (or a timeout/output-limit) is an environment
+      // problem, not a code defect: it must never trigger an agent fix loop.
+      const failedStage = sandboxFailedStage(result);
+      const fixable =
+        !succeeded &&
+        !imageMissing &&
+        !dockerMissing &&
+        result.exitCode !== 127 &&
+        isFixableSandboxFailure(result, failedStage);
+      const stageNote =
+        !succeeded && !imageMissing
+          ? !failedStage
+            ? "Failing stage: unknown (the container reported no stage marker) — treated as not auto-fixable."
+            : CODE_STAGES.has(failedStage)
+              ? `Failing stage: ${failedStage} — project code failure (auto-fixable).`
+              : failedStage === "install"
+                ? "Failing stage: install — a dependency/environment failure. Not auto-fixed by code changes: allow sandbox network for the install step, or pre-install dependencies."
+                : `Failing stage: ${failedStage} — not attributed to project code, so no automatic fix loop will start.`
+          : "";
       const output = [
         imageMissing
           ? `Docker sandbox could not start: image "${image}" is not present on this host. Pull it with: docker pull ${image} (the sandbox always runs with --pull=never).`
           : `Docker sandbox ${succeeded ? "passed" : "failed"} for ${target} (exit ${result.exitCode}${result.timedOut ? ", timeout" : ""}${result.aborted ? ", cancelled" : ""}${result.outputLimited ? ", output limit" : ""}).`,
         sourceNote,
+        stageNote,
         result.stdoutTail ? `stdout tail:\n${result.stdoutTail}` : "",
         result.stderrTail ? `stderr tail:\n${result.stderrTail}` : "",
       ]
@@ -602,7 +668,20 @@ export class SandboxRunner {
         output,
         data: {
           verification,
-          fixable: !succeeded && !imageMissing && result.exitCode !== 127 && !result.aborted,
+          // Only test/build/lint failures are repairable by an agent.
+          fixable,
+          failedStage,
+          fixableReason: succeeded
+            ? undefined
+            : fixable
+              ? `project-code:${failedStage}`
+              : result.timedOut
+                ? "timeout"
+                : result.outputLimited
+                  ? "output-limit"
+                  : failedStage
+                    ? `environment:${failedStage}`
+                    : "unknown-stage",
           // "unavailable" means no container ran (missing Docker CLI/daemon);
           // "image-missing" means the CLI worked but the image was never pulled;
           // local projects then stay unverified instead of executing anywhere

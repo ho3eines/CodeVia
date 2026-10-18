@@ -441,13 +441,16 @@
   /* ---------- tabs ----------
      Pure-CSS-ish tab strip: `tabsHtml` renders the buttons + panels and
      `switchTab` flips the active classes without a re-render. */
-  function tabsHtml(groupId, tabs) {
-    const strip = tabs.map((t, i) =>
-      `<button class="tab ${i === 0 ? "active" : ""}" data-tab-btn="${esc(groupId)}:${esc(t.id)}" onclick="switchTab('${esc(groupId)}','${esc(t.id)}')">
+  function tabsHtml(groupId, tabs, opts = {}) {
+    // Deep-linkable tabs: `opts.active` opens a specific tab (e.g. the project
+    // "Operations" tab from a "configure commands" button) instead of the first.
+    const activeId = opts.active && tabs.some((t) => t.id === opts.active) ? opts.active : tabs[0]?.id;
+    const strip = tabs.map((t) =>
+      `<button class="tab ${t.id === activeId ? "active" : ""}" data-tab-btn="${esc(groupId)}:${esc(t.id)}" onclick="switchTab('${esc(groupId)}','${esc(t.id)}')">
         ${esc(t.label)}${t.badge != null ? `<span class="tab-badge">${esc(String(t.badge))}</span>` : ""}
       </button>`).join("");
-    const panels = tabs.map((t, i) =>
-      `<div class="tab-panel" data-tab-panel="${esc(groupId)}:${esc(t.id)}" ${i === 0 ? "" : "hidden"}>${t.html}</div>`).join("");
+    const panels = tabs.map((t) =>
+      `<div class="tab-panel" data-tab-panel="${esc(groupId)}:${esc(t.id)}" ${t.id === activeId ? "" : "hidden"}>${t.html}</div>`).join("");
     return `<div class="tabs" role="tablist">${strip}</div>${panels}`;
   }
   window.switchTab = (groupId, tabId) => {
