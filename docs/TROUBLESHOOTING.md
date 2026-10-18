@@ -390,6 +390,52 @@ approval-waiting task still blocks re-runs. If you still see the 409 with no
 job running, cancel the task (or wait for the interrupted run to be reconciled
 on restart) and run again.
 
+## `run_tests` / `run_build` says the Docker sandbox is unavailable
+
+The tool runs project commands only inside a disposable Docker container; it
+never falls back to a host shell.
+
+- `Docker executable not found: docker` → install the Docker CLI/daemon, or set
+  `PROJECT_SANDBOX_DOCKER_BIN` to its absolute path. When CodeVia itself runs in
+  a container, mount `/var/run/docker.sock` and install the CLI in the image
+  (or set `DOCKER_HOST` for a remote daemon).
+- `docker: image … not found` → the runner uses `--pull=never`; pull the image
+  first (`docker pull node:22-alpine`) or set `PROJECT_SANDBOX_IMAGE` to an image
+  that already exists.
+- `No test command is configured for this project` → fill `Test` (and optionally
+  `Install`, `Lint`, `Build`) in Project → Edit → Operations. Detection cannot
+  guess a command that the repository does not declare.
+- Dependency installation needs the network → set
+  `settings.sandboxNetworkAccess = true`; every run then asks for approval.
+- Repository-backed projects without Docker fall back to GitHub CI check runs.
+  If no workflow exists, the result stays `unverified`; see
+  [AGENT_EXECUTION.md](AGENT_EXECUTION.md).
+
+## ZIP/RAR import returns 400
+
+The importer rejects anything that is not a safe project tree:
+
+| Message | Fix |
+|---|---|
+| `unsafe entry path` / `traversal` | Re-create the archive without `..`, absolute paths or backslashes (zip the project **contents**, not a parent folder) |
+| `symbolic link entry is not allowed` | Remove links (`zip -y` stores them); import the real files instead |
+| `compression ratio exceeds …` | The archive is a zip bomb or contains a huge repetitive file; raise `PROJECT_IMPORT_MAX_COMPRESSION_RATIO` only for trusted inputs |
+| `archive expands beyond …` / `too many archive entries` | Raise `PROJECT_IMPORT_MAX_TOTAL_BYTES` / `PROJECT_IMPORT_MAX_FILES` (bounded by the upload limit) |
+| `CRC mismatch` | The upload is corrupt; re-upload |
+| `RAR support requires 7z` (`503`) | Install `7z`/`7zz` or set `PROJECT_IMPORT_7Z_BIN`; ZIP needs no external tool |
+
+`413` means the multipart limit was hit: upload one archive no larger than
+`PROJECT_IMPORT_MAX_UPLOAD_BYTES` (25 MiB by default).
+
+## Ask returns 409 `repositoryRequired: true`
+
+The project has no linked repository — typically a folder project created from
+`POST /projects/from-local` without `gitInit: true`. Analysis, files and
+Simulation still work, but implementation has nowhere to commit. Re-create the
+project with `gitInit: true`, import a ZIP/RAR, or link a repository from the
+project's Settings. This is deliberate: previously the same request was queued
+and failed later with an internal `TypeError` on `configRepo`.
+
 ## Tests fail to run (Vite can't resolve `node:sqlite`)
 
 `node:sqlite` is experimental. Vitest is configured to externalize it. If you add a new test importing the DB, ensure `vitest.config.ts` keeps `node:sqlite` external.

@@ -51,7 +51,7 @@ The stored `Provider` config stores only `secretRef` (e.g. `OPENAI_API_KEY`) —
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for `/webhooks/github` signature validation |
 | `GITHUB_ENABLED` | Set `true` to use the real adapter; otherwise the mock is used for local dev/test (even if a token is present) |
 | `REPO_BRIEF_TTL_MS` | `120000` — how long the repository brief (file tree + README + manifests) that feeds the project chat is cached per account+repository+branch. `0` disables caching. A chat message re-reads GitHub only after the TTL, a `?refresh=1` health check, or a restart |
-| `REPO_MIRROR_ENABLED` | `true` — keep a **read-only bare clone** of connected repositories and read repository evidence from disk with git plumbing (`ls-tree` / `cat-file` / `grep`). Any mirror problem falls back to the GitHub API; repository code is never executed. `false` disables the whole path |
+| `REPO_MIRROR_ENABLED` | `true` — keep a **read-only bare clone** of connected repositories and read repository evidence from disk with git plumbing (`ls-tree` / `cat-file` / `grep`). Any mirror problem falls back to the GitHub API; the mirror itself never executes repository code (execution only happens in the Docker sandbox below). `false` disables the whole path |
 | `REPO_MIRROR_DIR` | `<dirname(DATABASE_PATH)>/mirrors` — where mirrors live, stored **per acting account** (`<acct-…>/<owner>/<name>.git`) so readability and content never leak across accounts. Keep it on the persistent volume |
 | `REPO_MIRROR_REFRESH_MS` | `300000` — re-fetch at most this often; a fresh mirror answers without any network. `POST /projects/:id/repo-mirror/refresh` forces a fetch |
 | `REPO_MIRROR_TIMEOUT_MS` / `REPO_MIRROR_READ_TIMEOUT_MS` | `120000` / `20000` — clone/fetch budget, and the budget for a single plumbing read |
@@ -107,6 +107,65 @@ Which model answers *now* — see [MODEL_ROUTING.md](MODEL_ROUTING.md) for the a
 | `STATE_COMMIT_SKIP_CI` | `true` | CodeVia's project-state commits only touch `CodeVia/**` (never code) and carry GitHub's `[skip ci]` marker, so a project's CI does not run — and does not email "all jobs have failed" — for every task/run/chat save. Set `false` to run CI on state commits too |
 | `WEB_BASE_URL` | `http://localhost:8080` | Base URL for the web UI |
 | `PUBLIC_WEB_BASE_URL` | (empty) | Public URL (Railway) used for absolute links/notifications |
+
+---
+
+## Docker sandbox (project lifecycle commands)
+
+Project code is **never executed on the CodeVia host**. The per-project
+`install` / `build` / `test` / `lint` / `start` commands run in a disposable
+Docker container (`src/projects/sandbox-runner.ts`) with a read-only root FS,
+`--cap-drop=ALL`, `no-new-privileges`, a PID limit, CPU/memory caps and
+`--network=none` unless the project opts in. See
+[AGENT_EXECUTION.md](AGENT_EXECUTION.md#اجرای-ایزوله-در-docker-sandbox).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROJECT_SANDBOX_ENABLED` | `true` | Master switch. `false` never runs a container: `run_tests`/`run_build` read GitHub CI checks (no sandbox approval, no Docker requirement) |
+| `PROJECT_SANDBOX_DOCKER_BIN` | `docker` | Docker CLI to spawn (absolute path when it is not on `PATH`) |
+| `PROJECT_SANDBOX_IMAGE` | (from stack) | Image override. Unset = `node:22-alpine`, `python:3.12-slim`, `golang:1.24-alpine`, `rust:1.88-slim` or `php:8.3-cli-alpine` based on the project language. The image must already be present (`--pull=never`) |
+| `PROJECT_SANDBOX_TIMEOUT_MS` | `480000` | Hard wall-clock limit for one execution (max 10 min) |
+| `PROJECT_SANDBOX_MEMORY_MB` | `1024` | Container memory cap |
+| `PROJECT_SANDBOX_CPUS` | `1` | CPU quota |
+| `PROJECT_SANDBOX_PIDS_LIMIT` | `128` | Process limit (fork-bomb guard) |
+| `PROJECT_SANDBOX_LOG_TAIL_BYTES` | `12000` | Trailing stdout/stderr kept as run evidence |
+| `PROJECT_SANDBOX_DIR` | OS temp dir | Scratch root for exported source trees |
+
+If Docker is missing, `run_tests`/`run_build` fall back to GitHub CI check runs
+for repository-backed projects (`verification: unverified` when there is no CI
+either). **Deployment note:** the bundled image does not ship the Docker CLI; a
+containerized CodeVia needs the CLI plus access to a daemon (`/var/run/docker.sock`
+or a remote `DOCKER_HOST`) for the sandbox to run.
+
+## Project import (.zip / .rar)
+
+`POST /projects/import` parses archives in memory and validates every entry
+(path, size, CRC, no symlinks) before writing. Nothing is extracted with an
+external archiver.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROJECT_IMPORT_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Maximum compressed upload |
+| `PROJECT_IMPORT_MAX_FILES` | `5000` | Maximum entries |
+| `PROJECT_IMPORT_MAX_FILE_BYTES` | `26214400` (25 MiB) | Maximum size of one extracted file |
+| `PROJECT_IMPORT_MAX_TOTAL_BYTES` | `209715200` (200 MiB) | Maximum expanded total |
+| `PROJECT_IMPORT_MAX_COMPRESSION_RATIO` | `500` | Zip-bomb guard (declared expansion ratio) |
+| `PROJECT_IMPORT_7Z_BIN` | (PATH) | `7z`/`7zz` used to read `.rar`; without it RAR import answers `503` |
+
+## Local Git mode & server-folder projects
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOCAL_GIT_MODE` | `false` | Replace the GitHub service layer with the system `git` binary ([LOCAL-GIT-MODE.md](LOCAL-GIT-MODE.md)) |
+| `LOCAL_REPOS_DIR` | `./repos` | Root for `<owner>/<repo>` working copies — imported and `new-local` projects are created here, so keep it on a persistent volume |
+| `LOCAL_GIT_OWNER` | `local` | Owner used for flat repositories and the viewer identity |
+| `LOCAL_GIT_BIN` | `git` | Explicit git executable |
+| `LOCAL_GIT_AUTO_FETCH` | `false` | Fetch from the remote before repository reads |
+| `LOCAL_GIT_AUTO_PUSH` | `false` | Push agent commits with the host's own git credentials |
+| `LOCAL_GIT_REMOTE` | `origin` | Remote used by auto push/fetch |
+| `LOCAL_GIT_VERIFY_CMD` | (empty) | **Legacy, not executed on the host.** Local mode refuses it and points at the Docker sandbox |
+| `LOCAL_GIT_STALE_LOCK_MS` | `600000` | Age after which a crashed git lock is treated as stale |
+| `CODEVIA_ALLOWED_ROOTS` | install dir | Comma-separated roots for `/fs/*`, `POST /projects/scan` and `POST /projects/from-local` |
 
 ---
 

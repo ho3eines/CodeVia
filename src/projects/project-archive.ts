@@ -1,4 +1,5 @@
 import { inflateRawSync } from "node:zlib";
+import { getEnv } from "../config/env.js";
 import { isSensitivePath } from "../filesystem/filesystem-service.js";
 
 export interface ProjectArchiveFile {
@@ -23,32 +24,35 @@ export const DEFAULT_PROJECT_ARCHIVE_LIMITS: ProjectArchiveLimits = {
 };
 
 export function projectArchiveLimitsFromEnv(): ProjectArchiveLimits {
-  const int = (name: string, fallback: number, min: number, max: number): number => {
-    const parsed = Number(process.env[name]);
-    return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
-  };
+  // Values come from the validated environment contract (src/config/env.ts), so
+  // a portable backup carries the import limits and an out-of-range value is
+  // rejected at boot instead of being silently ignored. The bounds below mirror
+  // the historical guard rails and still cap values loaded from a snapshot.
+  const env = getEnv();
+  const int = (value: number | undefined, fallback: number, min: number, max: number): number =>
+    Number.isSafeInteger(value) && (value as number) >= min && (value as number) <= max ? (value as number) : fallback;
   return {
     maxUploadBytes: int(
-      "PROJECT_IMPORT_MAX_UPLOAD_BYTES",
+      env.PROJECT_IMPORT_MAX_UPLOAD_BYTES,
       DEFAULT_PROJECT_ARCHIVE_LIMITS.maxUploadBytes,
       1024,
       100 * 1024 * 1024,
     ),
-    maxFiles: int("PROJECT_IMPORT_MAX_FILES", DEFAULT_PROJECT_ARCHIVE_LIMITS.maxFiles, 1, 20_000),
+    maxFiles: int(env.PROJECT_IMPORT_MAX_FILES, DEFAULT_PROJECT_ARCHIVE_LIMITS.maxFiles, 1, 20_000),
     maxFileBytes: int(
-      "PROJECT_IMPORT_MAX_FILE_BYTES",
+      env.PROJECT_IMPORT_MAX_FILE_BYTES,
       DEFAULT_PROJECT_ARCHIVE_LIMITS.maxFileBytes,
       1024,
       100 * 1024 * 1024,
     ),
     maxTotalBytes: int(
-      "PROJECT_IMPORT_MAX_TOTAL_BYTES",
+      env.PROJECT_IMPORT_MAX_TOTAL_BYTES,
       DEFAULT_PROJECT_ARCHIVE_LIMITS.maxTotalBytes,
       1024,
       1024 * 1024 * 1024,
     ),
     maxCompressionRatio: int(
-      "PROJECT_IMPORT_MAX_COMPRESSION_RATIO",
+      env.PROJECT_IMPORT_MAX_COMPRESSION_RATIO,
       DEFAULT_PROJECT_ARCHIVE_LIMITS.maxCompressionRatio,
       1,
       10_000,

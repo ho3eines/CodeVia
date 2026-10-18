@@ -264,6 +264,16 @@ export class AutonomousOrchestrator {
     if (!project) throw new Error(`Project ${task.projectId} not found`);
     const active = () => assertTaskActive(this.deps.taskRepo, task);
     active();
+    // Implementation always writes to a repository. A local-folder project
+    // created without `gitInit` has none, so fail once with an actionable
+    // message instead of crashing inside the first git call.
+    if (!project.configRepo)
+      throw Object.assign(
+        new Error(
+          "This project has no linked repository. Create it from a local folder with gitInit, import a ZIP/RAR, or link a GitHub/local repository before running implementation work.",
+        ),
+        { retryable: false },
+      );
     // Config is read before preflight and the refreshed project is reloaded.
     // Live task state must never be restored over a running/cancelled task.
     if (this.deps.files && this.deps.memoryRepo) {
@@ -357,7 +367,9 @@ export class AutonomousOrchestrator {
     const researchTask = this.spawn(
       task,
       `Research: ${task.title}`,
-      clarification ? `${task.description}\n\n[User clarification of the earlier blocker] ${clarification}` : task.description,
+      clarification
+        ? `${task.description}\n\n[User clarification of the earlier blocker] ${clarification}`
+        : task.description,
       "research",
     );
     const researchPlan: PreparePlan = async (ctx) => {

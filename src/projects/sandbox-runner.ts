@@ -3,6 +3,7 @@ import { promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
+import { getEnv } from "../config/env.js";
 import type { Project, ProjectCommands } from "../domain/entities.js";
 import type { GithubRepoRef, IGitHubService } from "../github/types.js";
 import { LocalGitService } from "../github/local-git-service.js";
@@ -73,16 +74,20 @@ function positiveNumber(value: string | undefined, fallback: number, max: number
 }
 
 export function sandboxConfigFromEnv(options: SandboxRunnerOptions = {}) {
+  // Validated contract (src/config/env.ts): a bad value fails at boot instead of
+  // silently changing how much CPU/memory a repository's own code may consume.
+  const env = getEnv();
+  const number = (value: number | undefined, fallback: number, max: number): number =>
+    positiveNumber(value === undefined ? undefined : String(value), fallback, max);
   return {
-    dockerBin: options.dockerBin ?? process.env.PROJECT_SANDBOX_DOCKER_BIN ?? "docker",
-    image: options.image ?? process.env.PROJECT_SANDBOX_IMAGE,
-    timeoutMs: options.timeoutMs ?? positiveNumber(process.env.PROJECT_SANDBOX_TIMEOUT_MS, 8 * 60_000, 10 * 60_000),
-    memoryMb: options.memoryMb ?? positiveNumber(process.env.PROJECT_SANDBOX_MEMORY_MB, 1024, 16 * 1024),
-    cpus: options.cpus ?? positiveNumber(process.env.PROJECT_SANDBOX_CPUS, 1, 8),
-    pidsLimit: options.pidsLimit ?? Math.floor(positiveNumber(process.env.PROJECT_SANDBOX_PIDS_LIMIT, 128, 4096)),
-    tailBytes:
-      options.tailBytes ?? Math.floor(positiveNumber(process.env.PROJECT_SANDBOX_LOG_TAIL_BYTES, 12_000, 256_000)),
-    workspaceRoot: resolve(options.workspaceRoot ?? process.env.PROJECT_SANDBOX_DIR ?? tmpdir()),
+    dockerBin: options.dockerBin ?? env.PROJECT_SANDBOX_DOCKER_BIN ?? "docker",
+    image: options.image ?? env.PROJECT_SANDBOX_IMAGE,
+    timeoutMs: options.timeoutMs ?? number(env.PROJECT_SANDBOX_TIMEOUT_MS, 8 * 60_000, 10 * 60_000),
+    memoryMb: options.memoryMb ?? number(env.PROJECT_SANDBOX_MEMORY_MB, 1024, 16 * 1024),
+    cpus: options.cpus ?? number(env.PROJECT_SANDBOX_CPUS, 1, 8),
+    pidsLimit: options.pidsLimit ?? Math.floor(number(env.PROJECT_SANDBOX_PIDS_LIMIT, 128, 4096)),
+    tailBytes: options.tailBytes ?? Math.floor(number(env.PROJECT_SANDBOX_LOG_TAIL_BYTES, 12_000, 256_000)),
+    workspaceRoot: resolve(options.workspaceRoot ?? env.PROJECT_SANDBOX_DIR ?? tmpdir()),
     runDocker: options.runDocker ?? runDockerProcess,
   };
 }
@@ -319,7 +324,26 @@ export class SandboxRunner {
       !(repoName === input.project.configRepo || input.project.repositories?.some((r) => r.repo === repoName))
     )
       return unverified("Sandbox repository must be linked to this project");
-    const commands = commandsFor(input.project);
+    // A mock repository has no real source tree to execute: running a container
+    // would prove nothing and would force a human approval for a simulation.
+    if (input.github.kind === "mock")
+      return {
+        ok: true,
+        output: `Simulation only: repository commands were not executed for ${repoName}@${ref}. Connect a real repository and Docker to run them.`,
+        data: { verification: "simulated", sandbox: "mock", repo: repoName, ref, stage: input.stage },
+      };
+    let commands: ProjectCommands;
+    try {
+      commands = commandsFor(input.project);
+    } catch (error) {
+      // A stored command can be edited by hand (or restored from an older
+      // backup). Treat an invalid one as "not verifiable" instead of letting
+      // the exception escape the tool and fail the whole run.
+      return unverified(
+        `A configured sandbox command is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        { stage: input.stage },
+      );
+    }
     const selected = stageCommands(commands, input.stage);
     if (!selected.required)
       return unverified(
@@ -421,13 +445,18 @@ export class SandboxRunner {
         .filter(Boolean)
         .join("\n\n");
       const verification = succeeded ? "passed" : result.exitCode === 127 ? "unverified" : "failed";
+      const dockerMissing =
+        result.exitCode === 127 &&
+        /Docker executable not found|Could not start Docker|docker: (?:command )?not found/i.test(result.stderrTail);
       return {
         ok: succeeded,
         output,
         data: {
           verification,
           fixable: !succeeded && result.exitCode !== 127 && !result.aborted,
-          sandbox: "docker",
+          // "unavailable" lets callers fall back to CI evidence when no Docker
+          // CLI exists on this host; "docker" means the sandbox really ran.
+          sandbox: dockerMissing ? "unavailable" : "docker",
           repo: repoName,
           ref,
           sha: source.sha,

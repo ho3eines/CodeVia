@@ -217,10 +217,7 @@ export class AgentManager {
    * by the state-archive reader) into the project repository and load it. The
    * model-free alternative to AI state generation.
    */
-  async importProjectState(
-    projectId: string,
-    files: GithubFile[],
-  ): Promise<{ imported: string[]; project: Project }> {
+  async importProjectState(projectId: string, files: GithubFile[]): Promise<{ imported: string[]; project: Project }> {
     if (!this.state)
       throw Object.assign(new Error("Project state sync is not configured on this server"), { statusCode: 503 });
     return this.state.applyImportedState(projectId, files);
@@ -512,7 +509,8 @@ export class AgentManager {
       const files = this.deps.projectFiles;
       if (!files) return false;
       const stored = this.deps.projectRepo.findById(projectId)?.data;
-      if (!stored) return false;
+      // A folder project without a repository has nowhere to mirror to.
+      if (!stored || !stored.configRepo) return false;
       const ok = await files.syncTask(hydrateProject(stored), task);
       if (ok) this.pendingTaskSyncs.delete(key);
       else this.pendingTaskSyncs.add(key);
@@ -531,7 +529,7 @@ export class AgentManager {
       const files = this.deps.projectFiles;
       if (!files) return false;
       const stored = this.deps.projectRepo.findById(projectId)?.data;
-      if (!stored) return false;
+      if (!stored || !stored.configRepo) return false;
       const ok = await files.syncRun(hydrateProject(stored), run);
       if (ok) this.pendingRunSyncs.delete(key);
       else this.pendingRunSyncs.add(key);

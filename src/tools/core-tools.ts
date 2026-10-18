@@ -201,7 +201,7 @@ async function verifyInSandboxOrGithubCi(
   stage: "test" | "build",
 ): Promise<import("./types.js").ToolResult> {
   if (ctx.sandboxRunner) {
-    return ctx.sandboxRunner.verify({
+    const sandbox = await ctx.sandboxRunner.verify({
       project: ctx.project,
       github: ctx.github,
       repoName: str(input.repo ?? ctx.project.configRepo),
@@ -211,6 +211,21 @@ async function verifyInSandboxOrGithubCi(
       signal: ctx.signal,
       checkActive: ctx.checkActive,
     });
+    // No Docker CLI on this host (common inside the container image): fall back
+    // to the repository's own CI evidence instead of reporting "unverified"
+    // forever. A local project has no CI to fall back to.
+    if (sandbox.data?.sandbox === "unavailable" && ctx.project.sourceType !== "local" && ctx.project.configRepo) {
+      // One-shot evidence read: the sandbox already failed, so do not add
+      // another 60-second CI wait to every tool call. Pending checks stay
+      // "unverified" and can be re-checked (or merged through the gate) later.
+      const ci = await verifyGithubChecks(ctx, { ...input, waitMs: 0 });
+      return {
+        ...ci,
+        output: `Docker sandbox is unavailable on this host; falling back to GitHub CI evidence.\n\n${ci.output}`,
+        data: { ...ci.data, sandbox: "unavailable" },
+      };
+    }
+    return sandbox;
   }
   if (ctx.project.sourceType === "local")
     return {

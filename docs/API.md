@@ -26,10 +26,15 @@ Interactive documentation (Swagger/OpenAPI) is served at **`/docs`**. The API is
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/projects/options` | Option catalog for the project form: `platforms`, `languages`, `frameworks`, `databases`, `deploymentTargets`, `features`, `integrations`, `agentTypes`, `repositoryRoles`, `coreAgentTypes` (all **multi-select**) |
+| POST | `/projects/scan` | Scan a **server folder** (`{path}`) → `ProjectAnalysis`. Requires `project.write` and a path inside `CODEVIA_ALLOWED_ROOTS` |
+| POST | `/projects/from-local` | Create a project from a server folder (`{path, gitInit?, overrides?}`). Without `gitInit` the project has no repository; with it the safe files are copied into `LOCAL_REPOS_DIR` and a `local/<slug>` repository is registered |
+| POST | `/projects/import` | `multipart/form-data` with exactly one `.zip`/`.rar` (optional `name`, `description`, `slug`) → local Git project with one initial commit. Traversal, links, CRC errors, zip bombs and secret files are rejected before anything is written |
+| POST | `/projects/new-local` | Create an empty local Git project (`{name, description?, slug?}`) with an initial `README.md` commit |
+| GET | `/projects/:id/analysis` | Stored folder analysis of a local project (`404` when the project was not created from a folder) |
 | GET | `/projects` | List projects (documents are upgraded to the multi-repo shape on read) |
 | POST | `/projects` | Create a project (**auto-onboard**: generate agents/skills/workflows/rules). Body: `name`, `description`, `repositories[]` (`{repo:"owner/name", branch?, role?, isConfigRepo?}` — exactly one config repo holds `.ai-engineering`), `capabilities{}` (arrays per dimension; `agentTypes` empty = derive roster from the stack). Legacy `configRepo`/`branch`/`framework`/`database` strings are still accepted. Errors: `400` no/invalid repo, `409` duplicate slug |
 | GET | `/projects/:id` | Project detail (`404` when missing) |
-| PATCH | `/projects/:id` | Update project. `capabilities{}` (merged, re-runs onboarding — agents outside the roster are disabled, never deleted), `repositories[]`, `name`, `description`, `defaultModelId`, `active`, `settings{}`, `reonboard:true` |
+| PATCH | `/projects/:id` | Update project. `capabilities{}` (merged, re-runs onboarding — agents outside the roster are disabled, never deleted), `repositories[]`, `name`, `description`, `defaultModelId`, `active`, `settings{}`, `commands{}` (per-project `install`/`build`/`test`/`lint`/`start` for the Docker sandbox), `reonboard:true` |
 | POST | `/projects/:id/activate` / `deactivate` | Toggle project |
 | DELETE | `/projects/:id` | Delete |
 | GET | `/projects/:id/agents` / `skills` / `memory` / `workflows` / `tasks` / `runs` / `tests` | Sub-resources |

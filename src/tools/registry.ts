@@ -73,7 +73,13 @@ export class ToolRegistry implements IToolRegistry {
       tool.sandboxExecution === true &&
       ctx.project.settings?.trustedForExecution === true &&
       ctx.project.settings?.sandboxNetworkAccess !== true;
-    const needsApproval = tool.dangerous && !trustedOfflineSandbox;
+    // Approval exists to gate *code execution*. A sandbox tool with no runner
+    // (PROJECT_SANDBOX_ENABLED=false → CI evidence only) or against a mock
+    // repository executes nothing, so blocking every demo/autonomous QA run on a
+    // human approval would be security theatre.
+    const simulatedSandbox =
+      tool.sandboxExecution === true && (ctx.sandboxRunner === undefined || ctx.github.kind === "mock");
+    const needsApproval = tool.dangerous && !trustedOfflineSandbox && !simulatedSandbox;
     ctx.checkActive?.();
     if (needsApproval && !ctx.approved) {
       if (!ctx.requestApproval)

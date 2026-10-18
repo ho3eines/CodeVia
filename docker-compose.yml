@@ -37,6 +37,8 @@ services:
       REPO_MIRROR_ENABLED: ${REPO_MIRROR_ENABLED:-true}
       REPO_MIRROR_DIR: ${REPO_MIRROR_DIR:-/app/data/mirrors}
       REPO_MIRROR_REFRESH_MS: ${REPO_MIRROR_REFRESH_MS:-300000}
+      # Imported / newly created local Git projects (inside the volume).
+      LOCAL_REPOS_DIR: ${LOCAL_REPOS_DIR:-/app/data/repos}
       # Platform
       ENABLE_SIMULATION_MODE: ${ENABLE_SIMULATION_MODE:-true}
     ports:

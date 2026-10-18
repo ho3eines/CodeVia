@@ -71,6 +71,9 @@ ENV DATABASE_PATH=/app/data/codevia.db
 # volume, so they survive restarts). Set REPO_MIRROR_ENABLED=false to turn the
 # mirror off entirely — reads then always go through the GitHub API.
 ENV REPO_MIRROR_DIR=/app/data/mirrors
+# Local/imported Git projects live inside the mounted volume too, so an upload
+# or "new local project" survives a redeploy (LOCAL_REPOS_DIR/<owner>/<repo>).
+ENV LOCAL_REPOS_DIR=/app/data/repos
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

@@ -114,7 +114,8 @@ export class Container {
     localGit: () => this.localGit,
   });
   readonly projectImports = new ProjectImportService(this.localProjects);
-  readonly sandboxRunner = new SandboxRunner();
+  /** Docker-backed project execution; `PROJECT_SANDBOX_ENABLED=false` keeps the CI-only path. */
+  readonly sandboxRunner = getEnv().PROJECT_SANDBOX_ENABLED ? new SandboxRunner() : undefined;
   readonly githubForProject = (project: Project, requestUserId?: string): IGitHubService =>
     project.sourceType === "local" && project.configRepo
       ? this.localGit
