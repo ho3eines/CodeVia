@@ -373,6 +373,48 @@ describe("UI shell", () => {
     win.closeModal();
   }, 60000);
 
+  it("warns that install runs offline and saves the install-only network toggle from Operations", async () => {
+    const linked = await container.agentManager.createProject({
+      name: "Offline Install QA",
+      description: "Folder project whose install needs the network",
+      configRepo: "acme/offline-install-qa",
+      branch: "main",
+    });
+    const folderProject = {
+      ...linked,
+      sourceType: "local" as const,
+      localPath: "/srv/projects/offline-install-qa",
+      configRepo: "",
+      repositories: [],
+      commands: { install: "npm ci", test: "npm test" },
+    };
+    container.projectRepo.upsert(folderProject, { key: folderProject.slug });
+    const { win, go, errors } = await boot();
+    let content = await go(`#/projects/${folderProject.id}/project`);
+    expect(content.textContent ?? "").toMatch(/runs with --network=none/);
+    expect(content.textContent ?? "").toMatch(/Network for the install step only/);
+
+    win.projectOperations(folderProject.id);
+    await new Promise((r) => setTimeout(r, 1500));
+    const installToggle = win.document.querySelector("#pe-install-network") as (El & { checked: boolean }) | null;
+    const fullToggle = win.document.querySelector("#pe-network") as (El & { checked: boolean }) | null;
+    expect(installToggle, "install-only network toggle rendered").toBeTruthy();
+    expect(installToggle!.checked).toBe(false);
+    expect(fullToggle!.checked).toBe(false);
+    installToggle!.checked = true;
+    (win.document.querySelector("#pe-save-lite") as El).click();
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const stored = container.projectRepo.findById(folderProject.id)!.data;
+    expect(stored.settings.sandboxInstallNetwork).toBe(true);
+    expect(stored.settings.sandboxNetworkAccess).toBe(false);
+    expect(stored.commands).toMatchObject({ install: "npm ci", test: "npm test" });
+
+    content = await go(`#/projects/${folderProject.id}/project`);
+    expect(content.textContent ?? "").not.toMatch(/runs with --network=none/);
+    expect(errors).toEqual([]);
+  }, 60000);
+
   it("shows the planned owners, criteria and task-local skills in task details and run evidence", async () => {
     const project = await container.agentManager.createProject({
       name: "Skill Trace UI",

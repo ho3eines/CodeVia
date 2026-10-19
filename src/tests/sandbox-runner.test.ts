@@ -331,6 +331,7 @@ describe("SandboxRunner.verify", () => {
     const runDocker = vi.fn(async (_bin: string, args: string[], timeoutMs: number) => {
       calls.push(args);
       workspaces.push(volumeArg(args));
+      expect(existsSync(args[args.lastIndexOf("--volume") + 1].split(":")[0]), "HOME volume exists").toBe(true);
       expect(timeoutMs).toBeGreaterThan(0);
       return ok({ stdoutTail: `phase ${calls.length}`, durationMs: 100 });
     });
@@ -358,13 +359,21 @@ describe("SandboxRunner.verify", () => {
     expect(rest[rest.length - 1]).toContain("npm test");
     expect(rest[rest.length - 1]).toContain("npm run lint");
     expect(rest[rest.length - 1]).not.toContain("npm ci");
-    // Same workspace, and HOME/caches persist inside it between the containers.
+    // Same workspace, and HOME/caches persist between the containers on a
+    // separate scratch volume — never inside the project tree.
     expect(workspaces[0]).toBe(workspaces[1]);
+    const homeMounts = calls.map((args) => args[args.lastIndexOf("--volume") + 1]);
+    expect(homeMounts[0]).toMatch(/[\\/]home:\/codevia-home:rw$/);
+    expect(homeMounts[1]).toBe(homeMounts[0]);
+    expect(homeMounts[0].split(":")[0]).not.toContain(workspaces[0].split(":")[0]);
     for (const args of calls) {
-      expect(args).toContain("HOME=/workspace/.codevia-home");
-      expect(args).toContain("GOMODCACHE=/workspace/.codevia-home/go-mod");
+      expect(args).toContain("HOME=/codevia-home");
+      expect(args).toContain("GOMODCACHE=/codevia-home/go-mod");
+      expect(args.join(" ")).not.toContain("/workspace/.codevia");
       expect(args).toEqual(expect.arrayContaining(["--read-only", "--cap-drop=ALL", "--user=1000:1000"]));
     }
+    // The shared HOME volume exists during the run and is removed with the workspace.
+    expect(existsSync(homeMounts[0].split(":")[0])).toBe(false);
     expect(String(result.output)).toMatch(/install ran in its own container with --network=bridge/);
     expect(String(result.output)).toMatch(/phase 1[\s\S]*phase 2/);
   });
@@ -449,6 +458,7 @@ describe("SandboxRunner.verify", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain("--network=bridge");
     expect(calls[0]).toContain("HOME=/tmp");
+    expect(calls[0].filter((a) => a === "--volume")).toHaveLength(1);
     expect(result.data).toMatchObject({ network: "full", networkAccess: true });
   });
 

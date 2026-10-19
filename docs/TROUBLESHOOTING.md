@@ -424,9 +424,10 @@ container. The result data tells you which failure it was:
   step only** (`settings.sandboxInstallNetwork = true`, Project → Edit →
   Operations). `install` then runs alone in a container with
   `--network=bridge`, and build/test/lint run in a second container with
-  `--network=none` on the same workspace (HOME and tool caches live under
-  `/workspace/.codevia-home`, so `pip install --user`, Go modules, Cargo and
-  Poetry downloads survive into the offline step). Only if the tests themselves
+  `--network=none` on the same workspace (HOME and tool caches live on a
+  separate scratch volume mounted at `/codevia-home` — outside the project
+  tree, so lint/test globs never see it — and `pip install --user`, Go modules,
+  Cargo and Poetry downloads survive into the offline step). Only if the tests themselves
   need the network, set `settings.sandboxNetworkAccess = true` instead. Either
   way every run asks for approval, even for a trusted project. While install
   runs offline, the project page shows a warning with a button to that tab.

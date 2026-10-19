@@ -414,15 +414,21 @@ export function sandboxPhases(
     : [{ steps: install, network: true }];
 }
 
+/** HOME inside the container when install and the offline steps are split. */
+export const SANDBOX_PERSISTENT_HOME = "/codevia-home";
+
 /**
  * Where tools keep caches and per-user installs. A single container uses its
  * tmpfs. When install and the offline steps run in separate containers, the
- * tmpfs does not survive, so HOME and every tool cache live inside the
- * workspace instead — `pip install` (user site), Go modules, Cargo registries
- * and Poetry virtualenvs fetched with network are then available offline.
+ * tmpfs does not survive, so HOME and every tool cache live on a dedicated
+ * scratch volume shared by both containers — `pip install` (user site), Go
+ * modules, Cargo registries and Poetry virtualenvs fetched with network are
+ * then available offline. The volume is outside /workspace on purpose: lint
+ * and test globs never see cache files, and the repository cannot pre-seed
+ * HOME (e.g. a `.profile` sourced by the login shell).
  */
 function cacheEnv(persistent: boolean): string[] {
-  const home = persistent ? "/workspace/.codevia-home" : "/tmp";
+  const home = persistent ? SANDBOX_PERSISTENT_HOME : "/tmp";
   const vars: Record<string, string> = {
     HOME: home,
     TMPDIR: "/tmp",
@@ -621,6 +627,11 @@ export class SandboxRunner {
       const networkMode = sandboxNetworkMode(input.project);
       const phases = sandboxPhases(selected.commands, networkMode);
       const persistentHome = phases.length > 1;
+      const homeVolume = join(workspaceParent, "home");
+      if (persistentHome) {
+        await fsp.mkdir(homeVolume, { recursive: true, mode: 0o777 });
+        await fsp.chmod(homeVolume, 0o777);
+      }
       const dockerArgs = (phase: SandboxPhase): string[] => [
         "run",
         "--rm",
@@ -641,6 +652,7 @@ export class SandboxRunner {
         ...cacheEnv(persistentHome),
         "--volume",
         `${workspace}:/workspace:rw`,
+        ...(persistentHome ? ["--volume", `${homeVolume}:${SANDBOX_PERSISTENT_HOME}:rw`] : []),
         "--workdir",
         "/workspace",
         image,
