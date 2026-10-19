@@ -377,6 +377,72 @@ export function sandboxScript(steps: ReadonlyArray<{ stage: string; command: str
   ].join("\n");
 }
 
+/**
+ * Container network for a sandbox execution:
+ *   - "none"         every step runs with `--network=none` (default);
+ *   - "install-only" `install` runs alone with `--network=bridge`, then the
+ *                    remaining steps run offline on the same workspace;
+ *   - "full"         one container with `--network=bridge` for every step.
+ */
+export type SandboxNetworkMode = "none" | "install-only" | "full";
+
+export function sandboxNetworkMode(project: Pick<Project, "settings">): SandboxNetworkMode {
+  if (project.settings?.sandboxNetworkAccess === true) return "full";
+  if (project.settings?.sandboxInstallNetwork === true) return "install-only";
+  return "none";
+}
+
+export interface SandboxPhase {
+  steps: Array<{ stage: string; command: string }>;
+  network: boolean;
+}
+
+/** Split the selected steps into the containers that will run them, in order. */
+export function sandboxPhases(
+  steps: ReadonlyArray<{ stage: string; command: string }>,
+  mode: SandboxNetworkMode,
+): SandboxPhase[] {
+  if (mode === "full") return [{ steps: [...steps], network: true }];
+  const install = steps.filter((step) => step.stage === "install");
+  if (mode === "none" || !install.length) return [{ steps: [...steps], network: false }];
+  const rest = steps.filter((step) => step.stage !== "install");
+  return rest.length
+    ? [
+        { steps: install, network: true },
+        { steps: rest, network: false },
+      ]
+    : [{ steps: install, network: true }];
+}
+
+/**
+ * Where tools keep caches and per-user installs. A single container uses its
+ * tmpfs. When install and the offline steps run in separate containers, the
+ * tmpfs does not survive, so HOME and every tool cache live inside the
+ * workspace instead — `pip install` (user site), Go modules, Cargo registries
+ * and Poetry virtualenvs fetched with network are then available offline.
+ */
+function cacheEnv(persistent: boolean): string[] {
+  const home = persistent ? "/workspace/.codevia-home" : "/tmp";
+  const vars: Record<string, string> = {
+    HOME: home,
+    TMPDIR: "/tmp",
+    CI: "true",
+    npm_config_cache: `${home}/npm-cache`,
+    PIP_CACHE_DIR: `${home}/pip-cache`,
+    GOCACHE: `${home}/go-build`,
+    GOMODCACHE: `${home}/go-mod`,
+    CARGO_HOME: `${home}/cargo`,
+    POETRY_CACHE_DIR: `${home}/poetry-cache`,
+  };
+  return Object.entries(vars).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
+}
+
+/** Concatenate two retained tails and keep only the last `limit` characters. */
+function joinTails(first: string, second: string, limit: number): string {
+  const joined = [first, second].filter(Boolean).join("\n");
+  return joined.length > limit ? joined.slice(joined.length - limit) : joined;
+}
+
 /** Stage reported by the EXIT trap, or `undefined` when the failure is unknown. */
 export function sandboxFailedStage(
   result: Pick<DockerExecutionResult, "stdoutTail" | "stderrTail">,
@@ -552,16 +618,16 @@ export class SandboxRunner {
     const workspace = join(workspaceParent, "work");
     try {
       await writeWorkspace(workspace, source.files);
-      const network = input.project.settings?.sandboxNetworkAccess === true;
-      const script = sandboxScript(selected.commands);
-      const containerName = `codevia-${randomUUID()}`;
-      const args = [
+      const networkMode = sandboxNetworkMode(input.project);
+      const phases = sandboxPhases(selected.commands, networkMode);
+      const persistentHome = phases.length > 1;
+      const dockerArgs = (phase: SandboxPhase): string[] => [
         "run",
         "--rm",
         "--pull=never",
         "--name",
-        containerName,
-        `--network=${network ? "bridge" : "none"}`,
+        `codevia-${randomUUID()}`,
+        `--network=${phase.network ? "bridge" : "none"}`,
         `--cpus=${this.config.cpus}`,
         `--memory=${bytes(this.config.memoryMb)}`,
         `--memory-swap=${bytes(this.config.memoryMb)}`,
@@ -572,24 +638,7 @@ export class SandboxRunner {
         "--user=1000:1000",
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,size=256m",
-        "--env",
-        "HOME=/tmp",
-        "--env",
-        "TMPDIR=/tmp",
-        "--env",
-        "CI=true",
-        "--env",
-        "npm_config_cache=/tmp/npm-cache",
-        "--env",
-        "PIP_CACHE_DIR=/tmp/pip-cache",
-        "--env",
-        "GOCACHE=/tmp/go-build",
-        "--env",
-        "GOMODCACHE=/tmp/go-mod",
-        "--env",
-        "CARGO_HOME=/tmp/cargo",
-        "--env",
-        "POETRY_CACHE_DIR=/tmp/poetry-cache",
+        ...cacheEnv(persistentHome),
         "--volume",
         `${workspace}:/workspace:rw`,
         "--workdir",
@@ -597,15 +646,40 @@ export class SandboxRunner {
         image,
         "/bin/sh",
         "-lc",
-        script,
+        sandboxScript(phase.steps),
       ];
-      const result = await this.config.runDocker(
-        this.config.dockerBin,
-        args,
-        this.config.timeoutMs,
-        input.signal,
-        this.config.tailBytes,
-      );
+      // Phases share one workspace and one wall-clock budget. A failing phase
+      // stops the run, so an install failure is reported exactly as before.
+      let result: DockerExecutionResult | undefined;
+      let installPhaseOk = false;
+      for (const phase of phases) {
+        const elapsed = result?.durationMs ?? 0;
+        const remaining = this.config.timeoutMs - elapsed;
+        if (remaining < 1000) {
+          result = { ...(result as DockerExecutionResult), exitCode: 124, timedOut: true };
+          break;
+        }
+        const current = await this.config.runDocker(
+          this.config.dockerBin,
+          dockerArgs(phase),
+          remaining,
+          input.signal,
+          this.config.tailBytes,
+        );
+        result = result
+          ? {
+              ...current,
+              stdoutTail: joinTails(result.stdoutTail, current.stdoutTail, this.config.tailBytes),
+              stderrTail: joinTails(result.stderrTail, current.stderrTail, this.config.tailBytes),
+              durationMs: result.durationMs + current.durationMs,
+            }
+          : current;
+        const phaseOk = current.exitCode === 0 && !current.timedOut && !current.aborted && !current.outputLimited;
+        if (!phaseOk) break;
+        if (phases.length > 1 && phase.network) installPhaseOk = true;
+        input.checkActive?.();
+      }
+      if (!result) throw new Error("No sandbox commands were scheduled");
       input.checkActive?.();
       const succeeded = result.exitCode === 0 && !result.timedOut && !result.aborted && !result.outputLimited;
       const configuredStages = selected.commands.map((item) => item.stage);
@@ -642,7 +716,9 @@ export class SandboxRunner {
             : CODE_STAGES.has(failedStage)
               ? `Failing stage: ${failedStage} — project code failure (auto-fixable).`
               : failedStage === "install"
-                ? "Failing stage: install — a dependency/environment failure. Not auto-fixed by code changes: allow sandbox network for the install step, or pre-install dependencies."
+                ? networkMode === "none"
+                  ? 'Failing stage: install — ran with --network=none, so the code was never tested (unverified). Not auto-fixed by code changes: enable "Network for the install step only" in Project → Edit → Operations, or vendor/pre-install dependencies.'
+                  : "Failing stage: install — failed even with network access, so the code was never tested (unverified). Not auto-fixed by code changes: check the install command, lockfile and registry access."
                 : `Failing stage: ${failedStage} — not attributed to project code, so no automatic fix loop will start.`
           : "";
       // `docker run` always keeps `--pull=never`; the only pull is the explicit
@@ -656,6 +732,9 @@ export class SandboxRunner {
           ? `Docker sandbox could not start: image "${image}" is not present on this host. Pull it with: docker pull ${image} (${pullNote}).`
           : `Docker sandbox ${succeeded ? "passed" : "failed"} for ${target} (exit ${result.exitCode}${result.timedOut ? ", timeout" : ""}${result.aborted ? ", cancelled" : ""}${result.outputLimited ? ", output limit" : ""}).`,
         sourceNote,
+        networkMode === "install-only" && phases.length > 1
+          ? `Network: install ran in its own container with --network=bridge${installPhaseOk ? "" : " (failed)"}; the remaining steps run offline with --network=none.`
+          : "",
         stageNote,
         result.stdoutTail ? `stdout tail:\n${result.stdoutTail}` : "",
         result.stderrTail ? `stderr tail:\n${result.stderrTail}` : "",
@@ -666,8 +745,10 @@ export class SandboxRunner {
         ? "unverified"
         : succeeded
           ? "passed"
-          : result.exitCode === 127
-            ? "unverified"
+          : result.exitCode === 127 || (failedStage === "install" && !result.timedOut && !result.aborted)
+            ? // Dependencies never installed: no build/test step ran, so this
+              // says nothing about the code. Never report it as a failed test.
+              "unverified"
             : "failed";
       return {
         ok: succeeded,
@@ -700,7 +781,9 @@ export class SandboxRunner {
           ...sourceData,
           stage: input.stage,
           commands: configuredStages,
-          networkAccess: network,
+          networkAccess: networkMode === "full",
+          network: networkMode,
+          ...(phases.length > 1 ? { installPhase: installPhaseOk ? "passed" : "failed" } : {}),
           exitCode: result.exitCode,
           timedOut: result.timedOut,
           aborted: result.aborted,

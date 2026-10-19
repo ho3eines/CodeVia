@@ -72,7 +72,8 @@ export class ToolRegistry implements IToolRegistry {
     // folder project, whose real source is localPath and which therefore runs
     // even when no GitHub account is connected. A missing runner cannot execute
     // code. Real sandbox runs are force-human unless the project is explicitly
-    // trusted and networking remains off. `sandboxFolderSource` is the single
+    // trusted and networking remains off (including install-only network:
+    // install scripts would run with network). `sandboxFolderSource` is the single
     // definition of "runs from localPath" (shared with the runner itself).
     const runsFromLocalFolder = sandboxFolderSource(ctx.project) !== undefined;
     const willExecuteSandbox =
@@ -83,7 +84,8 @@ export class ToolRegistry implements IToolRegistry {
     const trustedOfflineSandbox =
       willExecuteSandbox &&
       ctx.project.settings?.trustedForExecution === true &&
-      ctx.project.settings?.sandboxNetworkAccess !== true;
+      ctx.project.settings?.sandboxNetworkAccess !== true &&
+      ctx.project.settings?.sandboxInstallNetwork !== true;
     const needsApproval = tool.dangerous && (!tool.sandboxExecution || (willExecuteSandbox && !trustedOfflineSandbox));
     ctx.checkActive?.();
     if (needsApproval && !ctx.approved) {

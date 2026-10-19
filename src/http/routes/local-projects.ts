@@ -77,6 +77,7 @@ const overridesSchema = z
         skills: z.array(z.string()).optional(),
         trustedForExecution: z.boolean().optional(),
         sandboxNetworkAccess: z.boolean().optional(),
+        sandboxInstallNetwork: z.boolean().optional(),
       })
       .optional(),
   })

@@ -344,6 +344,14 @@ export interface ProjectSettings {
   trustedForExecution?: boolean;
   /** Allow sandbox containers network access. Default false (Docker --network=none). */
   sandboxNetworkAccess?: boolean;
+  /**
+   * Give only the `install` step network access: it runs in its own container
+   * with `--network=bridge`, then build/test/lint run in a second container
+   * with `--network=none` on the same workspace. Ignored when
+   * `sandboxNetworkAccess` is true (everything already has network). Still
+   * requires per-run approval, because install scripts execute with network.
+   */
+  sandboxInstallNetwork?: boolean;
   /** When QA fails, route back through research to re-analyse before fixing
    *  instead of patching directly on the same implementer. */
   researchBeforeFix?: boolean;

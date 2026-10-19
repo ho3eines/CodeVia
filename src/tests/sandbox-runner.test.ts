@@ -311,14 +311,145 @@ describe("SandboxRunner.verify", () => {
         }),
     });
     const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+    expect(result.ok).toBe(false);
+    // No test ran: an install failure is "unverified", never a failed test.
     expect(result.data).toMatchObject({
-      verification: "failed",
+      verification: "unverified",
       fixable: false,
       failedStage: "install",
       fixableReason: "environment:install",
+      network: "none",
     });
     expect(String(result.output)).toMatch(/Failing stage: install/);
     expect(String(result.output)).toMatch(/Not auto-fixed/i);
+    expect(String(result.output)).toMatch(/Network for the install step only/);
+  });
+
+  it("runs install with network and build/test/lint offline when install-only network is on", async () => {
+    const calls: string[][] = [];
+    const workspaces: string[] = [];
+    const runDocker = vi.fn(async (_bin: string, args: string[], timeoutMs: number) => {
+      calls.push(args);
+      workspaces.push(volumeArg(args));
+      expect(timeoutMs).toBeGreaterThan(0);
+      return ok({ stdoutTail: `phase ${calls.length}`, durationMs: 100 });
+    });
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+    const result = await runner.verify({
+      project: project({ settings: { sandboxInstallNetwork: true } as Project["settings"] }),
+      github: github(),
+      stage: "test",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      verification: "passed",
+      network: "install-only",
+      networkAccess: false,
+      installPhase: "passed",
+      durationMs: 200,
+    });
+    expect(calls).toHaveLength(2);
+    const [install, rest] = calls;
+    expect(install).toContain("--network=bridge");
+    expect(install[install.length - 1]).toContain("npm ci");
+    expect(install[install.length - 1]).not.toContain("npm test");
+    expect(rest).toContain("--network=none");
+    expect(rest).not.toContain("--network=bridge");
+    expect(rest[rest.length - 1]).toContain("npm test");
+    expect(rest[rest.length - 1]).toContain("npm run lint");
+    expect(rest[rest.length - 1]).not.toContain("npm ci");
+    // Same workspace, and HOME/caches persist inside it between the containers.
+    expect(workspaces[0]).toBe(workspaces[1]);
+    for (const args of calls) {
+      expect(args).toContain("HOME=/workspace/.codevia-home");
+      expect(args).toContain("GOMODCACHE=/workspace/.codevia-home/go-mod");
+      expect(args).toEqual(expect.arrayContaining(["--read-only", "--cap-drop=ALL", "--user=1000:1000"]));
+    }
+    expect(String(result.output)).toMatch(/install ran in its own container with --network=bridge/);
+    expect(String(result.output)).toMatch(/phase 1[\s\S]*phase 2/);
+  });
+
+  it("stops after a failing install phase and does not run the offline steps", async () => {
+    const runDocker = vi.fn(async () =>
+      ok({
+        exitCode: 1,
+        stdoutTail: "[CodeVia sandbox] install\nERR 404\n[CodeVia sandbox] failed-stage=install exit=1",
+      }),
+    );
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+    const result = await runner.verify({
+      project: project({ settings: { sandboxInstallNetwork: true } as Project["settings"] }),
+      github: github(),
+      stage: "test",
+    });
+    expect(runDocker).toHaveBeenCalledTimes(1);
+    expect(result.data).toMatchObject({
+      verification: "unverified",
+      fixable: false,
+      failedStage: "install",
+      installPhase: "failed",
+    });
+    expect(String(result.output)).toMatch(/failed even with network access/);
+  });
+
+  it("still reports a failing test after an install-only network phase as fixable", async () => {
+    let call = 0;
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      runDocker: async () =>
+        ++call === 1
+          ? ok()
+          : ok({ exitCode: 1, stdoutTail: "[CodeVia sandbox] test\nboom\n[CodeVia sandbox] failed-stage=test exit=1" }),
+    });
+    const result = await runner.verify({
+      project: project({ settings: { sandboxInstallNetwork: true } as Project["settings"] }),
+      github: github(),
+      stage: "test",
+    });
+    expect(result.data).toMatchObject({ verification: "failed", fixable: true, failedStage: "test" });
+  });
+
+  it("gives the offline phase only the remaining wall-clock budget", async () => {
+    const timeouts: number[] = [];
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      timeoutMs: 10_000,
+      runDocker: async (_bin, _args, timeoutMs) => {
+        timeouts.push(timeoutMs);
+        return ok({ durationMs: 9_500 });
+      },
+    });
+    const result = await runner.verify({
+      project: project({ settings: { sandboxInstallNetwork: true } as Project["settings"] }),
+      github: github(),
+      stage: "test",
+    });
+    // 500 ms left is below the 1 s floor: the offline phase is not started.
+    expect(timeouts).toEqual([10_000]);
+    expect(result.ok).toBe(false);
+    expect(result.data).toMatchObject({ verification: "failed", fixable: false, fixableReason: "timeout" });
+  });
+
+  it("uses one network-enabled container when full network access is on", async () => {
+    const calls: string[][] = [];
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      runDocker: async (_bin, args) => {
+        calls.push(args);
+        return ok();
+      },
+    });
+    const result = await runner.verify({
+      project: project({
+        settings: { sandboxNetworkAccess: true, sandboxInstallNetwork: true } as Project["settings"],
+      }),
+      github: github(),
+      stage: "test",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--network=bridge");
+    expect(calls[0]).toContain("HOME=/tmp");
+    expect(result.data).toMatchObject({ network: "full", networkAccess: true });
   });
 
   it("treats a failure without a stage marker as not fixable", async () => {
@@ -613,6 +744,39 @@ describe("folder projects without a git repository", () => {
 
     expect(result.requiresApproval).toBe(true);
     expect(runDocker).not.toHaveBeenCalled();
+  });
+
+  it("lets a trusted offline project skip approval, but not with install-only network", async () => {
+    const mock = {
+      ...github(),
+      kind: "mock",
+      listBranches: async () => [{ name: "main", sha: SHA }],
+    } as unknown as IGitHubService;
+    const agent = { id: "a1", slug: "qa", tools: ["run_tests"], permissions: ["github.read"] } as unknown as Agent;
+    const folder = tempRoot();
+    writeFolder(folder);
+    const attempt = async (settings: Partial<Project["settings"]>) => {
+      const runDocker = vi.fn(async () => ok());
+      const ctx = {
+        project: folderProject(folder, { settings: settings as Project["settings"] }),
+        agent,
+        github: mock,
+        logger: { info() {}, warn() {}, error() {} },
+        correlationId: "trusted-sandbox",
+        sandboxRunner: new SandboxRunner({ workspaceRoot: tempRoot(), runDocker }),
+      } as unknown as ToolContext;
+      const tools = new ToolRegistry();
+      tools.registerMany(CORE_TOOLS);
+      return { result: await tools.execute("run_tests", ctx, {}), runDocker };
+    };
+
+    const offline = await attempt({ trustedForExecution: true });
+    expect(offline.result.requiresApproval).not.toBe(true);
+    expect(offline.runDocker).toHaveBeenCalledTimes(1);
+
+    const installNet = await attempt({ trustedForExecution: true, sandboxInstallNetwork: true });
+    expect(installNet.result.requiresApproval).toBe(true);
+    expect(installNet.runDocker).not.toHaveBeenCalled();
   });
 
   it("refuses a symbolic link in the folder before Docker is called", async () => {

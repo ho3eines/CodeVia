@@ -194,6 +194,9 @@ function sandboxApprovalDetail(
     ref: str(input.ref ?? input.branch ?? ctx.project.branch),
     ...(folderSource ? { source: "localPath", localPath: folderSource } : {}),
     networkAccess: ctx.project.settings?.sandboxNetworkAccess === true,
+    // Shown to the approver: install scripts will run with network access.
+    installNetworkAccess:
+      ctx.project.settings?.sandboxNetworkAccess !== true && ctx.project.settings?.sandboxInstallNetwork === true,
     commands: stage === "test" ? ["install", "test", "lint"] : ["install", "build", "test", "lint"],
   };
 }

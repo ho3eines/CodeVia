@@ -420,9 +420,16 @@ container. The result data tells you which failure it was:
   `Install`, `Lint`, `Build`) in Project → Edit → Operations. The project page
   shows a warning with a button that opens that tab directly. Detection cannot
   guess a command that the repository does not declare.
-- Dependency installation needs the network → set
-  `settings.sandboxNetworkAccess = true` (Project → Edit → Operations); every
-  run then asks for approval.
+- Dependency installation needs the network → tick **Network for the install
+  step only** (`settings.sandboxInstallNetwork = true`, Project → Edit →
+  Operations). `install` then runs alone in a container with
+  `--network=bridge`, and build/test/lint run in a second container with
+  `--network=none` on the same workspace (HOME and tool caches live under
+  `/workspace/.codevia-home`, so `pip install --user`, Go modules, Cargo and
+  Poetry downloads survive into the offline step). Only if the tests themselves
+  need the network, set `settings.sandboxNetworkAccess = true` instead. Either
+  way every run asks for approval, even for a trusted project. While install
+  runs offline, the project page shows a warning with a button to that tab.
 - For a GitHub-backed project this message means no CI workflow reported checks
   for that commit: the result stays `unverified` — add a workflow or run the
   checks manually; see [AGENT_EXECUTION.md](AGENT_EXECUTION.md).
@@ -445,13 +452,16 @@ step that failed (`data.failedStage`) and sets `fixable` accordingly:
 | `fixableReason` | `fixable` | What to do |
 |---|---|---|
 | `project-code:test` / `:build` / `:lint` | `true` | Real code failure — the agent is sent back to fix it |
-| `environment:install` | `false` | `npm ci`/`pip install` failed (often because `--network=none`). Enable `settings.sandboxNetworkAccess` or pre-install dependencies in the image |
+| `environment:install` | `false` | `npm ci`/`pip install` failed (often because `--network=none`). Recorded as `verification: "unverified"` (no test ran). Enable `settings.sandboxInstallNetwork` (install-only network) or vendor dependencies |
 | `environment:start` | `false` | `start` is long-running; it is not a verification result |
 | `timeout` / `output-limit` | `false` | Raise `PROJECT_SANDBOX_TIMEOUT_MS` (capped at 10 min) / `PROJECT_SANDBOX_LOG_TAIL_BYTES` (the output limit is 100× that value), or make the command quieter/faster |
 | `unknown-stage` | `false` | The container died before/inside `sh` (e.g. OOM, bad image) — inspect the tails |
 
-`fixable: false` with `verification: "failed"` means the run stops and reports
-the failure instead of spending fix-loop budget on an environment problem.
+`fixable: false` means the run stops and reports the failure instead of
+spending fix-loop budget on an environment problem. A failed `install` step is
+reported as `unverified` rather than `failed`, because no build/test step ran;
+`data.network` (`none` / `install-only` / `full`) and, for split runs,
+`data.installPhase` show how the dependencies were fetched.
 
 ## ZIP/RAR import returns 400
 

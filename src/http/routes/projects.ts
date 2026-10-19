@@ -226,7 +226,7 @@ export function registerProjectRoutes(app: FastifyInstance, container: Container
     }
     if (body.settings && typeof body.settings === "object") {
       const settings = body.settings as Partial<Project["settings"]>;
-      for (const key of ["trustedForExecution", "sandboxNetworkAccess"] as const) {
+      for (const key of ["trustedForExecution", "sandboxNetworkAccess", "sandboxInstallNetwork"] as const) {
         if (Object.hasOwn(settings, key) && typeof settings[key] !== "boolean")
           return fail(reply, 400, `settings.${key} must be a boolean`);
       }
