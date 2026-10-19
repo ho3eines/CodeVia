@@ -38,12 +38,12 @@ A **multi-project, GitHub-centric (or 100% local — see [Local Git Mode](docs/L
 - 📱 **Telegram bot** — project-aware inline keyboards, natural-language requests (فارسی included) and human approval via Telegram. It receives updates over a **webhook when one is reachable, long polling otherwise**, so a bot token alone is enough — no ngrok, no public URL, and `/ping` tells you exactly which path is live.
 - 🔍 **Repository-aware chat** — the project chat is given real evidence (whole-repo file tree, README, manifests), cached per account+repo+branch, with a branch self-heal and a **repository health banner** (`GET /projects/:id/repo-status`) that states *why* a repository could not be read instead of letting the model invent a 404.
 - 📚 **Read-only local mirror** — evidence is read from a per-account bare clone with git *plumbing* (`ls-tree` / `cat-file` / `grep`), so large repositories answer from disk and agents get real content search; every failure falls back to the Git Trees API path. **No repository code is ever executed on the host** — writes go through the GitHub API and verification runs either in the Docker sandbox below or in the repository's own CI (in [Local Git Mode](docs/LOCAL-GIT-MODE.md), writes go through the local git backend and the mirror is auto-disabled).
-- 🧪 **Real test/build execution in a Docker sandbox** — per-project `install` / `build` / `test` / `lint` / `start` commands (editable in Project → Edit → Operations, auto-detected from the stack) run inside a disposable container with `--network=none`, `--read-only`, `--cap-drop=ALL`, `no-new-privileges`, PID/CPU/memory limits and no host shell. Results are recorded as `passed` / `failed` / `unverified` with exit code and output tails. GitHub-backed projects verify through their own CI checks (no container), and local projects never fall back to a host shell. See [docs/AGENT_EXECUTION.md](docs/AGENT_EXECUTION.md).
-- 📦 **ZIP/RAR project import & local project creation** — upload a `.zip`/`.rar` (bounded in-memory parsing, traversal/symlink/zip-bomb/CRC checks) or start from nothing; CodeVia writes the files into a fresh `local/<slug>` Git repository with one atomic initial commit, so agents can branch, commit and open Draft PRs without GitHub. Secret-bearing files are excluded before anything is written. See [docs/LOCAL-FOLDER-PROJECTS.md](docs/LOCAL-FOLDER-PROJECTS.md).
+- 🧪 **Real test/build execution in a Docker sandbox** — per-project `install` / `build` / `test` / `lint` / `start` commands (editable in Project → Edit → Operations, auto-detected from the stack) run inside a disposable container with `--network=none`, `--read-only`, `--cap-drop=ALL`, `no-new-privileges`, PID/CPU/memory limits and no host shell. Results are recorded as `passed` / `failed` / `unverified` with exit code, the failing stage (`failedStage`) and output tails; only a failing `test`/`build`/`lint` step is `fixable` and may start the QA→fix loop — an `install` failure, timeout or output limit never is. Commands, sandbox network access and trust are edited in **Project → Edit → Operations** (the project page links straight there when a `test` command is missing). A folder project created with `gitInit: false` has no repository, so the sandbox reads `project.localPath` directly (same file/size/symlink/secret guards) and says so; a missing image yields the exact `docker pull <image>` command (`PROJECT_SANDBOX_IMAGE_PULL=missing` can inspect/pull explicitly, while the run keeps `--pull=never`). GitHub-backed projects verify through their own CI checks (no container), and local projects never fall back to a host shell. See [docs/AGENT_EXECUTION.md](docs/AGENT_EXECUTION.md).
+- 📦 **ZIP/RAR project import & local project creation** — upload a `.zip`/`.rar` (bounded in-memory parsing, traversal/symlink/zip-bomb/CRC checks) or start from nothing; CodeVia writes the files into a fresh `local/<slug>` Git repository with one atomic initial commit, so agents can branch, commit and open Draft PRs without GitHub. Secret-bearing files are excluded before anything is written. `.rar` works out of the box in the bundled image (`p7zip-full`, `PROJECT_IMPORT_7Z_BIN=/usr/bin/7z`). See [docs/LOCAL-FOLDER-PROJECTS.md](docs/LOCAL-FOLDER-PROJECTS.md).
 - 📊 **Observability** — AI Run Console (observable steps, never chain-of-thought), cost tracking, agent dashboards, audit log, notifications, system health.
 - 🔐 **Security building blocks** — secret references, OAuth login, per-account GitHub tokens (every project action runs with *your* token, not a server PAT), role definitions, webhook signature validation, approval controls and audit events. Some global admin feeds are still shared; see the [remaining gaps](docs/MULTI_USER_ISOLATION.md#6-known-remaining-gaps-not-fixed-here).
 - 💾 **Full portable backup** — one JSON file holds *everything*: every runtime row **plus the environment and the API keys/tokens** that made it work. Download it from `Settings`, restore it on any other server (UI upload or `npm run backup:restore`), and the platform comes back complete — credentials are re-encrypted with the new server's `AUTH_SECRET` and the environment is written to `<db dir>/.env` so it survives a restart. Snapshots also go to a GitHub repo and/or the mounted volume on a cron schedule, with SHA-256-verified parts and optional `BACKUP_PASSPHRASE` protection. See [docs/SYSTEM_BACKUP.md](docs/SYSTEM_BACKUP.md).
-- 🐳 **Dockerized + Railway-ready** — multi-stage Dockerfile, health/readiness/liveness endpoints, `railway.json`, `docker-compose.yml`, `.env.example`.
+- 🐳 **Dockerized + Railway-ready** — multi-stage Dockerfile (optional Docker CLI via `--build-arg INSTALL_DOCKER_CLI=true`, daemon never installed; socket/sidecar notes with a security warning in `docker-compose.yml`), health/readiness/liveness endpoints, `railway.json`, `docker-compose.yml`, `.env.example`.
 
 ---
 
@@ -73,7 +73,7 @@ npm run seed
 ### Tests & build
 
 ```bash
-npm test            # unit + integration + end-to-end (1185 tests)
+npm test            # unit + integration + end-to-end (1201 tests)
 npm run smoke       # one-command live verification (33 checks, isolated port + temp DB)
 npm run backup      # full portable backup (every row + API keys + env) → data/codevia-backup.json
 npm run typecheck   # strict TypeScript
@@ -83,6 +83,60 @@ npm start           # run the production build
 
 > Testing guide (step-by-step, incl. manual UI scenarios): [`TESTING.md`](TESTING.md).
 > Coding-agent execution, CI setup, draft PRs and simulation semantics: [`docs/AGENT_EXECUTION.md`](docs/AGENT_EXECUTION.md).
+
+### 🧭 What works without Docker, a real model, or git
+
+"Without git" means neither GitHub nor Local Git; "without a real model" means only the Mock AI provider; "without Docker" means no container is ever started. Every row is covered by repository tests.
+
+| Capability | Without Docker | Without a real model (Mock) | Without git / GitHub |
+|---|---|---|---|
+| UI, login, folder scan (`POST /projects/scan`) | ✅ | ✅ | ✅ |
+| Folder project, `gitInit: false` (`POST /projects/from-local`) | ✅ | ✅ | ✅ — `sourceType: "local"`, no `configRepo` |
+| Folder project, `gitInit: true` | ✅ (system git only) | ✅ | ✅ — local-git repository |
+| `POST /projects/new-local`, ZIP `POST /projects/import` | ✅ (system git only) | ✅ | ✅ — repository `local/<slug>` |
+| RAR `POST /projects/import` | ✅ | ✅ | ✅ — needs `7z` (bundled in the image) |
+| Analysis, file list, search, project `analysis` | ✅ | ✅ | ✅ |
+| **`install/test/lint/build` for a git-less folder project** | ❌ → `unverified` / `sandbox: "unavailable"` | ✅ (the model is irrelevant) | ✅ — source read from `project.localPath` |
+| Project commands for a local project with a repository | ❌ → `unverified` | ✅ | ✅ — local-git, no GitHub |
+| GitHub-backed verification through CI checks | ✅ | ❌ → `simulated` | ❌ — needs GitHub |
+| Simulation mode (`executionMode: "simulation"`) | ✅ | ✅ | ✅ — plan only, writes nothing |
+| Autonomous/Agent/Workflow task that **really changes code** | depends on the path | ❌ → scaffold/TODO or `simulated`, no real edit | ❌ — needs a repository for commit/PR |
+| Draft PR, merge and the QA loop | — | ❌ | needs GitHub or Local Git |
+| Full backup / restore | ✅ | ✅ | ✅ |
+
+A git-less folder project **can** verify (the sandbox reads `localPath` directly), but an implementation request is still refused with `409` / `repositoryRequired: true` because there is nowhere to commit. Re-create it with `gitInit: true` or import a ZIP/RAR for the full chain.
+
+### Local project curl recipes
+
+```bash
+BASE=http://localhost:8080
+# When REQUIRE_AUTH=true add the session cookie: -b "codevia_session=…"
+
+# scan a server folder (no project created)
+curl -s $BASE/projects/scan -H 'content-type: application/json' \
+  -d '{"path":"/srv/repos/shop3"}' | jq .analysis.suggestions
+
+# folder project without git (verification runs from localPath)
+curl -s $BASE/projects/from-local -H 'content-type: application/json' \
+  -d '{"path":"/srv/repos/shop3","overrides":{"name":"Shop 3"}}'
+
+# same folder as a Local Git repository (agents can commit / open PRs)
+curl -s $BASE/projects/from-local -H 'content-type: application/json' \
+  -d '{"path":"/srv/repos/shop3","gitInit":true,"overrides":{"name":"Shop 3"}}'
+
+# new empty project: README + one initial commit
+curl -s $BASE/projects/new-local -H 'content-type: application/json' \
+  -d '{"name":"Shop 3"}'
+
+# ZIP/RAR import → repository local/<slug>
+curl -s $BASE/projects/import -F name='Shop 3' -F file=@shop3.zip
+
+# create a task, then run it (projectId comes from the responses above)
+curl -s $BASE/tasks -H 'content-type: application/json' \
+  -d '{"projectId":"proj-1a2b3c4d","title":"Add a login page","description":"Email + password"}' | jq .
+TASK_ID=task-1234abcd
+curl -s -X POST "$BASE/tasks/$TASK_ID/run" | jq .
+```
 
 ---
 

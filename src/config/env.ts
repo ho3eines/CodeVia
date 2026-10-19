@@ -167,6 +167,17 @@ const EnvSchema = z.object({
   PROJECT_SANDBOX_LOG_TAIL_BYTES: envNumber(12_000, 1000),
   /** Scratch root for exported source trees (default: the OS temp directory). */
   PROJECT_SANDBOX_DIR: blankString(),
+  /**
+   * Sandbox image availability policy, applied before `docker run` (which still
+   * uses `--pull=never`):
+   *   "never"   — do not touch the image; a missing one fails with the exact
+   *               `docker pull <image>` command to run (default);
+   *   "missing" — `docker image inspect`, then `docker pull` only when absent;
+   *   "always"  — `docker pull` before every execution.
+   * Pulling needs host/daemon network access; the container's own network stays
+   * governed by `settings.sandboxNetworkAccess`.
+   */
+  PROJECT_SANDBOX_IMAGE_PULL: envEnum(["never", "missing", "always"] as const, "never"),
 
   // ---- Project import (.zip / .rar) ----
   // Bounded, streaming-free archive parsing: no archive entry is ever written

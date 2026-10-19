@@ -4,6 +4,7 @@ import type { MemoryRecord } from "../memory/store.js";
 import { verifyGithubChecks } from "./github-checks.js";
 import { cleanRepoPath } from "../agents/implementation.js";
 import { invalidateRepoBrief } from "../agents/repo-brief.js";
+import { sandboxFolderSource } from "../projects/sandbox-runner.js";
 /** Coerce an input value to string. */
 function str(v: unknown): string {
   return v == null ? "" : String(v);
@@ -185,11 +186,13 @@ function sandboxApprovalDetail(
   ctx: ToolContext,
   input: Record<string, unknown>,
 ): Record<string, unknown> {
+  const folderSource = sandboxFolderSource(ctx.project);
   return {
     sandbox: "Docker",
     stage,
     repo: str(input.repo ?? ctx.project.configRepo),
     ref: str(input.ref ?? input.branch ?? ctx.project.branch),
+    ...(folderSource ? { source: "localPath", localPath: folderSource } : {}),
     networkAccess: ctx.project.settings?.sandboxNetworkAccess === true,
     commands: stage === "test" ? ["install", "test", "lint"] : ["install", "build", "test", "lint"],
   };
@@ -200,9 +203,13 @@ async function verifyInSandboxOrGithubCi(
   input: Record<string, unknown>,
   stage: "test" | "build",
 ): Promise<import("./types.js").ToolResult> {
+  // A folder project created with `gitInit: false` has no repository: its real
+  // source is `project.localPath`, so it is executable even when GitHub is not
+  // connected and the adapter is the mock one.
+  const folderSource = sandboxFolderSource(ctx.project);
   // The mock adapter never reads or executes project code: preserve its explicit
   // simulated CI result for tests/demo instead of requesting sandbox approval.
-  if (ctx.github.kind === "mock") return verifyGithubChecks(ctx, input);
+  if (ctx.github.kind === "mock" && !folderSource) return verifyGithubChecks(ctx, input);
   // GitHub-backed projects use GitHub's CI checks. Only imported/folder projects
   // execute configured lifecycle commands, and those commands must stay inside
   // the Docker runner; a missing runner is a hard failure, never a host fallback.
@@ -210,7 +217,9 @@ async function verifyInSandboxOrGithubCi(
   if (!ctx.sandboxRunner)
     return {
       ok: false,
-      output: "Docker sandbox runner is unavailable; project commands were not run on the host.",
+      output: folderSource
+        ? "Docker sandbox runner is unavailable; the local folder was not executed on the host."
+        : "Docker sandbox runner is unavailable; project commands were not run on the host.",
       data: { verification: "unverified", fixable: false, sandbox: "unavailable" },
     };
   return ctx.sandboxRunner.verify({

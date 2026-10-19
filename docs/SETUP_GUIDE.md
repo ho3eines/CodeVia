@@ -221,7 +221,12 @@ docker run -d --name codevia-web --env-file .env \
 
 ### پیش‌نیاز: CI در ریپوی هدف
 
-CodeVia خودش `npm test` اجرا نمی‌کنه. فقط **GitHub Actions checks** رو می‌خونه. پس ریپوی هدف باید CI داشته باشه:
+CodeVia بسته به نوع پروژه از دو مسیر مستقل تأیید می‌کند:
+
+- **پروژهٔ متصل به GitHub:** دستورهای پروژه را روی هاست اجرا نمی‌کند و فقط **GitHub Actions checks** همان commit را می‌خواند؛ پس ریپوی هدف باید CI داشته باشد (نمونهٔ زیر).
+- **پروژهٔ local / پوشه‌ای:** `install`/`build`/`test`/`lint` داخل Docker sandbox اجرا می‌شوند (هرگز روی هاست). این دستورها در **Project → Edit → Operations** تنظیم می‌شوند؛ اگر `Test` خالی باشد نتیجه `unverified` می‌ماند و صفحهٔ پروژه دکمهٔ رفتن به همان تب را نشان می‌دهد. تصویر Docker باید از قبل موجود باشد، یا `PROJECT_SANDBOX_IMAGE_PULL` روی `missing`/`always` باشد تا پیش از اجرا pull شود.
+
+نمونهٔ CI برای ریپوی متصل به GitHub:
 
 ```yaml
 # .github/workflows/ci.yml

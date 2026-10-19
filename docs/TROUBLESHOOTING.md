@@ -392,26 +392,66 @@ on restart) and run again.
 
 ## `run_tests` / `run_build` says the Docker sandbox is unavailable
 
-Only local/imported projects (`sourceType: "local"`) run commands, always
-inside a disposable Docker container; the tool never falls back to a host shell
-or to CI. GitHub-backed projects verify through their CI checks instead and never
-start a container.
+Only local projects (`sourceType: "local"`) run commands, always inside a
+disposable Docker container; the tool never falls back to a host shell or to CI.
+GitHub-backed projects verify through their CI checks instead and never start a
+container. The result data tells you which failure it was:
+
+| `data.sandbox` | Meaning |
+|---|---|
+| `unavailable` | The Docker CLI is missing or cannot reach a daemon — nothing ran |
+| `image-missing` | The CLI worked, but the image is not on the host; no project command ran |
+| `docker` | The container ran (check `verification`, `failedStage`) |
 
 - `Docker executable not found: docker` → install the Docker CLI/daemon, or set
   `PROJECT_SANDBOX_DOCKER_BIN` to its absolute path. When CodeVia itself runs in
-  a container, mount `/var/run/docker.sock` and install the CLI in the image
-  (or set `DOCKER_HOST` for a remote daemon).
-- `docker: image … not found` → the runner uses `--pull=never`; pull the image
-  first (`docker pull node:22-alpine`) or set `PROJECT_SANDBOX_IMAGE` to an image
-  that already exists.
+  a container, build the image with
+  `docker build --build-arg INSTALL_DOCKER_CLI=true .` (CLI only; the daemon is
+  never installed) and give it a daemon: mount `/var/run/docker.sock` (see the
+  security warning in `docker-compose.yml`) or set `DOCKER_HOST` for a sidecar
+  (`docker:2375`) or a remote daemon.
+- `is not present on this host` / `sandbox: "image-missing"` → `docker run`
+  always keeps `--pull=never`, so the image must exist when the container
+  starts. Either pull it once
+  (`docker pull node:22-alpine`), set `PROJECT_SANDBOX_IMAGE` to an image that
+  exists, or switch `PROJECT_SANDBOX_IMAGE_PULL` to `missing` (inspect + pull
+  when absent) or `always` (pull before every run).
 - `No test command is configured for this project` → fill `Test` (and optionally
-  `Install`, `Lint`, `Build`) in Project → Edit → Operations. Detection cannot
+  `Install`, `Lint`, `Build`) in Project → Edit → Operations. The project page
+  shows a warning with a button that opens that tab directly. Detection cannot
   guess a command that the repository does not declare.
 - Dependency installation needs the network → set
-  `settings.sandboxNetworkAccess = true`; every run then asks for approval.
+  `settings.sandboxNetworkAccess = true` (Project → Edit → Operations); every
+  run then asks for approval.
 - For a GitHub-backed project this message means no CI workflow reported checks
   for that commit: the result stays `unverified` — add a workflow or run the
   checks manually; see [AGENT_EXECUTION.md](AGENT_EXECUTION.md).
+
+### A folder project without a repository
+
+A project created by `POST /projects/from-local` with `gitInit: false` has no
+`configRepo`, but verification is **not** blocked: the sandbox reads
+`project.localPath` directly (same file/size/symlink/secret guards as project
+creation) and the result carries `source: "localPath"` plus a content digest
+instead of a commit SHA. Implementation requests are still refused with `409`
+and `repositoryRequired: true` because there is nowhere to commit — see
+[LOCAL-FOLDER-PROJECTS.md](LOCAL-FOLDER-PROJECTS.md).
+
+## QA stays red and the fix loop never starts
+
+The QA→fix loop only reacts to a **project-code** failure. The sandbox marks the
+step that failed (`data.failedStage`) and sets `fixable` accordingly:
+
+| `fixableReason` | `fixable` | What to do |
+|---|---|---|
+| `project-code:test` / `:build` / `:lint` | `true` | Real code failure — the agent is sent back to fix it |
+| `environment:install` | `false` | `npm ci`/`pip install` failed (often because `--network=none`). Enable `settings.sandboxNetworkAccess` or pre-install dependencies in the image |
+| `environment:start` | `false` | `start` is long-running; it is not a verification result |
+| `timeout` / `output-limit` | `false` | Raise `PROJECT_SANDBOX_TIMEOUT_MS` (capped at 10 min) / `PROJECT_SANDBOX_LOG_TAIL_BYTES` (the output limit is 100× that value), or make the command quieter/faster |
+| `unknown-stage` | `false` | The container died before/inside `sh` (e.g. OOM, bad image) — inspect the tails |
+
+`fixable: false` with `verification: "failed"` means the run stops and reports
+the failure instead of spending fix-loop budget on an environment problem.
 
 ## ZIP/RAR import returns 400
 

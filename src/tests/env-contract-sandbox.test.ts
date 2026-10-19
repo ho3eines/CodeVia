@@ -22,6 +22,7 @@ const KEYS = [
   "PROJECT_SANDBOX_PIDS_LIMIT",
   "PROJECT_SANDBOX_LOG_TAIL_BYTES",
   "PROJECT_SANDBOX_DIR",
+  "PROJECT_SANDBOX_IMAGE_PULL",
   "PROJECT_IMPORT_MAX_UPLOAD_BYTES",
   "PROJECT_IMPORT_MAX_FILES",
   "PROJECT_IMPORT_MAX_FILE_BYTES",
@@ -103,6 +104,7 @@ describe("environment contract", () => {
     process.env.PROJECT_SANDBOX_PIDS_LIMIT = "64";
     process.env.PROJECT_SANDBOX_LOG_TAIL_BYTES = "4096";
     process.env.PROJECT_SANDBOX_DIR = "./tmp-sandbox";
+    process.env.PROJECT_SANDBOX_IMAGE_PULL = "missing";
     getEnvFresh();
 
     const config = sandboxConfigFromEnv();
@@ -114,11 +116,13 @@ describe("environment contract", () => {
     expect(config.pidsLimit).toBe(64);
     expect(config.tailBytes).toBe(4096);
     expect(config.workspaceRoot).toBe(resolve("./tmp-sandbox"));
+    expect(config.imagePull).toBe("missing");
 
     // Explicit options always win (tests / embedding).
-    const overridden = sandboxConfigFromEnv({ dockerBin: "podman", memoryMb: 512 });
+    const overridden = sandboxConfigFromEnv({ dockerBin: "podman", memoryMb: 512, imagePull: "always" });
     expect(overridden.dockerBin).toBe("podman");
     expect(overridden.memoryMb).toBe(512);
+    expect(overridden.imagePull).toBe("always");
   });
 
   it("feeds the archive limits from the contract", () => {
@@ -145,5 +149,6 @@ describe("environment contract", () => {
       maxCompressionRatio: 500,
     });
     expect(sandboxConfigFromEnv().dockerBin).toBe("docker");
+    expect(sandboxConfigFromEnv().imagePull).toBe("never");
   });
 });

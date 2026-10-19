@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SandboxRunner, sandboxConfigFromEnv, type DockerExecutionResult } from "../projects/sandbox-runner.js";
+import {
+  SandboxRunner,
+  sandboxConfigFromEnv,
+  sandboxFailedStage,
+  sandboxScript,
+  type DockerExecutionResult,
+} from "../projects/sandbox-runner.js";
 import type { Project } from "../domain/entities.js";
 import type { GithubRepoRef, IGitHubService } from "../github/types.js";
 import { CORE_TOOLS, runTestsTool } from "../tools/core-tools.js";
@@ -57,6 +63,18 @@ function project(overrides: Partial<Project> = {}): Project {
     commands: { install: "npm ci", test: "npm test", lint: "npm run lint", build: "npm run build" },
     ...overrides,
   } as Project;
+}
+
+/** Folder project created with `gitInit: false`: no repository at all. */
+function folderProject(localPath: string, overrides: Partial<Project> = {}): Project {
+  return project({ sourceType: "local", configRepo: "", branch: "", repositories: [], localPath, ...overrides });
+}
+
+function writeFolder(root: string): void {
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "package.json"), '{"name":"foldered"}');
+  writeFileSync(join(root, "src", "index.ts"), "export {};");
+  writeFileSync(join(root, ".env"), "SECRET=canary");
 }
 
 function github(): IGitHubService {
@@ -160,7 +178,12 @@ describe("SandboxRunner.verify", () => {
       runDocker: async (_bin, args) => {
         workspace = volumeArg(args).split(":")[0];
         expect(existsSync(workspace)).toBe(true);
-        return ok({ exitCode: 1, stderrTail: "tests failed" });
+        // Same tail shape a real failing `test` step produces (EXIT trap line).
+        return ok({
+          exitCode: 1,
+          stdoutTail: "[CodeVia sandbox] test\nboom\n[CodeVia sandbox] failed-stage=test exit=1",
+          stderrTail: "tests failed",
+        });
       },
     });
     const result = await runner.verify({ project: project(), github: github(), stage: "test" });
@@ -252,6 +275,82 @@ describe("SandboxRunner.verify", () => {
     expect(result.ok).toBe(false);
     expect(result.data?.verification).toBe("failed");
     expect(String(result.output)).toMatch(/timeout/i);
+    // A timeout says nothing about the project's code: never auto-fix it.
+    expect(result.data?.fixable).toBe(false);
+    expect(result.data?.fixableReason).toBe("timeout");
+  });
+
+  it("marks a failing test/build/lint step as fixable and names the stage", async () => {
+    for (const stage of ["test", "build", "lint"]) {
+      const runner = new SandboxRunner({
+        workspaceRoot: tempRoot(),
+        runDocker: async () =>
+          ok({
+            exitCode: 1,
+            stdoutTail: `[CodeVia sandbox] ${stage}\nboom\n[CodeVia sandbox] failed-stage=${stage} exit=1`,
+          }),
+      });
+      const result = await runner.verify({
+        project: project(),
+        github: github(),
+        stage: stage === "build" ? "build" : "test",
+      });
+      expect(result.data, stage).toMatchObject({ verification: "failed", fixable: true, failedStage: stage });
+      expect(result.data?.fixableReason, stage).toBe(`project-code:${stage}`);
+    }
+  });
+
+  it("never sends an install/environment failure into the fix loop", async () => {
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      runDocker: async () =>
+        ok({
+          exitCode: 1,
+          stdoutTail:
+            "[CodeVia sandbox] install\nnpm ERR! network request failed\n[CodeVia sandbox] failed-stage=install exit=1",
+        }),
+    });
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+    expect(result.data).toMatchObject({
+      verification: "failed",
+      fixable: false,
+      failedStage: "install",
+      fixableReason: "environment:install",
+    });
+    expect(String(result.output)).toMatch(/Failing stage: install/);
+    expect(String(result.output)).toMatch(/Not auto-fixed/i);
+  });
+
+  it("treats a failure without a stage marker as not fixable", async () => {
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      runDocker: async () => ok({ exitCode: 1, stdoutTail: "segfault", stderrTail: "killed" }),
+    });
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+    expect(result.data).toMatchObject({ verification: "failed", fixable: false, fixableReason: "unknown-stage" });
+    expect(String(result.output)).toMatch(/Failing stage: unknown/);
+  });
+
+  it("emits the stage markers and the EXIT trap that reports the failing stage", async () => {
+    let script = "";
+    const runner = new SandboxRunner({
+      workspaceRoot: tempRoot(),
+      runDocker: async (_bin, args) => {
+        script = args[args.length - 1];
+        return ok();
+      },
+    });
+    await runner.verify({ project: project(), github: github(), stage: "test" });
+    expect(script).toContain("trap codevia_report EXIT");
+    expect(script).toContain("failed-stage=%s exit=%s");
+    expect(sandboxScript([{ stage: "test", command: "npm test" }])).toContain("codevia_stage=test; npm test");
+    // The trap line is written after the failing command's own output.
+    expect(
+      sandboxFailedStage({
+        stdoutTail: "noise\n[CodeVia sandbox] failed-stage=build exit=2\n",
+        stderrTail: "",
+      }),
+    ).toBe("build");
   });
 
   it("refuses symlinks and oversized sources before Docker is called", async () => {
@@ -422,5 +521,227 @@ describe("mock repositories", () => {
     const result = await tools.execute("run_tests", ctx, { ref: "main", waitMs: 0 });
     expect(result.data?.verification).toBe("passed");
     expect(result.output).toMatch(/GitHub CI passed/);
+  });
+});
+
+describe("folder projects without a git repository", () => {
+  it("reads the sandbox source from project.localPath instead of GitHub/local-git", async () => {
+    const folder = tempRoot();
+    writeFolder(folder);
+    mkdirSync(join(folder, ".git"));
+    writeFileSync(join(folder, ".git", "config"), "[core]");
+    let seenArgs: string[] = [];
+    let workspaceFiles: string[] = [];
+    let workspacePackage = "";
+    const runDocker = vi.fn(async (_bin: string, args: string[]) => {
+      seenArgs = args;
+      const workspace = volumeArg(args).split(":")[0];
+      workspaceFiles = ["package.json", "src/index.ts", ".env", ".git/config"].filter((f) =>
+        existsSync(join(workspace, f)),
+      );
+      workspacePackage = readFileSync(join(workspace, "package.json"), "utf8");
+      return ok();
+    });
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+
+    const result = await runner.verify({ project: folderProject(folder), github: github(), stage: "test" });
+
+    expect(runDocker).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      verification: "passed",
+      sandbox: "docker",
+      source: "localPath",
+      localPath: folder,
+      repo: "",
+    });
+    // The message states exactly where the source came from — no fake repo, no
+    // "repository must be linked" refusal and no CI claim.
+    expect(result.output).toMatch(/has no git repository/i);
+    expect(result.output).toMatch(/localPath/);
+    expect(result.output).not.toMatch(/must be linked to this project/i);
+    expect(result.data?.sha).toMatch(/^[a-f0-9]{64}$/);
+
+    expect(seenArgs).toContain("--pull=never");
+    const script = seenArgs[seenArgs.length - 1];
+    expect(script).toContain("npm ci");
+    expect(script).toContain("npm test");
+    expect(workspaceFiles).toEqual(["package.json", "src/index.ts"]);
+    expect(workspacePackage).toBe('{"name":"foldered"}');
+  });
+
+  it("reaches sandbox.verify from run_tests even when the GitHub adapter is mock", async () => {
+    const folder = tempRoot();
+    writeFolder(folder);
+    const runDocker = vi.fn(async () => ok());
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+    const mock = { ...github(), kind: "mock" } as unknown as IGitHubService;
+    const ctx = {
+      project: folderProject(folder),
+      github: mock,
+      sandboxRunner: runner,
+    } as unknown as ToolContext;
+
+    const result = await runTestsTool.execute(ctx, {});
+
+    expect(runDocker).toHaveBeenCalledTimes(1);
+    expect(result.data).toMatchObject({ verification: "passed", sandbox: "docker", source: "localPath" });
+    expect(result.output).not.toMatch(/Simulation only/i);
+  });
+
+  it("still requires human approval before running a folder project through the mock adapter", async () => {
+    const runDocker = vi.fn(async () => ok());
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+    const mock = {
+      ...github(),
+      kind: "mock",
+      listBranches: async () => [{ name: "main", sha: SHA }],
+    } as unknown as IGitHubService;
+    const agent = { id: "a1", slug: "qa", tools: ["run_tests"], permissions: ["github.read"] } as unknown as Agent;
+    const ctx = {
+      project: folderProject("/srv/folder-project"),
+      agent,
+      github: mock,
+      logger: { info() {}, warn() {}, error() {} },
+      correlationId: "folder-sandbox",
+      sandboxRunner: runner,
+    } as unknown as ToolContext;
+    const tools = new ToolRegistry();
+    tools.registerMany(CORE_TOOLS);
+
+    const result = await tools.execute("run_tests", ctx, {});
+
+    expect(result.requiresApproval).toBe(true);
+    expect(runDocker).not.toHaveBeenCalled();
+  });
+
+  it("refuses a symbolic link in the folder before Docker is called", async () => {
+    const folder = tempRoot();
+    writeFolder(folder);
+    symlinkSync(join(folder, "package.json"), join(folder, "linked-package.json"));
+    const runDocker = vi.fn(async () => ok());
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+
+    const result = await runner.verify({ project: folderProject(folder), github: github(), stage: "test" });
+
+    expect(result.ok).toBe(false);
+    expect(result.data?.verification).toBe("unverified");
+    expect(String(result.output)).toMatch(/symbolic link/i);
+    expect(runDocker).not.toHaveBeenCalled();
+  });
+
+  it("reports the real reason when the folder no longer exists", async () => {
+    const folder = join(tempRoot(), "deleted");
+    const runDocker = vi.fn(async () => ok());
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+
+    const result = await runner.verify({ project: folderProject(folder), github: github(), stage: "test" });
+
+    expect(result.data?.verification).toBe("unverified");
+    expect(String(result.output)).toMatch(/Could not prepare a safe sandbox source tree/);
+    expect(runDocker).not.toHaveBeenCalled();
+  });
+});
+
+describe("sandbox image availability", () => {
+  it("turns a missing image into an actionable docker pull message with --pull=never kept", async () => {
+    let seenArgs: string[] = [];
+    const runDocker = vi.fn(async (_bin: string, args: string[]) => {
+      seenArgs = args;
+      return ok({
+        exitCode: 125,
+        stdoutTail: "",
+        stderrTail: "docker: Error response from daemon: No such image: node:22-alpine:latest.",
+      });
+    });
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), runDocker });
+
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+
+    expect(result.ok).toBe(false);
+    expect(result.data).toMatchObject({ verification: "unverified", fixable: false, sandbox: "image-missing" });
+    expect(String(result.output)).toMatch(/docker pull node:22-alpine/);
+    expect(String(result.output)).toContain("PROJECT_SANDBOX_IMAGE_PULL=missing");
+    expect(seenArgs).toContain("--pull=never");
+  });
+
+  it("names the active image policy when a pulled image is still missing", async () => {
+    const runDocker = vi.fn(async (_bin: string, args: string[]) => {
+      if (args[0] === "pull") return ok({ stdoutTail: "pulled" });
+      return ok({
+        exitCode: 125,
+        stdoutTail: "",
+        stderrTail: "docker: Error response from daemon: No such image: node:22-alpine:latest.",
+      });
+    });
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), imagePull: "always", runDocker });
+
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+
+    expect(result.data).toMatchObject({ sandbox: "image-missing", fixable: false });
+    expect(String(result.output)).toContain("PROJECT_SANDBOX_IMAGE_PULL=always");
+    expect(String(result.output)).not.toContain("pull it once, or set PROJECT_SANDBOX_IMAGE_PULL=missing");
+  });
+
+  it("inspects and pulls a missing image first when imagePull=missing", async () => {
+    const calls: string[][] = [];
+    const runDocker = vi.fn(async (_bin: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] === "image")
+        return ok({ exitCode: 1, stdoutTail: "", stderrTail: "Error response from daemon: No such image" });
+      if (args[0] === "pull") return ok({ stdoutTail: "pulled" });
+      return ok();
+    });
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), imagePull: "missing", runDocker });
+
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+
+    expect(result.ok).toBe(true);
+    expect(calls.map((args) => args[0])).toEqual(["image", "pull", "run"]);
+    expect(calls[0]).toEqual(expect.arrayContaining(["image", "inspect"]));
+    expect(calls[1]).toEqual(["pull", "node:22-alpine"]);
+    expect(calls[2]).toContain("--pull=never");
+  });
+
+  it("skips the pull when the image already exists", async () => {
+    const calls: string[][] = [];
+    const runDocker = vi.fn(async (_bin: string, args: string[]) => {
+      calls.push(args);
+      return ok();
+    });
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), imagePull: "missing", runDocker });
+
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+
+    expect(result.ok).toBe(true);
+    expect(calls.map((args) => args[0])).toEqual(["image", "run"]);
+  });
+
+  it("does not start the container when the pull fails", async () => {
+    const calls: string[][] = [];
+    const runDocker = vi.fn(async (_bin: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] === "image") return ok({ exitCode: 1, stdoutTail: "", stderrTail: "No such image" });
+      return ok({ exitCode: 1, stdoutTail: "", stderrTail: "pull access denied for private/image" });
+    });
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), imagePull: "missing", runDocker });
+
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+
+    expect(result.data).toMatchObject({ verification: "unverified", sandbox: "image-missing" });
+    expect(String(result.output)).toMatch(/docker pull node:22-alpine/);
+    expect(calls.map((args) => args[0])).toEqual(["image", "pull"]);
+  });
+
+  it("reports Docker itself as unavailable during the preflight", async () => {
+    const runDocker = vi.fn(async () =>
+      ok({ exitCode: 127, stdoutTail: "", stderrTail: "Docker executable not found: docker" }),
+    );
+    const runner = new SandboxRunner({ workspaceRoot: tempRoot(), imagePull: "always", runDocker });
+
+    const result = await runner.verify({ project: project(), github: github(), stage: "test" });
+
+    expect(result.data).toMatchObject({ verification: "unverified", sandbox: "unavailable" });
+    expect(runDocker).toHaveBeenCalledTimes(1);
   });
 });

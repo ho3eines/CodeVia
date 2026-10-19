@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getEnv } from "../config/env.js";
 import type { Project, ProjectCommands } from "../domain/entities.js";
 import type { GithubRepoRef, IGitHubService } from "../github/types.js";
@@ -16,9 +16,19 @@ import {
   safeProjectArchivePath,
   type ProjectArchiveFile,
 } from "./project-archive.js";
+import { collectSafeFolderFiles } from "./local-project-service.js";
 import type { ToolResult } from "../tools/types.js";
 
 export type SandboxStage = "test" | "build" | "lint" | "install" | "start";
+
+/**
+ * What to do about the sandbox image before `docker run`:
+ *   - "never"   (default) rely on `--pull=never`; a missing image fails with an
+ *               explicit "run docker pull <image>" message;
+ *   - "missing" inspect the image first and pull it only when it is absent;
+ *   - "always"  pull before every run (refresh to the tag's current digest).
+ */
+export type SandboxImagePolicy = "never" | "missing" | "always";
 
 export interface DockerExecutionResult {
   exitCode: number;
@@ -47,6 +57,7 @@ export interface SandboxRunnerOptions {
   pidsLimit?: number;
   tailBytes?: number;
   workspaceRoot?: string;
+  imagePull?: SandboxImagePolicy;
   runDocker?: DockerProcessRunner;
 }
 
@@ -88,6 +99,7 @@ export function sandboxConfigFromEnv(options: SandboxRunnerOptions = {}) {
     pidsLimit: options.pidsLimit ?? Math.floor(number(env.PROJECT_SANDBOX_PIDS_LIMIT, 128, 4096)),
     tailBytes: options.tailBytes ?? Math.floor(number(env.PROJECT_SANDBOX_LOG_TAIL_BYTES, 12_000, 256_000)),
     workspaceRoot: resolve(options.workspaceRoot ?? env.PROJECT_SANDBOX_DIR ?? tmpdir()),
+    imagePull: options.imagePull ?? env.PROJECT_SANDBOX_IMAGE_PULL ?? "never",
     runDocker: options.runDocker ?? runDockerProcess,
   };
 }
@@ -225,6 +237,40 @@ async function writeWorkspace(workspace: string, files: readonly ProjectArchiveF
   }
 }
 
+/**
+ * A folder project created with `gitInit: false` owns no repository: no
+ * `configRepo`, no local-git working copy. Its only source of truth is
+ * `project.localPath`, which the sandbox reads directly instead of pretending
+ * there is a GitHub ref to resolve.
+ */
+export function sandboxFolderSource(project: Project): string | undefined {
+  if (project.sourceType !== "local") return undefined;
+  if (project.configRepo?.trim()) return undefined;
+  const localPath = project.localPath?.trim();
+  return localPath ? localPath : undefined;
+}
+
+/**
+ * Export a server folder as a sandbox source tree. Uses the very same walk as
+ * project creation (`collectSafeFolderFiles`): bounded file count/size/total,
+ * no symlinks or special files, and secret-bearing paths excluded.
+ */
+async function exportLocalFolderTree(rootPath: string): Promise<ExportedTree> {
+  const limits = projectArchiveLimitsFromEnv();
+  const collected = await collectSafeFolderFiles(rootPath);
+  const prepared = prepareProjectFiles(collected.files, limits);
+  const hash = createHash("sha256");
+  for (const file of [...prepared.files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    hash.update(file.path);
+    hash.update("\0");
+    hash.update(file.content);
+    hash.update("\0");
+  }
+  // No commit exists to pin: the digest identifies the exact file contents the
+  // container was given, so the evidence says which tree was executed.
+  return { sha: hash.digest("hex"), files: prepared.files };
+}
+
 async function exportGithubTree(
   github: IGitHubService,
   repo: GithubRepoRef,
@@ -300,6 +346,55 @@ function stageCommands(
 }
 
 /**
+ * Stages whose failure is attributable to the project's own code and can
+ * therefore be repaired by an agent. `install` failures are environment/
+ * dependency problems (with `--network=none` they are the normal outcome),
+ * and `start` is a long-running command usually ended by the timeout — sending
+ * either back into the QA→fix loop would burn the task budget on something a
+ * code edit cannot change.
+ */
+const CODE_STAGES: ReadonlySet<string> = new Set(["build", "test", "lint"]);
+
+/**
+ * In-container script for the selected steps.
+ *
+ * Each step is announced with a marker, and an EXIT trap appends
+ * `failed-stage=<stage>` **after** the failing command's output. The trap line
+ * is therefore always part of the retained stdout tail, so the platform can
+ * tell whether an install step or a test/build step failed even when the tail
+ * is truncated.
+ */
+export function sandboxScript(steps: ReadonlyArray<{ stage: string; command: string }>): string {
+  return [
+    "set -e",
+    "codevia_stage=",
+    'codevia_report() { codevia_status=$?; if [ "$codevia_status" -ne 0 ] && [ -n "$codevia_stage" ]; then ' +
+      'printf \'\\n[CodeVia sandbox] failed-stage=%s exit=%s\\n\' "$codevia_stage" "$codevia_status"; fi; }',
+    "trap codevia_report EXIT",
+    ...steps.map(
+      ({ stage, command }) => `printf '\\n[CodeVia sandbox] ${stage}\\n'; codevia_stage=${stage}; ${command}`,
+    ),
+  ].join("\n");
+}
+
+/** Stage reported by the EXIT trap, or `undefined` when the failure is unknown. */
+export function sandboxFailedStage(
+  result: Pick<DockerExecutionResult, "stdoutTail" | "stderrTail">,
+): string | undefined {
+  const pattern = /\[CodeVia sandbox\] failed-stage=([a-z]+) exit=\d+/;
+  return (pattern.exec(result.stdoutTail) ?? pattern.exec(result.stderrTail))?.[1];
+}
+
+/** Only a failing project-code step (test/build/lint) may enter the fix loop. */
+export function isFixableSandboxFailure(
+  result: Pick<DockerExecutionResult, "stdoutTail" | "stderrTail" | "timedOut" | "aborted" | "outputLimited">,
+  failedStage: string | undefined = sandboxFailedStage(result),
+): boolean {
+  if (result.timedOut || result.aborted || result.outputLimited) return false;
+  return !!failedStage && CODE_STAGES.has(failedStage);
+}
+
+/**
  * Executes project lifecycle commands only inside a disposable Docker
  * container. It deliberately has no host-shell fallback.
  */
@@ -310,23 +405,92 @@ export class SandboxRunner {
     this.config = sandboxConfigFromEnv(options);
   }
 
+  private dockerUnavailable(result: DockerExecutionResult): boolean {
+    return (
+      result.exitCode === 127 ||
+      /Docker executable not found|Could not start Docker|Cannot connect to the Docker daemon|Is the docker daemon running/i.test(
+        result.stderrTail,
+      )
+    );
+  }
+
+  /**
+   * Explicit, configurable image step before `docker run` (which always keeps
+   * `--pull=never`). Returns an actionable problem, or `undefined` to continue.
+   */
+  private async prepareImage(
+    image: string,
+    signal: AbortSignal | undefined,
+  ): Promise<{ output: string; data: Record<string, unknown> } | undefined> {
+    const policy = this.config.imagePull;
+    if (policy === "never") return undefined;
+    if (policy === "missing") {
+      const inspected = await this.config.runDocker(
+        this.config.dockerBin,
+        ["image", "inspect", "--format", "{{.Id}}", image],
+        Math.min(this.config.timeoutMs, 60_000),
+        signal,
+        this.config.tailBytes,
+      );
+      if (inspected.exitCode === 0) return undefined;
+      if (this.dockerUnavailable(inspected))
+        return {
+          output: `Docker is unavailable, so the sandbox image "${image}" could not be checked: ${inspected.stderrTail || "docker CLI not found"}`,
+          data: { sandbox: "unavailable" },
+        };
+    }
+    // A pull streams progress lines; allow a larger output window (the retained
+    // tail is still `tailBytes`) so a normal download is not killed as "output
+    // limited" before the image finishes.
+    const pulled = await this.config.runDocker(
+      this.config.dockerBin,
+      ["pull", image],
+      this.config.timeoutMs,
+      signal,
+      Math.max(this.config.tailBytes, 64_000),
+    );
+    if (pulled.exitCode === 0 && !pulled.timedOut && !pulled.aborted && !pulled.outputLimited) return undefined;
+    if (this.dockerUnavailable(pulled))
+      return {
+        output: `Docker is unavailable, so the sandbox image "${image}" could not be pulled: ${pulled.stderrTail || "docker CLI not found"}`,
+        data: { sandbox: "unavailable" },
+      };
+    const detail = [pulled.stdoutTail, pulled.stderrTail].filter(Boolean).join("\n");
+    return {
+      output: `Sandbox image "${image}" is not available on this host and could not be pulled${pulled.timedOut ? " (timed out)" : ""}. Pull it once with: docker pull ${image}${detail ? `\n\n${detail}` : ""}`,
+      data: { sandbox: "image-missing" },
+    };
+  }
+
   async verify(input: SandboxVerifyInput): Promise<ToolResult> {
-    const repoName = input.repoName ?? input.project.configRepo;
+    // A folder project created with `gitInit: false` has no repository at all;
+    // its source is `project.localPath`. Everything else keeps the repo path.
+    const folderPath = sandboxFolderSource(input.project);
+    const sourceData = folderPath ? { source: "localPath", localPath: folderPath } : {};
+    const requestedRepo = input.repoName?.trim();
+    const repoName = folderPath ? "" : (requestedRepo ?? input.project.configRepo);
     const ref = input.ref ?? input.project.branch;
     const unverified = (output: string, data: Record<string, unknown> = {}): ToolResult => ({
       ok: false,
       output,
-      data: { verification: "unverified", fixable: false, repo: repoName, ref, ...data },
+      data: { verification: "unverified", fixable: false, repo: repoName, ref, ...sourceData, ...data },
     });
+    const isLinkedRepo = (name: string): boolean =>
+      name === input.project.configRepo || !!input.project.repositories?.some((r) => r.repo === name);
     const repo = parseRepoFullName(repoName);
-    if (
-      !repo ||
-      !(repoName === input.project.configRepo || input.project.repositories?.some((r) => r.repo === repoName))
-    )
+    if (folderPath) {
+      // An explicitly requested repository must still belong to this project;
+      // the empty default simply means "read the folder".
+      if (requestedRepo && !isLinkedRepo(requestedRepo))
+        return unverified("Sandbox repository must be linked to this project", { stage: input.stage });
+    } else if (!repo || !isLinkedRepo(repoName)) {
       return unverified("Sandbox repository must be linked to this project");
+    }
     // A mock repository has no real source tree to execute: running a container
     // would prove nothing and would force a human approval for a simulation.
-    if (input.github.kind === "mock")
+    // A folder source is real local code and is executed even when no GitHub
+    // account is connected (the mock adapter is irrelevant to it).
+    if (input.github.kind === "mock" && !folderPath)
       return {
         ok: true,
         output: `Simulation only: repository commands were not executed for ${repoName}@${ref}. Connect a real repository and Docker to run them.`,
@@ -359,9 +523,21 @@ export class SandboxRunner {
       return unverified("A sandbox command is invalid or exceeds the 1000-character limit", { stage: input.stage });
     input.checkActive?.();
     if (input.signal?.aborted) return unverified("Sandbox execution was cancelled before it started");
+    const image = this.config.image || stackImage(input.project);
+    // The run below keeps `--pull=never`. The optional preflight only decides
+    // whether the image should be checked/pulled explicitly, so a missing image
+    // produces one actionable message instead of an opaque runtime failure.
+    const imageProblem = await this.prepareImage(image, input.signal);
+    if (imageProblem) return unverified(imageProblem.output, { stage: input.stage, image, ...imageProblem.data });
     let source: ExportedTree;
     try {
-      source = await exportGithubTree(input.github, repo, ref, input.expectedSha);
+      if (folderPath) {
+        source = await exportLocalFolderTree(folderPath);
+      } else if (repo) {
+        source = await exportGithubTree(input.github, repo, ref, input.expectedSha);
+      } else {
+        throw new Error(`Invalid repository name: ${repoName || "(empty)"}`);
+      }
     } catch (error) {
       return unverified(
         `Could not prepare a safe sandbox source tree: ${error instanceof Error ? error.message : String(error)}`,
@@ -377,11 +553,7 @@ export class SandboxRunner {
     try {
       await writeWorkspace(workspace, source.files);
       const network = input.project.settings?.sandboxNetworkAccess === true;
-      const image = this.config.image || stackImage(input.project);
-      const script = [
-        "set -e",
-        ...selected.commands.map(({ stage, command }) => `printf '\\n[CodeVia sandbox] ${stage}\\n'; ${command}`),
-      ].join("\n");
+      const script = sandboxScript(selected.commands);
       const containerName = `codevia-${randomUUID()}`;
       const args = [
         "run",
@@ -437,30 +609,95 @@ export class SandboxRunner {
       input.checkActive?.();
       const succeeded = result.exitCode === 0 && !result.timedOut && !result.aborted && !result.outputLimited;
       const configuredStages = selected.commands.map((item) => item.stage);
+      const dockerMissing =
+        result.exitCode === 127 &&
+        /Docker executable not found|Could not start Docker|docker: (?:command )?not found/i.test(result.stderrTail);
+      // `--pull=never` keeps sandbox runs offline; when the host has not pulled
+      // the image yet, say exactly what to run instead of a bare exit code.
+      const imageMissing =
+        !succeeded &&
+        !dockerMissing &&
+        /unable to find image|no such image|manifest unknown|pull access denied|image .*not found|reference does not exist/i.test(
+          result.stderrTail,
+        );
+      const target = folderPath
+        ? `local folder project "${input.project.slug}"`
+        : `${repoName}@${source.sha.slice(0, 12)}`;
+      const sourceNote = folderPath
+        ? `This project has no git repository; the sandbox source was read directly from localPath (${folderPath}).`
+        : "";
+      // A failing `install` (or a timeout/output-limit) is an environment
+      // problem, not a code defect: it must never trigger an agent fix loop.
+      const failedStage = sandboxFailedStage(result);
+      const fixable =
+        !succeeded &&
+        !imageMissing &&
+        !dockerMissing &&
+        result.exitCode !== 127 &&
+        isFixableSandboxFailure(result, failedStage);
+      const stageNote =
+        !succeeded && !imageMissing
+          ? !failedStage
+            ? "Failing stage: unknown (the container reported no stage marker) — treated as not auto-fixable."
+            : CODE_STAGES.has(failedStage)
+              ? `Failing stage: ${failedStage} — project code failure (auto-fixable).`
+              : failedStage === "install"
+                ? "Failing stage: install — a dependency/environment failure. Not auto-fixed by code changes: allow sandbox network for the install step, or pre-install dependencies."
+                : `Failing stage: ${failedStage} — not attributed to project code, so no automatic fix loop will start.`
+          : "";
+      // `docker run` always keeps `--pull=never`; the only pull is the explicit
+      // preflight. Say which policy was in effect so the message is exact.
+      const pullNote =
+        this.config.imagePull === "never"
+          ? "docker run keeps --pull=never; pull it once, or set PROJECT_SANDBOX_IMAGE_PULL=missing"
+          : `docker run keeps --pull=never and the explicit image step (PROJECT_SANDBOX_IMAGE_PULL=${this.config.imagePull}) did not leave it present`;
       const output = [
-        `Docker sandbox ${succeeded ? "passed" : "failed"} for ${repoName}@${source.sha.slice(0, 12)} (exit ${result.exitCode}${result.timedOut ? ", timeout" : ""}${result.aborted ? ", cancelled" : ""}${result.outputLimited ? ", output limit" : ""}).`,
+        imageMissing
+          ? `Docker sandbox could not start: image "${image}" is not present on this host. Pull it with: docker pull ${image} (${pullNote}).`
+          : `Docker sandbox ${succeeded ? "passed" : "failed"} for ${target} (exit ${result.exitCode}${result.timedOut ? ", timeout" : ""}${result.aborted ? ", cancelled" : ""}${result.outputLimited ? ", output limit" : ""}).`,
+        sourceNote,
+        stageNote,
         result.stdoutTail ? `stdout tail:\n${result.stdoutTail}` : "",
         result.stderrTail ? `stderr tail:\n${result.stderrTail}` : "",
       ]
         .filter(Boolean)
         .join("\n\n");
-      const verification = succeeded ? "passed" : result.exitCode === 127 ? "unverified" : "failed";
-      const dockerMissing =
-        result.exitCode === 127 &&
-        /Docker executable not found|Could not start Docker|docker: (?:command )?not found/i.test(result.stderrTail);
+      const verification = imageMissing
+        ? "unverified"
+        : succeeded
+          ? "passed"
+          : result.exitCode === 127
+            ? "unverified"
+            : "failed";
       return {
         ok: succeeded,
         output,
         data: {
           verification,
-          fixable: !succeeded && result.exitCode !== 127 && !result.aborted,
+          // Only test/build/lint failures are repairable by an agent.
+          fixable,
+          failedStage,
+          fixableReason: succeeded
+            ? undefined
+            : fixable
+              ? `project-code:${failedStage}`
+              : result.timedOut
+                ? "timeout"
+                : result.outputLimited
+                  ? "output-limit"
+                  : failedStage
+                    ? `environment:${failedStage}`
+                    : "unknown-stage",
           // "unavailable" means no container ran (missing Docker CLI/daemon);
+          // "image-missing" means the CLI worked but the image was never pulled;
           // local projects then stay unverified instead of executing anywhere
           // else. "docker" means the sandbox really ran.
-          sandbox: dockerMissing ? "unavailable" : "docker",
+          sandbox: dockerMissing ? "unavailable" : imageMissing ? "image-missing" : "docker",
           repo: repoName,
           ref,
           sha: source.sha,
+          image,
+          ...sourceData,
           stage: input.stage,
           commands: configuredStages,
           networkAccess: network,

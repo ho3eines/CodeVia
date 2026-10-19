@@ -445,13 +445,16 @@
   /* ---------- tabs ----------
      Pure-CSS-ish tab strip: `tabsHtml` renders the buttons + panels and
      `switchTab` flips the active classes without a re-render. */
-  function tabsHtml(groupId, tabs) {
-    const strip = tabs.map((t, i) =>
-      `<button class="tab ${i === 0 ? "active" : ""}" data-tab-btn="${esc(groupId)}:${esc(t.id)}" onclick="switchTab('${esc(groupId)}','${esc(t.id)}')">
+  function tabsHtml(groupId, tabs, opts = {}) {
+    // Deep-linkable tabs: `opts.active` opens a specific tab (e.g. the project
+    // "Operations" tab from a "configure commands" button) instead of the first.
+    const activeId = opts.active && tabs.some((t) => t.id === opts.active) ? opts.active : tabs[0]?.id;
+    const strip = tabs.map((t) =>
+      `<button class="tab ${t.id === activeId ? "active" : ""}" data-tab-btn="${esc(groupId)}:${esc(t.id)}" onclick="switchTab('${esc(groupId)}','${esc(t.id)}')">
         ${esc(t.label)}${t.badge != null ? `<span class="tab-badge">${esc(String(t.badge))}</span>` : ""}
       </button>`).join("");
-    const panels = tabs.map((t, i) =>
-      `<div class="tab-panel" data-tab-panel="${esc(groupId)}:${esc(t.id)}" ${i === 0 ? "" : "hidden"}>${t.html}</div>`).join("");
+    const panels = tabs.map((t) =>
+      `<div class="tab-panel" data-tab-panel="${esc(groupId)}:${esc(t.id)}" ${t.id === activeId ? "" : "hidden"}>${t.html}</div>`).join("");
     return `<div class="tabs" role="tablist">${strip}</div>${panels}`;
   }
   window.switchTab = (groupId, tabId) => {
@@ -1521,13 +1524,26 @@
     };
   };
   window.openLocalFolderModal = () => {
-    openModal("Import Server Folder", `<div class="field"><label>Absolute folder path on the CodeVia server</label><input class="input mono" id="lf-path" placeholder="/srv/projects/my-app"/></div><div class="field"><label>Project name (optional)</label><input class="input" id="lf-name" placeholder="Detected from the folder"/></div><label class="check"><input type="checkbox" id="lf-gitinit" checked/> Copy into LOCAL_REPOS_DIR and create an initial Git commit (recommended for agent edits)</label><div class="field-hint">The source must be inside a server folder allowed by the operator. Symbolic links and secret files are refused or omitted. The original folder is not modified when copying.</div><div class="flex mt"><button class="btn btn-primary" id="lf-import">Import folder</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    openModal("Import Server Folder", `<div class="field"><label>Absolute folder path on the CodeVia server</label><input class="input mono" id="lf-path" placeholder="/srv/projects/my-app"/></div><div class="field"><label>Project name (optional)</label><input class="input" id="lf-name" placeholder="Detected from the folder"/></div><label class="check"><input type="checkbox" id="lf-gitinit" checked/> Copy into LOCAL_REPOS_DIR and create an initial Git commit (recommended for agent edits)</label><div class="field-hint" id="lf-gitinit-hint"></div><div class="field-hint">The source must be inside a server folder allowed by the operator. Symbolic links and secret files are refused or omitted. The original folder is not modified when copying.</div><div class="flex mt"><button class="btn btn-primary" id="lf-import">Import folder</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    const gitToggle = $("#lf-gitinit");
+    const syncGitHint = () => {
+      const hint = $("#lf-gitinit-hint");
+      if (!hint) return;
+      hint.innerHTML = gitToggle.checked
+        ? "A local Git repository is created, so agents can branch, commit and open Draft PRs."
+        : "<strong>No repository:</strong> run_tests / run_build still verify in the Docker sandbox (source read from localPath), but implementation tasks are refused until a repository is linked.";
+    };
+    gitToggle.addEventListener("change", syncGitHint);
+    syncGitHint();
     $("#lf-import").onclick = async () => {
       const path = $("#lf-path").value.trim();
       if (!path) return toast("Path required", "Enter an absolute server path", "err");
       const overrides = $("#lf-name").value.trim() ? { name: $("#lf-name").value.trim() } : undefined;
+      const gitInit = $("#lf-gitinit").checked;
+      // Say exactly what a git-less project can and cannot do before creating it.
+      if (!gitInit && !confirm("Create this folder project WITHOUT a Git repository?\n\nrun_tests / run_build still verify inside the Docker sandbox (source read from localPath), but agents cannot commit, open PRs or change code. You can re-create it with gitInit later or import an archive.")) return;
       const btn = $("#lf-import"); btn.disabled = true;
-      try { const p = await api("/projects/from-local", { method: "POST", body: { path, gitInit: $("#lf-gitinit").checked, ...(overrides ? { overrides } : {}) } }); intakeProjectResult(p, p.configRepo ? `Created ${p.configRepo}` : "Folder linked read-only"); }
+      try { const p = await api("/projects/from-local", { method: "POST", body: { path, gitInit, ...(overrides ? { overrides } : {}) } }); intakeProjectResult(p, p.configRepo ? `Created ${p.configRepo}` : "Folder linked without a repository — verification reads localPath"); }
       catch (e) { toast("Folder import failed", e.message, "err"); btn.disabled = false; }
     };
   };
@@ -1974,9 +1990,29 @@
   }
 
   /* ---------- Project overview tab (info + quick ask + activity) ---------- */
+
+  /**
+   * Honest, actionable notice about what this project can actually execute.
+   * A local folder without a repository can verify (the sandbox reads
+   * localPath) but cannot implement, and an empty `test` command means every
+   * QA answer is "unverified" — both are invisible without this banner.
+   */
+  function projectExecutionNotice(p) {
+    if (p.sourceType !== "local") return "";
+    const cmds = p.commands || p.analysis?.commands || p.analysis?.suggestions?.commands || {};
+    const hasTest = !!(cmds.test && String(cmds.test).trim());
+    const repo = String(p.configRepo || "").trim();
+    const rows = [];
+    if (!repo) rows.push(`This folder project has no git repository (only <span class="mono">localPath</span>). <strong>run_tests</strong> / <strong>run_build</strong> still work — the Docker sandbox reads <span class="mono">localPath</span> directly — but implementation tasks need a repository: re-create it with <em>gitInit</em>, import a ZIP/RAR, or link one under Repositories.`);
+    if (!hasTest) rows.push(`No <span class="mono">test</span> command is configured, so verification stays <span class="mono">unverified</span>. Add install / build / test / lint commands in <strong>Operations</strong>.`);
+    if (!rows.length) return "";
+    const edit = `projectEdit(${esc(JSON.stringify(p.id))}, 'operations')`;
+    return `<div class="notice warn" style="margin-bottom:12px"><h4>${repo ? "⚠️ Sandbox verification" : "⚠️ Folder project without a repository"}</h4>${rows.map((r) => `<p>${r}</p>`).join("")}<div class="flex" style="gap:8px;flex-wrap:wrap"><button class="btn btn-primary" onclick="${edit}">⚙ Configure sandbox commands</button></div></div>`;
+  }
+
   function projectInfoTabHtml(p, stats) {
     const repos = p.repositories || [];
-    return `<div class="grid-2">
+    return `${projectExecutionNotice(p)}<div class="grid-2">
       <div class="card card-body">
         <div class="card-title">Project overview</div>
         <p>${esc(p.description || "No description yet.")}</p>
@@ -2035,6 +2071,7 @@
       ["Pull from GitHub", "⬇ Pull", "Restore agents/tasks/memory from CodeVia/ folder", "projectPull"],
       ["Re-onboard", "↻ Load", "Re-detect project structure and fill missing agents", "projectReonboard"],
       ["Export/Import", "⇩⇧ Export", "Backup / restore project state", "projectExport"],
+      ["Sandbox", "⚙️ Operations", "install/build/test commands, sandbox network and trust", "projectOperations"],
     ];
     return `<div class="grid-2">
       <div class="card card-body"><div class="card-title">Project resources</div>
@@ -2587,7 +2624,10 @@
     };
   };
   const PROJECT_PERMISSION_GROUPS = [["project","Project"],["agent","Agent"],["workflow","Workflow"],["model","Model"],["provider","Provider"],["skill","Skill"],["memory","Memory"],["repository","Repository"],["deployment","Deployment"],["secret","Secrets"],["telegram","Telegram"],["admin","Admin"]];
-  window.projectEdit = async (id) => {
+  // Deep link used by banners: open the edit dialog straight on Operations
+  // (sandbox lifecycle commands, network access and trust).
+  window.projectOperations = (id) => window.projectEdit(id, "operations");
+  window.projectEdit = async (id, initialTab) => {
     openModal("Edit project", `<div class="repo-empty">Loading…</div>`, { wide: true });
     let p, catalog, models, agents;
     try {
@@ -2607,8 +2647,8 @@
         { id: "capabilities", label: "Capabilities", html: `${CAPABILITY_GROUPS.map(([k, label, ph]) => chipGroupHtml(k, label, catalog[k] || [], caps[k] || [], { placeholder: ph, single: new Set(catalog.singleSelectKeys || ["databases"]).has(k) })).join("")}${chipGroupHtml("agentTypes", "Agents to generate", catalog.agentTypes || [], caps.agentTypes || [], { core: catalog.coreAgentTypes || [], allowCustom: false, hint: "Saving reads CodeVia and creates only missing definitions. Existing prompts and enabled/disabled choices are preserved." })}` },
         { id: "permissions", label: "Permissions", html: permTab },
         { id: "repositories", label: "Repositories", html: reposTab },
-        { id: "operations", label: "Operations", html: `<div class="grid-2"><div class="field"><label>Max tokens per run</label><input class="input" type="number" id="pe-b-tokens" value="${esc(b.maxTokensPerRun ?? 20000)}"/></div><div class="field"><label>Max calls per run</label><input class="input" type="number" id="pe-b-calls" value="${esc(b.maxCallsPerRun ?? 20)}"/></div><div class="field"><label>Max cost per run (USD)</label><input class="input" type="number" step="0.01" id="pe-b-cost" value="${esc(b.maxCostUsdPerRun ?? 5)}"/></div><div class="field"><label>Max duration (ms)</label><input class="input" type="number" id="pe-b-ms" value="${esc(b.maxDurationMs ?? 300000)}"/></div></div><div class="grid-2"><div class="field"><label>Max QA↔Fix loops</label><input class="input" type="number" id="pe-fixloops" min="0" max="6" value="${esc(p.settings?.maxFixLoops ?? 2)}"/><div class="field-hint">How many diagnosis/fix rounds after a failing QA run before giving up.</div></div><div class="field"><label>Diagnose via research before fixing</label><select class="select" id="pe-researchfix"><option value="true" ${p.settings?.researchBeforeFix !== false ? "selected" : ""}>On (recommended)</option><option value="false" ${p.settings?.researchBeforeFix === false ? "selected" : ""}>Off (direct fix)</option></select></div><div class="field"><label>Cache GitHub context in memory</label><select class="select" id="pe-cachectx"><option value="true" ${p.settings?.cacheContextInMemory !== false ? "selected" : ""}>On</option><option value="false" ${p.settings?.cacheContextInMemory === false ? "selected" : ""}>Off (rescan every run)</option></select></div></div><div class="card card-body mt"><div class="card-title">Sandbox lifecycle commands</div><div class="field-hint">Commands run only inside the Docker sandbox. Empty commands are not executed. Network is off unless explicitly enabled; trust only skips per-run approval and never disables the sandbox.</div><div class="grid-2"><div class="field"><label>Install</label><input class="input mono" id="pe-cmd-install" value="${esc(commands.install || "")}" placeholder="npm ci"/></div><div class="field"><label>Build</label><input class="input mono" id="pe-cmd-build" value="${esc(commands.build || "")}" placeholder="npm run build"/></div><div class="field"><label>Test</label><input class="input mono" id="pe-cmd-test" value="${esc(commands.test || "")}" placeholder="npm test"/></div><div class="field"><label>Lint</label><input class="input mono" id="pe-cmd-lint" value="${esc(commands.lint || "")}" placeholder="npm run lint"/></div><div class="field"><label>Start</label><input class="input mono" id="pe-cmd-start" value="${esc(commands.start || "")}" placeholder="npm start"/></div></div><label class="check"><input type="checkbox" id="pe-trusted" ${p.settings?.trustedForExecution === true ? "checked" : ""}/> Trust this project for sandbox commands (skip approval when network remains off)</label><label class="check"><input type="checkbox" id="pe-network" ${p.settings?.sandboxNetworkAccess === true ? "checked" : ""}/> Allow network inside the sandbox (approval is still required)</label></div><div class="field"><label>Notifications</label><input class="input" id="pe-notifications" value="${esc((p.settings?.notifications || []).join(", "))}" placeholder="web, telegram"/></div><div class="field"><label>Metadata (JSON)</label><textarea class="textarea mono" id="pe-meta">${esc(JSON.stringify(p.settings?.metadata || {}, null, 2))}</textarea></div>` },
-      ])}
+        { id: "operations", label: "Operations", html: `<div class="grid-2"><div class="field"><label>Max tokens per run</label><input class="input" type="number" id="pe-b-tokens" value="${esc(b.maxTokensPerRun ?? 20000)}"/></div><div class="field"><label>Max calls per run</label><input class="input" type="number" id="pe-b-calls" value="${esc(b.maxCallsPerRun ?? 20)}"/></div><div class="field"><label>Max cost per run (USD)</label><input class="input" type="number" step="0.01" id="pe-b-cost" value="${esc(b.maxCostUsdPerRun ?? 5)}"/></div><div class="field"><label>Max duration (ms)</label><input class="input" type="number" id="pe-b-ms" value="${esc(b.maxDurationMs ?? 300000)}"/></div></div><div class="grid-2"><div class="field"><label>Max QA↔Fix loops</label><input class="input" type="number" id="pe-fixloops" min="0" max="6" value="${esc(p.settings?.maxFixLoops ?? 2)}"/><div class="field-hint">How many diagnosis/fix rounds after a failing QA run before giving up.</div></div><div class="field"><label>Diagnose via research before fixing</label><select class="select" id="pe-researchfix"><option value="true" ${p.settings?.researchBeforeFix !== false ? "selected" : ""}>On (recommended)</option><option value="false" ${p.settings?.researchBeforeFix === false ? "selected" : ""}>Off (direct fix)</option></select></div><div class="field"><label>Cache GitHub context in memory</label><select class="select" id="pe-cachectx"><option value="true" ${p.settings?.cacheContextInMemory !== false ? "selected" : ""}>On</option><option value="false" ${p.settings?.cacheContextInMemory === false ? "selected" : ""}>Off (rescan every run)</option></select></div></div><div class="card card-body mt"><div class="card-title">Sandbox lifecycle commands</div><div class="field-hint">Commands run only inside the Docker sandbox. Empty commands are not executed. Network is off unless explicitly enabled; trust only skips per-run approval and never disables the sandbox. A failing <span class="mono">test</span>/<span class="mono">build</span>/<span class="mono">lint</span> step can start the QA→fix loop; a failing <span class="mono">install</span> step or a timeout never does — fix the environment (network / pre-installed dependencies) instead.</div>${commands.test && String(commands.test).trim() ? "" : `<div class="notice warn" style="margin-top:8px"><p>No <span class="mono">test</span> command: every QA request will finish <span class="mono">unverified</span>.</p></div>`}<div class="grid-2"><div class="field"><label>Install</label><input class="input mono" id="pe-cmd-install" value="${esc(commands.install || "")}" placeholder="npm ci"/></div><div class="field"><label>Build</label><input class="input mono" id="pe-cmd-build" value="${esc(commands.build || "")}" placeholder="npm run build"/></div><div class="field"><label>Test</label><input class="input mono" id="pe-cmd-test" value="${esc(commands.test || "")}" placeholder="npm test"/></div><div class="field"><label>Lint</label><input class="input mono" id="pe-cmd-lint" value="${esc(commands.lint || "")}" placeholder="npm run lint"/></div><div class="field"><label>Start</label><input class="input mono" id="pe-cmd-start" value="${esc(commands.start || "")}" placeholder="npm start"/></div></div><label class="check"><input type="checkbox" id="pe-trusted" ${p.settings?.trustedForExecution === true ? "checked" : ""}/> Trust this project for sandbox commands (skip approval when network remains off)</label><label class="check"><input type="checkbox" id="pe-network" ${p.settings?.sandboxNetworkAccess === true ? "checked" : ""}/> Allow network inside the sandbox (approval is still required)</label></div><div class="field"><label>Notifications</label><input class="input" id="pe-notifications" value="${esc((p.settings?.notifications || []).join(", "))}" placeholder="web, telegram"/></div><div class="field"><label>Metadata (JSON)</label><textarea class="textarea mono" id="pe-meta">${esc(JSON.stringify(p.settings?.metadata || {}, null, 2))}</textarea></div>` },
+      ], { active: initialTab })}
       <div class="flex mt"><button class="btn btn-primary" id="pe-save">Save & re-onboard</button><button class="btn" id="pe-save-lite">Save without onboarding</button><button class="btn btn-danger" id="pe-delete">Delete project</button><button class="btn" onclick="closeModal()">Cancel</button></div>`;
     bindChipGroups($("#modal-body"));
     $("#pe-link-repo").onclick = () => { closeModal(); projectAddRepo(id); };

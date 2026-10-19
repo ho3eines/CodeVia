@@ -158,7 +158,7 @@ Operations: repos, branches, commits, PRs, issues, releases, files, create branc
 
 ## 9. Queue / Worker Architecture
 
-`JobQueue` (backed by `jobs` table) supports idempotent enqueue (correlation-keyed), atomic `UPDATE … RETURNING` claim (oldest first), retry, and stats. `Worker` polls and dispatches job types (`agent.run`, `workflow.run`, `telegram.send`, `notify`, `github.op`). Resilience: retry with exponential backoff, dead-letter after max attempts, idempotency, logging. The worker runs in a separate process on Railway and never blocks the UI thread.
+`JobQueue` (backed by `jobs` table) supports idempotent enqueue (correlation-keyed), atomic `UPDATE … RETURNING` claim (oldest first), retry, and stats. `Worker` polls and dispatches job types (`agent.run`, `workflow.run`, `telegram.send`, `notify`, `github.op`). Resilience: retry with exponential backoff, dead-letter after max attempts, idempotency, logging. The worker runs in the **same process** as the HTTP server (`src/index.ts` starts `container.worker.start(1000)` next to `app.listen`), so jobs are consumed off the request path but a separate worker process is not implemented.
 
 ---
 
@@ -181,7 +181,7 @@ Operations: repos, branches, commits, PRs, issues, releases, files, create branc
 - **`docker-compose.yml`** — single-service local/prod bundle with volume for the runtime DB.
 - **`railway.json`** — Dockerfile builder, `/health` healthcheck path, restart policy, `node dist/index.js`.
 - **Endpoints** — `/health` (health), `/ready` (readiness), `/live` (liveness).
-- **Split services** — on Railway you can run separate `Web/API` and `Worker` services from the same image (a `WORKER_ONLY` env flag is the extension point); DB/queue are the only shared runtime stores.
+- **One process today** — the image starts the HTTP server and an in-process worker together (`src/index.ts`); there is no worker-only mode or `WORKER_ONLY` flag yet. Splitting Web/API from a worker is an extension point: the DB/queue are the only shared runtime stores, so a future worker-only entrypoint could lease jobs from the same volume.
 
 ---
 

@@ -23,6 +23,14 @@ dispatch), because every one of them stages work in a repository.
 `gitInit: true`, import a ZIP/RAR, or link a repository from the project's
 Settings; the API message says the same thing.
 
+**Verification is different from implementation.** `run_tests` / `run_build` on
+such a project does not need a repository: the Docker sandbox reads the source
+directly from `project.localPath` with the same guards as project creation
+(file count/size/total limits, no symlinks, secret files excluded) and reports
+`source: "localPath"` plus a content digest. Docker is still required — without
+it the result stays `unverified` / `sandbox: "unavailable"` and nothing runs on
+the host.
+
 This is a *server-side* feature: the platform process must run where it can see
 the folders (normal server, VPS, Docker with a mounted volume). It is not
 available on serverless platforms with an ephemeral filesystem.
@@ -149,8 +157,9 @@ never values. The full shape is the `ProjectAnalysis` type in
 A project created by **folder scan without `gitInit`** carries no repository:
 `configRepo` stays empty and `repositories` is `[]` until one is linked
 explicitly. Repo-backed features (state sync, memory writes, agents' repository
-context, sandbox execution) degrade gracefully — `repo-status` reports *why* the
-repository cannot be read — instead of failing project creation or reads.
+context) degrade gracefully — `repo-status` reports *why* the repository cannot
+be read — instead of failing project creation or reads. Sandbox verification
+falls back to `localPath` as described above (Docker still required).
 `GET /projects/:id` and the list endpoint work normally. The auto-bootstrap hook
 skips these projects (their state lives in the folder analysis, not in a
 `CodeVia/` folder).

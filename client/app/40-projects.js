@@ -269,13 +269,26 @@
     };
   };
   window.openLocalFolderModal = () => {
-    openModal("Import Server Folder", `<div class="field"><label>Absolute folder path on the CodeVia server</label><input class="input mono" id="lf-path" placeholder="/srv/projects/my-app"/></div><div class="field"><label>Project name (optional)</label><input class="input" id="lf-name" placeholder="Detected from the folder"/></div><label class="check"><input type="checkbox" id="lf-gitinit" checked/> Copy into LOCAL_REPOS_DIR and create an initial Git commit (recommended for agent edits)</label><div class="field-hint">The source must be inside a server folder allowed by the operator. Symbolic links and secret files are refused or omitted. The original folder is not modified when copying.</div><div class="flex mt"><button class="btn btn-primary" id="lf-import">Import folder</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    openModal("Import Server Folder", `<div class="field"><label>Absolute folder path on the CodeVia server</label><input class="input mono" id="lf-path" placeholder="/srv/projects/my-app"/></div><div class="field"><label>Project name (optional)</label><input class="input" id="lf-name" placeholder="Detected from the folder"/></div><label class="check"><input type="checkbox" id="lf-gitinit" checked/> Copy into LOCAL_REPOS_DIR and create an initial Git commit (recommended for agent edits)</label><div class="field-hint" id="lf-gitinit-hint"></div><div class="field-hint">The source must be inside a server folder allowed by the operator. Symbolic links and secret files are refused or omitted. The original folder is not modified when copying.</div><div class="flex mt"><button class="btn btn-primary" id="lf-import">Import folder</button><button class="btn" onclick="closeModal()">Cancel</button></div>`);
+    const gitToggle = $("#lf-gitinit");
+    const syncGitHint = () => {
+      const hint = $("#lf-gitinit-hint");
+      if (!hint) return;
+      hint.innerHTML = gitToggle.checked
+        ? "A local Git repository is created, so agents can branch, commit and open Draft PRs."
+        : "<strong>No repository:</strong> run_tests / run_build still verify in the Docker sandbox (source read from localPath), but implementation tasks are refused until a repository is linked.";
+    };
+    gitToggle.addEventListener("change", syncGitHint);
+    syncGitHint();
     $("#lf-import").onclick = async () => {
       const path = $("#lf-path").value.trim();
       if (!path) return toast("Path required", "Enter an absolute server path", "err");
       const overrides = $("#lf-name").value.trim() ? { name: $("#lf-name").value.trim() } : undefined;
+      const gitInit = $("#lf-gitinit").checked;
+      // Say exactly what a git-less project can and cannot do before creating it.
+      if (!gitInit && !confirm("Create this folder project WITHOUT a Git repository?\n\nrun_tests / run_build still verify inside the Docker sandbox (source read from localPath), but agents cannot commit, open PRs or change code. You can re-create it with gitInit later or import an archive.")) return;
       const btn = $("#lf-import"); btn.disabled = true;
-      try { const p = await api("/projects/from-local", { method: "POST", body: { path, gitInit: $("#lf-gitinit").checked, ...(overrides ? { overrides } : {}) } }); intakeProjectResult(p, p.configRepo ? `Created ${p.configRepo}` : "Folder linked read-only"); }
+      try { const p = await api("/projects/from-local", { method: "POST", body: { path, gitInit, ...(overrides ? { overrides } : {}) } }); intakeProjectResult(p, p.configRepo ? `Created ${p.configRepo}` : "Folder linked without a repository — verification reads localPath"); }
       catch (e) { toast("Folder import failed", e.message, "err"); btn.disabled = false; }
     };
   };

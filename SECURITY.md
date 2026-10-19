@@ -77,12 +77,17 @@ The following are treated as security issues and are prioritized:
   commands are **never executed on the CodeVia host**. They run in a disposable
   Docker container with `--network=none` (unless the project opts in),
   `--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`,
-  `--pids-limit`, CPU/memory caps, a non-root user and `--pull=never`; the
-  exported source tree is deleted afterwards. Sandbox runs are force-human
-  approved for untrusted projects, and project trust only skips that approval
-  while the network stays off. Nothing is approved when nothing can execute:
-  a mock repository or `PROJECT_SANDBOX_ENABLED=false` reads CI evidence only
-  (`src/projects/sandbox-runner.ts`, `src/tools/registry.ts`). Uploaded `.zip`/`.rar` archives are parsed in memory
+  `--pids-limit`, CPU/memory caps, a non-root user and `--pull=never` on
+  `docker run`; an image is pulled only by the explicit preflight
+  (`PROJECT_SANDBOX_IMAGE_PULL`, default `never`) before the container starts,
+  never from inside it; the exported source tree is deleted afterwards.
+  Sandbox runs are force-human approved for untrusted projects, and project
+  trust only skips that approval while the network stays off. Nothing is
+  approved when nothing can execute: a mock repository returns `simulated`, and
+  `PROJECT_SANDBOX_ENABLED=false` never starts a container — GitHub-backed
+  projects still read CI evidence, local projects report `unverified`
+  (`src/projects/sandbox-runner.ts`, `src/tools/registry.ts`). Uploaded
+  `.zip`/`.rar` archives are parsed in memory
   and rejected on traversal, links, CRC mismatch, oversized expansion or a bad
   compression ratio **before** a file is written; secret-bearing files are
   excluded from the initial commit (`src/projects/project-archive.ts`).
